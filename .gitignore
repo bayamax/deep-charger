@@ -1,0 +1,20 @@
+# Swift / Xcode build artifacts
+.build/
+.build_ios/
+.build_mac/
+DerivedData/
+*.xcarchive
+*.ipa
+
+# Xcode user data
+xcuserdata/
+*.xcuserstate
+*.xcscmblueprint
+
+# macOS
+.DS_Store
+
+# App Store Connect secrets (never commit)
+credentials
+*.p8
+AuthKey_*.p8

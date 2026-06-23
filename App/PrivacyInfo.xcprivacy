@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- The app does no cross-app/website tracking. -->
+    <key>NSPrivacyTracking</key>
+    <false/>
+    <key>NSPrivacyTrackingDomains</key>
+    <array/>
+    <!-- No user data is collected by the developer: all reasoning, chat history, saved
+         facts and file indexing happen on-device. Web lookups send the user's question
+         directly to public APIs (Wikipedia, DuckDuckGo); the developer operates no
+         backend and stores nothing. -->
+    <key>NSPrivacyCollectedDataTypes</key>
+    <array/>
+    <!-- No "required reason" APIs are used (verified: no UserDefaults, no file
+         timestamps, no disk-space/system-uptime APIs). -->
+    <key>NSPrivacyAccessedAPITypes</key>
+    <array/>
+</dict>
+</plist>

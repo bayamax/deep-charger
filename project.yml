@@ -1,0 +1,86 @@
+name: HypernetSPApp
+options:
+  bundleIdPrefix: com.bayamax
+  deploymentTarget:
+    iOS: "16.0"
+    macOS: "14.0"
+  createIntermediateGroups: true
+
+packages:
+  HypernetSP:
+    path: .
+  LaTeXSwiftUI:
+    url: https://github.com/colinc86/LaTeXSwiftUI
+    from: "1.3.0"
+
+# Shared sources + bundled model assets for both the iOS and macOS apps.
+targetTemplates:
+  AppBase:
+    type: application
+    sources:
+      - path: App
+      # Model + pooler (folder reference preserves fft_mlx4's directory structure in the bundle).
+      - path: /Users/oobayashikoushin/hypernet-sp-distill/fft_mlx4
+        type: folder
+        buildPhase: resources
+      - path: /Users/oobayashikoushin/hypernet-sp-distill/app_assets/pooler.safetensors
+        buildPhase: resources
+      - path: /Users/oobayashikoushin/hypernet-sp-distill/app_assets/pooler_config.json
+        buildPhase: resources
+      # BGE-small embedder + linear heads
+      - path: /Users/oobayashikoushin/hypernet-sp-distill/app_assets/bge_small
+        type: folder
+        buildPhase: resources
+      - path: /Users/oobayashikoushin/hypernet-sp-distill/app_assets/intent_head.json
+        buildPhase: resources
+      - path: /Users/oobayashikoushin/hypernet-sp-distill/app_assets/specificity_head.json
+        buildPhase: resources
+      # Recall (RECALL_V2 / Phase-B / trigger) assets REMOVED for this SP-only build — the production
+      # turn is `turnSP` (no recall/web/memory), so the ~442 MB BGE-base + recall weights aren't bundled.
+    dependencies:
+      - package: HypernetSP
+        product: HypernetSP
+      - package: LaTeXSwiftUI
+        product: LaTeXSwiftUI
+
+targets:
+  HypernetSPApp:                      # iPhone / iPad
+    templates: [AppBase]
+    platform: iOS
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.bayamax.hypernetsp
+        DEVELOPMENT_TEAM: 55Z2N5X2Z6
+        CODE_SIGN_STYLE: Automatic
+        MARKETING_VERSION: "0.1"
+        CURRENT_PROJECT_VERSION: "2"
+        IPHONEOS_DEPLOYMENT_TARGET: "16.0"
+        SWIFT_VERSION: "5.0"
+        TARGETED_DEVICE_FAMILY: "1"
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        CODE_SIGN_ENTITLEMENTS: App/HypernetSPApp.entitlements
+        GENERATE_INFOPLIST_FILE: YES
+        INFOPLIST_KEY_CFBundleDisplayName: "Deep Charger"
+        INFOPLIST_KEY_UILaunchScreen_Generation: YES
+        ENABLE_USER_SCRIPT_SANDBOXING: NO
+
+  HypernetSPMac:                      # macOS (primary heavy-RAG target)
+    templates: [AppBase]
+    platform: macOS
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.bayamax.hypernetsp.mac
+        DEVELOPMENT_TEAM: 55Z2N5X2Z6
+        CODE_SIGN_STYLE: Automatic
+        MARKETING_VERSION: "0.1"
+        CURRENT_PROJECT_VERSION: "2"
+        MACOSX_DEPLOYMENT_TARGET: "14.0"
+        SWIFT_VERSION: "5.0"
+        GENERATE_INFOPLIST_FILE: YES
+        INFOPLIST_KEY_CFBundleDisplayName: "Deep Charger"
+        INFOPLIST_KEY_NSHumanReadableCopyright: ""
+        INFOPLIST_KEY_LSApplicationCategoryType: "public.app-category.productivity"
+        # No app sandbox → can read local files (future local-file RAG source). No hardened runtime
+        # for local dev runs.
+        ENABLE_HARDENED_RUNTIME: NO
+        ENABLE_USER_SCRIPT_SANDBOXING: NO
