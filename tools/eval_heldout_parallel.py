@@ -260,15 +260,17 @@ EOS = tokenizer.eos_token_id
 NOTICE = "(no searches left - answer from what you have read)"
 CLOSE = re.compile(r"<search>(.*?)</\s*search\s*[^\w<]{0,3}$", re.S)
 TAG = "<information"
-gpu_lock = threading.Lock()   # MPS command queues are not safe to share across threads
-SERIALIZE = DEV == "mps" or os.environ.get("EVAL_SERIALIZE_GPU", "") == "1"
+# Concurrent forward passes on one shared module produce NaN logits and rollouts die in
+# torch.multinomial. Measured on CUDA with 6 workers: 47 of 50 rollouts lost. So the
+# forward is serialised on every backend, not just mps. Threads still overlap the
+# retrieval waits, which is where the idle time is; for more than that, run several
+# processes, each with its own copy of the model, on different shards.
+gpu_lock = threading.Lock()
 
 
 def fwd(**kw):
-    if SERIALIZE:
-        with gpu_lock:
-            return model(**kw)
-    return model(**kw)
+    with gpu_lock:
+        return model(**kw)
 
 
 def pick(logits, txt_tail, temp):

@@ -44,10 +44,15 @@ EVAL_HOME=~/work GRPO_MODEL=~/work/bf16_s100 GRPO_RESUME=~/work/ckpt_step120 \
 EVAL_THREADS=2 EVAL_SHARD=1/2 python3 eval_heldout_parallel.py
 ```
 
-On `mps` the model forward is serialised behind a lock, because Metal command queues
-are not safe to share across threads. Threads still overlap the retrieval waits, which
-is where most of the idle time is, but expect less speedup than on CUDA — 2 workers is
-usually the useful maximum there.
+The model forward is serialised behind a lock on every backend. Letting threads call one
+shared module concurrently produces NaN logits and the rollout dies in
+`torch.multinomial` — measured on CUDA with 6 workers, 47 of 50 rollouts were lost.
+Threads therefore buy the retrieval overlap only, worth roughly 1.6x.
+
+For more than that, run **several processes** on different shards, each with its own
+copy of the model. On the 3060 box, two processes of 4 threads each raised GPU
+utilisation from 30% to 79% and cut the effective cost from 40 s to about 13 s per
+rollout, at 8.4 GB of 12 GB. Three processes would not fit.
 
 ## Environment
 
