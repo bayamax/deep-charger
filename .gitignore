@@ -18,3 +18,4 @@ xcuserdata/
 credentials
 *.p8
 AuthKey_*.p8
+__pycache__/
