@@ -17,8 +17,7 @@ while :; do
       LAST=$h
       echo "$f" > /root/ctl_cmd.sh
       echo "=== CTL $(date -u +%H:%M) run $BOX.sh ($h) ===" | tee -a /root/ctl.log >> $LOG
-      bash /root/ctl_cmd.sh 2>&1 | tee -a /root/ctl.log >> $LOG
-      echo "=== CTL done ===" | tee -a /root/ctl.log >> $LOG
+      ( bash /root/ctl_cmd.sh 2>&1; echo "=== CTL done ($h) ===" ) | tee -a /root/ctl.log >> $LOG &
     fi
   fi
   if [ $((n % 5)) -eq 0 ] && [ -x /root/status.sh ]; then
