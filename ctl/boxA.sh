@@ -5,7 +5,7 @@ cat > /root/sync.sh <<'SY'
 #!/bin/bash
 # Convert finished rollouts (correct & grounded) into the SFT harness corpus format and push to box C.
 # The harness dedups by question, so overwriting the whole file each time is safe.
-T="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=20 -i /root/.ssh/id_sync -p 29244"
+T="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=20 -i /root/.ssh/id_sync -p 30732"
 while :; do
   python3 - <<'PY'
 import json, os
@@ -30,6 +30,6 @@ PY
 done
 SY
 chmod +x /root/sync.sh
-pgrep -f "/root/sync.sh" >/dev/null || (setsid nohup bash /root/sync.sh > /root/sync_boot.log 2>&1 < /dev/null &)
+pkill -f "/root/sync.sh"; sleep 1; (setsid nohup bash /root/sync.sh > /root/sync_boot.log 2>&1 < /dev/null &)
 sleep 2; pgrep -af "/root/sync.sh" | head -2; tail -2 /root/sync.log 2>/dev/null
 bash /root/do_gen.sh
