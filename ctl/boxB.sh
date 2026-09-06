@@ -1,12 +1,10 @@
-# box B (pooler SFT). 1) install `t`  2) smoke test (self-guarded)
-cat > /usr/local/bin/t <<'TT'
-#!/bin/bash
-# SFT status, phone-width. Read-only.
-echo "SFT-B $(date -u +%H:%M)Z  $(pgrep -f 'sft_pool_ru[n]' >/dev/null && echo 'run ok' || echo 'run STOPPED')"
-grep -q BOOT_DONE /root/boot.log 2>/dev/null || { echo "boot: $(tail -1 /root/boot.log | cut -c1-70)"; exit 0; }
-for m in smoke full; do L=/root/sft_$m.log; [ -f $L ] || continue; echo "[$m]"; grep -E "^\[fft\] (step|VAL|DONE|OOM|example failed|RESUMED|pooler)" $L | tail -4 | cut -c1-100; done
-tail -1 /root/sft_loss_full.log 2>/dev/null
-echo "gpu $(nvidia-smi --query-gpu=memory.used,utilization.gpu --format=csv,noheader 2>/dev/null)  disk $(df -h /root | tail -1 | awk '{print $4}') free"
-TT
-chmod +x /usr/local/bin/t
+# box B: diagnose missing files, repair, rerun smoke
+echo "--- boot.log tail"; tail -12 /root/boot.log
+echo "--- hfdl tree"; find /root/hfdl -maxdepth 3 -type f | head -30
+echo "--- work"; ls /root/work
+S=/root/hfdl/box_recover/scripts
+if [ ! -f $S/sft_pool_run.py ]; then hf download baya1116/hypernet-sp-distill --include "box_recover/scripts/*" --include "box_recover/corpus.jsonl" --include "box_recover/fft_val_set.txt" --local-dir /root/hfdl 2>&1 | tail -2; fi
+cp $S/*.py $S/*.sh /root/work/ 2>&1; cp /root/hfdl/box_recover/corpus.jsonl /root/work/corpus_box_final.jsonl 2>&1
+cp /root/hfdl/grpo_assets/mus_run/eval_step200/eval_heldout_300q_g2.jsonl /root/work/eval300.jsonl 2>&1
+ls -la /root/work | head -30
 bash /root/do_sft_pool.sh smoke
