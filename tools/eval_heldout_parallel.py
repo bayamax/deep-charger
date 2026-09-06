@@ -75,7 +75,12 @@ DTYPE = {"bf16": torch.bfloat16, "fp16": torch.float16, "fp32": torch.float32}[
 
 si, sn = (int(x) for x in SHARD.split("/"))
 assert 0 <= si < sn, "EVAL_SHARD must be i/n with 0 <= i < n"
-OUT_F = os.path.join(OUT_DIR, f"eval_heldout_p{si}of{sn}.jsonl")
+# EVAL_ALL=1: walk the whole shuffled corpus in order (a generation pass, not a held-out probe);
+# EVAL_EXCLUDE: jsonl/txt of questions that must never be generated for (the held-out set).
+ALL = os.environ.get("EVAL_ALL", "0") == "1"
+EXCLUDE_F = os.environ.get("EVAL_EXCLUDE", "")
+TAG = os.environ.get("EVAL_TAG", "heldout")
+OUT_F = os.path.join(OUT_DIR, f"eval_{TAG}_p{si}of{sn}.jsonl")
 
 # ---------------- scoring (verbatim from grpo_ep_torch.py) ---------------------------
 
@@ -369,7 +374,21 @@ def bucket(r):
     return min(int(t), 5) if isinstance(t, (int, float)) else 0
 
 
-if MATCH:
+excl = set()
+if EXCLUDE_F:
+    for line in open(EXCLUDE_F):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            excl.add((json.loads(line).get("q") or "").strip())
+        except Exception:
+            excl.add(line)
+    print(f"[data] excluding {len(excl)} questions from {EXCLUDE_F}", flush=True)
+if ALL:
+    sel = [r for r in full if r.get("q", "").strip() not in excl][:N_Q]
+    MATCH = False
+elif MATCH:
     train_slice = full[1:241]
     tgt = {}
     for r in train_slice:
@@ -389,9 +408,11 @@ if MATCH:
     tm = sum(min(int(r.get("srch") or 0), 9) for r in train_slice) / len(train_slice)
     em = sum(min(int(r.get("srch") or 0), 9) for r in sel) / max(len(sel), 1)
     print("  mean teacher srch: train=%.3f eval=%.3f" % (tm, em), flush=True)
-else:
+elif not ALL:
     sel = full[SKIP:SKIP + N_Q]
-random.Random(7).shuffle(sel)
+if not ALL:
+    random.Random(7).shuffle(sel)
+sel = [r for r in sel if r.get("q", "").strip() not in excl]
 shard = sel[si::sn]
 
 done = set()
