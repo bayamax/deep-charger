@@ -1,6 +1,7 @@
 # box C: (0) revive the ctl poll loop if it died (so later pushes to this file are picked up again),
 #        (1) relaunch the 300-question evals of the new model if they are not running,
 #        (2) publish a status file to HF every 5 min (pooler_distill/status.txt) so progress can be read without the log API.
+#        (1b) fix the huggingface-hub 1.x import breakage that killed the 10:23 relaunch
 # Safe to run repeatedly (ctl or by hand): nothing is duplicated.
 cd /root/work
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null)
@@ -28,6 +29,13 @@ while true; do
 done
 SP
 chmod +x /root/status_pub.sh
+# the HF upload pulled huggingface-hub 1.x, which transformers refuses at import -> pin it back (keeps the `hf` CLI, added in 0.34)
+if ! python3 -c "import transformers.modeling_utils" 2>/dev/null; then
+  pip install -q "huggingface_hub>=0.34,<1.0" 2>&1 | tail -1
+  python3 -c "import huggingface_hub, transformers.modeling_utils; print('hub', huggingface_hub.__version__, 'import ok')" || echo "IMPORT_STILL_BROKEN"
+else
+  echo "import ok"
+fi
 if ! pgrep -f "pool_eva[l].py" >/dev/null; then
   export SP_BASE=/root/fft_hf SP_RANK=128 SP_NOSYS=1 SP_EPISODIC=1 SP_HOTPOT2=0 OMP_NUM_THREADS=1 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
   echo "=== RELAUNCH $(date -u) ===" >> /root/pooleval_all_c.log
