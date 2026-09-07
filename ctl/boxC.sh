@@ -62,37 +62,7 @@ python3 /root/work/cnc.py /root/work/teacher600.jsonl /root/work/pooleval_all_c.
 TC
 chmod +x /usr/local/bin/tc
 echo "--- CNC $(date -u +%H:%M) ---"; tc
-for m in all_c all_nc; do
-  echo "--- ANALYZE $m $(date -u +%H:%M) ---"
-  python3 /root/work/analyze_pool.py /root/work/teacher600.jsonl /root/work/pooleval_$m.jsonl 768 2>/dev/null | grep "^=== ANALYZE n\|^buckets\|^student wrong\|gold->answer\|^gold-never-served\|^student searches\|^teacher searches\|stopped after\|mean gen tokens"
-  python3 - /root/work/pooleval_$m.jsonl <<'PY'
-import json,sys,collections
-R=[json.loads(l) for l in open(sys.argv[1])]
-more=collections.Counter(r["text"].count("<more/>") for r in R)
-wrong=[r for r in R if not r["correct"]]
-print("more/q all:", dict(sorted(more.items())), "| wrong rows more/q:", dict(sorted(collections.Counter(r["text"].count("<more/>") for r in wrong).items())))
-print("mean info tokens served/q:", sum(r["text"].count("<information") for r in R)/max(1,len(R)))
-PY
-done
-curl -sS --retry 3 -o /root/work/head_scan.py https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl/head_scan.py
-for m in all_c all_nc; do echo "--- HEAD_SCAN $m ---"; python3 /root/work/head_scan.py /root/work/pooleval_$m.jsonl 2>&1 | grep -v Warning | cut -c1-400; done
-echo "--- VERIFY $(date -u +%H:%M) ---"
-ps -eo pid,etimes,args | grep "pool_eva[l].py" | cut -c1-300
-for m in all_c all_nc; do echo "[$m cfg]"; grep -a "RELAUNCH\|\[cfg\]\|\[load\]" /root/pooleval_$m.log | tail -3 | cut -c1-200; done
-python3 - <<'PY'
-import json,collections
-from transformers import AutoTokenizer
-tok=AutoTokenizer.from_pretrained("/root/fft_hf")
-for m in ["all_c","all_nc"]:
-    R=[json.loads(l) for l in open(f"/root/work/pooleval_{m}.jsonl")]
-    rw=collections.Counter((r.get("rw"),r.get("maxd"),r.get("decode")) for r in R)
-    L=[len(tok.encode(r["text"],add_special_tokens=False)) for r in R]
-    over=sum(1 for r,l in zip(R,L) if l>r.get("rw",0))
-    print(m,"rows",len(R),"(rw,maxd,decode):",dict(rw))
-    print("  gen+info tokens: mean %.0f max %d | rows longer than their rw (compression actually engaged): %d/%d"%(sum(L)/len(L),max(L),over,len(R)))
-    print("  first 150 rows rw:",dict(collections.Counter(r.get("rw") for r in R[:150]))," rows>150 rw:",dict(collections.Counter(r.get("rw") for r in R[150:])))
-qa=[json.loads(l)["q"] for l in open("/root/work/pooleval_all_c.jsonl")]; qb=[json.loads(l)["q"] for l in open("/root/work/pooleval_all_nc.jsonl")]
-print("same question order:",qa[:min(len(qa),len(qb))]==qb[:min(len(qa),len(qb))],"| dup q in c:",len(qa)-len(set(qa)),"in nc:",len(qb)-len(set(qb)))
-PY
+curl -sS --retry 3 -o /root/work/strat.py https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl/strat.py
+echo "--- STRAT $(date -u +%H:%M) ---"; python3 /root/work/strat.py /root/work/teacher600.jsonl /root/work/pooleval_all_c.jsonl /root/work/pooleval_all_nc.jsonl 768 2>&1 | grep -v Warning
 pkill -f "status_pu[b].sh"; setsid nohup bash /root/status_pub.sh > /dev/null 2>&1 < /dev/null &
 echo "RELAUNCH_DONE $(date -u)"
