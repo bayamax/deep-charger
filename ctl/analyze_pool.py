@@ -16,15 +16,18 @@ def rows(p):
     return out
 def ntok(s): return len(tok.encode(s, add_special_tokens=False)) if s else 0
 def gold_pos(text, gold):
-    """token distance from the LAST served occurrence of gold (inside <information>) to the answer position (</think>)."""
+    """token distance from the end of the LAST <information> block containing gold to the answer position (</think>)."""
     if "</think>" not in text: return None
-    think = text.split("</think>")[0]
-    g = norm(gold); low = re.sub(r"[^a-z0-9 ]", " ", think.lower())
-    idx = low.rfind(" " + g + " ", 0)
-    if idx < 0:
-        idx = low.rfind(g)
-    if idx < 0: return None
-    return ntok(think[idx + len(g):])
+    think = text.split("</think>")[0]; g = norm(gold); last = None
+    for m in re.finditer(r"<information>(.*?)</information>", think, re.S):
+        if has(m.group(1), gold): last = m.end()
+    if last is None: return None
+    return ntok(think[last:])
+def think_has_gold(text, gold):
+    """the model itself wrote the gold string in its reasoning (outside <information>) before </think>."""
+    if "</think>" not in text: return False
+    think = re.sub(r"<information>.*?</information>", " ", text.split("</think>")[0], flags=re.S)
+    return has(think, gold)
 T = {}
 for r in rows(sys.argv[1]): T.setdefault(r["q"].strip(), []).append(r)
 S = [r for r in rows(sys.argv[2]) if r["q"].strip() in T]
@@ -80,6 +83,13 @@ for d, r in sorted(outs, key=lambda z: -z[0])[:3]:
     print(f"--- evicted sample d={d} q={r['q'][:90]!r} gold={r['gold']!r} answer={r['answer'][:80]!r}")
     tail = r["text"].split("</think>")[0][-500:].replace("\n", " ")
     print("    think tail:", tail[-300:])
+# 8b. decoding-guard suspects: model wrote gold in its own reasoning, final answer still wrong
+tw = [r for r in fail if think_has_gold(r["text"], r["gold"])]
+print(f"wrote gold in think but final answer wrong: {len(tw)}  (grounded {sum(r['grounded'] for r in tw)})")
+for r in tw[:6]:
+    print(f"    gold={r['gold']!r} answer={r['answer'][:70]!r}")
+tw_t = sum(1 for r in S for x in T[r["q"].strip()] if not x["correct"] and think_has_gold(x["text"], x["gold"]))
+print(f"teacher: wrote gold in think but final answer wrong: {tw_t} of {2*n} rolls")
 # 9. samples: gold inside window but wrong (reading/answering failure)
 k = 0
 for r in gr:
