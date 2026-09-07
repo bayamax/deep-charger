@@ -27,30 +27,36 @@ for r in rows:
     k = (r.get("q"), r.get("text")[:200] if r.get("text") else None)
     if k in seen: continue
     seen.add(k); R.append(r)
-cat = {"A": [], "B": [], "C": [], "amb": [], "Z": []}
+cat = {"A": [], "B": [], "C": [], "amb": [], "Q": [], "Z": []}
 nocorr = 0
 for r in R:
     if not r.get("correct"): nocorr += 1; continue
-    text, gold = r.get("text") or "", r.get("gold") or ""
+    text, gold, q = r.get("text") or "", r.get("gold") or "", r.get("q") or ""
     if "</think>" not in text: continue
-    think = text.split("</think>")[0]; ans_tok = ntok(think)
     rx = gold_re(gold)
     if rx is None: continue
+    if rx.search(q):
+        cat["Q"].append((r, "gold is in the question")); continue
+    think = text.split("</think>")[0]; ans_tok = ntok(think)
     info_spans = [(m.start(), m.end()) for m in re.finditer(r"<information>(.*?)</information>", think, re.S)]
-    served = [m for m in rx.finditer(think) if any(a <= m.start() < b for a, b in info_spans)]
-    own = [m for m in rx.finditer(think) if not any(a <= m.start() < b for a, b in info_spans)]
-    if not served:
-        cat["Z"].append((r, None, None)); continue
-    d_info = min(ans_tok - ntok(think[:m.end()]) for m in served)
-    d_any = min([d_info] + [ans_tok - ntok(think[:m.end()]) for m in own])
-    if d_info <= RW: cat["A"].append((r, d_info, d_any))
-    elif d_any <= RW: cat["B"].append((r, d_info, d_any))
-    elif d_any > RW + C: cat["C"].append((r, d_info, d_any))
-    else: cat["amb"].append((r, d_info, d_any))
+    occ = sorted((ntok(think[:m.end()]), "served" if any(a <= m.start() < b for a, b in info_spans) else "own") for m in rx.finditer(think))
+    if not any(k == "served" for _, k in occ):
+        cat["Z"].append((r, "never served")); continue
+    # walk the occurrences: an OWN occurrence is supported if some earlier occurrence (any kind) lies within RW tokens before it;
+    # an unsupported own occurrence (gap > RW+C) means the model produced the gold while it existed only in the pooled region
+    first_served = next(p for p, k in occ if k == "served")
+    gaps = [(p - max([pp for pp, _ in occ if pp < p] or [-10**9]), p) for p, k in occ if k == "own" and p > first_served]
+    worst = max([g for g, _ in gaps] or [0])
+    d_last = ans_tok - occ[-1][0]; d_served = ans_tok - max(p for p, k in occ if k == "served")
+    desc = f"served@{[p for p,k in occ if k=='served'][:4]} own@{[p for p,k in occ if k=='own'][:6]} answer@{ans_tok} d_served={d_served} d_last={d_last} worst_gap={worst}"
+    if worst > RW + C or d_last > RW + C: cat["C"].append((r, desc))
+    elif worst > RW or d_last > RW: cat["amb"].append((r, desc))
+    elif d_served > RW: cat["B"].append((r, desc))
+    else: cat["A"].append((r, desc))
 nc = len(R) - nocorr
 print(f"=== GOLD_POOLED {LAB} rows={len(R)} correct={nc} RW={RW}")
-print(f"  A gold-in-window {len(cat['A'])}   B self-carried {len(cat['B'])}   C pooled-only {len(cat['C'])}   ambiguous {len(cat['amb'])}   Z never-served {len(cat['Z'])}")
-for k in ("C", "B"):
-    for r, di, da in cat[k][:6]:
-        print(f"  [{k}] d_info={di} d_any={da} q={r['q'][:70]!r} gold={r['gold']!r} ans={r.get('answer','')[:50]!r}")
+print(f"  A gold-in-window {len(cat['A'])}   B self-carried(chain) {len(cat['B'])}   C recalled-from-pooled {len(cat['C'])}   ambiguous {len(cat['amb'])}   Q gold-in-question {len(cat['Q'])}   Z never-served {len(cat['Z'])}")
+for k in ("C", "amb", "B"):
+    for r, d in cat[k][:6]:
+        print(f"  [{k}] {d} q={r['q'][:60]!r} gold={r['gold']!r}")
 print("=== GOLD_POOLED END")

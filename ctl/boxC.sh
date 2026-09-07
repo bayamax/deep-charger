@@ -48,4 +48,4 @@ for i in 1 2 3 4 5 6; do curl -sS -o /root/work/gold_pooled.py "https://raw.gith
 for f in "pooleval_all_c.jsonl 768" "pooleval_all_nc.jsonl 768" "pooleval_post.jsonl 512" "/root/grpo_pool/rollouts.jsonl 768"; do set -- $f; p=$1; [ "${p#/}" = "$p" ] && p=/root/work/$p; python3 /root/work/gold_pooled.py $p $2 2>&1 | grep -v Warning | cut -c1-300; done
 pkill -f "status_pub"; pkill -f "status_pu[b].sh"; setsid nohup bash /root/status_pub.sh >> /proc/1/fd/1 2>&1 < /dev/null &
 echo "--- log tail"; tail -4 /root/grpo_pool.log | cut -c1-220
-echo "LAUNCH_DONE $(date -u)"
+echo "GP2"; echo "LAUNCH_DONE $(date -u)"
