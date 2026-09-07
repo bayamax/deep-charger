@@ -49,7 +49,23 @@ while true; do
 done
 SP
 chmod +x /root/status_pub.sh
-echo "--- GP4 $(date -u +%H:%M) ---"; python3 /root/work/gold_pooled.py /root/grpo_pool/rollouts.jsonl 768 grpo_v2 2>&1 | grep -v Warning | cut -c1-300
+echo "--- SRCH $(date -u +%H:%M) ---"
+python3 - <<'PY'
+import json,collections
+R=[json.loads(l) for l in open("/root/grpo_pool/rollouts.jsonl")]
+by=collections.defaultdict(list)
+for r in R: by[r["step"]].append(r)
+for s in sorted(by)[-12:]:
+    rs=by[s]; ns=[len(r["queries"]) for r in rs]
+    L=[len(r["text"]) for r in rs]
+    print(f"step {s:3d} n={len(rs)} srch per roll={sorted(ns)} correct={sum(r['correct'] for r in rs)} landed={sum(r['landed'] for r in rs)} dead={sum(r.get('dead',False) for r in rs)} chars mean={sum(L)//len(L)}")
+last=[r for s in sorted(by)[-6:] for r in by[s]]
+loop=[r for r in last if len(r["queries"])>=10]
+print(f"last 6 steps: rolls={len(last)} with >=10 searches {len(loop)}; of those landed {sum(r['landed'] for r in loop)} correct {sum(r['correct'] for r in loop)}")
+import re
+for r in loop[:2]:
+    qs=r["queries"]; print("  sample queries:", [q[:35] for q in qs[:4]], "...", [q[:35] for q in qs[-3:]], "| distinct", len(set(qs)), "/", len(qs))
+PY
 pkill -f "status_pub"; pkill -f "status_pu[b].sh"; setsid nohup bash /root/status_pub.sh >> /proc/1/fd/1 2>&1 < /dev/null &
 echo "--- log tail"; tail -4 /root/grpo_pool.log | cut -c1-220
 sleep 60; tail -3 /root/grpo_pool.log | cut -c1-200; echo "LAUNCH_DONE $(date -u)"
