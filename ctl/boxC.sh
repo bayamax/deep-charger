@@ -1,14 +1,21 @@
-# box C: (1) relaunch the 300-question evals of the new model if they are not running,
+# box C: (0) revive the ctl poll loop if it died (so later pushes to this file are picked up again),
+#        (1) relaunch the 300-question evals of the new model if they are not running,
 #        (2) publish a status file to HF every 5 min (pooler_distill/status.txt) so progress can be read without the log API.
 # Safe to run repeatedly (ctl or by hand): nothing is duplicated.
 cd /root/work
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null)
+if ! pgrep -f "/root/ctl\.s[h]" >/dev/null; then
+  if [ -f /root/start_ctl.sh ]; then setsid nohup bash /root/start_ctl.sh > /dev/null 2>&1 < /dev/null & else setsid nohup bash /root/ctl.sh > /dev/null 2>&1 < /dev/null & fi
+  sleep 2; echo "ctl revived: $(pgrep -fc '/root/ctl\.s[h]')"
+else
+  echo "ctl alive"
+fi
 cat > /root/status_pub.sh <<'SP'
 #!/bin/bash
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null)
 while true; do
   { echo "=== $(date -u) ==="
-    echo "ctl: $(pgrep -fc 'ctl\.s[h]')  evals: $(pgrep -fc 'pool_eva[l].py')  gpu: $(nvidia-smi --query-gpu=memory.used --format=csv,noheader 2>/dev/null)  disk: $(df -h /root | awk 'NR==2{print $4}')"
+    echo "ctl: $(pgrep -fc '/root/ctl\.s[h]')  evals: $(pgrep -fc 'pool_eva[l].py')  gpu: $(nvidia-smi --query-gpu=memory.used --format=csv,noheader 2>/dev/null)  disk: $(df -h /root | awk 'NR==2{print $4}')"
     for m in all_c all_nc; do
       echo "[$m] rows=$(wc -l < /root/work/pooleval_$m.jsonl 2>/dev/null)  $(grep -o '\[[0-9]*/300\].*' /root/pooleval_$m.log 2>/dev/null | tail -1 | cut -c1-120)"
       grep -i "error\|Traceback\|Killed" /root/pooleval_$m.log 2>/dev/null | tail -2
@@ -34,7 +41,7 @@ else
 fi
 cat > /usr/local/bin/t <<'TT'
 #!/bin/bash
-echo "$(date -u +%H:%M)Z  eval $(pgrep -fc 'pool_eva[l].py')"
+echo "$(date -u +%H:%M)Z  eval $(pgrep -fc 'pool_eva[l].py')  ctl $(pgrep -fc '/root/ctl\.s[h]')"
 for m in all_c all_nc; do
   if [ -s /root/work/pooleval_$m.jsonl ]; then python3 /root/work/paired.py /root/work/teacher600.jsonl /root/work/pooleval_$m.jsonl $m; else echo "$m 0"; fi
 done
