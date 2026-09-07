@@ -23,4 +23,4 @@ echo "gpu $(nvidia-smi --query-gpu=memory.used,utilization.gpu --format=csv,nohe
 TT
 chmod +x /usr/local/bin/t
 FREEZE=0 GCKPT=0 IDLE_EXIT=14400 bash /root/do_sft_pool.sh stream
-echo "--- LOSSLOG $(date -u +%H:%M) v1788736032"; cat /root/sft_loss_stream.log; echo "--- END LOSSLOG"
+echo "--- LOSSLOG $(date -u +%H:%M) v1788740173"; cat /root/sft_loss_stream.log; echo "--- END LOSSLOG"
