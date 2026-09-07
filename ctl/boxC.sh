@@ -34,6 +34,18 @@ fi
 cat > /usr/local/bin/t <<'TT'
 #!/bin/bash
 echo "$(date -u +%H:%M)Z  grpo $(pgrep -fc 'grpo_poo[l].py')  ctl $(pgrep -fc '/root/ctl\.s[h]')  gpu $(nvidia-smi --query-gpu=memory.used --format=csv,noheader 2>/dev/null)"
+python3 - <<'PY' 2>/dev/null
+import json,collections
+by=collections.defaultdict(list)
+for l in open("/root/grpo_pool/rollouts.jsonl"):
+    try: r=json.loads(l); by[r["step"]].append(r)
+    except Exception: pass
+S=sorted(by); mid=len(S)//2
+def acc(steps):
+    rs=[r for s in steps for r in by[s]]
+    return f"{100*sum(r['correct'] for r in rs)/max(len(rs),1):.0f}% srch {sum(len(r['queries']) for r in rs)/max(len(rs),1):.1f}"
+print(f"steps {S[0]}-{S[-1]}  1st half {acc(S[:mid])}  |  2nd half {acc(S[mid:])}")
+PY
 grep "^\[step" /root/grpo_pool.log | tail -3 | sed 's/ landed=[0-9]*%//;s/ more=[0-9.]*//;s/ |grad|=[0-9.]*//;s/ skip=[01]//' | cut -c1-90
 grep -i "error\|Traceback\|Killed\|GRPO_POOL_DONE" /root/grpo_pool.log | tail -2 | cut -c1-120
 TT
@@ -49,7 +61,7 @@ while true; do
 done
 SP
 chmod +x /root/status_pub.sh
-echo "--- SRCH $(date -u +%H:%M) ---"
+echo "--- SRCH2 $(date -u +%H:%M) ---"
 python3 - <<'PY'
 import json,collections
 R=[json.loads(l) for l in open("/root/grpo_pool/rollouts.jsonl")]
