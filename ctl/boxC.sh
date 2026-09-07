@@ -62,7 +62,13 @@ python3 /root/work/cnc.py /root/work/teacher600.jsonl /root/work/pooleval_all_c.
 TC
 chmod +x /usr/local/bin/tc
 echo "--- CNC $(date -u +%H:%M) ---"; tc
+# final: wait for the non-compressed run to reach 300 rows, then print the final tables and preserve the results on HF
+for i in $(seq 1 40); do [ "$(wc -l < /root/work/pooleval_all_nc.jsonl)" -ge 300 ] && break; sleep 30; done
+echo "--- FINAL $(date -u +%H:%M) rows c=$(wc -l < /root/work/pooleval_all_c.jsonl) nc=$(wc -l < /root/work/pooleval_all_nc.jsonl) evals=$(pgrep -fc 'pool_eva[l].py') ---"
+t; tc
 curl -sS --retry 3 -o /root/work/strat.py "https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl/strat.py?nocache=$(date +%s)"
-echo "--- STRAT3 $(date -u +%H:%M) ---"; python3 /root/work/strat.py /root/work/teacher600.jsonl /root/work/pooleval_all_c.jsonl /root/work/pooleval_all_nc.jsonl 768 2>&1 | grep -v Warning
+python3 /root/work/strat.py /root/work/teacher600.jsonl /root/work/pooleval_all_c.jsonl /root/work/pooleval_all_nc.jsonl 768 2>&1 | grep -v Warning
+grep -h "EVAL_DONE" /root/pooleval_all_c.log /root/pooleval_all_nc.log | cut -c1-200
+for f in pooleval_all_c.jsonl pooleval_all_nc.jsonl; do hf upload baya1116/hypernet-sp-distill /root/work/$f pooler_distill/$f >/dev/null 2>&1 && echo "hf uploaded $f"; done
 pkill -f "status_pu[b].sh"; setsid nohup bash /root/status_pub.sh > /dev/null 2>&1 < /dev/null &
 echo "RELAUNCH_DONE $(date -u)"
