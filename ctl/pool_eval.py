@@ -21,6 +21,7 @@ ap.add_argument("--n", type=int, default=300); ap.add_argument("--temp", type=fl
 ap.add_argument("--gen", type=int, default=1500); ap.add_argument("--maxs", type=int, default=5)
 ap.add_argument("--maxm", type=int, default=8); ap.add_argument("--chunk", type=int, default=128)
 ap.add_argument("--tag", default="")
+ap.add_argument("--decode", default="plain", choices=["plain", "guard"], help="plain = teacher environment (temp sampling, only the <information ban); guard = harness pick() with rep-penalty/no-repeat")
 A = ap.parse_args()
 
 os.environ.setdefault("SP_HOTPOT2", "0"); os.environ.setdefault("SP_BASE", "/root/fft_hf")
@@ -50,7 +51,7 @@ print(f"[load] {A.ckpt}: {len(md)} tensors, {len(r.unexpected_keys)} unexpected"
 if pl:
     pooler.load_sd(pl); print(f"[load] pooler restored ({len(pl)} tensors)", flush=True)
 model.eval()
-print(f"[cfg] rw={A.rw} maxd={A.maxd} chunk={A.chunk} temp={A.temp} gen={A.gen} maxs={A.maxs} maxm={A.maxm}", flush=True)
+print(f"[cfg] rw={A.rw} maxd={A.maxd} chunk={A.chunk} temp={A.temp} gen={A.gen} maxs={A.maxs} maxm={A.maxm} decode={A.decode}", flush=True)
 
 # ---- environment: verbatim grpo_ep_more serve() ----
 WAPI = "https://en.wikipedia.org/w/api.php"
@@ -151,6 +152,20 @@ CLOSE_RE = re.compile(r"<search>(.*?)</\s*search\s*[^\w<]{0,3}$", re.S)
 MORE_RE = re.compile(r"<\s*/?\s*more\s*/?\s*>\s*$", re.I)
 
 
+TAG = "<information"
+@torch.no_grad()
+def pick_plain(logits, gen):
+    """verbatim grpo_ep_more.pick(): temperature sampling; the policy may never write its own information block."""
+    lg = logits.float()[0].clone(); tail = tok.decode(gen[-16:]) if gen else ""
+    for _ in range(8):
+        t = int(torch.multinomial(torch.softmax(lg / A.temp, dim=-1), 1).item())
+        cand = tail + tok.decode([t])
+        if TAG in cand or any(cand.endswith(TAG[:k]) for k in range(4, len(TAG) + 1)):
+            lg[t] = -1e9; continue
+        return t
+    return int(torch.argmax(lg).item())
+
+
 @torch.no_grad()
 def rollout(question):
     """sp_rollout mechanics (SP + raw window, mass eviction) with the grpo_ep_more environment."""
@@ -187,7 +202,7 @@ def rollout(question):
         for _ in range(A.chunk):
             txt_tail = tok.decode(gen[-40:])
             greedy = "</think>" in txt_tail
-            nx = pick(last, gen, greedy, exempt, allowed_ng)
+            nx = pick_plain(last, gen) if A.decode == "plain" else pick(last, gen, greedy, exempt, allowed_ng)
             if nx == eos:
                 brk = True; break
             gen.append(nx); n_model += 1
@@ -271,7 +286,7 @@ with open(A.out, "a") as fh:
         correct = landed and has(ans, g)
         grounded = any(has(s, g) for s in served)
         rec = {"q": q, "gold": g, "correct": correct, "grounded": grounded, "landed": landed, "dead": dead,
-               "ns": ns_, "more": nm, "answer": ans, "queries": queries, "text": txt, "rw": A.rw, "maxd": A.maxd}
+               "ns": ns_, "more": nm, "answer": ans, "queries": queries, "text": txt, "rw": A.rw, "maxd": A.maxd, "decode": A.decode}
         fh.write(json.dumps(rec, ensure_ascii=False) + "\n"); fh.flush()
         stat["n"] += 1; stat["c"] += correct; stat["g"] += grounded; stat["l"] += landed; stat["s"] += ns_; stat["m"] += nm
         n = stat["n"]; el = time.time() - t0; per = el / max(n - k0, 1)

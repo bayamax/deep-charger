@@ -26,6 +26,23 @@ if [ "$MODE" = "smoke" ]; then
   head -n 24 /root/work/corpus_box_final.jsonl > /root/harvest_sft/smoke.jsonl; IDLE=120
 elif [ "$MODE" = "stream" ]; then
   rm -f /root/harvest_sft/smoke.jsonl; IDLE=${IDLE_EXIT:-14400}
+elif [ "$MODE" = "all" ]; then
+  # behaviour copy: every landed teacher trajectory (correct or not, grounded or not); only unlanded/dead rows dropped
+  mkdir -p /root/harvest_all
+  python3 - <<'PY'
+import json
+n=k=0; c=g=0
+with open("/root/harvest_all/gen_all.jsonl","w") as fh:
+    for l in open("/root/work/gen_mus200_full.jsonl"):
+        try: r=json.loads(l)
+        except Exception: continue
+        n+=1
+        if not r.get("landed") or r.get("dead") or "</think>" not in r.get("text",""): continue
+        k+=1; c+=bool(r.get("correct")); g+=bool(r.get("grounded"))
+        fh.write(json.dumps({"q":r["q"],"gold":r.get("gold",""),"ok":True,"gnd":True,"srch":r.get("ns"),"traj":r["text"]}, ensure_ascii=False)+"\n")
+print("full rows", n, "kept landed", k, "of which correct", c, "grounded", g)
+PY
+  HARVEST_GLOB="/root/harvest_all/*.jsonl"; IDLE=${IDLE_EXIT:-600}
 else
   python3 - <<'PY'
 import json
@@ -48,7 +65,7 @@ OUTF=/root/fft_new_${MODE}.safetensors
 SP_BASE=/root/fft_hf SP_RANK=128 SP_NOSYS=1 SP_EPISODIC=1 SP_RERANK=0 SP_HOTPOT2=0 SP_MAXD=4096 SP_LEN_NORM=0 SP_TRAIN_POOLER=1 \
 FFT_LR=1e-5 SP_POOLER_LR=1e-5 FFT_FREEZE_BELOW=0 FFT_FREEZE_IO=1 FFT_GRADCKPT=0 FFT_CHUNK=128 \
 SFT_ACC=8 SFT_ONE_RATIO=0.8 SFT_IDLE_EXIT=$IDLE FFT_VAL_EVERY=25 FFT_VAL_PIN=/root/hfdl/box_recover/fft_val_set.txt \
-SFT_HARVEST="/root/harvest_sft/*.jsonl" FFT_SEEN=/root/fft_seen_${MODE}.txt SFT_LOSSLOG=/root/sft_loss_${MODE}.log FFT_VALLOG=/root/fft_val_${MODE}.log \
+SFT_HARVEST="${HARVEST_GLOB:-/root/harvest_sft/*.jsonl}" FFT_SEEN=/root/fft_seen_${MODE}.txt SFT_LOSSLOG=/root/sft_loss_${MODE}.log FFT_VALLOG=/root/fft_val_${MODE}.log \
 SFT_SAVE_EVERY=25 SFT_SNAP_EVERY=40 SFT_SNAP_KEEP=3 SFT_OUT=$OUTF \
 OMP_NUM_THREADS=1 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
 setsid nohup python3 /root/work/sft_pool_run.py > /root/sft_${MODE}.log 2>&1 < /dev/null &
