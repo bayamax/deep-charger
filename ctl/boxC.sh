@@ -1,74 +1,49 @@
-# box C: (0) revive the ctl poll loop if it died (so later pushes to this file are picked up again),
-#        (1) relaunch the 300-question evals of the new model if they are not running,
-#        (2) publish a status file to HF every 5 min (pooler_distill/status.txt) so progress can be read without the log API.
-#        (1b) fix the huggingface-hub 1.x import breakage that killed the 10:23 relaunch
-# Safe to run repeatedly (ctl or by hand): nothing is duplicated.
+# box C: launch GRPO for the pooler lineage (teacher recipe + compression) from the distilled model.
+#   trainer  : /root/work/grpo_pool.py  (see its docstring)   out: /root/grpo_pool/{grpo.log,rollouts.jsonl,latest.safetensors,state.json}
+#   data     : the teacher's 2857-question pool (HF box_recover/corpus.jsonl) minus the held-out 300
+# Safe to re-run: never relaunches while a trainer is alive; a dead trainer is NOT auto-restarted (OOM rule) - look first.
 cd /root/work
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null)
 if ! pgrep -f "/root/ctl\.s[h]" >/dev/null; then
   if [ -f /root/start_ctl.sh ]; then setsid nohup bash /root/start_ctl.sh > /dev/null 2>&1 < /dev/null & else setsid nohup bash /root/ctl.sh > /dev/null 2>&1 < /dev/null & fi
   sleep 2; echo "ctl revived: $(pgrep -fc '/root/ctl\.s[h]')"
-else
-  echo "ctl alive"
 fi
+pkill -f "pool_eva[l].py" && echo "leftover evaluator killed"
+python3 -c "import transformers.modeling_utils" 2>/dev/null || pip install -q "huggingface_hub>=0.34,<1.0" 2>&1 | tail -1
+if [ ! -s /root/work/corpus_box_final.jsonl ]; then
+  curl -sSL --retry 3 -o /root/work/corpus_box_final.jsonl "https://huggingface.co/baya1116/hypernet-sp-distill/resolve/main/box_recover/corpus.jsonl"
+  echo "corpus downloaded: $(wc -l < /root/work/corpus_box_final.jsonl) rows"
+fi
+curl -sS --retry 3 -o /root/work/grpo_pool.py "https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl/grpo_pool.py?nocache=$(date +%s)"
+python3 -m py_compile /root/work/grpo_pool.py && echo "trainer fetched: $(wc -l < /root/work/grpo_pool.py) lines"
+echo "gpu: $(nvidia-smi --query-gpu=memory.used,memory.total --format=csv,noheader) | disk: $(df -h /root | awk 'NR==2{print $4}') free"
+mkdir -p /root/grpo_pool
+if ! pgrep -f "grpo_poo[l].py" >/dev/null; then
+  export SP_BASE=/root/fft_hf SP_RANK=128 SP_NOSYS=1 SP_EPISODIC=1 SP_HOTPOT2=0 OMP_NUM_THREADS=1 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+  echo "=== LAUNCH $(date -u) ===" >> /root/grpo_pool.log
+  setsid nohup python3 /root/work/grpo_pool.py /root/fft_new_all.safetensors /root/grpo_pool --steps 200 --g 12 --rw 768 --maxd 384 >> /root/grpo_pool.log 2>&1 < /dev/null &
+  echo "trainer launched"
+else
+  echo "trainer already running"
+fi
+cat > /usr/local/bin/t <<'TT'
+#!/bin/bash
+echo "$(date -u +%H:%M)Z  grpo $(pgrep -fc 'grpo_poo[l].py')  ctl $(pgrep -fc '/root/ctl\.s[h]')  gpu $(nvidia-smi --query-gpu=memory.used --format=csv,noheader 2>/dev/null)"
+grep "^\[step" /root/grpo_pool.log | tail -3 | sed 's/ landed=[0-9]*%//;s/ more=[0-9.]*//;s/ |grad|=[0-9.]*//;s/ skip=[01]//' | cut -c1-90
+grep -i "error\|Traceback\|Killed\|GRPO_POOL_DONE" /root/grpo_pool.log | tail -2 | cut -c1-120
+TT
+chmod +x /usr/local/bin/t
 cat > /root/status_pub.sh <<'SP'
 #!/bin/bash
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null)
 while true; do
-  { echo "=== $(date -u) ==="
-    echo "ctl: $(pgrep -fc '/root/ctl\.s[h]')  evals: $(pgrep -fc 'pool_eva[l].py')  gpu: $(nvidia-smi --query-gpu=memory.used --format=csv,noheader 2>/dev/null)  disk: $(df -h /root | awk 'NR==2{print $4}')"
-    for m in all_c all_nc; do
-      echo "[$m] rows=$(wc -l < /root/work/pooleval_$m.jsonl 2>/dev/null)  $(grep -o '\[[0-9]*/300\].*' /root/pooleval_$m.log 2>/dev/null | tail -1 | cut -c1-120)"
-      grep -i "error\|Traceback\|Killed" /root/pooleval_$m.log 2>/dev/null | tail -2
-    done
-    t 2>/dev/null; tc 2>/dev/null
-    echo "--- last eval log lines"; tail -2 /root/pooleval_all_c.log 2>/dev/null | cut -c1-200; tail -2 /root/pooleval_all_nc.log 2>/dev/null | cut -c1-200
-  } > /root/work/status.txt 2>&1
+  { echo "=== $(date -u) ==="; t 2>/dev/null; echo "--- last log lines"; tail -3 /root/grpo_pool.log | cut -c1-200; } > /root/work/status.txt 2>&1
+  echo "--- STATUS $(date -u +%H:%M) ---"; cat /root/work/status.txt
   hf upload baya1116/hypernet-sp-distill /root/work/status.txt pooler_distill/status.txt >/dev/null 2>&1
   sleep 300
 done
 SP
 chmod +x /root/status_pub.sh
-# the HF upload pulled huggingface-hub 1.x, which transformers refuses at import -> pin it back (keeps the `hf` CLI, added in 0.34)
-if ! python3 -c "import transformers.modeling_utils" 2>/dev/null; then
-  pip install -q "huggingface_hub>=0.34,<1.0" 2>&1 | tail -1
-  python3 -c "import huggingface_hub, transformers.modeling_utils; print('hub', huggingface_hub.__version__, 'import ok')" || echo "IMPORT_STILL_BROKEN"
-else
-  echo "import ok"
-fi
-if ! pgrep -f "pool_eva[l].py" >/dev/null; then
-  export SP_BASE=/root/fft_hf SP_RANK=128 SP_NOSYS=1 SP_EPISODIC=1 SP_HOTPOT2=0 OMP_NUM_THREADS=1 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
-  echo "=== RELAUNCH $(date -u) ===" >> /root/pooleval_all_c.log
-  setsid nohup python3 /root/work/pool_eval.py /root/fft_new_all.safetensors /root/work/eval300.jsonl /root/work/pooleval_all_c.jsonl --n 300 --rw 768 --decode plain --tag "[all_c]" >> /root/pooleval_all_c.log 2>&1 < /dev/null &
-  sleep 45
-  echo "=== RELAUNCH $(date -u) ===" >> /root/pooleval_all_nc.log
-  setsid nohup python3 /root/work/pool_eval.py /root/fft_new_all.safetensors /root/work/eval300.jsonl /root/work/pooleval_all_nc.jsonl --n 300 --rw 8000 --decode plain --tag "[all_nc]" >> /root/pooleval_all_nc.log 2>&1 < /dev/null &
-  echo "evals launched"
-else
-  echo "evals already running"
-fi
-cat > /usr/local/bin/t <<'TT'
-#!/bin/bash
-echo "$(date -u +%H:%M)Z  eval $(pgrep -fc 'pool_eva[l].py')  ctl $(pgrep -fc '/root/ctl\.s[h]')"
-for m in all_c all_nc; do
-  if [ -s /root/work/pooleval_$m.jsonl ]; then python3 /root/work/paired.py /root/work/teacher600.jsonl /root/work/pooleval_$m.jsonl $m; else echo "$m 0"; fi
-done
-TT
-chmod +x /usr/local/bin/t
-curl -sS --retry 3 -o /root/work/cnc.py https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl/cnc.py
-cat > /usr/local/bin/tc <<'TC'
-#!/bin/bash
-python3 /root/work/cnc.py /root/work/teacher600.jsonl /root/work/pooleval_all_c.jsonl /root/work/pooleval_all_nc.jsonl
-TC
-chmod +x /usr/local/bin/tc
-echo "--- CNC $(date -u +%H:%M) ---"; tc
-# final: wait for the non-compressed run to reach 300 rows, then print the final tables and preserve the results on HF
-for i in $(seq 1 40); do [ "$(wc -l < /root/work/pooleval_all_nc.jsonl)" -ge 300 ] && break; sleep 30; done
-echo "--- FINAL $(date -u +%H:%M) rows c=$(wc -l < /root/work/pooleval_all_c.jsonl) nc=$(wc -l < /root/work/pooleval_all_nc.jsonl) evals=$(pgrep -fc 'pool_eva[l].py') ---"
-t; tc
-curl -sS --retry 3 -o /root/work/strat.py "https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl/strat.py?nocache=$(date +%s)"
-python3 /root/work/strat.py /root/work/teacher600.jsonl /root/work/pooleval_all_c.jsonl /root/work/pooleval_all_nc.jsonl 768 2>&1 | grep -v Warning
-grep -h "EVAL_DONE" /root/pooleval_all_c.log /root/pooleval_all_nc.log | cut -c1-200
-for f in pooleval_all_c.jsonl pooleval_all_nc.jsonl; do hf upload baya1116/hypernet-sp-distill /root/work/$f pooler_distill/$f >/dev/null 2>&1 && echo "hf uploaded $f"; done
-pkill -f "status_pu[b].sh"; setsid nohup bash /root/status_pub.sh > /dev/null 2>&1 < /dev/null &
-echo "RELAUNCH_DONE $(date -u)"
+pkill -f "status_pu[b].sh"; setsid nohup bash /root/status_pub.sh >> /proc/1/fd/1 2>&1 < /dev/null &
+sleep 90; echo "--- first log lines"; tail -12 /root/grpo_pool.log | cut -c1-220
+echo "LAUNCH_DONE $(date -u)"
