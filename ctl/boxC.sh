@@ -21,7 +21,7 @@ while true; do
       echo "[$m] rows=$(wc -l < /root/work/pooleval_$m.jsonl 2>/dev/null)  $(grep -o '\[[0-9]*/300\].*' /root/pooleval_$m.log 2>/dev/null | tail -1 | cut -c1-120)"
       grep -i "error\|Traceback\|Killed" /root/pooleval_$m.log 2>/dev/null | tail -2
     done
-    t 2>/dev/null
+    t 2>/dev/null; tc 2>/dev/null
     echo "--- last eval log lines"; tail -2 /root/pooleval_all_c.log 2>/dev/null | cut -c1-200; tail -2 /root/pooleval_all_nc.log 2>/dev/null | cut -c1-200
   } > /root/work/status.txt 2>&1
   hf upload baya1116/hypernet-sp-distill /root/work/status.txt pooler_distill/status.txt >/dev/null 2>&1
@@ -55,5 +55,12 @@ for m in all_c all_nc; do
 done
 TT
 chmod +x /usr/local/bin/t
+curl -sS --retry 3 -o /root/work/cnc.py https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl/cnc.py
+cat > /usr/local/bin/tc <<'TC'
+#!/bin/bash
+python3 /root/work/cnc.py /root/work/teacher600.jsonl /root/work/pooleval_all_c.jsonl /root/work/pooleval_all_nc.jsonl
+TC
+chmod +x /usr/local/bin/tc
+echo "--- CNC $(date -u +%H:%M) ---"; tc
 pkill -f "status_pu[b].sh"; setsid nohup bash /root/status_pub.sh > /dev/null 2>&1 < /dev/null &
 echo "RELAUNCH_DONE $(date -u)"
