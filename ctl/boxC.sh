@@ -62,5 +62,17 @@ python3 /root/work/cnc.py /root/work/teacher600.jsonl /root/work/pooleval_all_c.
 TC
 chmod +x /usr/local/bin/tc
 echo "--- CNC $(date -u +%H:%M) ---"; tc
+for m in all_c all_nc; do
+  echo "--- ANALYZE $m $(date -u +%H:%M) ---"
+  python3 /root/work/analyze_pool.py /root/work/teacher600.jsonl /root/work/pooleval_$m.jsonl 768 2>/dev/null | grep "^=== ANALYZE n\|^buckets\|^student wrong\|gold->answer\|^gold-never-served\|^student searches\|^teacher searches\|stopped after\|mean gen tokens"
+  python3 - /root/work/pooleval_$m.jsonl <<'PY'
+import json,sys,collections
+R=[json.loads(l) for l in open(sys.argv[1])]
+more=collections.Counter(r["text"].count("<more/>") for r in R)
+wrong=[r for r in R if not r["correct"]]
+print("more/q all:", dict(sorted(more.items())), "| wrong rows more/q:", dict(sorted(collections.Counter(r["text"].count("<more/>") for r in wrong).items())))
+print("mean info tokens served/q:", sum(r["text"].count("<information") for r in R)/max(1,len(R)))
+PY
+done
 pkill -f "status_pu[b].sh"; setsid nohup bash /root/status_pub.sh > /dev/null 2>&1 < /dev/null &
 echo "RELAUNCH_DONE $(date -u)"
