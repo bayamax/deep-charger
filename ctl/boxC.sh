@@ -74,5 +74,7 @@ print("more/q all:", dict(sorted(more.items())), "| wrong rows more/q:", dict(so
 print("mean info tokens served/q:", sum(r["text"].count("<information") for r in R)/max(1,len(R)))
 PY
 done
+curl -sS --retry 3 -o /root/work/head_scan.py https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl/head_scan.py
+for m in all_c all_nc; do echo "--- HEAD_SCAN $m ---"; python3 /root/work/head_scan.py /root/work/pooleval_$m.jsonl 2>&1 | grep -v Warning | cut -c1-400; done
 pkill -f "status_pu[b].sh"; setsid nohup bash /root/status_pub.sh > /dev/null 2>&1 < /dev/null &
 echo "RELAUNCH_DONE $(date -u)"
