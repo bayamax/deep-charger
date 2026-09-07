@@ -1,26 +1,27 @@
-# box C: install `t`, then start the streaming SFT (waits for BOOT_DONE inside; self-guarded)
-cat > /usr/local/bin/t <<'TT'
-#!/bin/bash
-M=stream
-echo "SFT-C[$M] $(date -u +%H:%M)Z  $(pgrep -f 'sft_pool_ru[n]' >/dev/null && echo 'run ok' || echo 'run STOPPED')  harvest $(cat /root/harvest_sft/*.jsonl 2>/dev/null | wc -l) rows"
-L=/root/sft_$M.log; LL=/root/sft_loss_$M.log; VL=/root/fft_val_$M.log
-[ -f $LL ] && python3 - "$LL" "$VL" <<'PY' 2>/dev/null
-import sys
-rows=[l.split() for l in open(sys.argv[1]) if l.strip() and not l.startswith("#")]
-if not rows: print("no steps yet"); raise SystemExit
-step,ex,loss,ema,tok=rows[-1]
-print("step %s  ex %s  loss %s  ema %s" % (step,ex,loss,ema))
-ems=[float(r[3]) for r in rows]; m=lambda a: sum(a)/len(a)
-if len(ems)>=10: print("ema  first10 %.3f  last10 %.3f" % (m(ems[:10]), m(ems[-10:])))
-try:
-    v=[l.split() for l in open(sys.argv[2]) if l.strip() and not l.startswith("#")]
-    if v: print("val  step %s  all %s  multi %s  (%d evals)" % (v[-1][0], v[-1][2], v[-1][4], len(v)))
-except Exception: pass
+# box C: finalize the streaming SFT once A has shipped its last rows.
+#  1) wait for /root/work/gen_mus200_full.jsonl (A ships it after the final harvest sync)
+#  2) let the trainer consume the tail, then kill it, rewind fft_seen to the last saved step (SAVE_EVERY=25 -> step*8 rows)
+#  3) relaunch with a short IDLE_EXIT so it re-trains only the unsaved tail and writes the DONE checkpoint
+#  4) export a plain HF model dir (pooler tensors dropped; eval protocol never used the pooler at inference)
+for i in $(seq 1 120); do [ -f /root/work/gen_mus200_full.jsonl ] && break; sleep 30; done
+[ -f /root/work/gen_mus200_full.jsonl ] || { echo "A did not ship full jsonl in 60 min"; exit 0; }
+echo "full jsonl present: $(wc -l < /root/work/gen_mus200_full.jsonl) rows; harvest $(wc -l < /root/harvest_sft/gen_mus200.jsonl) rows"
+for i in $(seq 1 40); do S=$(wc -l < /root/fft_seen_stream.txt); sleep 30; S2=$(wc -l < /root/fft_seen_stream.txt); [ "$S" = "$S2" ] && grep -q "idle: scan() empty" <(tail -3 /root/sft_stream.log) && break; done
+LAST=$(awk 'NF==5 && $1!="#"{s=$1} END{print s+0}' /root/sft_loss_stream.log); SAVED=$(( LAST / 25 * 25 )); echo "trainer at step $LAST, last saved step $SAVED, seen $(wc -l < /root/fft_seen_stream.txt)"
+pkill -f "sft_pool_ru[n].py"; sleep 8
+head -n $(( SAVED * 8 )) /root/fft_seen_stream.txt > /root/fft_seen_stream.trim && mv /root/fft_seen_stream.trim /root/fft_seen_stream.txt; echo "seen rewound to $(wc -l < /root/fft_seen_stream.txt)"
+FREEZE=0 GCKPT=0 IDLE_EXIT=180 bash /root/do_sft_pool.sh stream
+for i in $(seq 1 60); do grep -q "^\[fft\] DONE" /root/sft_stream.log && break; sleep 30; done
+grep "^\[fft\] DONE\|^\[fft\] step" /root/sft_stream.log | tail -3
+ls -la /root/fft_new_stream.safetensors
+python3 - <<'PY'
+import torch, os
+from safetensors.torch import load_file
+from transformers import AutoModelForCausalLM, AutoTokenizer
+sd=load_file("/root/fft_new_stream.safetensors"); md={k:v for k,v in sd.items() if not k.startswith("pooler.")}
+m=AutoModelForCausalLM.from_pretrained("/root/fft_hf", torch_dtype=torch.bfloat16)
+r=m.load_state_dict(md, strict=False); print("missing", len(r.missing_keys), "unexpected", len(r.unexpected_keys))
+m.save_pretrained("/root/work/sft_stream_hf", safe_serialization=True); AutoTokenizer.from_pretrained("/root/fft_hf").save_pretrained("/root/work/sft_stream_hf")
+print("EXPORTED /root/work/sft_stream_hf")
 PY
-grep -E "^\[fft\] (RESUMED|pooler|DONE|OOM|example failed|oversize|idle)" $L 2>/dev/null | tail -2 | cut -c1-96
-ls -la /root/fft_new_$M.safetensors* 2>/dev/null | awk '{print "ckpt", $5/1e9 "GB", $6, $7, $8}' | tail -2
-echo "gpu $(nvidia-smi --query-gpu=memory.used,utilization.gpu --format=csv,noheader 2>/dev/null)  disk $(df -h /root | tail -1 | awk '{print $4}') free"
-TT
-chmod +x /usr/local/bin/t
-FREEZE=0 GCKPT=0 IDLE_EXIT=14400 bash /root/do_sft_pool.sh stream
-echo "--- LOSSLOG $(date -u +%H:%M) v1788740173"; cat /root/sft_loss_stream.log; echo "--- END LOSSLOG"
+du -sh /root/work/sft_stream_hf; echo "C_FINALIZE_DONE $(date -u)"
