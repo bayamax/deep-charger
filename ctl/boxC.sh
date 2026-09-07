@@ -44,7 +44,7 @@ while true; do
 done
 SP
 chmod +x /root/status_pub.sh
-curl -sS --retry 3 -o /root/work/gold_pooled.py "https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl/gold_pooled.py?nocache=$(date +%s)"
+for i in 1 2 3 4 5 6; do curl -sS -o /root/work/gold_pooled.py "https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl/gold_pooled.py?nocache=$(date +%s)" && python3 -m py_compile /root/work/gold_pooled.py && break; sleep 5; done
 for f in "pooleval_all_c.jsonl 768" "pooleval_all_nc.jsonl 768" "pooleval_post.jsonl 512" "/root/grpo_pool/rollouts.jsonl 768"; do set -- $f; p=$1; [ "${p#/}" = "$p" ] && p=/root/work/$p; python3 /root/work/gold_pooled.py $p $2 2>&1 | grep -v Warning | cut -c1-300; done
 pkill -f "status_pub"; pkill -f "status_pu[b].sh"; setsid nohup bash /root/status_pub.sh >> /proc/1/fd/1 2>&1 < /dev/null &
 echo "--- log tail"; tail -4 /root/grpo_pool.log | cut -c1-220
