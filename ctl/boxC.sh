@@ -45,6 +45,7 @@ def acc(steps):
     rs=[r for s in steps for r in by[s]]
     return f"{100*sum(r['correct'] for r in rs)/max(len(rs),1):.0f}% srch {sum(len(r['queries']) for r in rs)/max(len(rs),1):.1f}"
 print(f"steps {S[0]}-{S[-1]}  1st half {acc(S[:mid])}  |  2nd half {acc(S[mid:])}")
+print(f"last25 {acc(S[-25:])}  gnd {100*sum(r['grounded'] for s in S[-25:] for r in by[s])/max(sum(len(by[s]) for s in S[-25:]),1):.0f}%   step {S[-1]}/200")
 PY
 grep "^\[step" /root/grpo_pool.log | tail -3 | sed 's/ landed=[0-9]*%//;s/ more=[0-9.]*//;s/ |grad|=[0-9.]*//;s/ skip=[01]//' | cut -c1-90
 grep -i "error\|Traceback\|Killed\|GRPO_POOL_DONE" /root/grpo_pool.log | tail -2 | cut -c1-120
