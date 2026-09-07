@@ -49,7 +49,7 @@ while true; do
 done
 SP
 chmod +x /root/status_pub.sh
-echo "--- GP3 $(date -u +%H:%M) ---"; python3 /root/work/gold_pooled.py /root/grpo_pool/rollouts.jsonl 768 grpo_v2 2>&1 | grep -v Warning | cut -c1-300
+echo "--- GP4 $(date -u +%H:%M) ---"; python3 /root/work/gold_pooled.py /root/grpo_pool/rollouts.jsonl 768 grpo_v2 2>&1 | grep -v Warning | cut -c1-300
 pkill -f "status_pub"; pkill -f "status_pu[b].sh"; setsid nohup bash /root/status_pub.sh >> /proc/1/fd/1 2>&1 < /dev/null &
 echo "--- log tail"; tail -4 /root/grpo_pool.log | cut -c1-220
 sleep 60; tail -3 /root/grpo_pool.log | cut -c1-200; echo "LAUNCH_DONE $(date -u)"
