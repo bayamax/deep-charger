@@ -4,8 +4,9 @@
   environment : grpo_ep_more verbatim (kw||ask -> top-1 page, 256-token head, <more/> paging, MAXS 5, MAXM 8, GEN 1500, temp 0.9,
                 plain sampling with only the <information ban)   -- same code as pool_eval.py
   reward      : grounded-correct = 1.0, everything else 0.0 (no partial credit), group-normalised advantage, G=12, one question/step
-  loss        : -adv/G * mean log p over the policy's own tokens, computed under compression (SP + raw window, chunked) by the
-                harness's pg_grad_backward; Adam lr 1e-5 on the LoRA adapters + the pooler
+  loss        : -adv/G * mean log p over the policy's own tokens, computed under compression by rebuilding every block exactly
+                as the policy saw it (the pooled set after mass eviction is recorded during the rollout); Adam lr 1e-5 on the
+                LoRA adapters + the pooler
   inference   : rollouts run with the deployed compression (RW 768, MAXD 384, chunk 128, mass eviction)
   data        : corpus_box_final.jsonl (the teacher's 2857-question pool), gold <= 6 words, shuffled with seed 0, sequential;
                 the held-out eval300 questions are removed if present
@@ -177,7 +178,7 @@ def rollout(question):
     past = DynamicCache()
     model(input_ids=torch.tensor([q_ids], device=DEV), past_key_values=past, use_cache=True)
     MQ = past.get_seq_length()
-    gen, msk, kept, absorbed = [], [], [], 0
+    gen, msk, kept, absorbed, segs = [], [], [], 0, []
     n_model, ns_, nm, nmt = 0, 0, 0, 0
     served, queries, page_ids, page_off = [], [], [], 0
     t0 = time.time(); dead = False
@@ -193,7 +194,7 @@ def rollout(question):
             if len(kept) > A.maxd:
                 _, mass = pooler.forward_with_mass(emb(kept).to(torch.float32))
                 mm = mass[0].float().cpu().numpy(); kept = [kept[i] for i in np.sort(np.argsort(mm)[-A.maxd:])]
-        spv = sp(kept)
+        spv = sp(kept); segs.append([c0, None, list(kept)])     # what the policy saw for this block: pooled set + raw window gen[c0-R:c0]
         parts = [spv] + ([emb(gen[c0 - R:c0])] if R > 0 else []); block = torch.cat(parts, dim=1)
         crop_cache(past, MQ)
         Lb = block.shape[1]; pos = torch.arange(MQ, MQ + Lb, device=DEV)
@@ -244,6 +245,7 @@ def rollout(question):
             out = model(inputs_embeds=emb([nx]), past_key_values=past, attention_mask=torch.ones(1, npos + 1, device=DEV),
                         position_ids=torch.tensor([[npos]], device=DEV), cache_position=torch.tensor([npos], device=DEV), use_cache=True)
             npos += 1; last = out.logits[:, -1, :]
+        segs[-1][1] = len(gen)
         txt = tok.decode(gen)
         if dead or (brk and gen and gen[-1] == eos):
             break
@@ -252,8 +254,31 @@ def rollout(question):
     txt = tok.decode(gen)
     landed = "</think>" in txt and bool(txt.split("</think>")[-1].strip())
     ans = head_sentence(txt.split("</think>")[-1].strip()) if landed else ""
-    return dict(q_ids=q_ids, gen=gen, msk=msk, text=txt, answer=ans, ns=ns_, more=nm, served=served, queries=queries,
-                landed=landed, dead=dead)
+    return dict(q_ids=q_ids, gen=gen, msk=msk, segs=[x for x in segs if x[1] is not None], text=txt, answer=ans, ns=ns_, more=nm,
+                served=served, queries=queries, landed=landed, dead=dead)
+
+
+def pg_backward(r, coef):
+    """coef * (-mean log p over the policy's own tokens), backward. Each block is rebuilt EXACTLY as the policy saw it during
+    the rollout: [query, SP(recorded pooled set), raw window, block tokens] -- same mass-ordered eviction, same boundaries."""
+    qe = emb(r["q_ids"]); gen, msk = r["gen"], r["msk"]
+    ntot = sum(msk)
+    if ntot == 0: return 0.0
+    tot = 0.0
+    for c0, c1, kept in r["segs"]:
+        if sum(msk[c0:c1]) == 0: continue
+        R = min(c0, A.rw)
+        spv = sp(kept) if kept else torch.zeros((1, 0, ns["H"]), device=DEV, dtype=ns["MDTYPE"])
+        parts = [qe, spv] + ([emb(gen[c0 - R:c0])] if R > 0 else []) + [emb(gen[c0:c1])]
+        block = torch.cat(parts, dim=1); L = block.shape[1]; cur = c1 - c0
+        logits = model(inputs_embeds=block).logits.float()
+        pr = logits[:, L - cur - 1:L - 1, :]
+        tgt = torch.tensor([gen[c0:c1]], device=DEV); tm = torch.tensor([msk[c0:c1]], device=DEV, dtype=torch.float32)
+        ce = torch.nn.functional.cross_entropy(pr.reshape(-1, pr.shape[-1]), tgt.reshape(-1), reduction="none")
+        loss = (ce * tm.reshape(-1)).sum() / ntot
+        (coef * loss).backward()
+        tot += float(loss.item()); del logits, pr, ce, loss; clear()
+    return tot
 
 
 def price(r, gold):
@@ -317,8 +342,7 @@ for step in range(state["step"] + 1, A.steps + 1):
             adv = (rw_ - mu) / (sd + 1e-6)
             if abs(adv) < 1e-6:
                 continue
-            im = [1 - x for x in r["msk"]]
-            losses.append(pg_grad_backward(r["q_ids"], r["gen"], r["msk"], im, adv / A.g))
+            losses.append(pg_backward(r, adv / A.g))
             clear()
         params = [p for p in model.parameters() if p.requires_grad and p.grad is not None] + [p for p in pooler.parameters() if p.grad is not None]
         gnorm = float(torch.sqrt(sum((p.grad.float() ** 2).sum() for p in params)).item()) if params else 0.0
