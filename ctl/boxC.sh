@@ -62,7 +62,7 @@ python3 /root/work/cnc.py /root/work/teacher600.jsonl /root/work/pooleval_all_c.
 TC
 chmod +x /usr/local/bin/tc
 echo "--- CNC $(date -u +%H:%M) ---"; tc
-curl -sS --retry 3 -o /root/work/strat.py https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl/strat.py
-echo "--- STRAT2 $(date -u +%H:%M) ---"; python3 /root/work/strat.py /root/work/teacher600.jsonl /root/work/pooleval_all_c.jsonl /root/work/pooleval_all_nc.jsonl 768 2>&1 | grep -v Warning
+curl -sS --retry 3 -o /root/work/strat.py "https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl/strat.py?nocache=$(date +%s)"
+echo "--- STRAT3 $(date -u +%H:%M) ---"; python3 /root/work/strat.py /root/work/teacher600.jsonl /root/work/pooleval_all_c.jsonl /root/work/pooleval_all_nc.jsonl 768 2>&1 | grep -v Warning
 pkill -f "status_pu[b].sh"; setsid nohup bash /root/status_pub.sh > /dev/null 2>&1 < /dev/null &
 echo "RELAUNCH_DONE $(date -u)"
