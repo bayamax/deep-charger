@@ -9,17 +9,17 @@ for i in 1 2 3 4 5 6; do curl -sS -o /root/work/grpo_pool.py "https://raw.github
 for f in gold_pooled.py paired.py cnc.py strat.py analyze_pool.py pool_eval.py; do curl -sS -o /root/work/$f "https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl/$f?nocache=$(date +%s)"; done
 echo "trainer fetched: $(wc -l < /root/work/grpo_pool.py) lines, v2=$(grep -c "def pg_backward" /root/work/grpo_pool.py)"
 echo "gpu: $(nvidia-smi --query-gpu=name,memory.used,memory.total --format=csv,noheader) | disk: $(df -h /root | awk 'NR==2{print $4}') free"
-echo "resume state: $(cut -c1-40 /root/grpo_pool/state.json 2>/dev/null)  latest: $(ls -la /root/grpo_pool/latest.safetensors 2>/dev/null | awk '{print $5}') bytes"
-if [ ! -s /root/grpo_pool/latest.safetensors ] || [ ! -s /root/grpo_pool/state.json ] || [ ! -s /root/fft_new_all.safetensors ] || [ ! -f /root/fft_hf/model.safetensors ]; then
+echo "resume state: $(cut -c1-40 /root/grpo_pool2/state.json 2>/dev/null)  latest: $(ls -la /root/grpo_pool2/latest.safetensors 2>/dev/null | awk '{print $5}') bytes"
+if [ ! -s /root/grpo_pool2/latest.safetensors ] || [ ! -s /root/grpo_pool2/state.json ] || [ ! -s /root/fft_new_all.safetensors ] || [ ! -f /root/fft_hf/model.safetensors ]; then
   echo "NOT READY: checkpoint or model missing, not launching"; exit 0
 fi
-# v4 (user request 08:00 UTC): loop guard OFF, phantom-sample advantage ON (--phantom 0.5 --phantom-scale 0.5). Resume from step 40.
-if [ ! -f /root/grpo_pool/.v4 ]; then pkill -f "grpo_poo[l].py"; sleep 5; touch /root/grpo_pool/.v4; echo "v3 trainer stopped for the phantom run"; fi
+# v5 (user request 11:00 UTC): restart from the SFT model at step 0 with phantom + samepage on (guard off), fresh outdir /root/grpo_pool2.
+if [ ! -f /root/grpo_pool2/.v5 ]; then pkill -f "grpo_poo[l].py"; sleep 5; mkdir -p /root/grpo_pool2; touch /root/grpo_pool2/.v5; echo "v4 trainer stopped; fresh run from the SFT model"; fi
 if ! pgrep -f "grpo_poo[l].py" >/dev/null; then
   export SP_BASE=/root/fft_hf SP_RANK=128 SP_NOSYS=1 SP_EPISODIC=1 SP_HOTPOT2=0 OMP_NUM_THREADS=1 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
-  echo "=== LAUNCH $(date -u) ===" >> /root/grpo_pool.log
-  setsid nohup python3 /root/work/grpo_pool.py /root/fft_new_all.safetensors /root/grpo_pool --steps 200 --g 12 --rw 768 --maxd 384 --samepage 1 --gradckpt 1 --maxsrch 0 --phantom 0.5 --phantom-scale 0.5 >> /root/grpo_pool.log 2>&1 < /dev/null &
-  echo "trainer launched (resume)"
+  echo "=== LAUNCH $(date -u) ===" >> /root/grpo_pool2.log
+  setsid nohup python3 /root/work/grpo_pool.py /root/fft_new_all.safetensors /root/grpo_pool2 --steps 200 --g 12 --rw 768 --maxd 384 --samepage 1 --gradckpt 1 --maxsrch 0 --phantom 0.5 --phantom-scale 0.5 >> /root/grpo_pool2.log 2>&1 < /dev/null &
+  echo "trainer launched (fresh, step 0)"
 else
   echo "trainer already running"
 fi
@@ -29,7 +29,7 @@ echo "$(date -u +%H:%M)Z  grpo $(pgrep -fc 'grpo_poo[l].py')  ctl $(pgrep -fc '/
 python3 - <<'PY' 2>/dev/null
 import json,collections
 by=collections.defaultdict(list); last=0
-for l in open("/root/grpo_pool/rollouts.jsonl"):
+for l in open("/root/grpo_pool2/rollouts.jsonl"):
     try: r=json.loads(l)
     except Exception: continue
     if r["step"]<last:                                   # steps only grow within a run: a smaller step means a restart
@@ -42,27 +42,27 @@ def acc(steps):
 print(f"steps {S[0]}-{S[-1]}  1st half {acc(S[:mid])}  |  2nd half {acc(S[mid:])}")
 print(f"last25 {acc(S[-25:])}  gnd {100*sum(r['grounded'] for s in S[-25:] for r in by[s])/max(sum(len(by[s]) for s in S[-25:]),1):.0f}%   step {S[-1]}/200")
 PY
-grep "^\[step" /root/grpo_pool.log | tail -3 | sed 's/ landed=[0-9]*%//;s/ more=[0-9.]*//;s/ |grad|=[0-9.]*//;s/ skip=[01]//' | cut -c1-90
-grep -i "error\|Traceback\|Killed\|GRPO_POOL_DONE" /root/grpo_pool.log | tail -2 | cut -c1-120
+grep "^\[step" /root/grpo_pool2.log | tail -3 | sed 's/ landed=[0-9]*%//;s/ more=[0-9.]*//;s/ |grad|=[0-9.]*//;s/ skip=[01]//' | cut -c1-90
+grep -i "error\|Traceback\|Killed\|GRPO_POOL_DONE" /root/grpo_pool2.log | tail -2 | cut -c1-120
 TT
 chmod +x /usr/local/bin/t
 cat > /root/status_pub.sh <<'SP'
 #!/bin/bash
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null)
 while true; do
-  { echo "=== $(date -u) === box D"; t 2>/dev/null; echo "--- last log lines"; tail -3 /root/grpo_pool.log | cut -c1-200; } > /root/work/status.txt 2>&1
+  { echo "=== $(date -u) === box D"; t 2>/dev/null; echo "--- last log lines"; tail -3 /root/grpo_pool2.log | cut -c1-200; } > /root/work/status.txt 2>&1
   echo "--- STATUS $(date -u +%H:%M) ---"; cat /root/work/status.txt
   hf upload baya1116/hypernet-sp-distill /root/work/status.txt pooler_distill/status.txt >/dev/null 2>&1
   # keep the latest checkpoint preserved off-box every time it changes (every 20 steps)
-  if [ -f /root/grpo_pool/state.json ] && ! cmp -s /root/grpo_pool/state.json /root/.state_uploaded 2>/dev/null; then
-    hf upload baya1116/hypernet-sp-distill /root/grpo_pool/latest.safetensors pooler_distill/grpo_pool/latest.safetensors >/dev/null 2>&1 \
-    && hf upload baya1116/hypernet-sp-distill /root/grpo_pool/state.json pooler_distill/grpo_pool/state.json >/dev/null 2>&1 \
-    && hf upload baya1116/hypernet-sp-distill /root/grpo_pool/rollouts.jsonl pooler_distill/grpo_pool/rollouts.jsonl >/dev/null 2>&1 \
-    && cp /root/grpo_pool/state.json /root/.state_uploaded && echo "ckpt uploaded: $(cut -c1-30 /root/grpo_pool/state.json)"
+  if [ -f /root/grpo_pool2/state.json ] && ! cmp -s /root/grpo_pool2/state.json /root/.state_uploaded 2>/dev/null; then
+    hf upload baya1116/hypernet-sp-distill /root/grpo_pool2/latest.safetensors pooler_distill/grpo_pool2/latest.safetensors >/dev/null 2>&1 \
+    && hf upload baya1116/hypernet-sp-distill /root/grpo_pool2/state.json pooler_distill/grpo_pool2/state.json >/dev/null 2>&1 \
+    && hf upload baya1116/hypernet-sp-distill /root/grpo_pool2/rollouts.jsonl pooler_distill/grpo_pool2/rollouts.jsonl >/dev/null 2>&1 \
+    && cp /root/grpo_pool2/state.json /root/.state_uploaded && echo "ckpt uploaded: $(cut -c1-30 /root/grpo_pool2/state.json)"
   fi
   sleep 300
 done
 SP
 chmod +x /root/status_pub.sh
 pkill -f "status_pub"; setsid nohup bash /root/status_pub.sh >> /proc/1/fd/1 2>&1 < /dev/null &
-sleep 60; tail -4 /root/grpo_pool.log | cut -c1-200; echo "LAUNCH_DONE $(date -u)"
+sleep 60; tail -4 /root/grpo_pool2.log | cut -c1-200; echo "LAUNCH_DONE $(date -u)"
