@@ -194,7 +194,7 @@ def rollout(question):
     n_model, ns_, nm, nmt = 0, 0, 0, 0
     served, queries, page_ids, page_off = [], [], [], 0
     seen_pages, cur_key, nrep = {}, None, 0     # samepage: per-rollout read offset of every page shown so far
-    t0 = time.time(); dead = False
+    t0 = time.time(); dead = False; cut = False
 
     def inject(text):
         ids = tok.encode(text, add_special_tokens=False)
@@ -231,7 +231,7 @@ def rollout(question):
                 kw, ask = ([x.strip() for x in body.split("||", 1)] if "||" in body else (body, body))
                 queries.append(kw)
                 if A.maxsrch and ns_ >= A.maxsrch:
-                    dead = True; brk = True; break          # loop guard: the rollout ends here (unlanded)
+                    cut = True; brk = True; break           # loop guard: the rollout ends here (unlanded)
                 if not kw:
                     blk = "\n<information>(no results)</information>\n"
                 elif ns_ > A.maxs:
@@ -272,15 +272,15 @@ def rollout(question):
             npos += 1; last = out.logits[:, -1, :]
         segs[-1][1] = len(gen)
         txt = tok.decode(gen)
-        if dead or (brk and gen and gen[-1] == eos):
+        if dead or cut or (brk and gen and gen[-1] == eos):
             break
         if "</think>" in txt and answer_complete(txt.split("</think>")[-1]):
             break
     txt = tok.decode(gen)
-    landed = "</think>" in txt and bool(txt.split("</think>")[-1].strip())
+    landed = (not cut) and "</think>" in txt and bool(txt.split("</think>")[-1].strip())
     ans = head_sentence(txt.split("</think>")[-1].strip()) if landed else ""
     return dict(q_ids=q_ids, gen=gen, msk=msk, segs=[x for x in segs if x[1] is not None], text=txt, answer=ans, ns=ns_, more=nm,
-                rep=nrep, served=served, queries=queries, landed=landed, dead=dead)
+                rep=nrep, cut=cut, served=served, queries=queries, landed=landed, dead=dead)
 
 
 def pg_backward(r, coef):
@@ -357,7 +357,7 @@ for step in range(state["step"] + 1, A.steps + 1):
     for r in rolls:
         rw_, c, g = price(r, item["gold"]); rews.append(rw_); infos.append((r["ns"], g, r["landed"], c, r["more"], r.get("rep", 0)))
         roll_fh.write(json.dumps({"step": step, "q": item["q"], "gold": item["gold"], "queries": r["queries"], "answer": r["answer"][:120],
-                                  "grounded": g, "landed": r["landed"], "correct": c, "more": r["more"], "rep": r.get("rep", 0), "dead": r["dead"],
+                                  "grounded": g, "landed": r["landed"], "correct": c, "more": r["more"], "rep": r.get("rep", 0), "cut": r.get("cut", False), "dead": r["dead"],
                                   "text": r["text"]}, ensure_ascii=False) + "\n")
     roll_fh.flush()
     mu = sum(rews) / len(rews); sd = (sum((x - mu) ** 2 for x in rews) / len(rews)) ** 0.5
