@@ -10,8 +10,8 @@ for f in gold_pooled.py paired.py cnc.py strat.py analyze_pool.py pool_eval.py; 
 echo "trainer fetched: $(wc -l < /root/work/grpo_pool.py) lines, v2=$(grep -c "def pg_backward" /root/work/grpo_pool.py)"
 echo "gpu: $(nvidia-smi --query-gpu=name,memory.used,memory.total --format=csv,noheader) | disk: $(df -h /root | awk 'NR==2{print $4}') free"
 echo "resume state: $(cut -c1-40 /root/grpo_pool2/state.json 2>/dev/null)  latest: $(ls -la /root/grpo_pool2/latest.safetensors 2>/dev/null | awk '{print $5}') bytes"
-if [ ! -s /root/grpo_pool2/latest.safetensors ] || [ ! -s /root/grpo_pool2/state.json ] || [ ! -s /root/fft_new_all.safetensors ] || [ ! -f /root/fft_hf/model.safetensors ]; then
-  echo "NOT READY: checkpoint or model missing, not launching"; exit 0
+if [ ! -s /root/fft_new_all.safetensors ] || [ ! -f /root/fft_hf/model.safetensors ]; then
+  echo "NOT READY: model missing, not launching"; exit 0
 fi
 # v5 (user request 11:00 UTC): restart from the SFT model at step 0 with phantom + samepage on (guard off), fresh outdir /root/grpo_pool2.
 if [ ! -f /root/grpo_pool2/.v5 ]; then pkill -f "grpo_poo[l].py"; sleep 5; mkdir -p /root/grpo_pool2; touch /root/grpo_pool2/.v5; echo "v4 trainer stopped; fresh run from the SFT model"; fi
