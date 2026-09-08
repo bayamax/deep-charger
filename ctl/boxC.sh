@@ -62,22 +62,20 @@ while true; do
 done
 SP
 chmod +x /root/status_pub.sh
-echo "--- SRCH2 $(date -u +%H:%M) ---"
+echo "--- UTIL $(date -u +%H:%M) ---"
+for i in $(seq 1 12); do nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv,noheader; sleep 5; done | sort | uniq -c | sort -rn | head -6
+echo "cache rows: $(wc -l < /root/work/pool_eval_cache.jsonl)  (file mtime $(date -u -r /root/work/pool_eval_cache.jsonl +%H:%M))"
 python3 - <<'PY'
 import json,collections
 R=[json.loads(l) for l in open("/root/grpo_pool/rollouts.jsonl")]
 by=collections.defaultdict(list)
 for r in R: by[r["step"]].append(r)
-for s in sorted(by)[-12:]:
-    rs=by[s]; ns=[len(r["queries"]) for r in rs]
-    L=[len(r["text"]) for r in rs]
-    print(f"step {s:3d} n={len(rs)} srch per roll={sorted(ns)} correct={sum(r['correct'] for r in rs)} landed={sum(r['landed'] for r in rs)} dead={sum(r.get('dead',False) for r in rs)} chars mean={sum(L)//len(L)}")
-last=[r for s in sorted(by)[-6:] for r in by[s]]
-loop=[r for r in last if len(r["queries"])>=10]
-print(f"last 6 steps: rolls={len(last)} with >=10 searches {len(loop)}; of those landed {sum(r['landed'] for r in loop)} correct {sum(r['correct'] for r in loop)}")
-import re
-for r in loop[:2]:
-    qs=r["queries"]; print("  sample queries:", [q[:35] for q in qs[:4]], "...", [q[:35] for q in qs[-3:]], "| distinct", len(set(qs)), "/", len(qs))
+S=sorted(by)[-8:]
+tot=0; uniq=0
+for s in S:
+    qs=[q for r in by[s] for q in r["queries"][:5]]      # only the first 5 searches per roll are actually fetched
+    tot+=len(qs); uniq+=len(set(qs))
+print(f"last 8 steps: fetched searches {tot}, distinct queries {uniq} -> at most {uniq} wiki API round-trips (~{uniq*4*0.6/60:.1f} min of API sleep) vs step time ~13 min each")
 PY
 pkill -f "status_pub"; pkill -f "status_pu[b].sh"; setsid nohup bash /root/status_pub.sh >> /proc/1/fd/1 2>&1 < /dev/null &
 echo "--- log tail"; tail -4 /root/grpo_pool.log | cut -c1-220
