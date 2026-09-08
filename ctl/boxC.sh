@@ -62,13 +62,24 @@ while true; do
 done
 SP
 chmod +x /root/status_pub.sh
-echo "--- INV $(date -u +%H:%M) ---"
-python3 -c "import torch,transformers,peft,safetensors,numpy,huggingface_hub,bitsandbytes; print('torch',torch.__version__,'transformers',transformers.__version__,'peft',peft.__version__,'safetensors',safetensors.__version__,'numpy',numpy.__version__,'hub',huggingface_hub.__version__,'bnb',bitsandbytes.__version__)" 2>&1 | tail -1
-md5sum /root/work/teacher600.jsonl /root/work/eval300.jsonl /root/hfdl/grpo_assets/mus_run/eval_step200/eval_heldout_300q_g2.jsonl 2>&1 | cut -c1-120
-wc -l /root/work/teacher600.jsonl /root/work/eval300.jsonl /root/work/corpus_box_final.jsonl /root/work/pool_eval_cache.jsonl /root/grpo_pool/rollouts.jsonl | cut -c1-80
-du -sh /root/fft_hf /root/fft_new_all.safetensors /root/grpo_pool /root/work/fft_out/pooler.pt /root/hfdl/fft_out /root/work/pool_eval_cache.jsonl 2>&1 | cut -c1-80
-ls /root/fft_hf | tr '\n' ' '; echo; ls /root/work/*.py | tr '\n' ' '; echo
-cat /root/grpo_pool/state.json 2>/dev/null | cut -c1-80; echo; ls -la /root/grpo_pool/ | cut -c1-100
+# migration: once the step-40 checkpoint is saved, ship it (and everything box D needs to resume) to HF, in the background
+if ! pgrep -f "migrate_wai[t]" >/dev/null; then
+cat > /root/migrate_wait.sh <<'MW'
+#!/bin/bash
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null)
+while :; do s=$(python3 -c "import json;print(json.load(open('/root/grpo_pool/state.json'))['step'])" 2>/dev/null); [ -n "$s" ] && [ "$s" -ge 40 ] && break; sleep 60; done
+sleep 30
+R=baya1116/hypernet-sp-distill
+hf upload $R /root/grpo_pool/latest.safetensors pooler_distill/grpo_pool/latest.safetensors >/dev/null 2>&1 && echo "MIGRATE ckpt uploaded (step $s)"
+hf upload $R /root/grpo_pool/state.json pooler_distill/grpo_pool/state.json >/dev/null 2>&1
+hf upload $R /root/grpo_pool/rollouts.jsonl pooler_distill/grpo_pool/rollouts.jsonl >/dev/null 2>&1
+hf upload $R /root/grpo_pool/grpo.log pooler_distill/grpo_pool/grpo.log >/dev/null 2>&1
+hf upload $R /root/work/pool_eval_cache.jsonl pooler_distill/pool_eval_cache.jsonl >/dev/null 2>&1
+echo "MIGRATE_UPLOADED step $s $(date -u)"
+MW
+chmod +x /root/migrate_wait.sh; setsid nohup bash /root/migrate_wait.sh >> /proc/1/fd/1 2>&1 < /dev/null &
+echo "migration waiter armed (uploads at step>=40)"
+fi
 pkill -f "status_pub"; pkill -f "status_pu[b].sh"; setsid nohup bash /root/status_pub.sh >> /proc/1/fd/1 2>&1 < /dev/null &
 echo "--- log tail"; tail -4 /root/grpo_pool.log | cut -c1-220
 sleep 60; tail -3 /root/grpo_pool.log | cut -c1-200; echo "LAUNCH_DONE $(date -u)"
