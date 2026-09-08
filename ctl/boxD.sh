@@ -13,10 +13,12 @@ echo "resume state: $(cut -c1-40 /root/grpo_pool/state.json 2>/dev/null)  latest
 if [ ! -s /root/grpo_pool/latest.safetensors ] || [ ! -s /root/grpo_pool/state.json ] || [ ! -s /root/fft_new_all.safetensors ] || [ ! -f /root/fft_hf/model.safetensors ]; then
   echo "NOT READY: checkpoint or model missing, not launching"; exit 0
 fi
+# v3 (user-approved 07:00 UTC): loop guard on (--maxsrch 15). Stop the v2 trainer once and resume from the step-40 checkpoint.
+if [ ! -f /root/grpo_pool/.v3 ]; then pkill -f "grpo_poo[l].py"; sleep 5; touch /root/grpo_pool/.v3; echo "v2 trainer stopped for the loop guard"; fi
 if ! pgrep -f "grpo_poo[l].py" >/dev/null; then
   export SP_BASE=/root/fft_hf SP_RANK=128 SP_NOSYS=1 SP_EPISODIC=1 SP_HOTPOT2=0 OMP_NUM_THREADS=1 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
   echo "=== LAUNCH $(date -u) ===" >> /root/grpo_pool.log
-  setsid nohup python3 /root/work/grpo_pool.py /root/fft_new_all.safetensors /root/grpo_pool --steps 200 --g 12 --rw 768 --maxd 384 --samepage 1 --gradckpt 1 >> /root/grpo_pool.log 2>&1 < /dev/null &
+  setsid nohup python3 /root/work/grpo_pool.py /root/fft_new_all.safetensors /root/grpo_pool --steps 200 --g 12 --rw 768 --maxd 384 --samepage 1 --gradckpt 1 --maxsrch 15 >> /root/grpo_pool.log 2>&1 < /dev/null &
   echo "trainer launched (resume)"
 else
   echo "trainer already running"
@@ -59,11 +61,5 @@ while true; do
 done
 SP
 chmod +x /root/status_pub.sh
-echo "--- ALIVE $(date -u +%H:%M:%S) ---"
-ps -eo pid,etimes,pcpu,args | grep "grpo_poo[l].py" | cut -c1-120
-echo "rollouts rows $(wc -l < /root/grpo_pool/rollouts.jsonl)  mtime $(date -u -r /root/grpo_pool/rollouts.jsonl +%H:%M:%S) | grpo.log mtime $(date -u -r /root/grpo_pool/grpo.log +%H:%M:%S) | trainer stdout mtime $(date -u -r /root/grpo_pool.log +%H:%M:%S)"
-tail -1 /root/grpo_pool/grpo.log | cut -c1-120
-for i in 1 2 3 4 5 6; do nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv,noheader; sleep 5; done | tr '\n' ' '; echo
-sleep 120; echo "after 2 min: rollouts rows $(wc -l < /root/grpo_pool/rollouts.jsonl)  mtime $(date -u -r /root/grpo_pool/rollouts.jsonl +%H:%M:%S)"
 pkill -f "status_pub"; setsid nohup bash /root/status_pub.sh >> /proc/1/fd/1 2>&1 < /dev/null &
 sleep 60; tail -4 /root/grpo_pool.log | cut -c1-200; echo "LAUNCH_DONE $(date -u)"
