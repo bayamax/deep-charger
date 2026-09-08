@@ -62,21 +62,13 @@ while true; do
 done
 SP
 chmod +x /root/status_pub.sh
-echo "--- UTIL $(date -u +%H:%M) ---"
-for i in $(seq 1 12); do nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv,noheader; sleep 5; done | sort | uniq -c | sort -rn | head -6
-echo "cache rows: $(wc -l < /root/work/pool_eval_cache.jsonl)  (file mtime $(date -u -r /root/work/pool_eval_cache.jsonl +%H:%M))"
-python3 - <<'PY'
-import json,collections
-R=[json.loads(l) for l in open("/root/grpo_pool/rollouts.jsonl")]
-by=collections.defaultdict(list)
-for r in R: by[r["step"]].append(r)
-S=sorted(by)[-8:]
-tot=0; uniq=0
-for s in S:
-    qs=[q for r in by[s] for q in r["queries"][:5]]      # only the first 5 searches per roll are actually fetched
-    tot+=len(qs); uniq+=len(set(qs))
-print(f"last 8 steps: fetched searches {tot}, distinct queries {uniq} -> at most {uniq} wiki API round-trips (~{uniq*4*0.6/60:.1f} min of API sleep) vs step time ~13 min each")
-PY
+echo "--- INV $(date -u +%H:%M) ---"
+python3 -c "import torch,transformers,peft,safetensors,numpy,huggingface_hub,bitsandbytes; print('torch',torch.__version__,'transformers',transformers.__version__,'peft',peft.__version__,'safetensors',safetensors.__version__,'numpy',numpy.__version__,'hub',huggingface_hub.__version__,'bnb',bitsandbytes.__version__)" 2>&1 | tail -1
+md5sum /root/work/teacher600.jsonl /root/work/eval300.jsonl /root/hfdl/grpo_assets/mus_run/eval_step200/eval_heldout_300q_g2.jsonl 2>&1 | cut -c1-120
+wc -l /root/work/teacher600.jsonl /root/work/eval300.jsonl /root/work/corpus_box_final.jsonl /root/work/pool_eval_cache.jsonl /root/grpo_pool/rollouts.jsonl | cut -c1-80
+du -sh /root/fft_hf /root/fft_new_all.safetensors /root/grpo_pool /root/work/fft_out/pooler.pt /root/hfdl/fft_out /root/work/pool_eval_cache.jsonl 2>&1 | cut -c1-80
+ls /root/fft_hf | tr '\n' ' '; echo; ls /root/work/*.py | tr '\n' ' '; echo
+cat /root/grpo_pool/state.json 2>/dev/null | cut -c1-80; echo; ls -la /root/grpo_pool/ | cut -c1-100
 pkill -f "status_pub"; pkill -f "status_pu[b].sh"; setsid nohup bash /root/status_pub.sh >> /proc/1/fd/1 2>&1 < /dev/null &
 echo "--- log tail"; tail -4 /root/grpo_pool.log | cut -c1-220
 sleep 60; tail -3 /root/grpo_pool.log | cut -c1-200; echo "LAUNCH_DONE $(date -u)"
