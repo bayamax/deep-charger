@@ -32,9 +32,9 @@ by=collections.defaultdict(list); last=0
 for l in open("/root/grpo_pool/rollouts.jsonl"):
     try: r=json.loads(l)
     except Exception: continue
-    if r["step"]<=last and r["step"] in by and by[r["step"]] and by[r["step"]][-1] is not None and len(by[r["step"]])>=12:
-        for k in [k for k in by if k>=r["step"]]: by.pop(k)      # a restart: drop the superseded rows
-    by[r["step"]].append(r); last=max(last,r["step"]) if r["step"]>last else r["step"]
+    if r["step"]<last:                                   # steps only grow within a run: a smaller step means a restart
+        for k in [k for k in by if k>=r["step"]]: by.pop(k)   # drop the superseded rows
+    by[r["step"]].append(r); last=r["step"]
 S=sorted(by); mid=len(S)//2
 def acc(steps):
     rs=[r for s in steps for r in by[s]]
