@@ -3,6 +3,8 @@
 
   environment : grpo_ep_more verbatim (kw||ask -> top-1 page, 256-token head, <more/> paging, MAXS 5, MAXM 8, GEN 1500, temp 0.9,
                 plain sampling with only the <information ban)   -- same code as pool_eval.py
+                + samepage (default on): a search that lands on a page already shown in this rollout serves the NEXT chunk of it
+                  instead of the head again, and says "(this page is used up ...)" once the page is exhausted
   reward      : grounded-correct = 1.0, everything else 0.0 (no partial credit), group-normalised advantage, G=12, one question/step
   loss        : -adv/G * mean log p over the policy's own tokens, computed under compression by rebuilding every block exactly
                 as the policy saw it (the pooled set after mass eviction is recorded during the rollout); Adam lr 1e-5 on the
@@ -23,6 +25,7 @@ ap.add_argument("--gen", type=int, default=1500); ap.add_argument("--maxs", type
 ap.add_argument("--lr", type=float, default=1e-5); ap.add_argument("--pooler-lr", type=float, default=1e-5)
 ap.add_argument("--corpus", default="/root/work/corpus_box_final.jsonl"); ap.add_argument("--heldout", default="/root/work/eval300.jsonl")
 ap.add_argument("--save-every", type=int, default=20)
+ap.add_argument("--samepage", type=int, default=1, help="1: a search whose top page was already shown in this rollout serves the NEXT chunk of that page (and says so when the page is used up); 0: teacher environment (always the head)")
 A = ap.parse_args()
 os.makedirs(A.outdir, exist_ok=True)
 os.environ.setdefault("SP_RANK", "128"); os.environ.setdefault("SP_NOSYS", "1"); os.environ.setdefault("SP_EPISODIC", "1")
@@ -53,7 +56,7 @@ from safetensors.torch import save_file  # noqa: E402
 print(f"[init] weights <- {init_path} (resume step {state['step']})", flush=True)
 nT = sum(p.numel() for p in model.parameters() if p.requires_grad) / 1e6
 nP = sum(v.numel() for v in pooler.A.values()) / 1e6
-print(f"[cfg] G={A.g} steps={A.steps} rw={A.rw} maxd={A.maxd} chunk={A.chunk} temp={A.temp} gen={A.gen} maxs={A.maxs} maxm={A.maxm} "
+print(f"[cfg] G={A.g} steps={A.steps} rw={A.rw} maxd={A.maxd} chunk={A.chunk} temp={A.temp} gen={A.gen} maxs={A.maxs} maxm={A.maxm} samepage={A.samepage} "
       f"lr={A.lr} pooler_lr={A.pooler_lr} trainable lora={nT:.1f}M pooler={nP:.1f}M", flush=True)
 # ---- environment: verbatim grpo_ep_more serve() ----
 WAPI = "https://en.wikipedia.org/w/api.php"
@@ -66,6 +69,7 @@ except Exception:
 PAGE_STEP = 256
 NOTICE = "(no searches left - answer from what you have read)"
 NOMORE = "(no more of this page - search again or answer)"
+EXHAUSTED = "(this page is used up - search a different query or answer)"
 cache = {}
 CACHE_F = "/root/work/pool_eval_cache.jsonl"
 if os.path.exists(CACHE_F):
@@ -181,6 +185,7 @@ def rollout(question):
     gen, msk, kept, absorbed, segs = [], [], [], 0, []
     n_model, ns_, nm, nmt = 0, 0, 0, 0
     served, queries, page_ids, page_off = [], [], [], 0
+    seen_pages, cur_key, nrep = {}, None, 0     # samepage: per-rollout read offset of every page shown so far
     t0 = time.time(); dead = False
 
     def inject(text):
@@ -224,12 +229,21 @@ def rollout(question):
                 else:
                     pg = get_page(kw)
                     if not pg:
-                        chunk, page_ids, page_off = "(no results)", [], 0
+                        chunk, page_ids, page_off, cur_key = "(no results)", [], 0, None
                     else:
-                        page_ids = tok.encode(pg, add_special_tokens=False)
-                        chunk = tok.decode(page_ids[:PAGE_STEP]); page_off = PAGE_STEP
-                    served.append(chunk)
-                    blk = f"\n<information>\n{chunk}\n[READER] (no extraction)\n</information>\n"
+                        page_ids = tok.encode(pg, add_special_tokens=False); key = pg[:120]
+                        if A.samepage and key in seen_pages:
+                            page_off = seen_pages[key]; nrep += 1
+                            nxt = page_ids[page_off:page_off + PAGE_STEP]
+                            chunk = tok.decode(nxt) if nxt else None; page_off += len(nxt)
+                        else:
+                            chunk = tok.decode(page_ids[:PAGE_STEP]); page_off = PAGE_STEP
+                        seen_pages[key] = page_off; cur_key = key
+                    if chunk is None:
+                        blk = f"\n<information>{EXHAUSTED}</information>\n"
+                    else:
+                        served.append(chunk)
+                        blk = f"\n<information>\n{chunk}\n[READER] (no extraction)\n</information>\n"
                 inject(blk); brk = True; break
             if MORE_RE.search(txt) and len(re.findall(r"<\s*/?\s*more\s*/?\s*>", txt, re.I)) > nmt:
                 nmt += 1
@@ -237,7 +251,8 @@ def rollout(question):
                 if not nxt:
                     blk = f"\n<information>{NOMORE}</information>\n"
                 else:
-                    nm += 1; page_off += PAGE_STEP; chunk = tok.decode(nxt); served.append(chunk)
+                    nm += 1; page_off += len(nxt); chunk = tok.decode(nxt); served.append(chunk)
+                    if cur_key is not None: seen_pages[cur_key] = page_off
                     blk = f"\n<information>\n{chunk}\n[READER] (no extraction)\n</information>\n"
                 inject(blk); brk = True; break
             if "</think>" in txt and answer_complete(txt.split("</think>")[-1]):
@@ -255,7 +270,7 @@ def rollout(question):
     landed = "</think>" in txt and bool(txt.split("</think>")[-1].strip())
     ans = head_sentence(txt.split("</think>")[-1].strip()) if landed else ""
     return dict(q_ids=q_ids, gen=gen, msk=msk, segs=[x for x in segs if x[1] is not None], text=txt, answer=ans, ns=ns_, more=nm,
-                served=served, queries=queries, landed=landed, dead=dead)
+                rep=nrep, served=served, queries=queries, landed=landed, dead=dead)
 
 
 def pg_backward(r, coef):
@@ -329,9 +344,9 @@ for step in range(state["step"] + 1, A.steps + 1):
         continue
     rews, infos = [], []
     for r in rolls:
-        rw_, c, g = price(r, item["gold"]); rews.append(rw_); infos.append((r["ns"], g, r["landed"], c, r["more"]))
+        rw_, c, g = price(r, item["gold"]); rews.append(rw_); infos.append((r["ns"], g, r["landed"], c, r["more"], r.get("rep", 0)))
         roll_fh.write(json.dumps({"step": step, "q": item["q"], "gold": item["gold"], "queries": r["queries"], "answer": r["answer"][:120],
-                                  "grounded": g, "landed": r["landed"], "correct": c, "more": r["more"], "dead": r["dead"],
+                                  "grounded": g, "landed": r["landed"], "correct": c, "more": r["more"], "rep": r.get("rep", 0), "dead": r["dead"],
                                   "text": r["text"]}, ensure_ascii=False) + "\n")
     roll_fh.flush()
     mu = sum(rews) / len(rews); sd = (sum((x - mu) ** 2 for x in rews) / len(rews)) ** 0.5
@@ -351,7 +366,7 @@ for step in range(state["step"] + 1, A.steps + 1):
     corr = sum(1 for i in infos if i[3]) / n; gnd = sum(1 for i in infos if i[1]) / n; land = sum(1 for i in infos if i[2]) / n
     hist.append(corr)
     line = (f"[step {step}] correct={corr:.0%} grounded={gnd:.0%} landed={land:.0%} ema={sum(hist[-25:])/max(len(hist[-25:]),1):.0%} "
-            f"reward={mu:+.2f} srch={sum(i[0] for i in infos)/n:.1f} more={sum(i[4] for i in infos)/n:.2f} "
+            f"reward={mu:+.2f} srch={sum(i[0] for i in infos)/n:.1f} more={sum(i[4] for i in infos)/n:.2f} rep={sum(i[5] for i in infos)/n:.2f} "
             f"ce={sum(losses)/max(len(losses),1):.3f} |grad|={gnorm:.4f} skip={int(skipped)} elapsed={(time.time()-t0)/60:.0f}m")
     print(line, flush=True); log.write(line + "\n"); log.flush()
     if step % A.save_every == 0 or step == A.steps:

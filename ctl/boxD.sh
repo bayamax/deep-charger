@@ -15,7 +15,7 @@ fi
 if ! pgrep -f "grpo_poo[l].py" >/dev/null; then
   export SP_BASE=/root/fft_hf SP_RANK=128 SP_NOSYS=1 SP_EPISODIC=1 SP_HOTPOT2=0 OMP_NUM_THREADS=1 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
   echo "=== LAUNCH $(date -u) ===" >> /root/grpo_pool.log
-  setsid nohup python3 /root/work/grpo_pool.py /root/fft_new_all.safetensors /root/grpo_pool --steps 200 --g 12 --rw 768 --maxd 384 >> /root/grpo_pool.log 2>&1 < /dev/null &
+  setsid nohup python3 /root/work/grpo_pool.py /root/fft_new_all.safetensors /root/grpo_pool --steps 200 --g 12 --rw 768 --maxd 384 --samepage 1 >> /root/grpo_pool.log 2>&1 < /dev/null &
   echo "trainer launched (resume)"
 else
   echo "trainer already running"

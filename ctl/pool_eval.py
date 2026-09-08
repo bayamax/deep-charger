@@ -21,6 +21,7 @@ ap.add_argument("--n", type=int, default=300); ap.add_argument("--temp", type=fl
 ap.add_argument("--gen", type=int, default=1500); ap.add_argument("--maxs", type=int, default=5)
 ap.add_argument("--maxm", type=int, default=8); ap.add_argument("--chunk", type=int, default=128)
 ap.add_argument("--tag", default="")
+ap.add_argument("--samepage", type=int, default=0, help="1: a repeated page serves its next chunk (+ used-up notice), as in grpo_pool.py; 0: teacher environment")
 ap.add_argument("--decode", default="plain", choices=["plain", "guard"], help="plain = teacher environment (temp sampling, only the <information ban); guard = harness pick() with rep-penalty/no-repeat")
 A = ap.parse_args()
 
@@ -51,7 +52,7 @@ print(f"[load] {A.ckpt}: {len(md)} tensors, {len(r.unexpected_keys)} unexpected"
 if pl:
     pooler.load_sd(pl); print(f"[load] pooler restored ({len(pl)} tensors)", flush=True)
 model.eval()
-print(f"[cfg] rw={A.rw} maxd={A.maxd} chunk={A.chunk} temp={A.temp} gen={A.gen} maxs={A.maxs} maxm={A.maxm} decode={A.decode}", flush=True)
+print(f"[cfg] rw={A.rw} maxd={A.maxd} chunk={A.chunk} temp={A.temp} gen={A.gen} maxs={A.maxs} maxm={A.maxm} decode={A.decode} samepage={A.samepage}", flush=True)
 
 # ---- environment: verbatim grpo_ep_more serve() ----
 WAPI = "https://en.wikipedia.org/w/api.php"
@@ -64,6 +65,7 @@ except Exception:
 PAGE_STEP = 256
 NOTICE = "(no searches left - answer from what you have read)"
 NOMORE = "(no more of this page - search again or answer)"
+EXHAUSTED = "(this page is used up - search a different query or answer)"
 cache = {}
 CACHE_F = "/root/work/pool_eval_cache.jsonl"
 if os.path.exists(CACHE_F):
@@ -178,6 +180,7 @@ def rollout(question):
     exempt = set(q_ids); allowed_ng = _ngrams(q_ids)
     n_model, ns_, nm, nmt = 0, 0, 0, 0
     served, queries, page_ids, page_off = [], [], [], 0
+    seen_pages, cur_key, nrep = {}, None, 0
     t0 = time.time(); dead = False
 
     def inject(text):
@@ -223,12 +226,21 @@ def rollout(question):
                 else:
                     pg = get_page(kw)
                     if not pg:
-                        chunk, page_ids, page_off = "(no results)", [], 0
+                        chunk, page_ids, page_off, cur_key = "(no results)", [], 0, None
                     else:
-                        page_ids = tok.encode(pg, add_special_tokens=False)
-                        chunk = tok.decode(page_ids[:PAGE_STEP]); page_off = PAGE_STEP
-                    served.append(chunk)
-                    blk = f"\n<information>\n{chunk}\n[READER] (no extraction)\n</information>\n"
+                        page_ids = tok.encode(pg, add_special_tokens=False); key = pg[:120]
+                        if A.samepage and key in seen_pages:
+                            page_off = seen_pages[key]; nrep += 1
+                            nxt = page_ids[page_off:page_off + PAGE_STEP]
+                            chunk = tok.decode(nxt) if nxt else None; page_off += len(nxt)
+                        else:
+                            chunk = tok.decode(page_ids[:PAGE_STEP]); page_off = PAGE_STEP
+                        seen_pages[key] = page_off; cur_key = key
+                    if chunk is None:
+                        blk = f"\n<information>{EXHAUSTED}</information>\n"
+                    else:
+                        served.append(chunk)
+                        blk = f"\n<information>\n{chunk}\n[READER] (no extraction)\n</information>\n"
                 inject(blk); brk = True; break
             if MORE_RE.search(txt) and len(re.findall(r"<\s*/?\s*more\s*/?\s*>", txt, re.I)) > nmt:
                 nmt += 1
@@ -236,7 +248,8 @@ def rollout(question):
                 if not nxt:
                     blk = f"\n<information>{NOMORE}</information>\n"
                 else:
-                    nm += 1; page_off += PAGE_STEP; chunk = tok.decode(nxt); served.append(chunk)
+                    nm += 1; page_off += len(nxt); chunk = tok.decode(nxt); served.append(chunk)
+                    if cur_key is not None: seen_pages[cur_key] = page_off
                     blk = f"\n<information>\n{chunk}\n[READER] (no extraction)\n</information>\n"
                 inject(blk); brk = True; break
             if "</think>" in txt and answer_complete(txt.split("</think>")[-1]):
@@ -286,7 +299,7 @@ with open(A.out, "a") as fh:
         correct = landed and has(ans, g)
         grounded = any(has(s, g) for s in served)
         rec = {"q": q, "gold": g, "correct": correct, "grounded": grounded, "landed": landed, "dead": dead,
-               "ns": ns_, "more": nm, "answer": ans, "queries": queries, "text": txt, "rw": A.rw, "maxd": A.maxd, "decode": A.decode}
+               "ns": ns_, "more": nm, "answer": ans, "queries": queries, "text": txt, "rw": A.rw, "maxd": A.maxd, "decode": A.decode, "samepage": A.samepage}
         fh.write(json.dumps(rec, ensure_ascii=False) + "\n"); fh.flush()
         stat["n"] += 1; stat["c"] += correct; stat["g"] += grounded; stat["l"] += landed; stat["s"] += ns_; stat["m"] += nm
         n = stat["n"]; el = time.time() - t0; per = el / max(n - k0, 1)
