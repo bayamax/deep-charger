@@ -59,5 +59,11 @@ while true; do
 done
 SP
 chmod +x /root/status_pub.sh
+echo "--- ALIVE $(date -u +%H:%M:%S) ---"
+ps -eo pid,etimes,pcpu,args | grep "grpo_poo[l].py" | cut -c1-120
+echo "rollouts rows $(wc -l < /root/grpo_pool/rollouts.jsonl)  mtime $(date -u -r /root/grpo_pool/rollouts.jsonl +%H:%M:%S) | grpo.log mtime $(date -u -r /root/grpo_pool/grpo.log +%H:%M:%S) | trainer stdout mtime $(date -u -r /root/grpo_pool.log +%H:%M:%S)"
+tail -1 /root/grpo_pool/grpo.log | cut -c1-120
+for i in 1 2 3 4 5 6; do nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv,noheader; sleep 5; done | tr '\n' ' '; echo
+sleep 120; echo "after 2 min: rollouts rows $(wc -l < /root/grpo_pool/rollouts.jsonl)  mtime $(date -u -r /root/grpo_pool/rollouts.jsonl +%H:%M:%S)"
 pkill -f "status_pub"; setsid nohup bash /root/status_pub.sh >> /proc/1/fd/1 2>&1 < /dev/null &
 sleep 60; tail -4 /root/grpo_pool.log | cut -c1-200; echo "LAUNCH_DONE $(date -u)"
