@@ -25,6 +25,7 @@ ap.add_argument("--gen", type=int, default=1500); ap.add_argument("--maxs", type
 ap.add_argument("--lr", type=float, default=1e-5); ap.add_argument("--pooler-lr", type=float, default=1e-5)
 ap.add_argument("--corpus", default="/root/work/corpus_box_final.jsonl"); ap.add_argument("--heldout", default="/root/work/eval300.jsonl")
 ap.add_argument("--save-every", type=int, default=20)
+ap.add_argument("--maxsrch", type=int, default=0, help=">0: stop a rollout once it has issued this many <search> tags (loop guard; the rollout ends unlanded, reward 0). 0 = teacher recipe (only the 1500-token cap)")
 ap.add_argument("--gradckpt", type=int, default=1, help="1: gradient checkpointing through the transformer during the policy-gradient pass (16GB cards)")
 ap.add_argument("--samepage", type=int, default=1, help="1: a search whose top page was already shown in this rollout serves the NEXT chunk of that page (and says so when the page is used up); 0: teacher environment (always the head)")
 A = ap.parse_args()
@@ -63,7 +64,7 @@ if A.gradckpt:
     print("[init] gradient checkpointing ON for the policy-gradient pass", flush=True)
 nT = sum(p.numel() for p in model.parameters() if p.requires_grad) / 1e6
 nP = sum(v.numel() for v in pooler.A.values()) / 1e6
-print(f"[cfg] G={A.g} steps={A.steps} rw={A.rw} maxd={A.maxd} chunk={A.chunk} temp={A.temp} gen={A.gen} maxs={A.maxs} maxm={A.maxm} samepage={A.samepage} "
+print(f"[cfg] G={A.g} steps={A.steps} rw={A.rw} maxd={A.maxd} chunk={A.chunk} temp={A.temp} gen={A.gen} maxs={A.maxs} maxm={A.maxm} samepage={A.samepage} maxsrch={A.maxsrch} "
       f"lr={A.lr} pooler_lr={A.pooler_lr} trainable lora={nT:.1f}M pooler={nP:.1f}M", flush=True)
 # ---- environment: verbatim grpo_ep_more serve() ----
 WAPI = "https://en.wikipedia.org/w/api.php"
@@ -229,6 +230,8 @@ def rollout(question):
                 body = mclose.group(1).strip()
                 kw, ask = ([x.strip() for x in body.split("||", 1)] if "||" in body else (body, body))
                 queries.append(kw)
+                if A.maxsrch and ns_ >= A.maxsrch:
+                    dead = True; brk = True; break          # loop guard: the rollout ends here (unlanded)
                 if not kw:
                     blk = "\n<information>(no results)</information>\n"
                 elif ns_ > A.maxs:
