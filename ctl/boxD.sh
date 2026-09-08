@@ -64,5 +64,20 @@ while true; do
 done
 SP
 chmod +x /root/status_pub.sh
+echo "--- UTIL2 $(date -u +%H:%M) 5-min GPU sampling ---"
+for i in $(seq 1 150); do nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv,noheader,nounits; sleep 2; done > /tmp/util.txt
+python3 - <<'PY'
+v=[]
+for l in open("/tmp/util.txt"):
+    try: u,m=l.split(","); v.append((int(u),int(m)))
+    except Exception: pass
+n=len(v)
+lo=[x for x in v if x[0]<40]; hi=[x for x in v if x[0]>=40]
+print(f"samples {n} over {n*2}s | util mean {sum(x[0] for x in v)/n:.0f}%  median {sorted(x[0] for x in v)[n//2]}%")
+print(f"  low util (<40%, rollout decode: latency-bound)  {len(lo)/n*100:.0f}% of time, mean util {sum(x[0] for x in lo)/max(len(lo),1):.0f}%")
+print(f"  high util (>=40%, block/gradient: compute-bound) {len(hi)/n*100:.0f}% of time, mean util {sum(x[0] for x in hi)/max(len(hi),1):.0f}%")
+import collections
+print("  util histogram:", dict(sorted(collections.Counter(x[0]//10*10 for x in v).items())))
+PY
 pkill -f "status_pub"; setsid nohup bash /root/status_pub.sh >> /proc/1/fd/1 2>&1 < /dev/null &
 sleep 60; tail -4 /root/grpo_pool2.log | cut -c1-200; echo "LAUNCH_DONE $(date -u)"
