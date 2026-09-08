@@ -26,6 +26,8 @@ ap.add_argument("--lr", type=float, default=1e-5); ap.add_argument("--pooler-lr"
 ap.add_argument("--corpus", default="/root/work/corpus_box_final.jsonl"); ap.add_argument("--heldout", default="/root/work/eval300.jsonl")
 ap.add_argument("--save-every", type=int, default=20)
 ap.add_argument("--maxsrch", type=int, default=0, help=">0: stop a rollout once it has issued this many <search> tags (loop guard; the rollout ends unlanded, reward 0). 0 = teacher recipe (only the 1500-token cap)")
+ap.add_argument("--phantom", type=float, default=0.0, help=">0: add one phantom rollout with this reward to every group's statistics, so all-wrong / all-right groups still get a (uniform) advantage instead of being skipped. 0 = plain GRPO")
+ap.add_argument("--phantom-scale", type=float, default=0.5, help="advantage multiplier for groups whose real rewards are all identical (they only learn through the phantom)")
 ap.add_argument("--gradckpt", type=int, default=1, help="1: gradient checkpointing through the transformer during the policy-gradient pass (16GB cards)")
 ap.add_argument("--samepage", type=int, default=1, help="1: a search whose top page was already shown in this rollout serves the NEXT chunk of that page (and says so when the page is used up); 0: teacher environment (always the head)")
 A = ap.parse_args()
@@ -64,7 +66,7 @@ if A.gradckpt:
     print("[init] gradient checkpointing ON for the policy-gradient pass", flush=True)
 nT = sum(p.numel() for p in model.parameters() if p.requires_grad) / 1e6
 nP = sum(v.numel() for v in pooler.A.values()) / 1e6
-print(f"[cfg] G={A.g} steps={A.steps} rw={A.rw} maxd={A.maxd} chunk={A.chunk} temp={A.temp} gen={A.gen} maxs={A.maxs} maxm={A.maxm} samepage={A.samepage} maxsrch={A.maxsrch} "
+print(f"[cfg] G={A.g} steps={A.steps} rw={A.rw} maxd={A.maxd} chunk={A.chunk} temp={A.temp} gen={A.gen} maxs={A.maxs} maxm={A.maxm} samepage={A.samepage} maxsrch={A.maxsrch} phantom={A.phantom}x{A.phantom_scale} "
       f"lr={A.lr} pooler_lr={A.pooler_lr} trainable lora={nT:.1f}M pooler={nP:.1f}M", flush=True)
 # ---- environment: verbatim grpo_ep_more serve() ----
 WAPI = "https://en.wikipedia.org/w/api.php"
@@ -360,12 +362,15 @@ for step in range(state["step"] + 1, A.steps + 1):
                                   "grounded": g, "landed": r["landed"], "correct": c, "more": r["more"], "rep": r.get("rep", 0), "cut": r.get("cut", False), "dead": r["dead"],
                                   "text": r["text"]}, ensure_ascii=False) + "\n")
     roll_fh.flush()
-    mu = sum(rews) / len(rews); sd = (sum((x - mu) ** 2 for x in rews) / len(rews)) ** 0.5
+    stat = rews + ([A.phantom] if A.phantom > 0 else [])          # phantom sample: shifts the baseline for degenerate groups
+    mu = sum(stat) / len(stat); sd = (sum((x - mu) ** 2 for x in stat) / len(stat)) ** 0.5
+    degenerate = (max(rews) - min(rews)) < 1e-6
+    scale = A.phantom_scale if degenerate else 1.0
     skipped = sd < 1e-6; gnorm = 0.0; losses = []
     if not skipped:
         model.train()
         for r, rw_ in zip(rolls, rews):
-            adv = (rw_ - mu) / (sd + 1e-6)
+            adv = scale * (rw_ - mu) / (sd + 1e-6)
             if abs(adv) < 1e-6:
                 continue
             losses.append(pg_backward(r, adv / A.g))
@@ -378,7 +383,7 @@ for step in range(state["step"] + 1, A.steps + 1):
     hist.append(corr)
     line = (f"[step {step}] correct={corr:.0%} grounded={gnd:.0%} landed={land:.0%} ema={sum(hist[-25:])/max(len(hist[-25:]),1):.0%} "
             f"reward={mu:+.2f} srch={sum(i[0] for i in infos)/n:.1f} more={sum(i[4] for i in infos)/n:.2f} rep={sum(i[5] for i in infos)/n:.2f} "
-            f"ce={sum(losses)/max(len(losses),1):.3f} |grad|={gnorm:.4f} skip={int(skipped)} elapsed={(time.time()-t0)/60:.0f}m")
+            f"ce={sum(losses)/max(len(losses),1):.3f} |grad|={gnorm:.4f} skip={int(skipped)} deg={int(degenerate)} elapsed={(time.time()-t0)/60:.0f}m")
     print(line, flush=True); log.write(line + "\n"); log.flush()
     if step % A.save_every == 0 or step == A.steps:
         save_ckpt(LATEST)

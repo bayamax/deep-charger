@@ -13,12 +13,12 @@ echo "resume state: $(cut -c1-40 /root/grpo_pool/state.json 2>/dev/null)  latest
 if [ ! -s /root/grpo_pool/latest.safetensors ] || [ ! -s /root/grpo_pool/state.json ] || [ ! -s /root/fft_new_all.safetensors ] || [ ! -f /root/fft_hf/model.safetensors ]; then
   echo "NOT READY: checkpoint or model missing, not launching"; exit 0
 fi
-# v3 (user-approved 07:00 UTC): loop guard on (--maxsrch 15). Stop the v2 trainer once and resume from the step-40 checkpoint.
-if [ ! -f /root/grpo_pool/.v3 ]; then pkill -f "grpo_poo[l].py"; sleep 5; touch /root/grpo_pool/.v3; echo "v2 trainer stopped for the loop guard"; fi
+# v4 (user request 08:00 UTC): loop guard OFF, phantom-sample advantage ON (--phantom 0.5 --phantom-scale 0.5). Resume from step 40.
+if [ ! -f /root/grpo_pool/.v4 ]; then pkill -f "grpo_poo[l].py"; sleep 5; touch /root/grpo_pool/.v4; echo "v3 trainer stopped for the phantom run"; fi
 if ! pgrep -f "grpo_poo[l].py" >/dev/null; then
   export SP_BASE=/root/fft_hf SP_RANK=128 SP_NOSYS=1 SP_EPISODIC=1 SP_HOTPOT2=0 OMP_NUM_THREADS=1 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
   echo "=== LAUNCH $(date -u) ===" >> /root/grpo_pool.log
-  setsid nohup python3 /root/work/grpo_pool.py /root/fft_new_all.safetensors /root/grpo_pool --steps 200 --g 12 --rw 768 --maxd 384 --samepage 1 --gradckpt 1 --maxsrch 15 >> /root/grpo_pool.log 2>&1 < /dev/null &
+  setsid nohup python3 /root/work/grpo_pool.py /root/fft_new_all.safetensors /root/grpo_pool --steps 200 --g 12 --rw 768 --maxd 384 --samepage 1 --gradckpt 1 --maxsrch 0 --phantom 0.5 --phantom-scale 0.5 >> /root/grpo_pool.log 2>&1 < /dev/null &
   echo "trainer launched (resume)"
 else
   echo "trainer already running"
@@ -28,10 +28,13 @@ cat > /usr/local/bin/t <<'TT'
 echo "$(date -u +%H:%M)Z  grpo $(pgrep -fc 'grpo_poo[l].py')  ctl $(pgrep -fc '/root/ctl\.s[h]')  gpu $(nvidia-smi --query-gpu=memory.used --format=csv,noheader 2>/dev/null)"
 python3 - <<'PY' 2>/dev/null
 import json,collections
-by=collections.defaultdict(list)
+by=collections.defaultdict(list); last=0
 for l in open("/root/grpo_pool/rollouts.jsonl"):
-    try: r=json.loads(l); by[r["step"]].append(r)
-    except Exception: pass
+    try: r=json.loads(l)
+    except Exception: continue
+    if r["step"]<=last and r["step"] in by and by[r["step"]] and by[r["step"]][-1] is not None and len(by[r["step"]])>=12:
+        for k in [k for k in by if k>=r["step"]]: by.pop(k)      # a restart: drop the superseded rows
+    by[r["step"]].append(r); last=max(last,r["step"]) if r["step"]>last else r["step"]
 S=sorted(by); mid=len(S)//2
 def acc(steps):
     rs=[r for s in steps for r in by[s]]
