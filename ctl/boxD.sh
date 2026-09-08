@@ -1,6 +1,7 @@
 # box D (A4000 16GB, cheaper successor of box C): resume the pooler-lineage GRPO from the checkpoint C uploaded to HF.
 # The onstart already bootstrapped deps, fft_hf, fft_new_all.safetensors and /root/grpo_pool/{latest.safetensors,state.json,...}.
 # Safe to re-run: never relaunches while a trainer is alive; a dead trainer is NOT auto-restarted (OOM rule) - look first.
+# 03:40 UTC: OOM at step 44 on the 16GB card -> lm_head slice + gradient checkpointing in pg_backward; relaunch (resumes from step 40).
 cd /root/work
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null)
 python3 -c "import transformers.modeling_utils" 2>/dev/null || pip install -q "huggingface_hub>=0.34,<1.0" 2>&1 | tail -1
@@ -15,7 +16,7 @@ fi
 if ! pgrep -f "grpo_poo[l].py" >/dev/null; then
   export SP_BASE=/root/fft_hf SP_RANK=128 SP_NOSYS=1 SP_EPISODIC=1 SP_HOTPOT2=0 OMP_NUM_THREADS=1 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
   echo "=== LAUNCH $(date -u) ===" >> /root/grpo_pool.log
-  setsid nohup python3 /root/work/grpo_pool.py /root/fft_new_all.safetensors /root/grpo_pool --steps 200 --g 12 --rw 768 --maxd 384 --samepage 1 >> /root/grpo_pool.log 2>&1 < /dev/null &
+  setsid nohup python3 /root/work/grpo_pool.py /root/fft_new_all.safetensors /root/grpo_pool --steps 200 --g 12 --rw 768 --maxd 384 --samepage 1 --gradckpt 1 >> /root/grpo_pool.log 2>&1 < /dev/null &
   echo "trainer launched (resume)"
 else
   echo "trainer already running"

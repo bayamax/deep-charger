@@ -25,6 +25,7 @@ ap.add_argument("--gen", type=int, default=1500); ap.add_argument("--maxs", type
 ap.add_argument("--lr", type=float, default=1e-5); ap.add_argument("--pooler-lr", type=float, default=1e-5)
 ap.add_argument("--corpus", default="/root/work/corpus_box_final.jsonl"); ap.add_argument("--heldout", default="/root/work/eval300.jsonl")
 ap.add_argument("--save-every", type=int, default=20)
+ap.add_argument("--gradckpt", type=int, default=1, help="1: gradient checkpointing through the transformer during the policy-gradient pass (16GB cards)")
 ap.add_argument("--samepage", type=int, default=1, help="1: a search whose top page was already shown in this rollout serves the NEXT chunk of that page (and says so when the page is used up); 0: teacher environment (always the head)")
 A = ap.parse_args()
 os.makedirs(A.outdir, exist_ok=True)
@@ -54,6 +55,12 @@ ns["TEMP"] = A.temp; ns["MAXD"] = A.maxd; ns["C"] = A.chunk; ns["RWG"] = A.rw; n
 from transformers import DynamicCache  # noqa: E402
 from safetensors.torch import save_file  # noqa: E402
 print(f"[init] weights <- {init_path} (resume step {state['step']})", flush=True)
+CLM = model.base_model.model            # peft -> causal LM
+BODY, HEAD = CLM.model, CLM.lm_head     # transformer body, lm_head
+if A.gradckpt:
+    CLM.config.use_cache = False
+    CLM.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
+    print("[init] gradient checkpointing ON for the policy-gradient pass", flush=True)
 nT = sum(p.numel() for p in model.parameters() if p.requires_grad) / 1e6
 nP = sum(v.numel() for v in pooler.A.values()) / 1e6
 print(f"[cfg] G={A.g} steps={A.steps} rw={A.rw} maxd={A.maxd} chunk={A.chunk} temp={A.temp} gen={A.gen} maxs={A.maxs} maxm={A.maxm} samepage={A.samepage} "
@@ -286,13 +293,14 @@ def pg_backward(r, coef):
         spv = sp(kept) if kept else torch.zeros((1, 0, ns["H"]), device=DEV, dtype=ns["MDTYPE"])
         parts = [qe, spv] + ([emb(gen[c0 - R:c0])] if R > 0 else []) + [emb(gen[c0:c1])]
         block = torch.cat(parts, dim=1); L = block.shape[1]; cur = c1 - c0
-        logits = model(inputs_embeds=block).logits.float()
-        pr = logits[:, L - cur - 1:L - 1, :]
+        # lm_head only on the positions that predict this block's tokens (a full-block float32 logits tensor is ~800 MB)
+        h = BODY(inputs_embeds=block, use_cache=False).last_hidden_state[:, L - cur - 1:L - 1, :]
+        pr = HEAD(h).float()
         tgt = torch.tensor([gen[c0:c1]], device=DEV); tm = torch.tensor([msk[c0:c1]], device=DEV, dtype=torch.float32)
         ce = torch.nn.functional.cross_entropy(pr.reshape(-1, pr.shape[-1]), tgt.reshape(-1), reduction="none")
         loss = (ce * tm.reshape(-1)).sum() / ntot
         (coef * loss).backward()
-        tot += float(loss.item()); del logits, pr, ce, loss; clear()
+        tot += float(loss.item()); del h, pr, ce, loss, block; clear()
     return tot
 
 
