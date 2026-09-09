@@ -9,17 +9,57 @@ for i in 1 2 3 4 5 6; do curl -sS -o /root/work/grpo_pool.py "https://raw.github
 for f in gold_pooled.py paired.py cnc.py strat.py analyze_pool.py pool_eval.py; do curl -sS -o /root/work/$f "https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl/$f?nocache=$(date +%s)"; done
 echo "trainer fetched: $(wc -l < /root/work/grpo_pool.py) lines, v2=$(grep -c "def pg_backward" /root/work/grpo_pool.py)"
 echo "gpu: $(nvidia-smi --query-gpu=name,memory.used,memory.total --format=csv,noheader) | disk: $(df -h /root | awk 'NR==2{print $4}') free"
-echo "resume state: $(cut -c1-40 /root/grpo_pool2/state.json 2>/dev/null)  latest: $(ls -la /root/grpo_pool2/latest.safetensors 2>/dev/null | awk '{print $5}') bytes"
+echo "resume state: $(cut -c1-40 /root/grpo_pool3/state.json 2>/dev/null)  latest: $(ls -la /root/grpo_pool3/latest.safetensors 2>/dev/null | awk '{print $5}') bytes"
 if [ ! -s /root/fft_new_all.safetensors ] || [ ! -f /root/fft_hf/model.safetensors ]; then
   echo "NOT READY: model missing, not launching"; exit 0
 fi
-# v5 (user request 11:00 UTC): restart from the SFT model at step 0 with phantom + samepage on (guard off), fresh outdir /root/grpo_pool2.
-if [ ! -f /root/grpo_pool2/.v5 ]; then pkill -f "grpo_poo[l].py"; sleep 5; mkdir -p /root/grpo_pool2; touch /root/grpo_pool2/.v5; echo "v4 trainer stopped; fresh run from the SFT model"; fi
+# v6 (user request 01:00 UTC Sep 9): match the teacher's LoRA (r16, layers 20-27) and train only a small
+# adapter on the pooler. The SFT checkpoint is rank-128-on-all-layers in peft naming, so its weights must be
+# merged into a plain HF model first -- otherwise the layers without LoRA silently fall back to the stock base.
+for f in build_merged.py grpo_pool.py; do
+  for i in 1 2 3 4 5 6; do curl -sS -o /root/work/$f "https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl/$f?nocache=$(date +%s)" && python3 -m py_compile /root/work/$f && break; sleep 5; done
+done
+grep -q "PoolerAdapter" /root/work/grpo_pool.py && echo "trainer v6 fetched" || { echo "FETCH FAILED"; exit 0; }
+if [ ! -f /root/fft_hf2/model.safetensors ]; then
+  pkill -f "grpo_poo[l].py"; sleep 8
+  echo "--- MERGE $(date -u +%H:%M) ---"
+  cd /root/work && SP_BASE=/root/fft_hf python3 /root/work/build_merged.py /root/fft_new_all.safetensors /root/fft_hf2 /root/pooler_sft.safetensors 2>&1 | grep -v Warning | tail -6
+fi
+if [ ! -f /root/fft_hf2/model.safetensors ]; then echo "NOT READY: merge failed"; exit 0; fi
+if [ ! -f /root/.v6_checked ]; then
+  echo "--- SELFTEST $(date -u +%H:%M) ---"
+  python3 - <<'PY'
+import torch, re
+src=open("/root/work/grpo_pool.py").read()
+cls=src[src.index("class PoolerAdapter"):src.index('if A.pooler == "none":')]
+ns={"torch":torch}; exec(cls, ns); PA=ns["PoolerAdapter"]
+base={"query":torch.randn(32,16),"blocks.0.cross.in_proj_weight":torch.randn(48,16),
+      "blocks.0.lnq1.weight":torch.ones(16),"out_scale":torch.tensor(3.0)}
+for mode in ("ln","lora"):
+    a=PA(base,mode,4,2.0)
+    ok = all(torch.allclose(a[k],base[k]) for k in base) and set(a.keys())==set(base.keys())
+    print(f"  PoolerAdapter[{mode}]: identity-at-init {ok}, keys {len(a.keys())}, trainable {sum(p.numel() for p in a.trainable())}")
+    assert ok
+PY
+  echo "--- PARITY $(date -u +%H:%M) (merged model, 6 training questions) ---"
+  cd /root/work && SP_BASE=/root/fft_hf2 SP_RANK=128 SP_NOSYS=1 SP_EPISODIC=1 OMP_NUM_THREADS=1 \
+    python3 /root/work/pool_eval.py /root/pooler_sft.safetensors /root/work/corpus_box_final.jsonl /root/work/parity.jsonl \
+    --n 6 --rw 768 --decode plain --tag "[parity]" 2>&1 | grep -E "^\[load\]|^\[cfg\]|^\[[0-9]+/|EVAL_DONE" | tail -8
+  python3 -c "
+import json
+R=[json.loads(l) for l in open('/root/work/parity.jsonl')]
+print('  parity rows', len(R), 'landed', sum(r['landed'] for r in R), 'correct', sum(r['correct'] for r in R), 'mean srch', sum(r['ns'] for r in R)/max(len(R),1))
+for r in R[:2]: print('   q:', r['q'][:50], '| ans:', (r['answer'] or '(none)')[:45], '| q1:', (r['queries'] or [''])[0][:35])"
+  touch /root/.v6_checked
+fi
+if [ ! -f /root/grpo_pool3/.v6 ]; then pkill -f "grpo_poo[l].py"; sleep 5; mkdir -p /root/grpo_pool3; touch /root/grpo_pool3/.v6; echo "v5 stopped; fresh v6 run"; fi
 if ! pgrep -f "grpo_poo[l].py" >/dev/null; then
-  export SP_BASE=/root/fft_hf SP_RANK=128 SP_NOSYS=1 SP_EPISODIC=1 SP_HOTPOT2=0 OMP_NUM_THREADS=1 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
-  echo "=== LAUNCH $(date -u) ===" >> /root/grpo_pool2.log
-  setsid nohup python3 /root/work/grpo_pool.py /root/fft_new_all.safetensors /root/grpo_pool2 --steps 200 --g 12 --rw 768 --maxd 384 --samepage 1 --gradckpt 1 --maxsrch 0 --phantom 0.5 --phantom-scale 0.5 >> /root/grpo_pool2.log 2>&1 < /dev/null &
-  echo "trainer launched (fresh, step 0)"
+  export SP_NOSYS=1 SP_EPISODIC=1 SP_HOTPOT2=0 OMP_NUM_THREADS=1 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+  echo "=== LAUNCH $(date -u) ===" >> /root/grpo_pool3.log
+  setsid nohup python3 /root/work/grpo_pool.py /root/fft_hf2 /root/grpo_pool3 --steps 200 --g 12 --rw 768 --maxd 384 \
+    --lora-rank 16 --lora-layers 20-27 --pooler lora --pooler-rank 8 --pooler-init /root/pooler_sft.safetensors \
+    --samepage 1 --gradckpt 1 --maxsrch 0 --phantom 0 >> /root/grpo_pool3.log 2>&1 < /dev/null &
+  echo "trainer launched (v6, fresh, step 0)"
 else
   echo "trainer already running"
 fi
@@ -29,7 +69,7 @@ echo "$(date -u +%H:%M)Z  grpo $(pgrep -fc 'grpo_poo[l].py')  ctl $(pgrep -fc '/
 python3 - <<'PY' 2>/dev/null
 import json,collections
 by=collections.defaultdict(list); last=0
-for l in open("/root/grpo_pool2/rollouts.jsonl"):
+for l in open("/root/grpo_pool3/rollouts.jsonl"):
     try: r=json.loads(l)
     except Exception: continue
     if r["step"]<last:                                   # steps only grow within a run: a smaller step means a restart
@@ -42,23 +82,23 @@ def acc(steps):
 print(f"steps {S[0]}-{S[-1]}  1st half {acc(S[:mid])}  |  2nd half {acc(S[mid:])}")
 print(f"last25 {acc(S[-25:])}  gnd {100*sum(r['grounded'] for s in S[-25:] for r in by[s])/max(sum(len(by[s]) for s in S[-25:]),1):.0f}%   step {S[-1]}/200")
 PY
-grep "^\[step" /root/grpo_pool2.log | tail -3 | sed 's/ landed=[0-9]*%//;s/ more=[0-9.]*//;s/ |grad|=[0-9.]*//;s/ skip=[01]//' | cut -c1-90
-grep -i "error\|Traceback\|Killed\|GRPO_POOL_DONE" /root/grpo_pool2.log | tail -2 | cut -c1-120
+grep "^\[step" /root/grpo_pool3.log | tail -3 | sed 's/ landed=[0-9]*%//;s/ more=[0-9.]*//;s/ |grad|=[0-9.]*//;s/ skip=[01]//' | cut -c1-90
+grep -i "error\|Traceback\|Killed\|GRPO_POOL_DONE" /root/grpo_pool3.log | tail -2 | cut -c1-120
 TT
 chmod +x /usr/local/bin/t
 cat > /root/status_pub.sh <<'SP'
 #!/bin/bash
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null)
 while true; do
-  { echo "=== $(date -u) === box D"; t 2>/dev/null; echo "--- last log lines"; tail -3 /root/grpo_pool2.log | cut -c1-200; } > /root/work/status.txt 2>&1
+  { echo "=== $(date -u) === box D"; t 2>/dev/null; echo "--- last log lines"; tail -3 /root/grpo_pool3.log | cut -c1-200; } > /root/work/status.txt 2>&1
   echo "--- STATUS $(date -u +%H:%M) ---"; cat /root/work/status.txt
   hf upload baya1116/hypernet-sp-distill /root/work/status.txt pooler_distill/status.txt >/dev/null 2>&1
   # keep the latest checkpoint preserved off-box every time it changes (every 20 steps)
-  if [ -f /root/grpo_pool2/state.json ] && ! cmp -s /root/grpo_pool2/state.json /root/.state_uploaded 2>/dev/null; then
-    hf upload baya1116/hypernet-sp-distill /root/grpo_pool2/latest.safetensors pooler_distill/grpo_pool2/latest.safetensors >/dev/null 2>&1 \
-    && hf upload baya1116/hypernet-sp-distill /root/grpo_pool2/state.json pooler_distill/grpo_pool2/state.json >/dev/null 2>&1 \
-    && hf upload baya1116/hypernet-sp-distill /root/grpo_pool2/rollouts.jsonl pooler_distill/grpo_pool2/rollouts.jsonl >/dev/null 2>&1 \
-    && cp /root/grpo_pool2/state.json /root/.state_uploaded && echo "ckpt uploaded: $(cut -c1-30 /root/grpo_pool2/state.json)"
+  if [ -f /root/grpo_pool3/state.json ] && ! cmp -s /root/grpo_pool3/state.json /root/.state_uploaded 2>/dev/null; then
+    hf upload baya1116/hypernet-sp-distill /root/grpo_pool3/latest.safetensors pooler_distill/grpo_pool3/latest.safetensors >/dev/null 2>&1 \
+    && hf upload baya1116/hypernet-sp-distill /root/grpo_pool3/state.json pooler_distill/grpo_pool3/state.json >/dev/null 2>&1 \
+    && hf upload baya1116/hypernet-sp-distill /root/grpo_pool3/rollouts.jsonl pooler_distill/grpo_pool3/rollouts.jsonl >/dev/null 2>&1 \
+    && cp /root/grpo_pool3/state.json /root/.state_uploaded && echo "ckpt uploaded: $(cut -c1-30 /root/grpo_pool3/state.json)"
   fi
   sleep 300
 done
@@ -80,4 +120,4 @@ import collections
 print("  util histogram:", dict(sorted(collections.Counter(x[0]//10*10 for x in v).items())))
 PY
 pkill -f "status_pub"; setsid nohup bash /root/status_pub.sh >> /proc/1/fd/1 2>&1 < /dev/null &
-sleep 60; tail -4 /root/grpo_pool2.log | cut -c1-200; echo "LAUNCH_DONE $(date -u)"
+sleep 60; tail -4 /root/grpo_pool3.log | cut -c1-200; echo "LAUNCH_DONE $(date -u)"

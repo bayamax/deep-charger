@@ -29,16 +29,27 @@ ap.add_argument("--maxsrch", type=int, default=0, help=">0: stop a rollout once 
 ap.add_argument("--phantom", type=float, default=0.0, help=">0: add one phantom rollout with this reward to every group's statistics, so all-wrong / all-right groups still get a (uniform) advantage instead of being skipped. 0 = plain GRPO")
 ap.add_argument("--phantom-scale", type=float, default=0.5, help="advantage multiplier for groups whose real rewards are all identical (they only learn through the phantom)")
 ap.add_argument("--gradckpt", type=int, default=1, help="1: gradient checkpointing through the transformer during the policy-gradient pass (16GB cards)")
+ap.add_argument("--lora-rank", type=int, default=16, help="LoRA rank on the LLM (teacher used 16; the SFT lineage used 128)")
+ap.add_argument("--lora-layers", default="20-27", help="transformer layers the LoRA covers, e.g. 20-27 (teacher) or 'all'")
+ap.add_argument("--pooler", default="lora", choices=["none", "ln", "lora"],
+                help="none: frozen | ln: query + layernorms + out_scale only | lora: that plus a low-rank adapter on the pooler's big matrices")
+ap.add_argument("--pooler-rank", type=int, default=8); ap.add_argument("--pooler-scale", type=float, default=2.0)
+ap.add_argument("--pooler-init", default="", help="safetensors holding the pooler tensors (when the model comes from a merged HF dir)")
 ap.add_argument("--samepage", type=int, default=1, help="1: a search whose top page was already shown in this rollout serves the NEXT chunk of that page (and says so when the page is used up); 0: teacher environment (always the head)")
 A = ap.parse_args()
 os.makedirs(A.outdir, exist_ok=True)
-os.environ.setdefault("SP_RANK", "128"); os.environ.setdefault("SP_NOSYS", "1"); os.environ.setdefault("SP_EPISODIC", "1")
-os.environ["SP_TRAIN_POOLER"] = "1"; os.environ["SP_LR"] = str(A.lr); os.environ["SP_POOLER_LR"] = str(A.pooler_lr)
+os.environ["SP_RANK"] = str(A.lora_rank); os.environ.setdefault("SP_NOSYS", "1"); os.environ.setdefault("SP_EPISODIC", "1")
+os.environ["SP_TRAIN_POOLER"] = "0"           # the pooler is wired up below, not by the harness
+os.environ["SP_LR"] = str(A.lr); os.environ["SP_POOLER_LR"] = str(A.pooler_lr)
+LAYERS = None if A.lora_layers == "all" else list(range(int(A.lora_layers.split("-")[0]), int(A.lora_layers.split("-")[1]) + 1))
 # resume decides which weights the harness prefix loads
 STATE_F = os.path.join(A.outdir, "state.json"); LATEST = os.path.join(A.outdir, "latest.safetensors")
 state = json.load(open(STATE_F)) if os.path.exists(STATE_F) else {"step": 0}
 init_path = LATEST if (state["step"] > 0 and os.path.exists(LATEST)) else A.init
-os.environ["SP_INIT_FULL"] = init_path
+if os.path.isdir(init_path):                  # merged HF model dir: the weights ARE the base, nothing to overlay
+    os.environ["SP_BASE"] = init_path
+else:
+    os.environ["SP_INIT_FULL"] = init_path
 import torch  # noqa: E402
 import numpy as np  # noqa: E402
 
@@ -48,16 +59,67 @@ src = open(F).read().split("\n")
 cut = next(i for i, l in enumerate(src) if l.startswith("if MULTI > 1:"))
 sys.argv = ["grpo_e2e_torch.py", "0", str(A.g), "0", str(A.gen)]
 sys.path.insert(0, "/root/work")
-ns = {"__name__": "grpo_pool", "__file__": F}
-exec(compile("\n".join(src[:cut]), F, "exec"), ns)
-model, tok, pooler, opt = ns["model"], ns["tok"], ns["pooler"], ns["opt"]
+ns = {"__name__": "grpo_pool", "__file__": F, "_SP_LAYERS": LAYERS}
+prefix = "\n".join(src[:cut]).replace(
+    'target_modules=TARGETS, bias="none", task_type="CAUSAL_LM")',
+    'target_modules=TARGETS, bias="none", task_type="CAUSAL_LM", layers_to_transform=_SP_LAYERS)', 1)
+exec(compile(prefix, F, "exec"), ns)
+model, tok, pooler = ns["model"], ns["tok"], ns["pooler"]
 emb, sp, crop_cache, pick, _ngrams = ns["emb"], ns["sp"], ns["crop_cache"], ns["pick"], ns["_ngrams"]
 pg_grad_backward, clear = ns["pg_grad_backward"], ns["clear"]
 DEV, eos = ns["DEV"], ns["eos"]
 ns["TEMP"] = A.temp; ns["MAXD"] = A.maxd; ns["C"] = A.chunk; ns["RWG"] = A.rw; ns["GREEDY"] = False
 from transformers import DynamicCache  # noqa: E402
 from safetensors.torch import save_file  # noqa: E402
-print(f"[init] weights <- {init_path} (resume step {state['step']})", flush=True)
+print(f"[init] weights <- {init_path} (resume step {state['step']}) lora r={A.lora_rank} layers={A.lora_layers}", flush=True)
+if A.pooler_init and os.path.isdir(init_path) and os.path.exists(A.pooler_init):   # resuming a .safetensors already carries its pooler
+    from safetensors.torch import load_file as _lf
+    n = pooler.load_sd(_lf(A.pooler_init)); print(f"[init] pooler <- {A.pooler_init} ({n} tensors)", flush=True)
+
+
+class PoolerAdapter:
+    """Keeps the pooler's weights frozen and adds a small trainable part, addressed by the same keys.
+
+    ln   : the query vectors, every layernorm and out_scale become parameters (~0.1% of the pooler)
+    lora : that, plus W + scale*(B@A) on each 2-D matrix (attention projections and the FFN)
+    Reading self.A[k] returns the effective tensor, so the pooler's forward is untouched, and
+    items() yields merged weights so a checkpoint stays loadable by the plain pooler."""
+
+    def __init__(self, base, mode, rank, scale):
+        self.frozen, self.param, self.lo, self.scale = {}, {}, {}, scale
+        for k, v in base.items():
+            small = (v.ndim <= 1) or k == "query"
+            if small:
+                self.param[k] = torch.nn.Parameter(v.detach().clone())
+            elif mode == "lora":
+                self.frozen[k] = v.detach()
+                a = torch.nn.Parameter(torch.randn(rank, v.shape[1], device=v.device, dtype=v.dtype) * 0.01)
+                b = torch.nn.Parameter(torch.zeros(v.shape[0], rank, device=v.device, dtype=v.dtype))
+                self.lo[k] = (a, b)
+            else:
+                self.frozen[k] = v.detach()
+
+    def __getitem__(self, k):
+        if k in self.param: return self.param[k]
+        v = self.frozen[k]
+        ab = self.lo.get(k)
+        return v + self.scale * (ab[1] @ ab[0]) if ab else v
+
+    def __contains__(self, k): return k in self.param or k in self.frozen
+    def keys(self): return list(self.param) + list(self.frozen)
+    def values(self): return [self[k] for k in self.keys()]
+    def items(self): return [(k, self[k]) for k in self.keys()]        # merged: plain-pooler compatible
+    def trainable(self): return list(self.param.values()) + [p for ab in self.lo.values() for p in ab]
+
+
+if A.pooler == "none":
+    pooler_params = []
+else:
+    pooler.A = PoolerAdapter(pooler.A, A.pooler, A.pooler_rank, A.pooler_scale)
+    pooler_params = pooler.A.trainable()
+opt = torch.optim.Adam(
+    [{"params": [p for p in model.parameters() if p.requires_grad], "lr": A.lr}]
+    + ([{"params": pooler_params, "lr": A.pooler_lr}] if pooler_params else []))
 CLM = model.base_model.model            # peft -> causal LM
 BODY, HEAD = CLM.model, CLM.lm_head     # transformer body, lm_head
 if A.gradckpt:
@@ -65,9 +127,9 @@ if A.gradckpt:
     CLM.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
     print("[init] gradient checkpointing ON for the policy-gradient pass", flush=True)
 nT = sum(p.numel() for p in model.parameters() if p.requires_grad) / 1e6
-nP = sum(v.numel() for v in pooler.A.values()) / 1e6
+nP = sum(p.numel() for p in pooler_params) / 1e6
 print(f"[cfg] G={A.g} steps={A.steps} rw={A.rw} maxd={A.maxd} chunk={A.chunk} temp={A.temp} gen={A.gen} maxs={A.maxs} maxm={A.maxm} samepage={A.samepage} maxsrch={A.maxsrch} phantom={A.phantom}x{A.phantom_scale} "
-      f"lr={A.lr} pooler_lr={A.pooler_lr} trainable lora={nT:.1f}M pooler={nP:.1f}M", flush=True)
+      f"lr={A.lr} pooler_lr={A.pooler_lr} pooler={A.pooler}(r={A.pooler_rank}) trainable lora={nT:.1f}M pooler={nP:.2f}M", flush=True)
 # ---- environment: verbatim grpo_ep_more serve() ----
 WAPI = "https://en.wikipedia.org/w/api.php"
 UA = {"User-Agent": "deep-charger-grpo-ep/1.0 (research; bayamax@icloud.com)"}
@@ -318,7 +380,7 @@ def price(r, gold):
 
 def save_ckpt(path):
     sd = {n: p.detach().to(torch.bfloat16).cpu().contiguous() for n, p in model.named_parameters()}   # full model (base + LoRA): loads standalone like the SFT ckpt
-    sd.update({"pooler." + k: v.detach().float().cpu().contiguous() for k, v in pooler.A.items()})
+    sd.update({"pooler." + k: v.detach().float().cpu().contiguous() for k, v in pooler.A.items()})   # merged
     save_file(sd, path + ".tmp"); os.replace(path + ".tmp", path)
 
 
@@ -375,7 +437,7 @@ for step in range(state["step"] + 1, A.steps + 1):
                 continue
             losses.append(pg_backward(r, adv / A.g))
             clear()
-        params = [p for p in model.parameters() if p.requires_grad and p.grad is not None] + [p for p in pooler.parameters() if p.grad is not None]
+        params = [p for p in model.parameters() if p.requires_grad and p.grad is not None] + [p for p in pooler_params if p.grad is not None]
         gnorm = float(torch.sqrt(sum((p.grad.float() ** 2).sum() for p in params)).item()) if params else 0.0
         opt.step(); opt.zero_grad(set_to_none=True); clear()
     n = len(infos)
