@@ -2,6 +2,8 @@
 # The onstart already bootstrapped deps, fft_hf, fft_new_all.safetensors and /root/grpo_pool/{latest.safetensors,state.json,...}.
 # Safe to re-run: never relaunches while a trainer is alive; a dead trainer is NOT auto-restarted (OOM rule) - look first.
 # 03:40 UTC: OOM at step 44 on the 16GB card -> lm_head slice + gradient checkpointing in pg_backward; relaunch (resumes from step 40).
+# 08:50 UTC Sep 10: the first version of this relied on a ctl content change to relaunch, so the run sat idle
+#   for 15 min after finishing step 200 - keepgoing.sh below is the standing watchdog that fixes it.
 # 06:00 UTC Sep 10 (user request): TARGET raised past 200 so the run continues instead of stopping. --steps is the TOTAL
 #   target; the trainer resumes from grpo_pool3/{latest.safetensors,state.json}. A dead trainer is relaunched ONLY after a
 #   clean GRPO_POOL_DONE with no crash in the tail - a crashed trainer is still left alone (OOM rule).
@@ -79,6 +81,36 @@ else
     echo "trainer launched (v6, resuming from step $AT, target $TARGET)"
   fi
 fi
+# The control loop only runs this script when its content changes, so the relaunch above fires at most
+# once per edit. keepgoing.sh is the standing watchdog: it resumes the trainer whenever the target has been
+# raised past the saved step, and only after a CLEAN finish - a crash is still left alone (OOM rule).
+cat > /root/keepgoing.sh <<'KG'
+#!/bin/bash
+while true; do
+  sleep 60
+  T=$(cat /root/.grpo_target 2>/dev/null); T=${T:-0}
+  pgrep -f "grpo_poo[l].py" >/dev/null && continue
+  AT=$(python3 -c "import json;print(json.load(open('/root/grpo_pool3/state.json'))['step'])" 2>/dev/null); AT=${AT:-0}
+  [ "$AT" -ge "$T" ] && continue
+  TL=$(tail -40 /root/grpo_pool3.log 2>/dev/null)
+  if echo "$TL" | grep -q -E "Traceback|CUDA out of memory|Killed"; then
+    echo "[keepgoing] crash markers in the log tail at step $AT - standing down for an hour"; sleep 3600; continue
+  fi
+  if ! echo "$TL" | grep -q "GRPO_POOL_DONE"; then
+    echo "[keepgoing] trainer down at step $AT without GRPO_POOL_DONE - standing down for an hour"; sleep 3600; continue
+  fi
+  export SP_NOSYS=1 SP_EPISODIC=1 SP_HOTPOT2=0 OMP_NUM_THREADS=1 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+  echo "=== LAUNCH $(date -u) (keepgoing $AT -> $T) ===" >> /root/grpo_pool3.log
+  setsid nohup python3 /root/work/grpo_pool.py /root/fft_hf2 /root/grpo_pool3 --steps $T --g 12 --rw 768 --maxd 384 \
+    --lora-rank 16 --lora-layers 20-27 --pooler lora --pooler-rank 8 --pooler-init /root/pooler_sft.safetensors \
+    --samepage 1 --gradckpt 1 --maxsrch 0 --phantom 0 >> /root/grpo_pool3.log 2>&1 < /dev/null &
+  echo "[keepgoing] relaunched from step $AT toward $T"
+  sleep 600                                  # cooldown: never spin on a trainer that dies on startup
+done
+KG
+chmod +x /root/keepgoing.sh
+pkill -f "keepgoin[g].sh"; setsid nohup bash /root/keepgoing.sh >> /proc/1/fd/1 2>&1 < /dev/null &
+echo "keepgoing watchdog started (target $TARGET)"
 cat > /usr/local/bin/t <<'TT'
 #!/bin/bash
 echo "$(date -u +%H:%M)Z  grpo $(pgrep -fc 'grpo_poo[l].py')  ctl $(pgrep -fc '/root/ctl\.s[h]')  gpu $(nvidia-smi --query-gpu=memory.used --format=csv,noheader 2>/dev/null)"
