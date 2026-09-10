@@ -142,13 +142,13 @@ echo "[switch] changeover at step $AT (a save has just been written, so at most 
 pkill -f "grpo_poo[l].py"; sleep 20; pkill -9 -f "grpo_poo[l].py" 2>/dev/null; sleep 5
 cd /root/work
 OK=0
-for N in 48 24 12; do
+for N in 48; do
   echo "=== BATCH SELFTEST N=$N $(date -u) step $(ST) ==="
   SP_NOSYS=1 SP_EPISODIC=1 OMP_NUM_THREADS=1 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
     python3 /root/work/grpo_pool.py /root/fft_hf2 /root/grpo_pool3 --g $N --rw 768 --maxd 384 \
     --lora-rank 16 --lora-layers 20-27 --pooler lora --pooler-rank 8 --pooler-init /root/pooler_sft.safetensors \
     --samepage 1 --maxsrch 0 --phantom 0 --selftest-batch $N > /root/selftest.txt 2>&1
-  grep -viE "warning|warn\(" /root/selftest.txt | tail -14
+  grep -viE "warning|warn\(" /root/selftest.txt | tail -20
   if grep -q "BATCH_SELFTEST PASS" /root/selftest.txt; then
     echo $N > /root/.grpo_batch; echo $N > /root/.grpo_g; echo 12 > /root/.grpo_bp; echo 5000 > /root/.grpo_target; OK=1
     echo "[switch] PASS at N=$N -> group $N, batch $N, gradient replays 12, no step target"; break
@@ -168,12 +168,12 @@ setsid nohup python3 /root/work/grpo_pool.py /root/fft_hf2 /root/grpo_pool3 --st
 echo "[switch] relaunched from step $(ST): group $GS, batch $BS, gradient replays $BP, target $T"
 SW
 chmod +x /root/switch.sh
-if [ ! -f /root/.switch_done3 ]; then
-  touch /root/.switch_done3
+if [ ! -f /root/.switch_done4 ]; then
+  touch /root/.switch_done4
   pkill -f "switc[h].sh"; setsid nohup bash /root/switch.sh >> /proc/1/fd/1 2>&1 < /dev/null &
   echo "switch armed: waits for the next save, tests the batched rollout, then resumes with it"
 else
-  echo "switch already armed earlier (rm /root/.switch_done3 to re-arm)"
+  echo "switch already armed earlier (rm /root/.switch_done4 to re-arm)"
 fi
 cat > /usr/local/bin/t <<'TT'
 #!/bin/bash

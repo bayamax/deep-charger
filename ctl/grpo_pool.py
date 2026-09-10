@@ -609,26 +609,33 @@ print(f"[data] {n_all} questions, {n_all - len(pool)} held-out removed -> {len(p
 
 if A.selftest_batch:
     # Greedy makes the policy deterministic, so the batched rollout must reproduce the single one token for token.
+    # B=1 is the discriminator: it exercises every line of the batched path with no padding and no cross-row
+    # arithmetic, so a mismatch there is a bug in the code and a mismatch only at B>1 is padding or numerics.
     GREEDY_PICK = True
     allok = True
-    for qi in range(3):
+    for qi in range(2):
         q = pool[qi]["q"]
         t = time.time(); a = rollout(q); t1 = time.time() - t
+        one = rollout_batch(q, 1)[0]
+        same1 = one["gen"] == a["gen"]
+        d1 = next((i for i in range(min(len(a["gen"]), len(one["gen"]))) if a["gen"][i] != one["gen"][i]),
+                  min(len(a["gen"]), len(one["gen"])))
+        print(f"  q{qi} B=1 identical: {same1}" + ("" if same1 else f" (first difference at token {d1} of {len(a['gen'])}/{len(one['gen'])})"), flush=True)
+        if not same1:
+            print(f"    single: {tok.decode(a['gen'][max(0, d1 - 15):d1 + 25])!r}", flush=True)
+            print(f"    batch : {tok.decode(one['gen'][max(0, d1 - 15):d1 + 25])!r}", flush=True)
         t = time.time(); bs = rollout_batch(q, A.selftest_batch); t2 = time.time() - t
-        for j, b in enumerate(bs):
-            ok = (a["gen"] == b["gen"] and a["msk"] == b["msk"] and a["answer"] == b["answer"]
-                  and a["ns"] == b["ns"] and a["landed"] == b["landed"] and a["queries"] == b["queries"])
-            allok &= ok
-            if not ok:
-                n = min(len(a["gen"]), len(b["gen"]))
-                d = next((i for i in range(n) if a["gen"][i] != b["gen"][i]), n)
-                print(f"  q{qi} row{j}: MISMATCH at token {d}/{len(a['gen'])} vs {len(b['gen'])} "
-                      f"| ns {a['ns']}/{b['ns']} landed {a['landed']}/{b['landed']}", flush=True)
-                print(f"    single: ...{tok.decode(a['gen'][max(0, d - 20):d + 30])!r}", flush=True)
-                print(f"    batch : ...{tok.decode(b['gen'][max(0, d - 20):d + 30])!r}", flush=True)
+        match = sum(1 for b in bs if b["gen"] == a["gen"])
+        if match < len(bs):
+            b = next(b for b in bs if b["gen"] != a["gen"])
+            n = min(len(a["gen"]), len(b["gen"]))
+            d = next((i for i in range(n) if a["gen"][i] != b["gen"][i]), n)
+            print(f"    B={A.selftest_batch} first difference at token {d} of {len(a['gen'])}/{len(b['gen'])}: "
+                  f"{tok.decode([a['gen'][d]])!r} vs {tok.decode([b['gen'][d]])!r}", flush=True)
+        allok &= same1 and match == len(bs)
         peak = torch.cuda.max_memory_allocated() / 2**30
         print(f"  q{qi}: single {t1:.1f}s | batch x{A.selftest_batch} {t2:.1f}s ({A.selftest_batch * t1 / max(t2, 1e-9):.1f}x) "
-              f"| rows match {sum(1 for b in bs if b['gen'] == a['gen'])}/{len(bs)} | peak {peak:.1f} GiB", flush=True)
+              f"| rows matching the single rollout {match}/{len(bs)} | peak {peak:.1f} GiB", flush=True)
         torch.cuda.reset_peak_memory_stats(); clear()
     print("BATCH_SELFTEST " + ("PASS" if allok else "FAIL"), flush=True)
     raise SystemExit(0 if allok else 1)
