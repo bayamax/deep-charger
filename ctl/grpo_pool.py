@@ -35,6 +35,8 @@ ap.add_argument("--pooler", default="lora", choices=["none", "ln", "lora"],
                 help="none: frozen | ln: query + layernorms + out_scale only | lora: that plus a low-rank adapter on the pooler's big matrices")
 ap.add_argument("--pooler-rank", type=int, default=8); ap.add_argument("--pooler-scale", type=float, default=2.0)
 ap.add_argument("--pooler-init", default="", help="safetensors holding the pooler tensors (when the model comes from a merged HF dir)")
+ap.add_argument("--backprop", type=int, default=0, help="how many of the group's rollouts the gradient actually replays. 0 = all of them. A smaller number keeps the update as cheap as it was while the group itself grows: with a 0/1 reward every rollout in a reward stratum carries the same advantage, so which members are replayed is a free choice, and each is reweighted so the group's gradient keeps its original scale")
+ap.add_argument("--select", default="random", choices=["random", "grounded"], help="how the replayed rollouts are drawn inside each reward stratum. random keeps the estimate unbiased; grounded prefers zero-reward rollouts that DID read the gold, which aims the negative gradient at the reading failure rather than at the search failure (deliberately biased)")
 ap.add_argument("--batch", type=int, default=1, help="rollouts decoded in lockstep. 1 = the original one-at-a-time path. >1 batches the per-token decode, which is where ~89%% of wall time goes at 14%% GPU utilisation")
 ap.add_argument("--selftest-batch", type=int, default=0, help="run the greedy equivalence check between the single and batched rollout, print the verdict and exit")
 ap.add_argument("--samepage", type=int, default=1, help="1: a search whose top page was already shown in this rollout serves the NEXT chunk of that page (and says so when the page is used up); 0: teacher environment (always the head)")
@@ -553,6 +555,34 @@ def pg_backward(r, coef):
     return tot
 
 
+def choose_replay(rews, gnds, m):
+    """Pick which of the group's rollouts the gradient replays, with a weight that keeps the sum unbiased.
+
+    With a 0/1 reward the advantage is constant inside a reward stratum, so replaying a subset costs nothing in
+    fidelity as long as each stratum keeps its share: weighting a drawn member by (stratum size / drawn) makes the
+    subset sum an unbiased estimate of the whole group's."""
+    n = len(rews)
+    if m <= 0 or m >= n:
+        return [(i, 1.0) for i in range(n)]
+    by = {}
+    for i, r in enumerate(rews):
+        by.setdefault(round(r, 6), []).append(i)
+    out = []
+    for r, idxs in sorted(by.items()):
+        k = max(1, min(len(idxs), int(round(m * len(idxs) / n))))
+        if A.select == "grounded" and r <= 0:
+            pool_g = [i for i in idxs if gnds[i]]                  # read the gold and still got it wrong
+            pick = random.sample(pool_g, min(k, len(pool_g)))
+            if len(pick) < k:
+                rest = [i for i in idxs if i not in set(pick)]
+                pick += random.sample(rest, k - len(pick))
+        else:
+            pick = random.sample(idxs, k)
+        w = len(idxs) / len(pick)
+        out.extend((i, w) for i in pick)
+    return out
+
+
 def price(r, gold):
     """teacher's price(): grounded-correct is 1.0, everything else 0.0."""
     correct = r["landed"] and has(r["answer"], gold)
@@ -652,11 +682,11 @@ for step in range(state["step"] + 1, A.steps + 1):
     skipped = sd < 1e-6; gnorm = 0.0; losses = []
     if not skipped:
         model.train()
-        for r, rw_ in zip(rolls, rews):
-            adv = scale * (rw_ - mu) / (sd + 1e-6)
+        for i, w in choose_replay(rews, [x[1] for x in infos], A.backprop):
+            adv = scale * (rews[i] - mu) / (sd + 1e-6)
             if abs(adv) < 1e-6:
                 continue
-            losses.append(pg_backward(r, adv / A.g))
+            losses.append(pg_backward(rolls[i], w * adv / A.g))
             clear()
         params = [p for p in model.parameters() if p.requires_grad and p.grad is not None] + [p for p in pooler_params if p.grad is not None]
         gnorm = float(torch.sqrt(sum((p.grad.float() ** 2).sum() for p in params)).item()) if params else 0.0
@@ -666,7 +696,7 @@ for step in range(state["step"] + 1, A.steps + 1):
     hist.append(corr)
     line = (f"[step {step}] correct={corr:.0%} grounded={gnd:.0%} landed={land:.0%} ema={sum(hist[-25:])/max(len(hist[-25:]),1):.0%} "
             f"reward={mu:+.2f} srch={sum(i[0] for i in infos)/n:.1f} more={sum(i[4] for i in infos)/n:.2f} rep={sum(i[5] for i in infos)/n:.2f} "
-            f"ce={sum(losses)/max(len(losses),1):.3f} |grad|={gnorm:.4f} skip={int(skipped)} deg={int(degenerate)} elapsed={(time.time()-t0)/60:.0f}m")
+            f"ce={sum(losses)/max(len(losses),1):.3f} |grad|={gnorm:.4f} g={n} bp={len(losses)} skip={int(skipped)} deg={int(degenerate)} elapsed={(time.time()-t0)/60:.0f}m")
     print(line, flush=True); log.write(line + "\n"); log.flush()
     if step % A.save_every == 0 or step == A.steps:
         save_ckpt(LATEST)
