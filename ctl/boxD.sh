@@ -73,6 +73,7 @@ for r in R[:2]: print('   q:', r['q'][:50], '| ans:', (r['answer'] or '(none)')[
 fi
 if [ ! -f /root/grpo_pool3/.v6 ]; then pkill -f "grpo_poo[l].py"; sleep 5; mkdir -p /root/grpo_pool3; touch /root/grpo_pool3/.v6; echo "v5 stopped; fresh v6 run"; fi
 [ -f /root/.grpo_batch ] || echo 1 > /root/.grpo_batch     # rollouts decoded in lockstep; switch.sh raises it once the equivalence test passes
+[ -f /root/.grpo_g ] || echo 12 > /root/.grpo_g            # rollouts per question. Bigger groups mean fewer all-wrong groups, which produce no gradient at all
 [ -f /root/.grpo_target ] || echo 300 > /root/.grpo_target  # switch.sh owns this from here on; a later run must not clobber it
 TARGET=$(cat /root/.grpo_target)
 AT=$(python3 -c "import json;print(json.load(open('/root/grpo_pool3/state.json'))['step'])" 2>/dev/null); AT=${AT:-0}
@@ -90,8 +91,8 @@ else
   else
     export SP_NOSYS=1 SP_EPISODIC=1 SP_HOTPOT2=0 OMP_NUM_THREADS=1 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
     echo "=== LAUNCH $(date -u) ===" >> /root/grpo_pool3.log
-    BS=$(cat /root/.grpo_batch 2>/dev/null); BS=${BS:-1}
-    setsid nohup python3 /root/work/grpo_pool.py /root/fft_hf2 /root/grpo_pool3 --steps $TARGET --g 12 --rw 768 --maxd 384 \
+    BS=$(cat /root/.grpo_batch 2>/dev/null); BS=${BS:-1}; GS=$(cat /root/.grpo_g 2>/dev/null); GS=${GS:-12}
+    setsid nohup python3 /root/work/grpo_pool.py /root/fft_hf2 /root/grpo_pool3 --steps $TARGET --g $GS --rw 768 --maxd 384 \
       --lora-rank 16 --lora-layers 20-27 --pooler lora --pooler-rank 8 --pooler-init /root/pooler_sft.safetensors \
       --samepage 1 --gradckpt 1 --maxsrch 0 --phantom 0 --batch $BS >> /root/grpo_pool3.log 2>&1 < /dev/null &
     echo "trainer launched (v6, resuming from step $AT, target $TARGET)"
@@ -117,8 +118,8 @@ while true; do
   fi
   export SP_NOSYS=1 SP_EPISODIC=1 SP_HOTPOT2=0 OMP_NUM_THREADS=1 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
   echo "=== LAUNCH $(date -u) (keepgoing $AT -> $T) ===" >> /root/grpo_pool3.log
-  BS=$(cat /root/.grpo_batch 2>/dev/null); BS=${BS:-1}
-  setsid nohup python3 /root/work/grpo_pool.py /root/fft_hf2 /root/grpo_pool3 --steps $T --g 12 --rw 768 --maxd 384 \
+  BS=$(cat /root/.grpo_batch 2>/dev/null); BS=${BS:-1}; GS=$(cat /root/.grpo_g 2>/dev/null); GS=${GS:-12}
+  setsid nohup python3 /root/work/grpo_pool.py /root/fft_hf2 /root/grpo_pool3 --steps $T --g $GS --rw 768 --maxd 384 \
     --lora-rank 16 --lora-layers 20-27 --pooler lora --pooler-rank 8 --pooler-init /root/pooler_sft.safetensors \
     --samepage 1 --gradckpt 1 --maxsrch 0 --phantom 0 --batch $BS >> /root/grpo_pool3.log 2>&1 < /dev/null &
   echo "[keepgoing] relaunched from step $AT toward $T"
@@ -147,35 +148,40 @@ for i in $(seq 1 200); do
   fi
 done
 pkill -f "grpo_poo[l].py"; sleep 5
-echo "=== BATCH SELFTEST $(date -u) step $(ST) ==="
 cd /root/work
-SP_NOSYS=1 SP_EPISODIC=1 OMP_NUM_THREADS=1 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
-  python3 /root/work/grpo_pool.py /root/fft_hf2 /root/grpo_pool3 --g 12 --rw 768 --maxd 384 \
-  --lora-rank 16 --lora-layers 20-27 --pooler lora --pooler-rank 8 --pooler-init /root/pooler_sft.safetensors \
-  --samepage 1 --maxsrch 0 --phantom 0 --selftest-batch 12 > /root/selftest.txt 2>&1
-grep -viE "warning|warn\(" /root/selftest.txt | tail -22
-if grep -q "BATCH_SELFTEST PASS" /root/selftest.txt; then
-  echo 12 > /root/.grpo_batch; echo 600 > /root/.grpo_target
-  echo "[switch] PASS -> batch 12, target 600"
-else
-  echo 1 > /root/.grpo_batch; echo 300 > /root/.grpo_target
-  echo "[switch] FAIL -> single-rollout path kept, target 300"
-fi
-BS=$(cat /root/.grpo_batch); T=$(cat /root/.grpo_target)
+OK=0
+for N in 48 24 12; do
+  echo "=== BATCH SELFTEST N=$N $(date -u) step $(ST) ==="
+  SP_NOSYS=1 SP_EPISODIC=1 OMP_NUM_THREADS=1 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
+    python3 /root/work/grpo_pool.py /root/fft_hf2 /root/grpo_pool3 --g $N --rw 768 --maxd 384 \
+    --lora-rank 16 --lora-layers 20-27 --pooler lora --pooler-rank 8 --pooler-init /root/pooler_sft.safetensors \
+    --samepage 1 --maxsrch 0 --phantom 0 --selftest-batch $N > /root/selftest.txt 2>&1
+  grep -viE "warning|warn\(" /root/selftest.txt | tail -14
+  if grep -q "BATCH_SELFTEST PASS" /root/selftest.txt; then
+    echo $N > /root/.grpo_batch; echo $N > /root/.grpo_g; echo 600 > /root/.grpo_target; OK=1
+    echo "[switch] PASS at N=$N -> group $N, batch $N, target 600"; break
+  fi
+  if grep -qiE "outofmemory|CUDA out of memory" /root/selftest.txt; then
+    echo "[switch] N=$N did not fit - trying a smaller group"; continue
+  fi
+  echo "[switch] N=$N MISMATCH (not memory) - the batched path is wrong, keeping the single one"; break
+done
+if [ "$OK" != "1" ]; then echo 1 > /root/.grpo_batch; echo 12 > /root/.grpo_g; echo 300 > /root/.grpo_target; fi
+BS=$(cat /root/.grpo_batch); T=$(cat /root/.grpo_target); GS=$(cat /root/.grpo_g)
 export SP_NOSYS=1 SP_EPISODIC=1 SP_HOTPOT2=0 OMP_NUM_THREADS=1 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 echo "=== LAUNCH $(date -u) (switch batch=$BS -> $T) ===" >> /root/grpo_pool3.log
-setsid nohup python3 /root/work/grpo_pool.py /root/fft_hf2 /root/grpo_pool3 --steps $T --g 12 --rw 768 --maxd 384 \
+setsid nohup python3 /root/work/grpo_pool.py /root/fft_hf2 /root/grpo_pool3 --steps $T --g $GS --rw 768 --maxd 384 \
   --lora-rank 16 --lora-layers 20-27 --pooler lora --pooler-rank 8 --pooler-init /root/pooler_sft.safetensors \
   --samepage 1 --gradckpt 1 --maxsrch 0 --phantom 0 --batch $BS >> /root/grpo_pool3.log 2>&1 < /dev/null &
-echo "[switch] relaunched from step $(ST) with batch $BS toward $T"
+echo "[switch] relaunched from step $(ST) with group $GS, batch $BS, toward $T"
 SW
 chmod +x /root/switch.sh
-if [ ! -f /root/.switch_done ]; then
-  touch /root/.switch_done
+if [ ! -f /root/.switch_done2 ]; then
+  touch /root/.switch_done2
   pkill -f "switc[h].sh"; setsid nohup bash /root/switch.sh >> /proc/1/fd/1 2>&1 < /dev/null &
   echo "switch armed: waits for the next save, tests the batched rollout, then resumes with it"
 else
-  echo "switch already armed earlier (rm /root/.switch_done to re-arm)"
+  echo "switch already armed earlier (rm /root/.switch_done2 to re-arm)"
 fi
 cat > /usr/local/bin/t <<'TT'
 #!/bin/bash
