@@ -15,6 +15,20 @@ for f in gold_pooled.py paired.py cnc.py strat.py analyze_pool.py pool_eval.py; 
 echo "trainer fetched: $(wc -l < /root/work/grpo_pool.py) lines, v2=$(grep -c "def pg_backward" /root/work/grpo_pool.py)"
 echo "gpu: $(nvidia-smi --query-gpu=name,memory.used,memory.total --format=csv,noheader) | disk: $(df -h /root | awk 'NR==2{print $4}') free"
 echo "resume state: $(cut -c1-40 /root/grpo_pool3/state.json 2>/dev/null)  latest: $(ls -la /root/grpo_pool3/latest.safetensors 2>/dev/null | awk '{print $5}') bytes"
+# Preserve the milestone checkpoints off-box (user request 15:40 UTC Sep 10). status_pub only ever uploads
+# latest.safetensors, which is overwritten every 20 steps; ckpt_step100/200 are written by the trainer at the
+# 100-step marks and would otherwise be lost with the instance. Each file is uploaded once, tracked by a marker.
+for C in /root/grpo_pool3/ckpt_step*.safetensors; do
+  [ -e "$C" ] || continue
+  B=$(basename "$C"); M="/root/.uploaded_$B"
+  [ -f "$M" ] && { echo "already preserved: $B"; continue; }
+  echo "preserving $B ($(du -h "$C" | cut -f1)) -> HF"
+  if hf upload baya1116/hypernet-sp-distill "$C" "pooler_distill/grpo_pool3/$B" >/dev/null 2>&1; then
+    touch "$M"; echo "  PRESERVED $B"
+  else
+    echo "  UPLOAD FAILED $B"
+  fi
+done
 if [ ! -s /root/fft_new_all.safetensors ] || [ ! -f /root/fft_hf/model.safetensors ]; then
   echo "NOT READY: model missing, not launching"; exit 0
 fi
