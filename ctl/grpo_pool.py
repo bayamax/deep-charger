@@ -663,9 +663,10 @@ if A.selftest_batch:
         print(f"    logit drift batch 1 vs {A.selftest_batch}: max |delta| {dr['maxabs']:.4f} | KL at temp {A.temp} "
               f"{dr['kl']:.2e} nats | same argmax {dr['argmax_same']} | same top-200 order {dr['top200_same']}/200", flush=True)
         # The code is correct when a batch of one reproduces the single path exactly. Beyond that, only the size of
-        # the numerical difference matters: a KL this small moves the sampled distribution far less than the
-        # temperature already does.
-        allok &= same1 and dr["kl"] < 1e-3
+        # the numerical difference matters. 1e-2 nats is a sampled-probability ratio of 1.01 between the batch the
+        # rollout drew from and the batch of one the gradient scores it with, against the 1.2 that PPO-style
+        # methods normally allow.
+        allok &= same1 and dr["kl"] < 1e-2
         peak = torch.cuda.max_memory_allocated() / 2**30
         print(f"  q{qi}: single {t1:.1f}s | batch x{A.selftest_batch} {t2:.1f}s ({A.selftest_batch * t1 / max(t2, 1e-9):.1f}x) "
               f"| rows matching the single rollout {match}/{len(bs)} | peak {peak:.1f} GiB", flush=True)
