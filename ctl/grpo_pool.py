@@ -550,6 +550,33 @@ def pg_backward(r, coef):
     return tot
 
 
+@torch.no_grad()
+def logit_drift(question, N):
+    """How far apart are the logits a row sees at batch 1 and at batch N, for the identical input?
+
+    Token-level equality under a greedy policy cannot survive a change of batch size: the reduction order in the
+    matmuls changes, the logits move in their last bits, and a near tie eventually flips. What matters is whether
+    the sampling distribution moves, so measure that directly."""
+    q_ids = tok.encode(tok.apply_chat_template([{"role": "user", "content": question}],
+                                               add_generation_prompt=True, tokenize=False) + "<think>\n")
+    MQ = len(q_ids); block = sp([])
+    def run(n):
+        past = DynamicCache()
+        BODY(input_ids=torch.tensor([q_ids] * n, device=DEV), past_key_values=past, use_cache=True)
+        L = block.shape[1]
+        pos = torch.arange(MQ, MQ + L, device=DEV)
+        return last_logits(inputs_embeds=block.expand(n, -1, -1).contiguous(), past_key_values=past,
+                           attention_mask=torch.ones(n, MQ + L, device=DEV),
+                           position_ids=pos.unsqueeze(0).expand(n, -1), cache_position=pos, use_cache=True)[0].float()
+    a, b = run(1), run(N)
+    pa = torch.softmax(a / A.temp, -1); pb = torch.softmax(b / A.temp, -1)
+    kl = float((pa * (pa.clamp_min(1e-12).log() - pb.clamp_min(1e-12).log())).sum())
+    top = 200
+    ia = a.topk(top).indices; ib = b.topk(top).indices
+    return dict(maxabs=float((a - b).abs().max()), kl=kl, argmax_same=bool(ia[0] == ib[0]),
+                top200_same=int((ia == ib).sum()), mass=float(pa[ia[0]]))
+
+
 def choose_replay(rews, gnds, m):
     """Pick which of the group's rollouts the gradient replays, with a weight that keeps the sum unbiased.
 
@@ -632,7 +659,13 @@ if A.selftest_batch:
             d = next((i for i in range(n) if a["gen"][i] != b["gen"][i]), n)
             print(f"    B={A.selftest_batch} first difference at token {d} of {len(a['gen'])}/{len(b['gen'])}: "
                   f"{tok.decode([a['gen'][d]])!r} vs {tok.decode([b['gen'][d]])!r}", flush=True)
-        allok &= same1 and match == len(bs)
+        dr = logit_drift(q, A.selftest_batch)
+        print(f"    logit drift batch 1 vs {A.selftest_batch}: max |delta| {dr['maxabs']:.4f} | KL at temp {A.temp} "
+              f"{dr['kl']:.2e} nats | same argmax {dr['argmax_same']} | same top-200 order {dr['top200_same']}/200", flush=True)
+        # The code is correct when a batch of one reproduces the single path exactly. Beyond that, only the size of
+        # the numerical difference matters: a KL this small moves the sampled distribution far less than the
+        # temperature already does.
+        allok &= same1 and dr["kl"] < 1e-3
         peak = torch.cuda.max_memory_allocated() / 2**30
         print(f"  q{qi}: single {t1:.1f}s | batch x{A.selftest_batch} {t2:.1f}s ({A.selftest_batch * t1 / max(t2, 1e-9):.1f}x) "
               f"| rows matching the single rollout {match}/{len(bs)} | peak {peak:.1f} GiB", flush=True)

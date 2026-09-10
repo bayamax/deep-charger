@@ -156,7 +156,7 @@ for N in 48; do
   if grep -qiE "outofmemory|CUDA out of memory" /root/selftest.txt; then
     echo "[switch] N=$N did not fit - trying a smaller group"; continue
   fi
-  echo "[switch] N=$N MISMATCH (not memory) - the batched path is wrong, keeping the single one"; break
+  echo "[switch] N=$N rejected: batch-of-one identity or logit drift failed - keeping the single path"; break
 done
 if [ "$OK" != "1" ]; then echo 1 > /root/.grpo_batch; echo 12 > /root/.grpo_g; echo 12 > /root/.grpo_bp; echo 5000 > /root/.grpo_target; fi
 BS=$(cat /root/.grpo_batch); T=$(cat /root/.grpo_target); GS=$(cat /root/.grpo_g); BP=$(cat /root/.grpo_bp)
@@ -168,12 +168,12 @@ setsid nohup python3 /root/work/grpo_pool.py /root/fft_hf2 /root/grpo_pool3 --st
 echo "[switch] relaunched from step $(ST): group $GS, batch $BS, gradient replays $BP, target $T"
 SW
 chmod +x /root/switch.sh
-if [ ! -f /root/.switch_done4 ]; then
-  touch /root/.switch_done4
+if [ ! -f /root/.switch_done5 ]; then
+  touch /root/.switch_done5
   pkill -f "switc[h].sh"; setsid nohup bash /root/switch.sh >> /proc/1/fd/1 2>&1 < /dev/null &
   echo "switch armed: waits for the next save, tests the batched rollout, then resumes with it"
 else
-  echo "switch already armed earlier (rm /root/.switch_done4 to re-arm)"
+  echo "switch already armed earlier (rm /root/.switch_done5 to re-arm)"
 fi
 cat > /usr/local/bin/t <<'TT'
 #!/bin/bash
