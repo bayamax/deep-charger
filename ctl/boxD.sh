@@ -137,18 +137,9 @@ echo "keepgoing watchdog started (target $TARGET)"
 cat > /root/switch.sh <<'SW'
 #!/bin/bash
 ST() { python3 -c "import json;print(json.load(open('/root/grpo_pool3/state.json'))['step'])" 2>/dev/null; }
-AT0=$(ST); AT0=${AT0:-0}
-echo "[switch] waiting for the next checkpoint save (now at step $AT0) before the changeover"
-for i in $(seq 1 200); do
-  sleep 60
-  pgrep -f "grpo_poo[l].py" >/dev/null || { echo "[switch] trainer already stopped at $(ST)"; break; }
-  AT=$(ST); AT=${AT:-0}
-  if [ "$AT" -gt "$AT0" ]; then
-    echo "[switch] fresh save at step $AT - stopping the trainer for the changeover (nothing lost)"
-    pkill -f "grpo_poo[l].py"; sleep 25; break
-  fi
-done
-pkill -f "grpo_poo[l].py"; sleep 5
+AT=$(ST); AT=${AT:-0}
+echo "[switch] changeover at step $AT (a save has just been written, so at most a step or two is lost)"
+pkill -f "grpo_poo[l].py"; sleep 20; pkill -9 -f "grpo_poo[l].py" 2>/dev/null; sleep 5
 cd /root/work
 OK=0
 for N in 48 24 12; do
@@ -177,12 +168,12 @@ setsid nohup python3 /root/work/grpo_pool.py /root/fft_hf2 /root/grpo_pool3 --st
 echo "[switch] relaunched from step $(ST): group $GS, batch $BS, gradient replays $BP, target $T"
 SW
 chmod +x /root/switch.sh
-if [ ! -f /root/.switch_done2 ]; then
-  touch /root/.switch_done2
+if [ ! -f /root/.switch_done3 ]; then
+  touch /root/.switch_done3
   pkill -f "switc[h].sh"; setsid nohup bash /root/switch.sh >> /proc/1/fd/1 2>&1 < /dev/null &
   echo "switch armed: waits for the next save, tests the batched rollout, then resumes with it"
 else
-  echo "switch already armed earlier (rm /root/.switch_done2 to re-arm)"
+  echo "switch already armed earlier (rm /root/.switch_done3 to re-arm)"
 fi
 cat > /usr/local/bin/t <<'TT'
 #!/bin/bash

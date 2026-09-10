@@ -363,18 +363,15 @@ def rollout(question):
                 rep=nrep, cut=cut, served=served, queries=queries, landed=landed, dead=dead)
 
 
-_LK = None                    # name of the "only compute the last logits" kwarg, resolved once
+def last_logits(**kw):
+    """Forward through the transformer body and run the lm_head on the final position only.
 
-
-def _last_logits_kw():
-    """A block forward at batch 12 would otherwise materialise (12, ~800, 151k) logits -- about 3 GiB -- when
-    only the final position is ever read. Recent transformers can be told to compute just that row."""
-    global _LK
-    if _LK is None:
-        import inspect
-        names = inspect.signature(model.forward).parameters
-        _LK = next((k for k in ("logits_to_keep", "num_logits_to_keep") if k in names), "")
-    return {_LK: 1} if _LK else {}
+    Going through the causal-LM wrapper computes logits for every position and casts them to float32: at batch 48
+    that is a 9 GiB allocation for one row of numbers we actually read. peft hides the wrapper's signature, so
+    asking transformers to keep only the last logits is not reliable across versions -- calling the body and the
+    head separately is."""
+    h = BODY(**kw).last_hidden_state[:, -1:, :]
+    return HEAD(h)[:, -1, :]
 
 
 @torch.no_grad()
@@ -484,11 +481,10 @@ def rollout_batch(question, B):
             posv[i, Lmax - L:] = torch.arange(MQ, MQ + L, device=DEV)
             amask[i, MQ + Lmax - L:] = 1
         past = DynamicCache()
-        model(input_ids=torch.tensor([q_ids] * nA, device=DEV), past_key_values=past, use_cache=True)
+        BODY(input_ids=torch.tensor([q_ids] * nA, device=DEV), past_key_values=past, use_cache=True)
         cpos = torch.arange(MQ, MQ + Lmax, device=DEV)
-        out = model(inputs_embeds=emb_b, past_key_values=past, attention_mask=amask,
-                    position_ids=posv, cache_position=cpos, use_cache=True, **_last_logits_kw())
-        last = out.logits[:, -1, :]
+        last = last_logits(inputs_embeds=emb_b, past_key_values=past, attention_mask=amask,
+                           position_ids=posv, cache_position=cpos, use_cache=True)
         npos = [MQ + L for L in Ls]
         alive = [True] * nA
         for _ in range(A.chunk):
@@ -506,9 +502,8 @@ def rollout_batch(question, B):
             amask = torch.cat([amask, torch.ones(nA, 1, device=DEV)], dim=1)
             pid = torch.tensor([[p] for p in npos], device=DEV)
             cp = torch.tensor([amask.shape[1] - 1], device=DEV)
-            out = model(inputs_embeds=nxt_emb, past_key_values=past, attention_mask=amask,
-                        position_ids=pid, cache_position=cp, use_cache=True, **_last_logits_kw())
-            last = out.logits[:, -1, :]
+            last = last_logits(inputs_embeds=nxt_emb, past_key_values=past, attention_mask=amask,
+                               position_ids=pid, cache_position=cp, use_cache=True)
             npos = [p + 1 for p in npos]
         for b in act:
             st = S[b]; st["segs"][-1][1] = len(st["gen"])
@@ -517,7 +512,7 @@ def rollout_batch(question, B):
                 st["done"] = True
             elif "</think>" in txt and answer_complete(txt.split("</think>")[-1]):
                 st["done"] = True
-        del past, out, last; clear()
+        del past, last; clear()
 
     outs = []
     for st in S:
