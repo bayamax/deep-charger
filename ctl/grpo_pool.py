@@ -35,6 +35,8 @@ ap.add_argument("--pooler", default="lora", choices=["none", "ln", "lora"],
                 help="none: frozen | ln: query + layernorms + out_scale only | lora: that plus a low-rank adapter on the pooler's big matrices")
 ap.add_argument("--pooler-rank", type=int, default=8); ap.add_argument("--pooler-scale", type=float, default=2.0)
 ap.add_argument("--pooler-init", default="", help="safetensors holding the pooler tensors (when the model comes from a merged HF dir)")
+ap.add_argument("--batch", type=int, default=1, help="rollouts decoded in lockstep. 1 = the original one-at-a-time path. >1 batches the per-token decode, which is where ~89%% of wall time goes at 14%% GPU utilisation")
+ap.add_argument("--selftest-batch", type=int, default=0, help="run the greedy equivalence check between the single and batched rollout, print the verdict and exit")
 ap.add_argument("--samepage", type=int, default=1, help="1: a search whose top page was already shown in this rollout serves the NEXT chunk of that page (and says so when the page is used up); 0: teacher environment (always the head)")
 A = ap.parse_args()
 os.makedirs(A.outdir, exist_ok=True)
@@ -231,17 +233,29 @@ MORE_RE = re.compile(r"<\s*/?\s*more\s*/?\s*>\s*$", re.I)
 
 
 TAG = "<information"
+GREEDY_PICK = False          # the equivalence self-test needs a deterministic policy; training never sets this
+
+
+def _banned(lg, t, tail):
+    cand = tail + tok.decode([t])
+    return TAG in cand or any(cand.endswith(TAG[:k]) for k in range(4, len(TAG) + 1))
+
+
 @torch.no_grad()
-def pick_plain(logits, gen):
-    """verbatim grpo_ep_more.pick(): temperature sampling; the policy may never write its own information block."""
-    lg = logits.float()[0].clone(); tail = tok.decode(gen[-16:]) if gen else ""
+def pick_row(lg, gen):
+    """verbatim grpo_ep_more.pick() for one row of logits; the policy may never write its own information block."""
+    lg = lg.float().clone(); tail = tok.decode(gen[-16:]) if gen else ""
     for _ in range(8):
-        t = int(torch.multinomial(torch.softmax(lg / A.temp, dim=-1), 1).item())
-        cand = tail + tok.decode([t])
-        if TAG in cand or any(cand.endswith(TAG[:k]) for k in range(4, len(TAG) + 1)):
+        t = int(torch.argmax(lg).item()) if GREEDY_PICK else int(torch.multinomial(torch.softmax(lg / A.temp, dim=-1), 1).item())
+        if _banned(lg, t, tail):
             lg[t] = -1e9; continue
         return t
     return int(torch.argmax(lg).item())
+
+
+@torch.no_grad()
+def pick_plain(logits, gen):
+    return pick_row(logits[0], gen)
 
 
 
@@ -347,6 +361,174 @@ def rollout(question):
                 rep=nrep, cut=cut, served=served, queries=queries, landed=landed, dead=dead)
 
 
+_LK = None                    # name of the "only compute the last logits" kwarg, resolved once
+
+
+def _last_logits_kw():
+    """A block forward at batch 12 would otherwise materialise (12, ~800, 151k) logits -- about 3 GiB -- when
+    only the final position is ever read. Recent transformers can be told to compute just that row."""
+    global _LK
+    if _LK is None:
+        import inspect
+        names = inspect.signature(model.forward).parameters
+        _LK = next((k for k in ("logits_to_keep", "num_logits_to_keep") if k in names), "")
+    return {_LK: 1} if _LK else {}
+
+
+@torch.no_grad()
+def rollout_batch(question, B):
+    """B independent rollouts of the same question, decoded in lockstep.
+
+    Semantics match rollout() exactly: every row keeps its own generation, pooled set, page offsets and stop
+    conditions, and each block is rebuilt from that row's own state against a freshly prefilled question cache.
+    Only the per-token decode is shared -- that is the part that leaves the GPU at ~14% utilisation when the
+    rollouts are run one at a time. Rows that stop early are carried along with filler tokens; the cache is
+    rebuilt from scratch every block, so their pollution never reaches a row that is still generating."""
+    model.eval()
+    q_ids = tok.encode(tok.apply_chat_template([{"role": "user", "content": question}],
+                                               add_generation_prompt=True, tokenize=False) + "<think>\n")
+    MQ = len(q_ids)
+    S = [dict(gen=[], msk=[], kept=[], absorbed=0, segs=[], n_model=0, ns_=0, nm=0, nmt=0, served=[], queries=[],
+              page_ids=[], page_off=0, seen_pages={}, cur_key=None, nrep=0, dead=False, cut=False, done=False)
+         for _ in range(B)]
+    t0 = time.time()
+
+    def inject(st, text):
+        ids = tok.encode(text, add_special_tokens=False)
+        st["gen"].extend(ids); st["msk"].extend([0] * len(ids))
+
+    def advance(st, nx):
+        """one decoded token for one row; returns True when this row's block ends here (verbatim rollout() order)"""
+        if nx == eos:
+            return True
+        st["gen"].append(nx); st["msk"].append(1); st["n_model"] += 1
+        gen = st["gen"]
+        if len(gen) >= 8 and len(set(gen[-8:])) == 1:
+            st["dead"] = True; return True
+        txt = tok.decode(gen)
+        si = txt.rfind("<search>")
+        mclose = CLOSE_RE.search(txt, si) if si >= 0 else None
+        if mclose and txt.count("<search>") > st["ns_"]:
+            st["ns_"] += 1
+            body = mclose.group(1).strip()
+            kw, ask = ([x.strip() for x in body.split("||", 1)] if "||" in body else (body, body))
+            st["queries"].append(kw)
+            if A.maxsrch and st["ns_"] >= A.maxsrch:
+                st["cut"] = True; return True
+            if not kw:
+                blk = "\n<information>(no results)</information>\n"
+            elif st["ns_"] > A.maxs:
+                blk = f"\n<information>{NOTICE}</information>\n"
+            else:
+                pg = get_page(kw)
+                if not pg:
+                    chunk, st["page_ids"], st["page_off"], st["cur_key"] = "(no results)", [], 0, None
+                else:
+                    st["page_ids"] = tok.encode(pg, add_special_tokens=False); key = pg[:120]
+                    if A.samepage and key in st["seen_pages"]:
+                        st["page_off"] = st["seen_pages"][key]; st["nrep"] += 1
+                        nxt = st["page_ids"][st["page_off"]:st["page_off"] + PAGE_STEP]
+                        chunk = tok.decode(nxt) if nxt else None; st["page_off"] += len(nxt)
+                    else:
+                        chunk = tok.decode(st["page_ids"][:PAGE_STEP]); st["page_off"] = PAGE_STEP
+                    st["seen_pages"][key] = st["page_off"]; st["cur_key"] = key
+                if chunk is None:
+                    blk = f"\n<information>{EXHAUSTED}</information>\n"
+                else:
+                    st["served"].append(chunk)
+                    blk = f"\n<information>\n{chunk}\n[READER] (no extraction)\n</information>\n"
+            inject(st, blk); return True
+        if MORE_RE.search(txt) and len(re.findall(r"<\s*/?\s*more\s*/?\s*>", txt, re.I)) > st["nmt"]:
+            st["nmt"] += 1
+            nxt = st["page_ids"][st["page_off"]:st["page_off"] + PAGE_STEP] if st["nm"] < A.maxm else []
+            if not nxt:
+                blk = f"\n<information>{NOMORE}</information>\n"
+            else:
+                st["nm"] += 1; st["page_off"] += len(nxt); chunk = tok.decode(nxt); st["served"].append(chunk)
+                if st["cur_key"] is not None: st["seen_pages"][st["cur_key"]] = st["page_off"]
+                blk = f"\n<information>\n{chunk}\n[READER] (no extraction)\n</information>\n"
+            inject(st, blk); return True
+        if "</think>" in txt and answer_complete(txt.split("</think>")[-1]):
+            return True
+        return False
+
+    while True:
+        for st in S:
+            if not st["done"] and (st["n_model"] >= A.gen or time.time() - t0 >= 600):
+                st["done"] = True
+        act = [b for b in range(B) if not S[b]["done"]]
+        if not act:
+            break
+        blocks, Ls = [], []
+        for b in act:                                  # one block per row, built exactly as rollout() builds it
+            st = S[b]; gen = st["gen"]; c0 = len(gen); R = min(c0, A.rw); nd = c0 - R
+            if nd > st["absorbed"]:
+                st["kept"].extend(gen[st["absorbed"]:nd]); st["absorbed"] = nd
+                if len(st["kept"]) > A.maxd:
+                    _, mass = pooler.forward_with_mass(emb(st["kept"]).to(torch.float32))
+                    mm = mass[0].float().cpu().numpy()
+                    st["kept"] = [st["kept"][i] for i in np.sort(np.argsort(mm)[-A.maxd:])]
+            spv = sp(st["kept"]); st["segs"].append([c0, None, list(st["kept"])])
+            parts = [spv] + ([emb(gen[c0 - R:c0])] if R > 0 else [])
+            blk = torch.cat(parts, dim=1); blocks.append(blk); Ls.append(blk.shape[1])
+        nA = len(act); Lmax = max(Ls); H = blocks[0].shape[-1]
+        emb_b = torch.zeros(nA, Lmax, H, device=DEV, dtype=blocks[0].dtype)
+        posv = torch.zeros(nA, Lmax, dtype=torch.long, device=DEV)
+        amask = torch.zeros(nA, MQ + Lmax, device=DEV)
+        amask[:, :MQ] = 1
+        for i, blk in enumerate(blocks):               # left-pad: every row's last real token lands on index -1
+            L = Ls[i]
+            emb_b[i, Lmax - L:] = blk[0]
+            posv[i, Lmax - L:] = torch.arange(MQ, MQ + L, device=DEV)
+            amask[i, MQ + Lmax - L:] = 1
+        past = DynamicCache()
+        model(input_ids=torch.tensor([q_ids] * nA, device=DEV), past_key_values=past, use_cache=True)
+        cpos = torch.arange(MQ, MQ + Lmax, device=DEV)
+        out = model(inputs_embeds=emb_b, past_key_values=past, attention_mask=amask,
+                    position_ids=posv, cache_position=cpos, use_cache=True, **_last_logits_kw())
+        last = out.logits[:, -1, :]
+        npos = [MQ + L for L in Ls]
+        alive = [True] * nA
+        for _ in range(A.chunk):
+            step_tok = []
+            for i, b in enumerate(act):
+                if not alive[i]:
+                    step_tok.append(eos); continue
+                nx = pick_row(last[i], S[b]["gen"])
+                if advance(S[b], nx):
+                    alive[i] = False
+                step_tok.append(nx)
+            if not any(alive):
+                break
+            nxt_emb = torch.cat([emb([t]) for t in step_tok], dim=0)
+            amask = torch.cat([amask, torch.ones(nA, 1, device=DEV)], dim=1)
+            pid = torch.tensor([[p] for p in npos], device=DEV)
+            cp = torch.tensor([amask.shape[1] - 1], device=DEV)
+            out = model(inputs_embeds=nxt_emb, past_key_values=past, attention_mask=amask,
+                        position_ids=pid, cache_position=cp, use_cache=True, **_last_logits_kw())
+            last = out.logits[:, -1, :]
+            npos = [p + 1 for p in npos]
+        for b in act:
+            st = S[b]; st["segs"][-1][1] = len(st["gen"])
+            txt = tok.decode(st["gen"])
+            if st["dead"] or st["cut"] or (st["gen"] and st["gen"][-1] == eos):
+                st["done"] = True
+            elif "</think>" in txt and answer_complete(txt.split("</think>")[-1]):
+                st["done"] = True
+        del past, out, last; clear()
+
+    outs = []
+    for st in S:
+        txt = tok.decode(st["gen"])
+        landed = (not st["cut"]) and "</think>" in txt and bool(txt.split("</think>")[-1].strip())
+        ans = head_sentence(txt.split("</think>")[-1].strip()) if landed else ""
+        outs.append(dict(q_ids=q_ids, gen=st["gen"], msk=st["msk"],
+                         segs=[x for x in st["segs"] if x[1] is not None], text=txt, answer=ans,
+                         ns=st["ns_"], more=st["nm"], rep=st["nrep"], cut=st["cut"], served=st["served"],
+                         queries=st["queries"], landed=landed, dead=st["dead"]))
+    return outs
+
+
 def pg_backward(r, coef):
     """coef * (-mean log p over the policy's own tokens), backward. Each block is rebuilt EXACTLY as the policy saw it during
     the rollout: [query, SP(recorded pooled set), raw window, block tokens] -- same mass-ordered eviction, same boundaries."""
@@ -400,6 +582,32 @@ rng = random.Random(0); rng.shuffle(pool)
 n_all = len(pool); pool = [x for x in pool if x["q"] not in held]
 print(f"[data] {n_all} questions, {n_all - len(pool)} held-out removed -> {len(pool)}", flush=True)
 
+if A.selftest_batch:
+    # Greedy makes the policy deterministic, so the batched rollout must reproduce the single one token for token.
+    GREEDY_PICK = True
+    allok = True
+    for qi in range(3):
+        q = pool[qi]["q"]
+        t = time.time(); a = rollout(q); t1 = time.time() - t
+        t = time.time(); bs = rollout_batch(q, A.selftest_batch); t2 = time.time() - t
+        for j, b in enumerate(bs):
+            ok = (a["gen"] == b["gen"] and a["msk"] == b["msk"] and a["answer"] == b["answer"]
+                  and a["ns"] == b["ns"] and a["landed"] == b["landed"] and a["queries"] == b["queries"])
+            allok &= ok
+            if not ok:
+                n = min(len(a["gen"]), len(b["gen"]))
+                d = next((i for i in range(n) if a["gen"][i] != b["gen"][i]), n)
+                print(f"  q{qi} row{j}: MISMATCH at token {d}/{len(a['gen'])} vs {len(b['gen'])} "
+                      f"| ns {a['ns']}/{b['ns']} landed {a['landed']}/{b['landed']}", flush=True)
+                print(f"    single: ...{tok.decode(a['gen'][max(0, d - 20):d + 30])!r}", flush=True)
+                print(f"    batch : ...{tok.decode(b['gen'][max(0, d - 20):d + 30])!r}", flush=True)
+        peak = torch.cuda.max_memory_allocated() / 2**30
+        print(f"  q{qi}: single {t1:.1f}s | batch x{A.selftest_batch} {t2:.1f}s ({A.selftest_batch * t1 / max(t2, 1e-9):.1f}x) "
+              f"| rows match {sum(1 for b in bs if b['gen'] == a['gen'])}/{len(bs)} | peak {peak:.1f} GiB", flush=True)
+        torch.cuda.reset_peak_memory_stats(); clear()
+    print("BATCH_SELFTEST " + ("PASS" if allok else "FAIL"), flush=True)
+    raise SystemExit(0 if allok else 1)
+
 log = open(os.path.join(A.outdir, "grpo.log"), "a")
 roll_fh = open(os.path.join(A.outdir, "rollouts.jsonl"), "a")
 hist = list(state.get("hist", []))
@@ -408,13 +616,26 @@ for step in range(state["step"] + 1, A.steps + 1):
     item = pool[step % len(pool)]
     opt.zero_grad(set_to_none=True)
     rolls = []
-    for _ in range(A.g):
-        try:
-            rolls.append(rollout(item["q"]))
-        except (KeyboardInterrupt, SystemExit):
-            raise
-        except BaseException as e:
-            print(f"[warn] rollout dropped: {type(e).__name__}: {str(e)[:120]}", flush=True); clear()
+    if A.batch > 1:
+        while len(rolls) < A.g:
+            k = min(A.batch, A.g - len(rolls))
+            try:
+                got = rollout_batch(item["q"], k)
+            except (KeyboardInterrupt, SystemExit):
+                raise
+            except BaseException as e:
+                print(f"[warn] batch dropped ({k}): {type(e).__name__}: {str(e)[:120]}", flush=True); clear(); break
+            rolls.extend(got)
+            if not got:
+                break
+    else:
+        for _ in range(A.g):
+            try:
+                rolls.append(rollout(item["q"]))
+            except (KeyboardInterrupt, SystemExit):
+                raise
+            except BaseException as e:
+                print(f"[warn] rollout dropped: {type(e).__name__}: {str(e)[:120]}", flush=True); clear()
     if not rolls:
         continue
     rews, infos = [], []
