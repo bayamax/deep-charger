@@ -33,8 +33,10 @@ if [ "$MODE" = "qat" ]; then
     cp /root/hfdl/pooler_distill/grpo_pool3/rollouts.jsonl /root/work/rollouts.jsonl
   fi
   echo "traces: $(wc -l < /root/work/rollouts.jsonl) rollouts"
-  if pgrep -f "qat.p[y]" >/dev/null; then echo "QAT already running: $(tail -1 /root/qat.log)"; exit 0; fi
-  if [ -f /root/qat_hf/model.safetensors ]; then echo "QAT already finished -> /root/qat_hf"; exit 0; fi
+  RUNNING=0
+  pgrep -f "qat.p[y]" >/dev/null && { RUNNING=1; echo "QAT already running: $(tail -1 /root/qat.log)"; }
+  [ -f /root/qat_hf/model.safetensors ] && { RUNNING=1; echo "QAT already finished -> /root/qat_hf"; }
+  if [ "$RUNNING" = "0" ]; then
   # Two steps first: they print the step-0 loss, which IS the quantization damage while the adapter
   # is still zero, and they prove the memory fits before an hour is committed to it. A crash here is
   # not retried, it is looked at.
@@ -50,11 +52,26 @@ if [ "$MODE" = "qat" ]; then
     --rank 32 --alpha 64 --lr 1e-4 --steps ${QSTEPS:-1500} --accum 4 --len 640 --kpos 256 \
     >> /root/qat_run.log 2>&1 < /dev/null &
   sleep 20
+  fi
   cat > /usr/local/bin/t <<'TTQ'
 #!/bin/bash
 echo "$(date -u +%H:%M)Z qat $(pgrep -fc 'qat.p[y]')本  $(nvidia-smi --query-gpu=memory.used --format=csv,noheader)"
 grep -E "^\[q4\]|^\[lora\]|^\[data\]" /root/qat_run.log 2>/dev/null | head -5
-tail -4 /root/qat.log 2>/dev/null
+python3 - <<'PYT' 2>/dev/null
+import re
+rows=[]
+for l in open("/root/qat.log"):
+    m=re.match(r"step (\d+) kl=([\d.]+) mse=([\d.]+)", l)
+    if m: rows.append((int(m.group(1)), float(m.group(2)), float(m.group(3))))
+if rows:
+    rows.sort()
+    def mean(xs): return sum(xs)/len(xs)
+    a, b = rows[:20], rows[-20:]
+    print(f"  step {rows[-1][0]}  kl {mean([r[1] for r in a]):.4f} -> {mean([r[1] for r in b]):.4f}"
+          f"   hidden mse {mean([r[2] for r in a]):.4f} -> {mean([r[2] for r in b]):.4f}"
+          f"   ({100*(1-mean([r[1] for r in b])/max(mean([r[1] for r in a]),1e-9)):.0f}% of the rounding damage removed)")
+PYT
+tail -2 /root/qat.log 2>/dev/null
 python3 - <<'PYQ' 2>/dev/null
 import json,glob,collections,math
 def summary(pat):
