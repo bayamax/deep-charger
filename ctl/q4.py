@@ -89,8 +89,13 @@ def check_adapters_idle(model):
 
 
 @torch.no_grad()
-def quantize_model(model, group=64, bits=4, store_dtype=torch.float16, verbose=True):
-    """Replace every deployed-quantized weight by its dequantized 4-bit value, in place."""
+def quantize_model(model, group=64, bits=4, store_dtype=torch.float16, verbose=True, chunk=1 << 24):
+    """Replace every deployed-quantized weight by its dequantized 4-bit value, in place.
+
+    The arithmetic runs on the CPU in row blocks. Doing it on the GPU costs several float32
+    temporaries of the output head at once, and the allocator keeps those blocks reserved
+    afterwards - enough to stop a third evaluator process from fitting on the card.
+    """
     bad = check_adapters_idle(model)
     if bad:
         raise RuntimeError(f"{len(bad)} lora_B are non-zero (e.g. {bad[0]}); merge before quantizing")
@@ -98,13 +103,18 @@ def quantize_model(model, group=64, bits=4, store_dtype=torch.float16, verbose=T
     worst = []
     for name, mod in mods:
         w = mod.weight
-        q = quant_dequant(w.data, group, bits, store_dtype)
-        err = (q.float() - w.data.float())
-        se, ss = err.pow(2).sum().item(), w.data.float().pow(2).sum().item()
+        rows = max(1, chunk // w.shape[-1])
+        se = ss = 0.0
+        for i in range(0, w.shape[0], rows):
+            blk = w.data[i:i + rows].to("cpu", torch.float32)
+            q = quant_dequant(blk, group, bits, store_dtype)
+            se += (q - blk).pow(2).sum().item(); ss += blk.pow(2).sum().item()
+            w.data[i:i + rows].copy_(q.to(w.dtype))
         rel = (se / max(ss, 1e-30)) ** 0.5
         worst.append((rel, name, tuple(w.shape)))
         tot_n += w.numel(); tot_se += se; tot_ss += ss
-        w.data.copy_(q)
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
     worst.sort(reverse=True)
     if verbose:
         print(f"[q4] {len(mods)} modules, {tot_n/1e6:.1f}M weights, group={group} bits={bits} "

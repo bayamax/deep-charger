@@ -46,6 +46,17 @@ PY
 fi
 [ -f /root/.q4_t0 ] || date +%s > /root/.q4_t0
 
+# One-shot: the first launch did the quantization arithmetic on the GPU, which left about 9.5GB
+# reserved per process and let only two of the three shards onto the card - the third OOMed and the
+# watchdog kept retrying it. The quantizer now works on the CPU in row blocks, so restart the shards
+# once to pick that up. pool_eval resumes from its own output, so only the question in flight is lost.
+if [ ! -f /root/.q4_cpuquant ]; then
+  touch /root/.q4_cpuquant
+  pkill -f "evalkee[p].sh"; pkill -f "pool_eval.p[y]"; sleep 10
+  pkill -9 -f "pool_eval.p[y]" 2>/dev/null; sleep 3
+  echo "shards stopped; they come back on the CPU-side quantizer ($(cat /root/work/q4_out_*.jsonl 2>/dev/null | wc -l) rollouts kept)"
+fi
+
 # ctl only re-runs this file when its content changes, so a shard that dies would otherwise sit dead
 # until the next edit. This watchdog restarts one when its process is gone and its output is short;
 # pool_eval resumes by skipping the questions already in its own output.
