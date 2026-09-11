@@ -20,6 +20,75 @@ done
 cp /root/work/web_search.py /root/work/runtime/web_search.py 2>/dev/null
 echo "fetched: pool_eval $(wc -l < /root/work/pool_eval.py) lines, q4 $(wc -l < /root/work/q4.py) lines"
 
+if [ "$MODE" = "publish" ]; then
+  # Everything worth keeping leaves the box before it is touched: this host's ssh tunnel never came
+  # up, so the next box is a new one, and a stopped instance is not guaranteed to start again.
+  pkill -f "afterkee[p].sh"; pkill -f "evalkee[p].sh"; pkill -f "pool_eval.p[y]"; sleep 8
+  pkill -9 -f "pool_eval.p[y]" 2>/dev/null; sleep 2
+  R=baya1116/hypernet-sp-distill; D=pooler_distill/grpo_pool3_step200_q4
+  python3 - <<'PYP' > /root/work/qat_metrics.json
+import json, glob, collections, math
+
+def load(pat):
+    rows = []
+    for f in sorted(glob.glob(pat)):
+        for line in open(f):
+            try: rows.append(json.loads(line))
+            except Exception: pass
+    if not rows: return None
+    by = collections.defaultdict(list)
+    for r in rows: by[r.get("q", "")].append(bool(r.get("correct")))
+    return {"rollouts": len(rows), "questions": len(by),
+            "correct": round(100*sum(1 for r in rows if r.get("correct"))/len(rows), 1),
+            "grounded": round(100*sum(1 for r in rows if r.get("grounded"))/len(rows), 1),
+            "landed": round(100*sum(1 for r in rows if r.get("landed"))/len(rows), 1),
+            "searches_per_rollout": round(sum(r.get("ns", 0) for r in rows)/len(rows), 2),
+            "_per_q": {k: sum(v)/len(v) for k, v in by.items()}}
+
+def paired(X, Y):
+    if not (X and Y): return None
+    c = sorted(set(X["_per_q"]) & set(Y["_per_q"]))
+    if not c: return None
+    d = [Y["_per_q"][k] - X["_per_q"][k] for k in c]
+    m = sum(d)/len(d); sd = (sum((x-m)**2 for x in d)/len(d))**0.5
+    return {"delta_pt": round(100*m, 1), "se_pt": round(100*sd/math.sqrt(len(c)), 1), "questions": len(c)}
+
+F, Q, N = load("/root/work/ev_out_*.jsonl"), load("/root/work/q4_out_*.jsonl"), load("/root/work/qa_out_*.jsonl")
+out = {
+  "what": "Does the phone's 4-bit conversion cost accuracy, and does training against it help?",
+  "quantization": {"scheme": "MLX affine, group 64, 4 bits, scales and biases fp16",
+                   "modules": "7 projections x 28 blocks + embed_tokens + lm_head = 198, 1776.9M weights",
+                   "weight_relative_error": {"projections": 9.51, "embed_tokens": 10.19, "lm_head": 10.35}},
+  "training": {"method": "straight-through on the merged weight: forward uses W + (Q(W)-W).detach(), W = base + BA",
+               "trainable": "LoRA r32 alpha64 on the 196 projections, 36.9M parameters",
+               "objective": "KL to the model's own bf16 self at sampled positions + normalised hidden-state MSE",
+               "data": "4344 of the model's own GRPO traces", "steps": 1500, "seconds_per_step": 1.7,
+               "kl": {"first_20_steps": 0.0713, "last_20_steps": 0.0229},
+               "hidden_mse": {"first_20_steps": 0.0260, "last_20_steps": 0.0110}},
+  "heldout": {"file": "eval300.jsonl first 300 lines, 150 distinct questions x 2",
+              "settings": {"rw": 768, "maxd": 384, "samepage": 1, "temp": 0.9, "gen": 1500, "maxs": 5, "decode": "plain"},
+              "bf16": F and {k: v for k, v in F.items() if k != "_per_q"},
+              "4bit_before": Q and {k: v for k, v in Q.items() if k != "_per_q"},
+              "4bit_after": N and {k: v for k, v in N.items() if k != "_per_q"}},
+  "paired": {"4bit_before_vs_bf16": paired(F, Q), "4bit_after_vs_bf16": paired(F, N),
+             "4bit_after_vs_before": paired(Q, N)},
+}
+print(json.dumps(out, ensure_ascii=False, indent=2))
+PYP
+  cat /root/work/qat_metrics.json
+  echo "--- uploading $(du -shL /root/qat_hf 2>/dev/null | cut -f1) ---"
+  hf upload $R /root/qat_hf $D/model 2>&1 | tail -2
+  hf upload $R /root/work/qat_metrics.json $D/metrics.json 2>&1 | tail -1
+  hf upload $R /root/qat/latest.pt $D/qat_lora.pt 2>&1 | tail -1
+  hf upload $R /root/qat.log $D/qat.log >/dev/null 2>&1
+  for i in 0 1 2; do
+    hf upload $R /root/work/q4_out_$i.jsonl $D/before_shard$i.jsonl >/dev/null 2>&1
+    hf upload $R /root/work/qa_out_$i.jsonl $D/after_shard$i.jsonl >/dev/null 2>&1
+  done
+  echo "PUBLISH_DONE $(date -u)"
+  exit 0
+fi
+
 if [ "$MODE" = "qat" ]; then
   # Quantization-aware training. The held-out measurement is the before-number and stays on disk;
   # what runs now moves the weights so that the same 4-bit conversion stops costing accuracy.
