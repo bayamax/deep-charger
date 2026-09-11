@@ -19,8 +19,17 @@ done
 cp /root/work/web_search.py /root/work/runtime/web_search.py 2>/dev/null
 echo "fetched: pool_eval $(wc -l < /root/work/pool_eval.py) lines, q4 $(wc -l < /root/work/q4.py) lines"
 
-if [ ! -f /root/eval_hf200/model.safetensors ]; then echo "NOT READY: /root/eval_hf200 missing (onstart still downloading?)"; exit 0; fi
-if [ ! -s /root/pooler200.safetensors ]; then echo "NOT READY: pooler missing"; exit 0; fi
+# The control loop starts before the assets finish arriving, so wait here rather than exiting: ctl
+# only re-runs this file when its content changes, and a one-line "not ready" would be the last thing
+# the box ever said.
+for w in $(seq 1 40); do
+  [ -s /root/eval_hf200/model.safetensors ] && [ -s /root/pooler200.safetensors ] && break
+  echo "[wait $w] downloading: $(du -sh /root/hfdl 2>/dev/null | cut -f1) in /root/hfdl, $(tail -1 /root/boot.log 2>/dev/null | cut -c1-100)"
+  sleep 60
+done
+if [ ! -s /root/eval_hf200/model.safetensors ]; then echo "NOT READY: /root/eval_hf200 never arrived"; exit 0; fi
+if [ ! -s /root/pooler200.safetensors ]; then echo "NOT READY: pooler never arrived"; exit 0; fi
+if [ ! -s /root/work/eval300.jsonl ]; then echo "NOT READY: questions never arrived"; exit 0; fi
 
 # thirty seconds of checking the quantizer is cheaper than two hours of measuring with a broken one
 python3 /root/work/q4.py || { echo "Q4 SELFTEST FAILED - not launching"; exit 0; }
