@@ -11,14 +11,130 @@
 # questions instead of being read off two independent means.
 cd /root/work
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null)
-MODE=publish
+MODE=dwq
 SHARDS=3
 RAW="https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl"
-for f in pool_eval.py q4.py qat.py build_merged.py web_search.py; do
+for f in pool_eval.py q4.py qat.py dwq.py build_merged.py web_search.py; do
   for try in 1 2 3; do curl -sS -o /root/work/$f "$RAW/$f?nocache=$(date +%s)" && python3 -m py_compile /root/work/$f && break; sleep 5; done
 done
 cp /root/work/web_search.py /root/work/runtime/web_search.py 2>/dev/null
 echo "fetched: pool_eval $(wc -l < /root/work/pool_eval.py) lines, q4 $(wc -l < /root/work/q4.py) lines"
+
+if [ "$MODE" = "dwq" ]; then
+  # Train the quantization parameters rather than the weights under them. This starts from the bf16
+  # model that scored 39.7%, not from the straight-through attempt that scored 34.0%.
+  pkill -f "afterkee[p].sh"; pkill -f "evalkee[p].sh"; pkill -f "qat.p[y]"; pkill -f "pool_eval.p[y]"; sleep 8
+  pkill -9 -f "pool_eval.p[y]" 2>/dev/null; sleep 2
+  [ -s /root/work/dwq_calib/train.jsonl ] || { echo "NOT READY: no calibration set"; exit 0; }
+  echo "calibration: $(wc -l < /root/work/dwq_calib/train.jsonl) sequences"
+  RUNNING=0
+  pgrep -f "dwq.p[y]" >/dev/null && { RUNNING=1; echo "DWQ already running: $(tail -1 /root/dwq.log)"; }
+  [ -f /root/dwq_hf/model.safetensors ] && { RUNNING=1; echo "DWQ already finished"; }
+  if [ "$RUNNING" = "0" ]; then
+    # Two steps first: they print the error the codes start with, and prove the memory fits.
+    if [ ! -f /root/.dwq_selftest_ok ]; then
+      rm -f /root/dwq.log
+      cd /root/work && PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python3 /root/work/dwq.py \
+        --base /root/eval_hf200 --data /root/work/dwq_calib/train.jsonl --selftest 2 2>&1 | tail -20
+      grep -q "^step 2 " /root/dwq.log 2>/dev/null || { echo "DWQ SELFTEST FAILED - not launching"; exit 0; }
+      touch /root/.dwq_selftest_ok
+    fi
+    cd /root/work && PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True setsid nohup python3 /root/work/dwq.py \
+      --base /root/eval_hf200 --data /root/work/dwq_calib/train.jsonl \
+      --out-hf /root/dwq_hf --out-mlx /root/dwq_mlx4 \
+      --lr ${DLR:-1e-6} --steps ${DSTEPS:-512} --accum 4 --len 1024 --kpos 256 --temp 2.0 \
+      >> /root/dwq_run.log 2>&1 < /dev/null &
+    sleep 20
+  fi
+  # The measurement needs no --q4: /root/dwq_hf already holds the 4-bit values, dequantized.
+  cat > /root/dwqkeep.sh <<'DKQ'
+#!/bin/bash
+until [ -s /root/dwq_hf/model.safetensors ] && grep -q DWQ_DONE /root/dwq_run.log 2>/dev/null; do sleep 60; done
+pkill -f "dwq.p[y]"; sleep 10
+while :; do
+  for i in 0 1 2; do
+    want=$(wc -l < /root/work/ev_$i.jsonl 2>/dev/null || echo 0)
+    have=$(wc -l < /root/work/dw_out_$i.jsonl 2>/dev/null || echo 0)
+    [ "$want" -gt 0 ] && [ "$have" -ge "$want" ] && continue
+    pgrep -f "pool_eval.py .* /root/work/ev_$i.jsonl" >/dev/null && continue
+    echo "[dwq-eval $(date -u +%H:%M)] shard $i at $have/$want - starting"
+    grep -viE "^\s*$" /root/dw_$i.log 2>/dev/null | tail -4 | cut -c1-200
+    cd /root/work && SP_BASE=/root/dwq_hf SP_RANK=16 SP_NOSYS=1 SP_EPISODIC=1 OMP_NUM_THREADS=1 \
+      PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True setsid nohup python3 /root/work/pool_eval.py \
+      /root/pooler200.safetensors /root/work/ev_$i.jsonl /root/work/dw_out_$i.jsonl \
+      --n 999 --rw 768 --maxd 384 --samepage 1 --decode plain --tag "[d$i]" \
+      >> /root/dw_$i.log 2>&1 < /dev/null &
+    sleep 60
+  done
+  sleep 120
+done
+DKQ
+  chmod +x /root/dwqkeep.sh
+  pkill -f "dwqkee[p].sh"; sleep 1
+  setsid nohup bash /root/dwqkeep.sh >> /proc/1/fd/1 2>&1 < /dev/null &
+  cat > /usr/local/bin/t <<'TTD'
+#!/bin/bash
+echo "$(date -u +%H:%M)Z dwq $(pgrep -fc 'dwq.p[y]')本  eval $(pgrep -fc 'pool_eval.p[y]')本  $(nvidia-smi --query-gpu=memory.used --format=csv,noheader)"
+grep -E "^\[dwq\]|^\[data\]" /root/dwq_run.log 2>/dev/null | head -4
+python3 - <<'PYD' 2>/dev/null
+import re
+rows=[]
+for l in open("/root/dwq.log"):
+    m=re.match(r"step (\d+) kl=([\d.]+)", l)
+    if m: rows.append((int(m.group(1)), float(m.group(2))))
+if rows:
+    rows.sort()
+    mean=lambda xs: sum(xs)/len(xs)
+    a=[r[1] for r in rows[:20]]; b=[r[1] for r in rows[-20:]]
+    print(f"  step {rows[-1][0]}  kl {mean(a):.4f} -> {mean(b):.4f}  ({100*(1-mean(b)/max(mean(a),1e-9)):.0f}% closed)")
+PYD
+python3 - <<'PYE' 2>/dev/null
+import json,glob,collections,math
+def load(pat):
+    rows=[]
+    for f in sorted(glob.glob(pat)):
+        for line in open(f):
+            try: rows.append(json.loads(line))
+            except Exception: pass
+    if not rows: return None
+    by=collections.defaultdict(list)
+    for r in rows: by[r.get("q","")].append(bool(r.get("correct")))
+    return len(rows), 100*sum(1 for r in rows if r.get("correct"))/len(rows), {k:sum(v)/len(v) for k,v in by.items()}
+F=load("/root/work/ev_out_*.jsonl"); Q=load("/root/work/q4_out_*.jsonl")
+N=load("/root/work/qa_out_*.jsonl"); D=load("/root/work/dw_out_*.jsonl")
+for tag,S in (("bf16",F),("4bit plain",Q),("4bit +STE-lora",N),("4bit +dwq",D)):
+    if S: print(f"  {tag:16s} {S[1]:5.1f}%  ({S[0]} roll)")
+def pair(tag,X,Y):
+    if not (X and Y): return
+    c=sorted(set(X[2])&set(Y[2]))
+    if not c: return
+    d=[Y[2][k]-X[2][k] for k in c]; m=sum(d)/len(d)
+    sd=(sum((x-m)**2 for x in d)/len(d))**0.5
+    print(f"  paired {tag:22s} {100*m:+.1f} pt ±{100*sd/math.sqrt(len(d)):.1f} over {len(c)} questions")
+pair("plain vs bf16",F,Q); pair("STE-lora vs bf16",F,N); pair("dwq vs bf16",F,D); pair("dwq vs plain",Q,D)
+PYE
+TTD
+  chmod +x /usr/local/bin/t
+  cat > /root/status.sh <<'STD'
+#!/bin/bash
+t 2>/dev/null
+STD
+  chmod +x /root/status.sh
+  pkill -f "status_pu[b]"; sleep 1
+  cat > /root/status_pub.sh <<'SPD'
+#!/bin/bash
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null)
+while true; do
+  { echo "=== $(date -u) === box E (dwq)"; t 2>/dev/null; } > /root/work/status.txt 2>&1
+  echo "--- STATUS $(date -u +%H:%M) ---"; cat /root/work/status.txt
+  sleep 300
+done
+SPD
+  chmod +x /root/status_pub.sh
+  setsid nohup bash /root/status_pub.sh >> /proc/1/fd/1 2>&1 < /dev/null &
+  sleep 40; t; echo "DWQ_LAUNCH_DONE $(date -u)"
+  exit 0
+fi
 
 if [ "$MODE" = "publish" ]; then
   # Everything worth keeping leaves the box before it is touched: this host's ssh tunnel never came

@@ -31,12 +31,15 @@ TARGETS = ("q_proj", "k_proj", "v_proj", "o_proj",
            "lm_head", "embed_tokens")
 
 
-def quant_dequant(w, group=64, bits=4, store_dtype=torch.float16, ste=False):
-    """Round w onto the 4-bit affine grid and back. Shape preserved, dtype preserved."""
+def affine_params(w, group=64, bits=4, store_dtype=torch.float16):
+    """The three things the file stores: integer codes, per-group scale, per-group bias.
+
+    Returns q [.., n_groups, group] as float, and scales/biases [.., n_groups, 1], such that
+    q * scale + bias is what the runtime computes.
+    """
     if w.shape[-1] % group:
         raise ValueError(f"last dim {w.shape[-1]} is not a multiple of the group size {group}")
-    out_dtype, shape = w.dtype, w.shape
-    x = w.float().reshape(-1, shape[-1] // group, group)
+    x = w.float().reshape(-1, w.shape[-1] // group, group)
     n_bins = float((1 << bits) - 1)
     w_max = x.amax(-1, keepdim=True)
     w_min = x.amin(-1, keepdim=True)
@@ -47,11 +50,17 @@ def quant_dequant(w, group=64, bits=4, store_dtype=torch.float16, ste=False):
     q0 = torch.round(edge / scales)
     scales = torch.where(q0 != 0, edge / q0, scales)
     biases = torch.where(q0 == 0, torch.zeros_like(edge), edge)
-    # the file keeps these in fp16, so the phone dequantizes with the rounded values
+    # the file keeps these in fp16, so the runtime dequantizes with the rounded values
     scales = scales.to(store_dtype).float()
     biases = biases.to(store_dtype).float()
     q = torch.clamp(torch.round((x - biases) / scales), 0.0, n_bins)
-    deq = (q * scales + biases).reshape(shape).to(out_dtype)
+    return q, scales, biases
+
+
+def quant_dequant(w, group=64, bits=4, store_dtype=torch.float16, ste=False):
+    """Round w onto the 4-bit affine grid and back. Shape preserved, dtype preserved."""
+    q, scales, biases = affine_params(w, group, bits, store_dtype)
+    deq = (q * scales + biases).reshape(w.shape).to(w.dtype)
     return w + (deq - w).detach() if ste else deq
 
 
