@@ -23,7 +23,7 @@ ap = argparse.ArgumentParser()
 ap.add_argument("--base", default="/root/eval_hf200", help="the bf16 model to quantize and distil from")
 ap.add_argument("--data", default="/root/work/dwq_calib/train.jsonl", help="jsonl with a text field")
 ap.add_argument("--out-mlx", default="/root/dwq_mlx4"); ap.add_argument("--out-hf", default="/root/dwq_hf")
-ap.add_argument("--ckpt", default="/root/dwq/latest.pt")
+ap.add_argument("--ckpt", default="/root/dwq/latest.pt"); ap.add_argument("--log", default="/root/dwq.log")
 ap.add_argument("--lr", type=float, default=1e-6); ap.add_argument("--steps", type=int, default=512)
 ap.add_argument("--accum", type=int, default=4); ap.add_argument("--len", type=int, default=1024)
 ap.add_argument("--kpos", type=int, default=256, help="positions per sequence scored with the KL")
@@ -215,7 +215,7 @@ def save_ckpt(i):
                 "opt": opt.state_dict(), "step": i}, A.ckpt)
 
 
-log = open("/root/dwq.log", "a")
+log = open(A.log, "a")
 v0 = validate()
 keep_if_best(v0, 0)
 print(f"[dwq] validation kl before training {v0:.4f} over {len(VAL_IDS)} unseen sequences", flush=True)
