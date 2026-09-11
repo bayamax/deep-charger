@@ -14,7 +14,7 @@ export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null)
 MODE=dwq
 SHARDS=3
 RAW="https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl"
-for f in pool_eval.py q4.py qat.py dwq.py build_merged.py web_search.py; do
+for f in pool_eval.py q4.py qat.py dwq.py checkmlx.py build_merged.py web_search.py; do
   for try in 1 2 3; do curl -sS -o /root/work/$f "$RAW/$f?nocache=$(date +%s)" && python3 -m py_compile /root/work/$f && break; sleep 5; done
 done
 cp /root/work/web_search.py /root/work/runtime/web_search.py 2>/dev/null
@@ -72,6 +72,12 @@ DKQ
   chmod +x /root/dwqkeep.sh
   pkill -f "dwqkee[p].sh"; sleep 1
   setsid nohup bash /root/dwqkeep.sh >> /proc/1/fd/1 2>&1 < /dev/null &
+  # Everything we claim is measured on the dequantized copy, so the claim only reaches the phone if
+  # the packed copy unpacks to the same numbers. Cheap, and it runs on the CPU beside the evaluation.
+  if [ -s /root/dwq_mlx4/model.safetensors ] && [ ! -f /root/.mlx_checked ]; then
+    python3 /root/work/checkmlx.py /root/dwq_mlx4 /root/dwq_hf 2>&1 | tail -8
+    touch /root/.mlx_checked
+  fi
   cat > /usr/local/bin/t <<'TTD'
 #!/bin/bash
 echo "$(date -u +%H:%M)Z dwq $(pgrep -fc 'dwq.p[y]')本  eval $(pgrep -fc 'pool_eval.p[y]')本  $(nvidia-smi --query-gpu=memory.used --format=csv,noheader)"
