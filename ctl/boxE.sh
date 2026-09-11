@@ -87,13 +87,14 @@ def summary(pat):
 F=summary("/root/work/ev_out_*.jsonl"); Q=summary("/root/work/q4_out_*.jsonl"); N=summary("/root/work/qa_out_*.jsonl")
 for tag,S in (("bf16",F),("4bit before",Q),("4bit after",N)):
     if S: print(f"  {tag:12s} {S[1]:5.1f}%  ({S[0]} roll)")
-for tag,S in (("before",Q),("after",N)):
-    if F and S:
-        c=sorted(set(F[2])&set(S[2]))
-        if not c: continue
-        d=[S[2][k]-F[2][k] for k in c]; m=sum(d)/len(d)
-        sd=(sum((x-m)**2 for x in d)/len(d))**0.5
-        print(f"  paired {tag:6s} vs bf16 {100*m:+.1f} pt ±{100*sd/math.sqrt(len(d)):.1f} over {len(c)} questions")
+def pair(tag,X,Y):
+    if not (X and Y): return
+    c=sorted(set(X[2])&set(Y[2]))
+    if not c: return
+    d=[Y[2][k]-X[2][k] for k in c]; m=sum(d)/len(d)
+    sd=(sum((x-m)**2 for x in d)/len(d))**0.5
+    print(f"  paired {tag:22s} {100*m:+.1f} pt ±{100*sd/math.sqrt(len(d)):.1f} over {len(c)} questions")
+pair("4bit before vs bf16",F,Q); pair("4bit after vs bf16",F,N); pair("4bit after vs before",Q,N)
 PYQ
 TTQ
   chmod +x /usr/local/bin/t
