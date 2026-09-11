@@ -20,8 +20,46 @@ echo "trainer fetched: $(wc -l < /root/work/grpo_pool.py) lines, v2=$(grep -c "d
 # is not whether GRPO helped but whether the step-200 model clears 40% on the held-out 300 with samepage on.
 # The evaluator runs one question at a time, so the 300 are sharded across processes instead; that reuses code
 # that has already been verified rather than adding a batched path to it.
-MODE=eval
+MODE=publish
 SHARDS=3
+if [ "$MODE" = "publish" ]; then
+  # The 39.7% model, in the form that loads on its own: the evaluation ran against /root/eval_hf200, which is
+  # ckpt_step200 with its rank-16 LoRA folded into plain weights, plus the pooler beside it. The raw peft-named
+  # checkpoint is already on HF but cannot be loaded without rebuilding the exact LoRA shape.
+  export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null)
+  pkill -f "pool_eval.p[y]"; sleep 5
+  R=baya1116/hypernet-sp-distill; D=pooler_distill/grpo_pool3_step200
+  python3 - <<'PY' > /root/work/metrics.json
+import json,glob,collections
+rows=[]
+for f in sorted(glob.glob("/root/work/ev_out_*.jsonl")):
+    for line in open(f):
+        try: rows.append(json.loads(line))
+        except Exception: pass
+n=len(rows); by=collections.defaultdict(list)
+for r in rows: by[r.get("q","")].append(bool(r.get("correct")))
+print(json.dumps({
+  "model": "GRPO step 200 over the pooler-distilled student, LoRA r16 layers 20-27 plus a rank-8 pooler adapter",
+  "eval": {"file": "eval300.jsonl first 300 lines", "questions": len(by), "rollouts": n,
+            "correct": round(100*sum(1 for r in rows if r.get("correct"))/n, 1),
+            "grounded": round(100*sum(1 for r in rows if r.get("grounded"))/n, 1),
+            "landed": round(100*sum(1 for r in rows if r.get("landed"))/n, 1),
+            "searches_per_rollout": round(sum(r.get("ns",0) for r in rows)/n, 2)},
+  "settings": {"rw": 768, "maxd": 384, "samepage": 1, "temp": 0.9, "gen": 1500, "maxs": 5, "maxm": 8, "decode": "plain"},
+  "reference": {"sft_same_eval": 35.7, "teacher_uncompressed": 41.5},
+  "note": "Standard error over questions is about 3.1 points, so this sits level with the teacher and is not "
+          "separable from the SFT starting point."}, ensure_ascii=False, indent=2))
+PY
+  cat /root/work/metrics.json
+  echo "--- uploading $(du -sh /root/eval_hf200 | cut -f1) ---"
+  hf upload $R /root/eval_hf200 $D/model 2>&1 | tail -2
+  hf upload $R /root/pooler200.safetensors $D/pooler.safetensors 2>&1 | tail -1
+  hf upload $R /root/work/metrics.json $D/metrics.json 2>&1 | tail -1
+  for i in 0 1 2; do hf upload $R /root/work/ev_out_$i.jsonl $D/eval_shard$i.jsonl >/dev/null 2>&1; done
+  hf upload $R /root/grpo_pool3/rollouts.jsonl pooler_distill/grpo_pool3/rollouts.jsonl >/dev/null 2>&1
+  echo "PUBLISH_DONE $(date -u)"
+  exit 0
+fi
 if [ "$MODE" = "eval" ]; then
   echo 0 > /root/.grpo_target                      # the watchdog must not put the trainer back
   pkill -f "switc[h].sh"; pkill -f "keepgoin[g].sh"; pkill -f "grpo_poo[l].py"; sleep 15
