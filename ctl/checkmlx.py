@@ -36,9 +36,14 @@ for s in stems:
     ref = h[s + ".weight"]
     if w.shape != ref.shape:
         print(f"  SHAPE {s}: {w.shape} vs {ref.shape}"); bad += 1; continue
-    d = np.abs(w - ref).max()
+    # The dequantized copy is stored bfloat16 because that is what the evaluator runs, so the
+    # comparison is at bfloat16 precision: identical grid values, one of them rounded on the way
+    # to disk. Anything larger than that is a packing error.
+    d = np.abs(torch.from_numpy(w).bfloat16().float().numpy() - ref).max()
     if d > 0:
         print(f"  DIFF  {s}: max |unpacked - dequantized| = {d:.3e}"); bad += 1
+        if bad > 5:
+            print("  (stopping after six)"); break
 
 # the tensors the conversion does not touch must still be present and finite
 plain = [k for k in q if not k.endswith((".scales", ".biases")) and k[: -len(".weight")] not in stems]

@@ -59,7 +59,7 @@ DKQ
   cat >> /root/dwqkeep.sh <<'DKQ2'
 until [ -s $HF/model.safetensors ] && grep -q DWQ_DONE /root/dwq_run_$RUN.log 2>/dev/null; do sleep 60; done
 pkill -f "dwq.p[y]"; sleep 10
-python3 /root/work/checkmlx.py ${HF/_hf_/_mlx4_} $HF 2>&1 | tail -6
+python3 /root/work/checkmlx.py ${HF/_hf_/_mlx4_} $HF 2>&1 | tail -8
 while :; do
   for i in 0 1 2; do
     want=$(wc -l < /root/work/ev_$i.jsonl 2>/dev/null || echo 0)
