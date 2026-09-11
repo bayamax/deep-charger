@@ -11,13 +11,95 @@
 # questions instead of being read off two independent means.
 cd /root/work
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null)
+MODE=q4eval
 SHARDS=3
 RAW="https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl"
-for f in pool_eval.py q4.py build_merged.py web_search.py; do
+for f in pool_eval.py q4.py qat.py build_merged.py web_search.py; do
   for try in 1 2 3; do curl -sS -o /root/work/$f "$RAW/$f?nocache=$(date +%s)" && python3 -m py_compile /root/work/$f && break; sleep 5; done
 done
 cp /root/work/web_search.py /root/work/runtime/web_search.py 2>/dev/null
 echo "fetched: pool_eval $(wc -l < /root/work/pool_eval.py) lines, q4 $(wc -l < /root/work/q4.py) lines"
+
+if [ "$MODE" = "qat" ]; then
+  # Quantization-aware training. The held-out measurement is the before-number and stays on disk;
+  # what runs now moves the weights so that the same 4-bit conversion stops costing accuracy.
+  pkill -f "evalkee[p].sh"; pkill -f "pool_eval.p[y]"; sleep 8
+  pkill -9 -f "pool_eval.p[y]" 2>/dev/null; sleep 2
+  for i in 0 1 2; do hf upload baya1116/hypernet-sp-distill /root/work/q4_out_$i.jsonl pooler_distill/grpo_pool3_step200/q4_shard$i.jsonl >/dev/null 2>&1; done
+  echo "before-number frozen at $(cat /root/work/q4_out_*.jsonl 2>/dev/null | wc -l) rollouts"
+  # the model's own traces: on-distribution calibration input, and the only data this needs
+  if [ ! -s /root/work/rollouts.jsonl ]; then
+    for try in 1 2 3; do hf download baya1116/hypernet-sp-distill --include "pooler_distill/grpo_pool3/rollouts.jsonl" --local-dir /root/hfdl 2>&1 | tail -1 && break; sleep 10; done
+    cp /root/hfdl/pooler_distill/grpo_pool3/rollouts.jsonl /root/work/rollouts.jsonl
+  fi
+  echo "traces: $(wc -l < /root/work/rollouts.jsonl) rollouts"
+  if pgrep -f "qat.p[y]" >/dev/null; then echo "QAT already running: $(tail -1 /root/qat.log)"; exit 0; fi
+  if [ -f /root/qat_hf/model.safetensors ]; then echo "QAT already finished -> /root/qat_hf"; exit 0; fi
+  # Two steps first: they print the step-0 loss, which IS the quantization damage while the adapter
+  # is still zero, and they prove the memory fits before an hour is committed to it. A crash here is
+  # not retried, it is looked at.
+  if [ ! -f /root/.qat_selftest_ok ]; then
+    rm -f /root/qat.log
+    cd /root/work && PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python3 /root/work/qat.py \
+      --base /root/eval_hf200 --data /root/work/rollouts.jsonl --selftest 2 2>&1 | tail -22
+    grep -q "^step 2 " /root/qat.log 2>/dev/null || { echo "QAT SELFTEST FAILED - not launching"; exit 0; }
+    touch /root/.qat_selftest_ok
+  fi
+  cd /root/work && PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True setsid nohup python3 /root/work/qat.py \
+    --base /root/eval_hf200 --data /root/work/rollouts.jsonl --out /root/qat_hf \
+    --rank 32 --alpha 64 --lr 1e-4 --steps ${QSTEPS:-1500} --accum 4 --len 640 --kpos 256 \
+    >> /root/qat_run.log 2>&1 < /dev/null &
+  sleep 20
+  cat > /usr/local/bin/t <<'TTQ'
+#!/bin/bash
+echo "$(date -u +%H:%M)Z qat $(pgrep -fc 'qat.p[y]')本  $(nvidia-smi --query-gpu=memory.used --format=csv,noheader)"
+grep -E "^\[q4\]|^\[lora\]|^\[data\]" /root/qat_run.log 2>/dev/null | head -5
+tail -4 /root/qat.log 2>/dev/null
+python3 - <<'PYQ' 2>/dev/null
+import json,glob,collections,math
+def summary(pat):
+    rows=[]
+    for f in sorted(glob.glob(pat)):
+        for line in open(f):
+            try: rows.append(json.loads(line))
+            except Exception: pass
+    if not rows: return None
+    by=collections.defaultdict(list)
+    for r in rows: by[r.get("q","")].append(bool(r.get("correct")))
+    return len(rows), 100*sum(1 for r in rows if r.get("correct"))/len(rows), {k:sum(v)/len(v) for k,v in by.items()}
+F=summary("/root/work/ev_out_*.jsonl"); Q=summary("/root/work/q4_out_*.jsonl"); N=summary("/root/work/qa_out_*.jsonl")
+for tag,S in (("bf16",F),("4bit before",Q),("4bit after",N)):
+    if S: print(f"  {tag:12s} {S[1]:5.1f}%  ({S[0]} roll)")
+for tag,S in (("before",Q),("after",N)):
+    if F and S:
+        c=sorted(set(F[2])&set(S[2]))
+        if not c: continue
+        d=[S[2][k]-F[2][k] for k in c]; m=sum(d)/len(d)
+        sd=(sum((x-m)**2 for x in d)/len(d))**0.5
+        print(f"  paired {tag:6s} vs bf16 {100*m:+.1f} pt ±{100*sd/math.sqrt(len(d)):.1f} over {len(c)} questions")
+PYQ
+TTQ
+  chmod +x /usr/local/bin/t
+  cat > /root/status.sh <<'STQ'
+#!/bin/bash
+t 2>/dev/null
+STQ
+  chmod +x /root/status.sh
+  pkill -f "status_pu[b]"; sleep 1
+  cat > /root/status_pub.sh <<'SPQ'
+#!/bin/bash
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null)
+while true; do
+  { echo "=== $(date -u) === box E (qat)"; t 2>/dev/null; } > /root/work/status.txt 2>&1
+  echo "--- STATUS $(date -u +%H:%M) ---"; cat /root/work/status.txt
+  sleep 300
+done
+SPQ
+  chmod +x /root/status_pub.sh
+  setsid nohup bash /root/status_pub.sh >> /proc/1/fd/1 2>&1 < /dev/null &
+  sleep 40; t; echo "QAT_LAUNCH_DONE $(date -u)"
+  exit 0
+fi
 
 # The control loop starts before the assets finish arriving, so wait here rather than exiting: ctl
 # only re-runs this file when its content changes, and a one-line "not ready" would be the last thing
