@@ -36,15 +36,22 @@ if [ "$MODE" = "eval" ]; then
       2>&1 | grep -viE "warning|warn\(" | tail -5
   fi
   if [ ! -f /root/eval_hf200/model.safetensors ]; then echo "MERGE FAILED - not launching"; exit 0; fi
-  if [ ! -f /root/work/ev_0.jsonl ]; then
+  # eval300.jsonl holds 600 lines; every previous number on this file came from pool_eval's default --n 300,
+  # i.e. the first 300. Shard those same 300 so the result is comparable, and drop any output written against
+  # a different split.
+  if [ ! -f /root/work/ev_0.jsonl ] || [ ! -f /root/work/.ev_split_first300 ]; then
+    pkill -f "pool_eval.p[y]"; sleep 5
+    rm -f /root/work/ev_out_*.jsonl
     python3 - <<'PY'
 import json
-qs=[l for l in open("/root/work/eval300.jsonl") if l.strip()]
+qs=[l for l in open("/root/work/eval300.jsonl") if l.strip()][:300]
+uniq={json.loads(l).get("q","") for l in qs}
 S=3
 for i in range(S):
     open(f"/root/work/ev_{i}.jsonl","w").writelines(qs[i::S])
-print(f"[shard] {len(qs)} questions -> {S} shards of {[len(qs[i::S]) for i in range(S)]}")
+print(f"[shard] first 300 lines, {len(uniq)} distinct questions -> {[len(qs[i::S]) for i in range(S)]}")
 PY
+    touch /root/work/.ev_split_first300
   fi
   for i in $(seq 0 $((SHARDS-1))); do
     if ! pgrep -f "pool_eval.py .* /root/work/ev_$i.jsonl" >/dev/null; then
