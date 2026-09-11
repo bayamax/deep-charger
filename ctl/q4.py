@@ -133,10 +133,15 @@ if __name__ == "__main__":
             rel = (q - w).pow(2).sum().sqrt() / w.pow(2).sum().sqrt()
             lv = len(torch.unique(q[0, :A.group]))
             print(f"{tag:8s} rel {100*rel:.2f}%  levels in first group {lv} (<= {(1<<A.bits)})")
-        # a grid point must survive a second pass unchanged
-        w = torch.randn(64, 128) * 0.02
-        q1 = quant_dequant(w); q2 = quant_dequant(q1)
-        print(f"idempotent: max|q(q(w)) - q(w)| = {(q2-q1).abs().max():.3e}")
+        # What the scheme guarantees is that the group's larger-magnitude edge lands on the grid
+        # exactly (bias = edge) and that zero does too (scale is redefined so edge/scale is an
+        # integer). It does NOT guarantee a second pass is a no-op: re-quantizing re-derives the
+        # grid from the new extremes, so values move again.
+        w = (torch.randn(64, 128) * 0.02).reshape(-1, 2, 64)
+        q = quant_dequant(w.reshape(64, 128)).reshape(-1, 2, 64)
+        far = w.abs().argmax(-1, keepdim=True)
+        de = (w.gather(-1, far) - q.gather(-1, far)).abs().max()
+        print(f"edge preserved: max|w_edge - q(w)_edge| = {de:.3e}  (fp16 rounding of the stored bias)")
     else:
         from transformers import AutoModelForCausalLM
         m = AutoModelForCausalLM.from_pretrained(A.hf, torch_dtype=torch.float32)

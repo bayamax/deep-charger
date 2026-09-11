@@ -102,6 +102,7 @@ def summary(rows):
                 se=100*sd/math.sqrt(len(qm)))
 
 alive=os.popen("pgrep -fc 'pool_eval.p[y]'").read().strip() or "0"
+qh=os.popen("grep '^\\[q4\\]' /root/q4_0.log 2>/dev/null | head -2").read().rstrip()
 t0=0
 try: t0=int(open("/root/.q4_t0").read().strip())
 except Exception: pass
@@ -110,6 +111,7 @@ nq=Q["n"] if Q else 0
 el=max(time.time()-t0,1) if t0 else 0
 eta=f"  残り~{(300-nq)/(nq/el)/60:.0f}分" if nq and el and nq<300 else ""
 print(f"{time.strftime('%H:%M',time.gmtime())}Z q4eval {alive}本  {nq}/300{eta}")
+if qh: print("  "+qh.replace("\n","\n  "))
 for tag,S in (("bf16",F),("4bit",Q)):
     if S: print(f"  {tag}  correct {S['c']:5.1f}% ±{S['se']:.1f}  gnd {S['g']:3.0f}%  land {S['l']:3.0f}%  srch {S['s']:.1f}  ({S['n']} roll / {S['q']} q)")
 if Q and F:
