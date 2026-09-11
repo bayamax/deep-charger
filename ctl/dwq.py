@@ -33,6 +33,9 @@ ap.add_argument("--save-every", type=int, default=50)
 ap.add_argument("--group", type=int, default=64); ap.add_argument("--bits", type=int, default=4)
 ap.add_argument("--seed", type=int, default=0)
 ap.add_argument("--selftest", type=int, default=0)
+ap.add_argument("--clip-search", type=int, default=1, help="1: pick each group's clip before freezing its codes")
+ap.add_argument("--val", type=int, default=48, help="calibration sequences held back to watch for overfitting")
+ap.add_argument("--val-every", type=int, default=50)
 A = ap.parse_args()
 
 import torch                                                     # noqa: E402
@@ -75,10 +78,11 @@ class QTensor:
 
     def __init__(self, name, w):
         self.name, self.shape, self.dtype = name, tuple(w.shape), w.dtype
-        q, s, b = q4.affine_params(w.detach().to("cpu", torch.float32), GS, A.bits)
-        self.codes = q.to(torch.uint8).to(DEV)                   # [rows, n_groups, group]
-        self.scales = s.to(DEV).requires_grad_(True)             # [rows, n_groups, 1]
-        self.biases = b.to(DEV).requires_grad_(True)
+        f = q4.clipped_affine_params if A.clip_search else q4.affine_params
+        q, s, b = f(w.detach().float(), GS, A.bits)
+        self.codes = q.to(torch.uint8)                           # [rows, n_groups, group]
+        self.scales = s.to(DEV).float().requires_grad_(True)     # [rows, n_groups, 1]
+        self.biases = b.to(DEV).float().requires_grad_(True)
         self.orig = w.detach().clone()
 
     def weight(self):
@@ -126,16 +130,23 @@ print(f"[dwq] starting relative error {100*overall():.2f}% "
 if DEV == "cuda":
     torch.cuda.empty_cache()
 
-ROWS = [json.loads(l)["text"] for l in open(A.data) if l.strip()]
-print(f"[data] {len(ROWS)} calibration sequences", flush=True)
+ALL = [json.loads(l)["text"] for l in open(A.data) if l.strip()]
+VAL, ROWS = ALL[:A.val], ALL[A.val:]
+print(f"[data] {len(ROWS)} calibration sequences, {len(VAL)} held back for validation", flush=True)
+
+
+def clip_ids(ids, rnd):
+    if len(ids) <= A.len:
+        return ids
+    start = 0 if (rnd and random.random() < 0.5) else (random.randrange(len(ids) - A.len) if rnd else 0)
+    return ids[start:start + A.len]
 
 
 def sample_ids():
-    ids = tok.encode(ROWS[random.randrange(len(ROWS))], add_special_tokens=False)
-    if len(ids) <= A.len:
-        return ids
-    start = 0 if random.random() < 0.5 else random.randrange(len(ids) - A.len)
-    return ids[start:start + A.len]
+    return clip_ids(tok.encode(ROWS[random.randrange(len(ROWS))], add_special_tokens=False), True)
+
+
+VAL_IDS = [clip_ids(tok.encode(t, add_special_tokens=False), False) for t in VAL]
 
 
 opt = torch.optim.Adam(params, lr=A.lr, betas=(0.9, 0.95))
@@ -169,6 +180,35 @@ def one_sequence():
     return kl * A.temp ** 2, n
 
 
+@torch.no_grad()
+def validate():
+    """The same KL on text the training never sees: the cheap signal that says train longer or stop."""
+    tot = 0.0
+    for ids in VAL_IDS:
+        t = torch.tensor([ids], device=DEV)
+        idx = torch.arange(0, t.shape[1], max(1, t.shape[1] // A.kpos), device=DEV)[:A.kpos]
+        TEACHER[0] = True
+        lg_t = F.linear(BODY(input_ids=t).last_hidden_state[0, idx], QS["lm_head"].orig).float()
+        TEACHER[0] = False
+        lg_s = HEAD(BODY(input_ids=t).last_hidden_state[0, idx]).float()
+        p_t = F.softmax(lg_t / A.temp, -1)
+        tot += ((p_t * (torch.log(p_t.clamp_min(1e-9)) - F.log_softmax(lg_s / A.temp, -1))).sum(-1)
+                .mean().item() * A.temp ** 2)
+    return tot / max(len(VAL_IDS), 1)
+
+
+BEST = {"val": float("inf"), "step": 0, "qp": None}
+
+
+def keep_if_best(v, i):
+    if v < BEST["val"]:
+        BEST.update(val=v, step=i,
+                    qp={k: (q.scales.detach().cpu().clone(), q.biases.detach().cpu().clone())
+                        for k, q in QS.items()})
+        return True
+    return False
+
+
 def save_ckpt(i):
     os.makedirs(os.path.dirname(A.ckpt), exist_ok=True)
     torch.save({"qp": {k: (v.scales.detach().cpu(), v.biases.detach().cpu()) for k, v in QS.items()},
@@ -176,6 +216,10 @@ def save_ckpt(i):
 
 
 log = open("/root/dwq.log", "a")
+v0 = validate()
+keep_if_best(v0, 0)
+print(f"[dwq] validation kl before training {v0:.4f} over {len(VAL_IDS)} unseen sequences", flush=True)
+log.write(f"val 0 kl={v0:.4f}\n"); log.flush()
 t0 = time.time()
 for i in range(step0, A.selftest if A.selftest else A.steps):
     for g in opt.param_groups:
@@ -192,6 +236,11 @@ for i in range(step0, A.selftest if A.selftest else A.steps):
     line = (f"step {i+1} kl={kls:.4f} lr={lr_at(i):.2e} tok={toks} "
             f"{(time.time()-t0)/(i-step0+1):.1f}s/step")
     print(line, flush=True); log.write(line + "\n"); log.flush()
+    if (i + 1) % A.val_every == 0 or i + 1 == A.steps:
+        v = validate()
+        mark = "best" if keep_if_best(v, i + 1) else f"worse than step {BEST['step']} ({BEST['val']:.4f})"
+        vl = f"val {i+1} kl={v:.4f} {mark}"
+        print(vl, flush=True); log.write(vl + "\n"); log.flush()
     if (i + 1) % A.save_every == 0 or i + 1 == A.steps:
         save_ckpt(i + 1); print(f"[ckpt] step {i+1}", flush=True)
 
@@ -199,6 +248,14 @@ if A.selftest:
     print(f"[dwq] relative error after {A.selftest} steps {100*overall():.2f}%", flush=True)
     print("DWQ_SELFTEST_DONE", flush=True)
     raise SystemExit
+
+# ---- ship the step that validated best, not the last one ----------------------------------------
+if BEST["qp"] is not None:
+    with torch.no_grad():
+        for k, (sc, bi) in BEST["qp"].items():
+            QS[k].scales.data.copy_(sc.to(DEV)); QS[k].biases.data.copy_(bi.to(DEV))
+    print(f"[dwq] taking step {BEST['step']}, validation kl {BEST['val']:.4f} "
+          f"(started at {v0:.4f})", flush=True)
 
 # ---- what the file stores: fp16 scales and biases, so round them before anything is written -----
 with torch.no_grad():

@@ -57,6 +57,42 @@ def affine_params(w, group=64, bits=4, store_dtype=torch.float16):
     return q, scales, biases
 
 
+def clipped_affine_params(w, group=64, bits=4, store_dtype=torch.float16, ratios=None, chunk=1 << 22):
+    """affine_params, but each group keeps the clip that reconstructs it best.
+
+    The grid is pinned to the group's extremes, so one outlier in a group of 64 sets the step size
+    for the other 63. Shrinking the range costs the outlier and buys resolution everywhere else;
+    whether that trades well is a per-group question, so ask it per group. This is the standard
+    weight-clipping search, and it only changes which integer codes the tensor starts from - the
+    scale and bias it returns are still exactly what the file stores.
+    """
+    ratios = ratios or [1.0, 0.95, 0.9, 0.85, 0.8, 0.75, 0.7]
+    shape = w.shape
+    x = w.float().reshape(-1, shape[-1] // group, group)
+    rows = max(1, chunk // (x.shape[1] * group))
+    Q = torch.empty_like(x)
+    S = torch.empty(x.shape[0], x.shape[1], 1, device=x.device, dtype=x.dtype)
+    B = torch.empty_like(S)
+    for i in range(0, x.shape[0], rows):
+        blk = x[i:i + rows]
+        best = None
+        for r in ratios:
+            c = blk if r == 1.0 else blk.clamp(blk.amin(-1, keepdim=True) * r,
+                                               blk.amax(-1, keepdim=True) * r)
+            # affine_params groups along the last axis, which is already the group here
+            q, sc, bi = affine_params(c, group, bits, store_dtype)
+            q = q.reshape(blk.shape); sc = sc.reshape(blk.shape[:-1] + (1,)); bi = bi.reshape(sc.shape)
+            err = (q * sc + bi - blk).pow(2).sum(-1, keepdim=True)      # against the TRUE weights
+            if best is None:
+                best = (err, q, sc, bi)
+            else:
+                take = err < best[0]
+                best = (torch.where(take, err, best[0]), torch.where(take, q, best[1]),
+                        torch.where(take, sc, best[2]), torch.where(take, bi, best[3]))
+        Q[i:i + rows], S[i:i + rows], B[i:i + rows] = best[1], best[2], best[3]
+    return Q, S, B
+
+
 def quant_dequant(w, group=64, bits=4, store_dtype=torch.float16, ste=False):
     """Round w onto the 4-bit affine grid and back. Shape preserved, dtype preserved."""
     q, scales, biases = affine_params(w, group, bits, store_dtype)
@@ -161,6 +197,16 @@ if __name__ == "__main__":
         far = w.abs().argmax(-1, keepdim=True)
         de = (w.gather(-1, far) - q.gather(-1, far)).abs().max()
         print(f"edge preserved: max|w_edge - q(w)_edge| = {de:.3e}  (fp16 rounding of the stored bias)")
+        # the clip search may never reconstruct worse than not clipping: it keeps 1.0 as a candidate
+        w = torch.cat([torch.randn(128, 63) * 0.02, torch.randn(128, 1) * 0.5], 1).reshape(2, 4096)
+        q0, s0, b0 = affine_params(w, 64, A.bits)
+        q1, s1, b1 = clipped_affine_params(w, 64, A.bits)
+        assert q1.shape == q0.shape and s1.shape == s0.shape, (q1.shape, s1.shape)
+        e0 = (q0 * s0 + b0 - w.reshape(q0.shape)).pow(2).sum().item()
+        e1 = (q1 * s1 + b1 - w.reshape(q1.shape)).pow(2).sum().item()
+        print(f"clip search: squared error {e0:.4e} -> {e1:.4e} "
+              f"({100*(1-e1/max(e0,1e-30)):.0f}% lower on a group with one outlier)")
+        assert e1 <= e0 + 1e-9, "clipping made the reconstruction worse"
     else:
         from transformers import AutoModelForCausalLM
         m = AutoModelForCausalLM.from_pretrained(A.hf, torch_dtype=torch.float32)
