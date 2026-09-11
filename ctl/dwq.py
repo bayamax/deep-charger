@@ -36,6 +36,7 @@ ap.add_argument("--selftest", type=int, default=0)
 ap.add_argument("--clip-search", type=int, default=1, help="1: pick each group's clip before freezing its codes")
 ap.add_argument("--val", type=int, default=48, help="calibration sequences held back to watch for overfitting")
 ap.add_argument("--val-every", type=int, default=50)
+ap.add_argument("--focus", type=int, default=0, help="1: score the positions where the two models disagree most, instead of random ones")
 A = ap.parse_args()
 
 import torch                                                     # noqa: E402
@@ -166,17 +167,35 @@ def lr_at(i):
     return A.lr * 0.5 * (1 + math.cos(math.pi * min(t, 1.0)))
 
 
+def kl_at(lg_t, lg_s):
+    p_t = F.softmax(lg_t / A.temp, -1)
+    return (p_t * (torch.log(p_t.clamp_min(1e-9)) - F.log_softmax(lg_s / A.temp, -1))).sum(-1)
+
+
 def one_sequence():
     ids = torch.tensor([sample_ids()], device=DEV)
     n = ids.shape[1]
-    idx = torch.randperm(n, device=DEV)[:min(A.kpos, n)]
+    k = min(A.kpos, n)
     TEACHER[0] = True
     with torch.no_grad():
-        lg_t = F.linear(BODY(input_ids=ids).last_hidden_state[0, idx], QS["lm_head"].orig).float()
+        h_t = BODY(input_ids=ids).last_hidden_state[0]
     TEACHER[0] = False
-    lg_s = HEAD(BODY(input_ids=ids).last_hidden_state[0, idx]).float()
-    p_t = F.softmax(lg_t / A.temp, -1)
-    kl = (p_t * (torch.log(p_t.clamp_min(1e-9)) - F.log_softmax(lg_s / A.temp, -1))).sum(-1).mean()
+    h_s = BODY(input_ids=ids).last_hidden_state[0]
+    if A.focus:
+        # Quantization does not damage every position equally, and a random sample spends most of
+        # its budget where the two models already agree. Rank first, then score where it hurts.
+        with torch.no_grad():
+            per = torch.empty(n, device=DEV)
+            for i in range(0, n, 128):
+                sl = slice(i, min(i + 128, n))
+                per[sl] = kl_at(F.linear(h_t[sl], QS["lm_head"].orig).float(),
+                                HEAD(h_s[sl].detach()).float())
+            idx = per.topk(k).indices
+    else:
+        idx = torch.randperm(n, device=DEV)[:k]
+    with torch.no_grad():
+        lg_t = F.linear(h_t[idx], QS["lm_head"].orig).float()
+    kl = kl_at(lg_t, HEAD(h_s[idx]).float()).mean()
     return kl * A.temp ** 2, n
 
 
@@ -191,9 +210,7 @@ def validate():
         lg_t = F.linear(BODY(input_ids=t).last_hidden_state[0, idx], QS["lm_head"].orig).float()
         TEACHER[0] = False
         lg_s = HEAD(BODY(input_ids=t).last_hidden_state[0, idx]).float()
-        p_t = F.softmax(lg_t / A.temp, -1)
-        tot += ((p_t * (torch.log(p_t.clamp_min(1e-9)) - F.log_softmax(lg_s / A.temp, -1))).sum(-1)
-                .mean().item() * A.temp ** 2)
+        tot += kl_at(lg_t, lg_s).mean().item() * A.temp ** 2      # always uniform, so runs compare
     return tot / max(len(VAL_IDS), 1)
 
 
