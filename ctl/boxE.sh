@@ -11,7 +11,7 @@
 # questions instead of being read off two independent means.
 cd /root/work
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null)
-MODE=q4eval
+MODE=qat
 SHARDS=3
 RAW="https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl"
 for f in pool_eval.py q4.py qat.py build_merged.py web_search.py; do
