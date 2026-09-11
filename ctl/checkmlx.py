@@ -10,13 +10,15 @@ exactly. This unpacks every quantized tensor and compares.
 """
 import json, sys
 import numpy as np
+import torch
 from safetensors.numpy import load_file
+from safetensors.torch import load_file as load_torch
 
 MLX, HF = sys.argv[1], sys.argv[2]
 cfg = json.load(open(MLX + "/config.json"))
 bits = cfg["quantization"]["bits"]; group = cfg["quantization"]["group_size"]
 q = load_file(MLX + "/model.safetensors")
-h = load_file(HF + "/model.safetensors")
+h = {k: v.float().numpy() for k, v in load_torch(HF + "/model.safetensors").items()}   # bf16 is not a numpy dtype
 stems = sorted(k[: -len(".scales")] for k in q if k.endswith(".scales"))
 print(f"[check] {len(stems)} quantized tensors, {bits} bits, group {group}")
 
@@ -31,7 +33,7 @@ for s in stems:
     codes = (codes & ((1 << bits) - 1)).reshape(packed.shape[0], -1)
     w = (codes.reshape(codes.shape[0], -1, group).astype(np.float32) * sc[:, :, None]
          + bi[:, :, None]).reshape(codes.shape)
-    ref = h[s + ".weight"].astype(np.float32)
+    ref = h[s + ".weight"]
     if w.shape != ref.shape:
         print(f"  SHAPE {s}: {w.shape} vs {ref.shape}"); bad += 1; continue
     d = np.abs(w - ref).max()

@@ -26,7 +26,6 @@ if [ "$MODE" = "dwq" ]; then
   # model that scored 39.7%. RUN names the attempt, so a second one does not overwrite the first.
   RUN=${DRUN:-d1}
   pkill -f "afterkee[p].sh"; pkill -f "evalkee[p].sh"; pkill -f "dwqkee[p].sh"; pkill -f "qat.p[y]"; sleep 5
-  pkill -f "pool_eval.p[y]"; sleep 8; pkill -9 -f "pool_eval.p[y]" 2>/dev/null; sleep 2
   [ -s /root/work/dwq_calib/train.jsonl ] || { echo "NOT READY: no calibration set"; exit 0; }
   echo "=== DWQ run $RUN $(date -u) === calibration $(wc -l < /root/work/dwq_calib/train.jsonl) sequences"
   HF=/root/dwq_hf_$RUN; MLX=/root/dwq_mlx4_$RUN; LOG=/root/dwq_$RUN.log
@@ -39,6 +38,9 @@ if [ "$MODE" = "dwq" ]; then
   pgrep -f "dwq.p[y]" >/dev/null && { RUNNING=1; echo "DWQ already running: $(tail -1 $LOG)"; }
   [ -f $HF/model.safetensors ] && { RUNNING=1; echo "DWQ $RUN already finished"; }
   if [ "$RUNNING" = "0" ]; then
+    # Only a launch needs the card to itself. Re-running this file while a measurement is in flight
+    # must not kill it - that is how the status command gets fixed without losing an hour of work.
+    pkill -f "pool_eval.p[y]"; sleep 8; pkill -9 -f "pool_eval.p[y]" 2>/dev/null; sleep 2
     # The quantizer's own checks first: they cost seconds and they gate an hour of GPU.
     python3 /root/work/q4.py || { echo "Q4 SELFTEST FAILED - not launching"; exit 0; }
     cd /root/work && PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True setsid nohup python3 /root/work/dwq.py \
