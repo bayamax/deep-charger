@@ -53,6 +53,7 @@ print(f"[shard] first 300 lines, {len(uniq)} distinct questions -> {[len(qs[i::S
 PY
     touch /root/work/.ev_split_first300
   fi
+  [ -f /root/.eval_t0 ] || date +%s > /root/.eval_t0
   for i in $(seq 0 $((SHARDS-1))); do
     if ! pgrep -f "pool_eval.py .* /root/work/ev_$i.jsonl" >/dev/null; then
       cd /root/work && SP_BASE=/root/eval_hf200 SP_RANK=16 SP_NOSYS=1 SP_EPISODIC=1 OMP_NUM_THREADS=1 \
@@ -67,20 +68,37 @@ PY
   done
   cat > /usr/local/bin/t <<'TT'
 #!/bin/bash
-echo "$(date -u +%H:%M)Z  eval $(pgrep -fc 'pool_eval.p[y]')  gpu $(nvidia-smi --query-gpu=memory.used --format=csv,noheader 2>/dev/null)"
 python3 - <<'PY'
-import json,glob
-tot=dict(n=0,c=0,g=0,l=0,s=0)
+import json,glob,os,time,math,collections
+rows=[]; per={}
 for f in sorted(glob.glob("/root/work/ev_out_*.jsonl")):
-    k=dict(n=0,c=0,g=0,l=0,s=0)
+    k=f.split("_")[-1][0]; per[k]=0
     for line in open(f):
         try: r=json.loads(line)
         except Exception: continue
-        k["n"]+=1; k["c"]+=bool(r.get("correct")); k["g"]+=bool(r.get("grounded")); k["l"]+=bool(r.get("landed")); k["s"]+=r.get("ns",0)
-    for x in tot: tot[x]+=k[x]
-    if k["n"]: print(f"  {f.split('_')[-1][0]}: {k['n']:>3}  correct {100*k['c']/k['n']:5.1f}%  gnd {100*k['g']/k['n']:5.1f}%  landed {100*k['l']/k['n']:5.1f}%  srch {k['s']/k['n']:.1f}")
-n=tot["n"]
-if n: print(f"  ALL {n}/300  correct {100*tot['c']/n:5.1f}%  gnd {100*tot['g']/n:5.1f}%  landed {100*tot['l']/n:5.1f}%  srch {tot['s']/n:.1f}")
+        rows.append(r); per[k]+=1
+n=len(rows)
+alive=len(os.popen("pgrep -fc 'pool_eval.p[y]'").read().strip() or "0")
+alive=os.popen("pgrep -fc 'pool_eval.p[y]'").read().strip() or "0"
+t0=0
+try: t0=int(open("/root/.eval_t0").read().strip())
+except Exception: pass
+el=max(time.time()-t0,1) if t0 else 0
+eta=f"  残り~{(300-n)/(n/el)/60:.0f}分" if n and el and n<300 else ""
+print(f"{time.strftime('%H:%M',time.gmtime())}Z eval {alive}  {n}/300{eta}")
+if not n: raise SystemExit
+c=sum(1 for r in rows if r.get("correct")); g=sum(1 for r in rows if r.get("grounded"))
+l=sum(1 for r in rows if r.get("landed")); sr=sum(r.get("ns",0) for r in rows)
+# the file holds each question twice, so the error bar has to be over questions, not rollouts
+by=collections.defaultdict(list)
+for r in rows: by[r.get("q","")].append(bool(r.get("correct")))
+qm=[sum(v)/len(v) for v in by.values()]
+mu=sum(qm)/len(qm)
+sd=(sum((x-mu)**2 for x in qm)/len(qm))**0.5
+se=100*sd/math.sqrt(len(qm))
+print(f"correct {100*c/n:.1f}% ±{se:.1f}  gnd {100*g/n:.0f}%  land {100*l/n:.0f}%  srch {sr/n:.1f}")
+print(f"  SFT 35.7%   教師 41.5%   問題数 {len(by)}")
+print("  shard " + "  ".join(f"{k}:{v}" for k,v in sorted(per.items())))
 PY
 grep -h "EVAL_DONE" /root/eval_*.log 2>/dev/null | tail -3
 TT
