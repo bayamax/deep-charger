@@ -390,6 +390,11 @@ def rollout_batch(question, B):
     S = [dict(gen=[], msk=[], kept=[], absorbed=0, segs=[], n_model=0, ns_=0, nm=0, nmt=0, served=[], queries=[],
               page_ids=[], page_off=0, seen_pages={}, cur_key=None, nrep=0, dead=False, cut=False, done=False)
          for _ in range(B)]
+    # The single path gives each rollout its own 600 s safety net. Sharing one budget across the batch turns that
+    # net into a guillotine: a step takes about ten minutes, so rows still generating were being cut off mid
+    # answer, landing at reward 0 for a reason that is nothing to do with the policy, and the gradient then
+    # replayed that as a failure. Give the batch the same budget per twelve rows that a group of twelve had.
+    budget = 600 * max(1, -(-B // 12))
     t0 = time.time()
 
     def inject(st, text):
@@ -453,7 +458,7 @@ def rollout_batch(question, B):
 
     while True:
         for st in S:
-            if not st["done"] and (st["n_model"] >= A.gen or time.time() - t0 >= 600):
+            if not st["done"] and (st["n_model"] >= A.gen or time.time() - t0 >= budget):
                 st["done"] = True
         act = [b for b in range(B) if not S[b]["done"]]
         if not act:
@@ -514,6 +519,10 @@ def rollout_batch(question, B):
                 st["done"] = True
         del past, last; clear()
 
+    cut_by_time = sum(1 for st in S if st["n_model"] < A.gen and not st["cut"] and not st["dead"]
+                      and "</think>" not in tok.decode(st["gen"]))
+    if cut_by_time:
+        print(f"[warn] {cut_by_time}/{B} rollouts hit the {budget}s batch budget before answering", flush=True)
     outs = []
     for st in S:
         txt = tok.decode(st["gen"])
