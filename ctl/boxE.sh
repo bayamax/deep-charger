@@ -112,6 +112,35 @@ while true; do
   sleep 300
 done
 SPQ
+  # When the training finishes cleanly, the same held-out measurement runs against the trained
+  # weights, through the same evaluator, the same 150 questions and the same 4-bit grid. This is
+  # sequenced rather than retried: it starts only on QAT_DONE plus a saved model, and a shard that
+  # dies mid-run is restarted because pool_eval resumes from its own output.
+  cat > /root/afterkeep.sh <<'AKQ'
+#!/bin/bash
+until [ -s /root/qat_hf/model.safetensors ] && grep -q QAT_DONE /root/qat_run.log 2>/dev/null; do sleep 60; done
+pkill -f "qat.p[y]"; sleep 10
+while :; do
+  for i in 0 1 2; do
+    want=$(wc -l < /root/work/ev_$i.jsonl 2>/dev/null || echo 0)
+    have=$(wc -l < /root/work/qa_out_$i.jsonl 2>/dev/null || echo 0)
+    [ "$want" -gt 0 ] && [ "$have" -ge "$want" ] && continue
+    pgrep -f "pool_eval.py .* /root/work/ev_$i.jsonl" >/dev/null && continue
+    echo "[after $(date -u +%H:%M)] shard $i at $have/$want - starting"
+    grep -viE "^\s*$" /root/qa_$i.log 2>/dev/null | tail -4 | cut -c1-200
+    cd /root/work && SP_BASE=/root/qat_hf SP_RANK=16 SP_NOSYS=1 SP_EPISODIC=1 OMP_NUM_THREADS=1 \
+      PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True setsid nohup python3 /root/work/pool_eval.py \
+      /root/pooler200.safetensors /root/work/ev_$i.jsonl /root/work/qa_out_$i.jsonl \
+      --n 999 --rw 768 --maxd 384 --samepage 1 --decode plain --q4 1 --tag "[a$i]" \
+      >> /root/qa_$i.log 2>&1 < /dev/null &
+    sleep 60
+  done
+  sleep 120
+done
+AKQ
+  chmod +x /root/afterkeep.sh
+  pkill -f "afterkee[p].sh"; sleep 1
+  setsid nohup bash /root/afterkeep.sh >> /proc/1/fd/1 2>&1 < /dev/null &
   chmod +x /root/status_pub.sh
   setsid nohup bash /root/status_pub.sh >> /proc/1/fd/1 2>&1 < /dev/null &
   sleep 40; t; echo "QAT_LAUNCH_DONE $(date -u)"
