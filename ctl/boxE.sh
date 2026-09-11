@@ -105,7 +105,11 @@ def summary(rows):
     qm={k:sum(v)/len(v) for k,v in by.items()}
     mu=sum(qm.values())/len(qm)
     sd=(sum((x-mu)**2 for x in qm.values())/len(qm))**0.5
-    return dict(n=n, q=len(qm), qm=qm,
+    def per_q(key):
+        d=collections.defaultdict(list)
+        for r in rows: d[r.get("q","")].append(float(r.get(key) or 0))
+        return {k:sum(v)/len(v) for k,v in d.items()}
+    return dict(n=n, q=len(qm), qm=qm, gq=per_q("grounded"), sq=per_q("ns"),
                 c=100*sum(1 for r in rows if r.get("correct"))/n,
                 g=100*sum(1 for r in rows if r.get("grounded"))/n,
                 l=100*sum(1 for r in rows if r.get("landed"))/n,
@@ -128,9 +132,12 @@ for tag,S in (("bf16",F),("4bit",Q)):
 if Q and F:
     common=sorted(set(Q["qm"]) & set(F["qm"]))
     if common:
-        d=[Q["qm"][k]-F["qm"][k] for k in common]
-        m=sum(d)/len(d); sd=(sum((x-m)**2 for x in d)/len(d))**0.5
-        print(f"  paired 4bit-bf16 {100*m:+.1f} pt ±{100*sd/math.sqrt(len(d)):.1f}  over {len(common)} shared questions")
+        def pair(key, scale, unit):
+            d=[Q[key][k]-F[key][k] for k in common]
+            m=sum(d)/len(d); sd=(sum((x-m)**2 for x in d)/len(d))**0.5
+            return f"{scale*m:+.1f}{unit} ±{scale*sd/math.sqrt(len(d)):.1f}"
+        print(f"  paired 4bit-bf16 over {len(common)} shared questions: "
+              f"correct {pair('qm',100,'pt')}  gnd {pair('gq',100,'pt')}  srch {pair('sq',1,'')}")
 PY
 TT
 chmod +x /usr/local/bin/t
