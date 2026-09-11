@@ -7,6 +7,10 @@
 # 06:00 UTC Sep 10 (user request): TARGET raised past 200 so the run continues instead of stopping. --steps is the TOTAL
 #   target; the trainer resumes from grpo_pool3/{latest.safetensors,state.json}. A dead trainer is relaunched ONLY after a
 #   clean GRPO_POOL_DONE with no crash in the tail - a crashed trainer is still left alone (OOM rule).
+# RETIRED 2026-09-11: the host had no free GPU to restart this box on, so the 4-bit measurement moved to
+# box E (ctl/boxE.sh). Everything this box produced is on HF. If it ever comes back, it must not relaunch
+# the trainer or duplicate the run, so it stops here.
+echo "box D is retired - see ctl/boxE.sh"; exit 0
 cd /root/work
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null)
 python3 -c "import transformers.modeling_utils" 2>/dev/null || pip install -q "huggingface_hub>=0.34,<1.0" 2>&1 | tail -1
