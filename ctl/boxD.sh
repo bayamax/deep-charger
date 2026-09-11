@@ -55,13 +55,16 @@ PY
   fi
   [ -f /root/.eval_t0 ] || date +%s > /root/.eval_t0
   for i in $(seq 0 $((SHARDS-1))); do
+    if [ -s /root/eval_$i.log ] && ! pgrep -f "pool_eval.py .* /root/work/ev_$i.jsonl" >/dev/null; then
+      echo "--- shard $i log tail ---"; grep -viE "^\s*$" /root/eval_$i.log | tail -6 | cut -c1-200
+    fi
     if ! pgrep -f "pool_eval.py .* /root/work/ev_$i.jsonl" >/dev/null; then
       cd /root/work && SP_BASE=/root/eval_hf200 SP_RANK=16 SP_NOSYS=1 SP_EPISODIC=1 OMP_NUM_THREADS=1 \
         PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True setsid nohup python3 /root/work/pool_eval.py \
         /root/pooler200.safetensors /root/work/ev_$i.jsonl /root/work/ev_out_$i.jsonl \
         --n 999 --rw 768 --maxd 384 --samepage 1 --decode plain --tag "[$i]" \
         >> /root/eval_$i.log 2>&1 < /dev/null &
-      echo "eval shard $i launched"
+      echo "eval shard $i launched"; sleep 40        # stagger the model loads; three at once is what killed shard 0
     else
       echo "eval shard $i already running"
     fi
