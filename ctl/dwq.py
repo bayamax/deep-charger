@@ -17,7 +17,7 @@ with no --q4 - the weights already are the 4-bit values.
 
   python3 dwq.py --base /root/eval_hf200 --data /root/work/dwq_calib/train.jsonl
 """
-import argparse, json, math, os, random, shutil, sys, time
+import argparse, json, math, os, random, re, shutil, sys, time
 
 ap = argparse.ArgumentParser()
 ap.add_argument("--base", default="/root/eval_hf200", help="the bf16 model to quantize and distil from")
@@ -37,6 +37,7 @@ ap.add_argument("--clip-search", type=int, default=1, help="1: pick each group's
 ap.add_argument("--val", type=int, default=48, help="calibration sequences held back to watch for overfitting")
 ap.add_argument("--val-every", type=int, default=50)
 ap.add_argument("--focus", type=int, default=0, help="1: score the positions where the two models disagree most, instead of random ones")
+ap.add_argument("--policy-only", type=int, default=0, help="1: score only tokens the model itself writes, never the injected search results")
 A = ap.parse_args()
 
 import torch                                                     # noqa: E402
@@ -136,18 +137,38 @@ VAL, ROWS = ALL[:A.val], ALL[A.val:]
 print(f"[data] {len(ROWS)} calibration sequences, {len(VAL)} held back for validation", flush=True)
 
 
-def clip_ids(ids, rnd):
+def encode(text):
+    """Token ids, plus a flag per token for what the policy itself wrote.
+
+    Roughly half of every trace is the search result that was pasted into it. Those tokens are
+    context the model reads, never output it produces, and scoring positions uniformly spends most
+    of the budget learning to predict Wikipedia prose - while the few tokens that decide the score,
+    the answer entity and the decision to stop searching, get almost none of it.
+    """
+    head, sep, body = text.partition("<think>\n")
+    ids = tok.encode(head + sep, add_special_tokens=False)
+    own = [0.0] * len(ids)
+    for seg in re.split(r"(<information>.*?</information>)", body, flags=re.S):
+        if not seg:
+            continue
+        si = tok.encode(seg, add_special_tokens=False)
+        ids += si
+        own += [0.0 if seg.startswith("<information>") else 1.0] * len(si)
+    return ids, own
+
+
+def clip(ids, own, rnd):
     if len(ids) <= A.len:
-        return ids
+        return ids, own
     start = 0 if (rnd and random.random() < 0.5) else (random.randrange(len(ids) - A.len) if rnd else 0)
-    return ids[start:start + A.len]
+    return ids[start:start + A.len], own[start:start + A.len]
 
 
 def sample_ids():
-    return clip_ids(tok.encode(ROWS[random.randrange(len(ROWS))], add_special_tokens=False), True)
+    return clip(*encode(ROWS[random.randrange(len(ROWS))]), True)
 
 
-VAL_IDS = [clip_ids(tok.encode(t, add_special_tokens=False), False) for t in VAL]
+VAL_IDS = [clip(*encode(t), False)[0] for t in VAL]
 
 
 opt = torch.optim.Adam(params, lr=A.lr, betas=(0.9, 0.95))
@@ -173,9 +194,12 @@ def kl_at(lg_t, lg_s):
 
 
 def one_sequence():
-    ids = torch.tensor([sample_ids()], device=DEV)
+    raw, own = sample_ids()
+    ids = torch.tensor([raw], device=DEV)
     n = ids.shape[1]
-    k = min(A.kpos, n)
+    pool = torch.tensor([i for i, o in enumerate(own) if o > 0] or list(range(n)), device=DEV) \
+        if A.policy_only else torch.arange(n, device=DEV)
+    k = min(A.kpos, len(pool))
     TEACHER[0] = True
     with torch.no_grad():
         h_t = BODY(input_ids=ids).last_hidden_state[0]
@@ -185,14 +209,14 @@ def one_sequence():
         # Quantization does not damage every position equally, and a random sample spends most of
         # its budget where the two models already agree. Rank first, then score where it hurts.
         with torch.no_grad():
-            per = torch.empty(n, device=DEV)
-            for i in range(0, n, 128):
-                sl = slice(i, min(i + 128, n))
-                per[sl] = kl_at(F.linear(h_t[sl], QS["lm_head"].orig).float(),
-                                HEAD(h_s[sl].detach()).float())
-            idx = per.topk(k).indices
+            per = torch.empty(len(pool), device=DEV)
+            for i in range(0, len(pool), 128):
+                sl = pool[i:i + 128]
+                per[i:i + len(sl)] = kl_at(F.linear(h_t[sl], QS["lm_head"].orig).float(),
+                                           HEAD(h_s[sl].detach()).float())
+            idx = pool[per.topk(k).indices]
     else:
-        idx = torch.randperm(n, device=DEV)[:k]
+        idx = pool[torch.randperm(len(pool), device=DEV)[:k]]
     with torch.no_grad():
         lg_t = F.linear(h_t[idx], QS["lm_head"].orig).float()
     kl = kl_at(lg_t, HEAD(h_s[idx]).float()).mean()

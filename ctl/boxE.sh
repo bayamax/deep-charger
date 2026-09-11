@@ -11,8 +11,10 @@
 # questions instead of being read off two independent means.
 cd /root/work
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null)
-DRUN=d3
-MODE=probe
+DRUN=d4
+DPOL=1
+DFOCUS=1
+MODE=dwq
 SHARDS=3
 RAW="https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl"
 for f in pool_eval.py q4.py qat.py dwq.py checkmlx.py build_merged.py web_search.py; do
@@ -181,6 +183,7 @@ if [ "$MODE" = "dwq" ]; then
       --out-hf $HF --out-mlx $MLX --ckpt /root/dwq/$RUN.pt --log $LOG \
       --clip-search ${DCLIP:-1} --lr ${DLR:-2e-6} --steps ${DSTEPS:-4000} \
       --accum 4 --len 1024 --kpos 256 --temp ${DTEMP:-1.0} --val 48 --val-every ${DVAL:-100} \
+      --policy-only ${DPOL:-0} --focus ${DFOCUS:-0} \
       >> /root/dwq_run_$RUN.log 2>&1 < /dev/null &
     sleep 20
   fi
