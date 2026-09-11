@@ -15,7 +15,8 @@
   usage       : python3 grpo_pool.py <init.safetensors> <outdir> [--steps 200] [--g 12] [--rw 768] [--maxd 384] [--lr 1e-5]
   resume      : if <outdir>/latest.safetensors + state.json exist, continues from there
 """
-import os, sys, json, time, re, ssl, random, argparse, urllib.parse, urllib.request
+import os, sys, json, time, re, ssl, random, argparse, threading, urllib.parse, urllib.request
+from concurrent.futures import ThreadPoolExecutor
 ap = argparse.ArgumentParser()
 ap.add_argument("init"); ap.add_argument("outdir")
 ap.add_argument("--steps", type=int, default=200); ap.add_argument("--g", type=int, default=12)
@@ -35,6 +36,7 @@ ap.add_argument("--pooler", default="lora", choices=["none", "ln", "lora"],
                 help="none: frozen | ln: query + layernorms + out_scale only | lora: that plus a low-rank adapter on the pooler's big matrices")
 ap.add_argument("--pooler-rank", type=int, default=8); ap.add_argument("--pooler-scale", type=float, default=2.0)
 ap.add_argument("--pooler-init", default="", help="safetensors holding the pooler tensors (when the model comes from a merged HF dir)")
+ap.add_argument("--fetchers", type=int, default=8, help="how many Wikipedia lookups a batched step may have in flight. The searches were the last serial part of a batched rollout: two API round trips each with a 0.6 s courtesy sleep, run one row at a time. 1 restores the serial behaviour")
 ap.add_argument("--backprop", type=int, default=0, help="how many of the group's rollouts the gradient actually replays. 0 = all of them. A smaller number keeps the update as cheap as it was while the group itself grows: with a 0/1 reward every rollout in a reward stratum carries the same advantage, so which members are replayed is a free choice, and each is reweighted so the group's gradient keeps its original scale")
 ap.add_argument("--select", default="random", choices=["random", "grounded"], help="how the replayed rollouts are drawn inside each reward stratum. random keeps the estimate unbiased; grounded prefers zero-reward rollouts that DID read the gold, which aims the negative gradient at the reading failure rather than at the search failure (deliberately biased)")
 ap.add_argument("--batch", type=int, default=1, help="rollouts decoded in lockstep. 1 = the original one-at-a-time path. >1 batches the per-token decode, which is where ~89%% of wall time goes at 14%% GPU utilisation")
@@ -195,11 +197,24 @@ def fetch(kw):
     return ""
 
 
+_page_guard = threading.Lock()
+_page_locks = {}
+
+
 def get_page(kw):
+    """Thread-safe: rows of a batched rollout look pages up concurrently, and two rows asking for the same
+    keyword at the same moment must still cost one fetch, not two."""
     if kw in cache:
         return cache[kw]
-    page = fetch(kw); cache[kw] = page
-    cache_fh.write(json.dumps({"kw": kw, "page": page}, ensure_ascii=False) + "\n"); cache_fh.flush()
+    with _page_guard:
+        lk = _page_locks.setdefault(kw, threading.Lock())
+    with lk:
+        if kw in cache:
+            return cache[kw]
+        page = fetch(kw)
+        with _page_guard:
+            cache[kw] = page
+            cache_fh.write(json.dumps({"kw": kw, "page": page}, ensure_ascii=False) + "\n"); cache_fh.flush()
     return page
 
 
@@ -390,11 +405,10 @@ def rollout_batch(question, B):
     S = [dict(gen=[], msk=[], kept=[], absorbed=0, segs=[], n_model=0, ns_=0, nm=0, nmt=0, served=[], queries=[],
               page_ids=[], page_off=0, seen_pages={}, cur_key=None, nrep=0, dead=False, cut=False, done=False)
          for _ in range(B)]
-    # The single path gives each rollout its own 600 s safety net. Sharing one budget across the batch turns that
-    # net into a guillotine: a step takes about ten minutes, so rows still generating were being cut off mid
-    # answer, landing at reward 0 for a reason that is nothing to do with the policy, and the gradient then
-    # replayed that as a failure. Give the batch the same budget per twelve rows that a group of twelve had.
-    budget = 600 * max(1, -(-B // 12))
+    # Wall clock, not work: the rows run together, so the batch needs about what one rollout needed. 600 s was
+    # nonetheless too tight while the page lookups were serial, and cutting rows off mid answer fed the gradient
+    # failures the policy had not caused. 900 s with the lookups overlapped leaves room without hiding a stall.
+    budget = 900
     t0 = time.time()
 
     def inject(st, text):
@@ -493,14 +507,19 @@ def rollout_batch(question, B):
         npos = [MQ + L for L in Ls]
         alive = [True] * nA
         for _ in range(A.chunk):
-            step_tok = []
-            for i, b in enumerate(act):
-                if not alive[i]:
-                    step_tok.append(eos); continue
-                nx = pick_row(last[i], S[b]["gen"])
-                if advance(S[b], nx):
+            # sampling stays serial (it is microseconds of GPU work); advancing does not, because a row that has
+            # just written a search tag blocks on Wikipedia and the other rows have no reason to wait for it
+            toks = [pick_row(last[i], S[b]["gen"]) if alive[i] else None for i, b in enumerate(act)]
+            live = [i for i in range(nA) if toks[i] is not None]
+            if A.fetchers > 1 and len(live) > 1:
+                with ThreadPoolExecutor(max_workers=min(A.fetchers, len(live))) as ex:
+                    ended = list(ex.map(lambda i: advance(S[act[i]], toks[i]), live))
+            else:
+                ended = [advance(S[act[i]], toks[i]) for i in live]
+            for j, i in enumerate(live):
+                if ended[j]:
                     alive[i] = False
-                step_tok.append(nx)
+            step_tok = [t if t is not None else eos for t in toks]
             if not any(alive):
                 break
             nxt_emb = torch.cat([emb([t]) for t in step_tok], dim=0)

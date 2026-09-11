@@ -168,12 +168,12 @@ setsid nohup python3 /root/work/grpo_pool.py /root/fft_hf2 /root/grpo_pool3 --st
 echo "[switch] relaunched from step $(ST): group $GS, batch $BS, gradient replays $BP, target $T"
 SW
 chmod +x /root/switch.sh
-if [ ! -f /root/.switch_done7 ]; then
-  touch /root/.switch_done7
+if [ ! -f /root/.switch_done8 ]; then
+  touch /root/.switch_done8
   pkill -f "switc[h].sh"; setsid nohup bash /root/switch.sh >> /proc/1/fd/1 2>&1 < /dev/null &
   echo "switch armed: waits for the next save, tests the batched rollout, then resumes with it"
 else
-  echo "switch already armed earlier (rm /root/.switch_done7 to re-arm)"
+  echo "switch already armed earlier (rm /root/.switch_done8 to re-arm)"
 fi
 cat > /usr/local/bin/t <<'TT'
 #!/bin/bash
