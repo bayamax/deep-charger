@@ -11,8 +11,95 @@ cd /root/work
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null)
 python3 -c "import transformers.modeling_utils" 2>/dev/null || pip install -q "huggingface_hub>=0.34,<1.0" 2>&1 | tail -1
 for i in 1 2 3 4 5 6; do curl -sS -o /root/work/grpo_pool.py "https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl/grpo_pool.py?nocache=$(date +%s)" && grep -q "def pg_backward" /root/work/grpo_pool.py && python3 -m py_compile /root/work/grpo_pool.py && break; sleep 5; done
-for f in gold_pooled.py paired.py cnc.py strat.py analyze_pool.py pool_eval.py; do curl -sS -o /root/work/$f "https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl/$f?nocache=$(date +%s)"; done
+for f in gold_pooled.py paired.py cnc.py strat.py analyze_pool.py pool_eval.py build_merged.py; do curl -sS -o /root/work/$f "https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl/$f?nocache=$(date +%s)"; done
 echo "trainer fetched: $(wc -l < /root/work/grpo_pool.py) lines, v2=$(grep -c "def pg_backward" /root/work/grpo_pool.py)"
+
+# ---- HELD-OUT EVALUATION (user decision 04:10 UTC Sep 11) --------------------------------------------------
+# The group-48 run was stopped at step 272: fifteen questions averaged 21.8% against a 25% line, with landed at
+# 97.7% and no truncation, so the answers were being written and were simply wrong. What is being measured now
+# is not whether GRPO helped but whether the step-200 model clears 40% on the held-out 300 with samepage on.
+# The evaluator runs one question at a time, so the 300 are sharded across processes instead; that reuses code
+# that has already been verified rather than adding a batched path to it.
+MODE=eval
+SHARDS=3
+if [ "$MODE" = "eval" ]; then
+  echo 0 > /root/.grpo_target                      # the watchdog must not put the trainer back
+  pkill -f "switc[h].sh"; pkill -f "keepgoin[g].sh"; pkill -f "grpo_poo[l].py"; sleep 15
+  pkill -9 -f "grpo_poo[l].py" 2>/dev/null; sleep 3
+  echo "=== EVAL MODE $(date -u) === trainer stopped at step $(python3 -c "import json;print(json.load(open('/root/grpo_pool3/state.json'))['step'])" 2>/dev/null)"
+  # The checkpoint carries the rank-16 / layers-20-27 peft naming it was trained under. Fold it into plain
+  # weights first: an evaluator that mounts a differently shaped LoRA would silently read the stock base.
+  if [ ! -f /root/eval_hf200/model.safetensors ]; then
+    echo "--- MERGE ckpt_step200 $(date -u +%H:%M) ---"
+    cd /root/work && SP_BASE=/root/fft_hf2 python3 /root/work/build_merged.py \
+      /root/grpo_pool3/ckpt_step200.safetensors /root/eval_hf200 /root/pooler200.safetensors 16 20-27 \
+      2>&1 | grep -viE "warning|warn\(" | tail -5
+  fi
+  if [ ! -f /root/eval_hf200/model.safetensors ]; then echo "MERGE FAILED - not launching"; exit 0; fi
+  if [ ! -f /root/work/ev_0.jsonl ]; then
+    python3 - <<'PY'
+import json
+qs=[l for l in open("/root/work/eval300.jsonl") if l.strip()]
+S=3
+for i in range(S):
+    open(f"/root/work/ev_{i}.jsonl","w").writelines(qs[i::S])
+print(f"[shard] {len(qs)} questions -> {S} shards of {[len(qs[i::S]) for i in range(S)]}")
+PY
+  fi
+  for i in $(seq 0 $((SHARDS-1))); do
+    if ! pgrep -f "pool_eval.py .* /root/work/ev_$i.jsonl" >/dev/null; then
+      cd /root/work && SP_BASE=/root/eval_hf200 SP_RANK=16 SP_NOSYS=1 SP_EPISODIC=1 OMP_NUM_THREADS=1 \
+        PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True setsid nohup python3 /root/work/pool_eval.py \
+        /root/pooler200.safetensors /root/work/ev_$i.jsonl /root/work/ev_out_$i.jsonl \
+        --n 999 --rw 768 --maxd 384 --samepage 1 --decode plain --tag "[$i]" \
+        >> /root/eval_$i.log 2>&1 < /dev/null &
+      echo "eval shard $i launched"
+    else
+      echo "eval shard $i already running"
+    fi
+  done
+  cat > /usr/local/bin/t <<'TT'
+#!/bin/bash
+echo "$(date -u +%H:%M)Z  eval $(pgrep -fc 'pool_eval.p[y]')  gpu $(nvidia-smi --query-gpu=memory.used --format=csv,noheader 2>/dev/null)"
+python3 - <<'PY'
+import json,glob
+tot=dict(n=0,c=0,g=0,l=0,s=0)
+for f in sorted(glob.glob("/root/work/ev_out_*.jsonl")):
+    k=dict(n=0,c=0,g=0,l=0,s=0)
+    for line in open(f):
+        try: r=json.loads(line)
+        except Exception: continue
+        k["n"]+=1; k["c"]+=bool(r.get("correct")); k["g"]+=bool(r.get("grounded")); k["l"]+=bool(r.get("landed")); k["s"]+=r.get("ns",0)
+    for x in tot: tot[x]+=k[x]
+    if k["n"]: print(f"  {f.split('_')[-1][0]}: {k['n']:>3}  correct {100*k['c']/k['n']:5.1f}%  gnd {100*k['g']/k['n']:5.1f}%  landed {100*k['l']/k['n']:5.1f}%  srch {k['s']/k['n']:.1f}")
+n=tot["n"]
+if n: print(f"  ALL {n}/300  correct {100*tot['c']/n:5.1f}%  gnd {100*tot['g']/n:5.1f}%  landed {100*tot['l']/n:5.1f}%  srch {tot['s']/n:.1f}")
+PY
+grep -h "EVAL_DONE" /root/eval_*.log 2>/dev/null | tail -3
+TT
+  chmod +x /usr/local/bin/t
+  cat > /root/status.sh <<'ST'
+#!/bin/bash
+t 2>/dev/null
+ST
+  chmod +x /root/status.sh
+  pkill -f "status_pu[b]"; sleep 1
+  cat > /root/status_pub.sh <<'SP2'
+#!/bin/bash
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null)
+while true; do
+  { echo "=== $(date -u) === box D (eval)"; t 2>/dev/null; } > /root/work/status.txt 2>&1
+  echo "--- STATUS $(date -u +%H:%M) ---"; cat /root/work/status.txt
+  for i in 0 1 2; do hf upload baya1116/hypernet-sp-distill /root/work/ev_out_$i.jsonl pooler_distill/grpo_pool3/eval200_shard$i.jsonl >/dev/null 2>&1; done
+  sleep 300
+done
+SP2
+  chmod +x /root/status_pub.sh
+  setsid nohup bash /root/status_pub.sh >> /proc/1/fd/1 2>&1 < /dev/null &
+  sleep 45; t; echo "EVAL_LAUNCH_DONE $(date -u)"
+  exit 0
+fi
+# ---- end eval mode ----------------------------------------------------------------------------------------
 echo "gpu: $(nvidia-smi --query-gpu=name,memory.used,memory.total --format=csv,noheader) | disk: $(df -h /root | awk 'NR==2{print $4}') free"
 echo "resume state: $(cut -c1-40 /root/grpo_pool3/state.json 2>/dev/null)  latest: $(ls -la /root/grpo_pool3/latest.safetensors 2>/dev/null | awk '{print $5}') bytes"
 # Preserve the milestone checkpoints off-box (user request 15:40 UTC Sep 10). status_pub only ever uploads
