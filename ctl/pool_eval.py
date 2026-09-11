@@ -25,6 +25,7 @@ ap.add_argument("--samepage", type=int, default=0, help="1: a repeated page serv
 ap.add_argument("--decode", default="plain", choices=["plain", "guard"], help="plain = teacher environment (temp sampling, only the <information ban); guard = harness pick() with rep-penalty/no-repeat")
 ap.add_argument("--q4", type=int, default=0, help="1: round every weight the phone quantizes onto the 4-bit affine grid (group 64) before evaluating")
 ap.add_argument("--q4group", type=int, default=64); ap.add_argument("--q4bits", type=int, default=4)
+ap.add_argument("--q4skip", default="", help="comma-separated leaf modules to leave in float, e.g. embed_tokens")
 A = ap.parse_args()
 
 os.environ.setdefault("SP_HOTPOT2", "0"); os.environ.setdefault("SP_BASE", "/root/fft_hf")
@@ -58,8 +59,9 @@ if A.q4:
     # What ships is the 4-bit conversion of these weights, so measure that and not the bf16 parent.
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     import q4  # noqa: E402
-    q4.quantize_model(model, group=A.q4group, bits=A.q4bits)
-print(f"[cfg] rw={A.rw} maxd={A.maxd} chunk={A.chunk} temp={A.temp} gen={A.gen} maxs={A.maxs} maxm={A.maxm} decode={A.decode} samepage={A.samepage} q4={A.q4}", flush=True)
+    q4.quantize_model(model, group=A.q4group, bits=A.q4bits,
+                      skip=tuple(x for x in A.q4skip.split(",") if x))
+print(f"[cfg] rw={A.rw} maxd={A.maxd} chunk={A.chunk} temp={A.temp} gen={A.gen} maxs={A.maxs} maxm={A.maxm} decode={A.decode} samepage={A.samepage} q4={A.q4} q4skip={A.q4skip}", flush=True)
 
 # ---- environment: verbatim grpo_ep_more serve() ----
 WAPI = "https://en.wikipedia.org/w/api.php"

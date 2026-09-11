@@ -106,13 +106,19 @@ def _leaf(name):
     return parts[-1] if parts else ""
 
 
-def quantizable(model):
-    """[(name, module)] for every module the deployed conversion would have quantized, once each."""
+def quantizable(model, skip=()):
+    """[(name, module)] for every module the deployed conversion would have quantized, once each.
+
+    skip names leaf modules to leave in float. A module whose weight is stored without scales is
+    not quantized by the app either - the loader quantizes exactly what the file says is quantized -
+    so skipping one here describes a directory the app can already read, at the cost of its size.
+    """
     out, seen = [], set()
     for name, mod in model.named_modules():
         if not isinstance(mod, (nn.Linear, nn.Embedding)):
             continue
-        if _leaf(name) not in TARGETS:
+        leaf = _leaf(name)
+        if leaf not in TARGETS or leaf in skip:
             continue
         w = getattr(mod, "weight", None)
         if w is None or w.shape[-1] % 64:
@@ -134,7 +140,7 @@ def check_adapters_idle(model):
 
 
 @torch.no_grad()
-def quantize_model(model, group=64, bits=4, store_dtype=torch.float16, verbose=True, chunk=1 << 24):
+def quantize_model(model, group=64, bits=4, store_dtype=torch.float16, verbose=True, chunk=1 << 24, skip=()):
     """Replace every deployed-quantized weight by its dequantized 4-bit value, in place.
 
     The arithmetic runs on the CPU in row blocks. Doing it on the GPU costs several float32
@@ -144,7 +150,7 @@ def quantize_model(model, group=64, bits=4, store_dtype=torch.float16, verbose=T
     bad = check_adapters_idle(model)
     if bad:
         raise RuntimeError(f"{len(bad)} lora_B are non-zero (e.g. {bad[0]}); merge before quantizing")
-    mods, tot_n, tot_se, tot_ss = quantizable(model), 0, 0.0, 0.0
+    mods, tot_n, tot_se, tot_ss = quantizable(model, skip), 0, 0.0, 0.0
     worst = []
     for name, mod in mods:
         w = mod.weight
@@ -163,7 +169,7 @@ def quantize_model(model, group=64, bits=4, store_dtype=torch.float16, verbose=T
     worst.sort(reverse=True)
     if verbose:
         print(f"[q4] {len(mods)} modules, {tot_n/1e6:.1f}M weights, group={group} bits={bits} "
-              f"store={store_dtype}", flush=True)
+              f"store={store_dtype}" + (f", left in float: {','.join(skip)}" if skip else ""), flush=True)
         print(f"[q4] overall relative error {100*(tot_se/max(tot_ss,1e-30))**0.5:.2f}%", flush=True)
         for rel, name, shape in worst[:5]:
             print(f"[q4]   worst {100*rel:5.2f}%  {name} {shape}", flush=True)
