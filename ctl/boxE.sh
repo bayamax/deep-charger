@@ -11,7 +11,7 @@
 # questions instead of being read off two independent means.
 cd /root/work
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null)
-DRUN=d2
+DRUN=d3
 MODE=dwq
 SHARDS=3
 RAW="https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl"
@@ -30,6 +30,11 @@ if [ "$MODE" = "dwq" ]; then
   [ -s /root/work/dwq_calib/train.jsonl ] || { echo "NOT READY: no calibration set"; exit 0; }
   echo "=== DWQ run $RUN $(date -u) === calibration $(wc -l < /root/work/dwq_calib/train.jsonl) sequences"
   HF=/root/dwq_hf_$RUN; MLX=/root/dwq_mlx4_$RUN; LOG=/root/dwq_$RUN.log
+  # a run under a different tag is a superseded configuration, not something to wait for
+  if pgrep -af "dwq.p[y]" | grep -qv -- "--ckpt /root/dwq/$RUN.pt"; then
+    echo "stopping the run that is not $RUN: $(pgrep -af 'dwq.p[y]' | head -1 | cut -c1-120)"
+    pkill -f "dwq.p[y]"; sleep 8; pkill -9 -f "dwq.p[y]" 2>/dev/null; sleep 2
+  fi
   RUNNING=0
   pgrep -f "dwq.p[y]" >/dev/null && { RUNNING=1; echo "DWQ already running: $(tail -1 $LOG)"; }
   [ -f $HF/model.safetensors ] && { RUNNING=1; echo "DWQ $RUN already finished"; }
@@ -40,7 +45,7 @@ if [ "$MODE" = "dwq" ]; then
       --base /root/eval_hf200 --data /root/work/dwq_calib/train.jsonl \
       --out-hf $HF --out-mlx $MLX --ckpt /root/dwq/$RUN.pt --log $LOG \
       --clip-search ${DCLIP:-1} --lr ${DLR:-2e-6} --steps ${DSTEPS:-4000} \
-      --accum 4 --len 1024 --kpos 256 --temp 2.0 --val 48 --val-every ${DVAL:-100} \
+      --accum 4 --len 1024 --kpos 256 --temp ${DTEMP:-1.0} --val 48 --val-every ${DVAL:-100} \
       >> /root/dwq_run_$RUN.log 2>&1 < /dev/null &
     sleep 20
   fi
