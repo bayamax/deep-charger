@@ -21,6 +21,91 @@ done
 cp /root/work/web_search.py /root/work/runtime/web_search.py 2>/dev/null
 echo "fetched: pool_eval $(wc -l < /root/work/pool_eval.py) lines, q4 $(wc -l < /root/work/q4.py) lines"
 
+# The status command is the same whatever mode this file is in, so it is installed once,
+# before the modes - a probe that forgets to reinstall it would otherwise report a stale table.
+cat > /usr/local/bin/t <<'TTD'
+#!/bin/bash
+echo "$(date -u +%H:%M)Z dwq $(pgrep -fc 'dwq.p[y]')本  eval $(pgrep -fc 'pool_eval.p[y]')本  $(nvidia-smi --query-gpu=memory.used --format=csv,noheader)"
+for f in /root/dwq_run_*.log; do grep -hE "^\[dwq\]" "$f" 2>/dev/null | tail -3; done
+python3 - <<'PYD' 2>/dev/null
+import re,glob,os
+for f in sorted(glob.glob("/root/dwq_d*.log")):
+  tr=[];va=[]
+  for l in open(f):
+      m=re.match(r"step (\d+) kl=([\d.]+)",l)
+      if m: tr.append((int(m.group(1)),float(m.group(2))))
+      m=re.match(r"val (\d+) kl=([\d.]+)",l)
+      if m: va.append((int(m.group(1)),float(m.group(2))))
+  if not tr and not va: continue
+  tag=os.path.basename(f)[4:-4]
+  mean=lambda xs: sum(xs)/len(xs)
+  s=f"  {tag}: "
+  if tr: s+=f"step {tr[-1][0]} train kl {mean([r[1] for r in tr[:20]]):.4f} -> {mean([r[1] for r in tr[-20:]]):.4f}"
+  if va: s+=f"   val {va[0][1]:.4f} -> {va[-1][1]:.4f} (best {min(v for _,v in va):.4f} @ {min(va,key=lambda x:x[1])[0]})"
+  print(s)
+PYD
+python3 - <<'PYE' 2>/dev/null
+import json,glob,collections,math,os
+KEYS=("correct","grounded","landed","ns")
+def load(pat):
+  rows=[]
+  for f in sorted(glob.glob(pat)):
+      for line in open(f):
+          try: rows.append(json.loads(line))
+          except Exception: pass
+  if not rows: return None
+  per={}
+  for k in KEYS:
+      d=collections.defaultdict(list)
+      for r in rows: d[r.get("q","")].append(float(r.get(k) or 0))
+      per[k]={q:sum(v)/len(v) for q,v in d.items()}
+  m={k:sum(float(r.get(k) or 0) for r in rows)/len(rows) for k in KEYS}
+  return len(rows), m, per
+runs=[("bf16","/root/work/ev_out_*.jsonl"),("4bit plain","/root/work/q4_out_*.jsonl"),
+    ("4bit +STE-lora","/root/work/qa_out_*.jsonl"),("4bit +dwq d1","/root/work/dw_out_*.jsonl")]
+for p in sorted(glob.glob("/root/work/d[0-9]_out_0.jsonl")):
+  t=os.path.basename(p).split("_")[0]
+  runs.append((f"4bit +dwq {t}", f"/root/work/{t}_out_*.jsonl"))
+for p in sorted(glob.glob("/root/work/g[0-9]*_out_0.jsonl")):
+  t=os.path.basename(p).split("_")[0]
+  runs.append((f"4bit {t} plain", f"/root/work/{t}_out_*.jsonl"))
+L={n:load(p) for n,p in runs}
+for n,_ in runs:
+  S=L[n]
+  if S: print(f"  {n:16s} {100*S[1]['correct']:5.1f}%  gnd {100*S[1]['grounded']:3.0f}%  "
+              f"land {100*S[1]['landed']:3.0f}%  srch {S[1]['ns']:.1f}  ({S[0]} roll)")
+F=L["bf16"]
+for n,_ in runs[1:]:
+  S=L[n]
+  if not (F and S): continue
+  c=sorted(set(F[2]["correct"])&set(S[2]["correct"]))
+  if not c: continue
+  out=[]
+  for k,sc,u in (("correct",100,"pt"),("grounded",100,"pt"),("landed",100,"pt"),("ns",1,"")):
+      d=[S[2][k][q]-F[2][k][q] for q in c]; m=sum(d)/len(d)
+      sd=(sum((x-m)**2 for x in d)/len(d))**0.5
+      out.append(f"{k[:4]} {sc*m:+.1f}{u}±{sc*sd/math.sqrt(len(d)):.1f}")
+  print(f"  vs bf16 {n:16s} " + "  ".join(out) + f"  ({len(c)} q)")
+PYE
+TTD
+chmod +x /usr/local/bin/t
+cat > /root/status.sh <<'STD'
+#!/bin/bash
+t 2>/dev/null
+STD
+chmod +x /root/status.sh
+pkill -f "status_pu[b]"; sleep 1
+cat > /root/status_pub.sh <<'SPD'
+#!/bin/bash
+while true; do
+{ echo "=== $(date -u) === box E (dwq)"; t 2>/dev/null; } > /root/work/status.txt 2>&1
+echo "--- STATUS $(date -u +%H:%M) ---"; cat /root/work/status.txt
+sleep 300
+done
+SPD
+chmod +x /root/status_pub.sh
+setsid nohup bash /root/status_pub.sh >> /proc/1/fd/1 2>&1 < /dev/null &
+
 if [ "$MODE" = "probe" ]; then
   # Three training attempts have each closed most of the KL gap to bf16 and left the score where it
   # was. Before a fourth, ask a different question: is the format itself the binding constraint?
@@ -128,88 +213,6 @@ done
 DKQ2
   chmod +x /root/dwqkeep.sh
   setsid nohup bash /root/dwqkeep.sh >> /proc/1/fd/1 2>&1 < /dev/null &
-  cat > /usr/local/bin/t <<'TTD'
-#!/bin/bash
-echo "$(date -u +%H:%M)Z dwq $(pgrep -fc 'dwq.p[y]')本  eval $(pgrep -fc 'pool_eval.p[y]')本  $(nvidia-smi --query-gpu=memory.used --format=csv,noheader)"
-for f in /root/dwq_run_*.log; do grep -hE "^\[dwq\]" "$f" 2>/dev/null | tail -3; done
-python3 - <<'PYD' 2>/dev/null
-import re,glob,os
-for f in sorted(glob.glob("/root/dwq_d*.log")):
-    tr=[];va=[]
-    for l in open(f):
-        m=re.match(r"step (\d+) kl=([\d.]+)",l)
-        if m: tr.append((int(m.group(1)),float(m.group(2))))
-        m=re.match(r"val (\d+) kl=([\d.]+)",l)
-        if m: va.append((int(m.group(1)),float(m.group(2))))
-    if not tr and not va: continue
-    tag=os.path.basename(f)[4:-4]
-    mean=lambda xs: sum(xs)/len(xs)
-    s=f"  {tag}: "
-    if tr: s+=f"step {tr[-1][0]} train kl {mean([r[1] for r in tr[:20]]):.4f} -> {mean([r[1] for r in tr[-20:]]):.4f}"
-    if va: s+=f"   val {va[0][1]:.4f} -> {va[-1][1]:.4f} (best {min(v for _,v in va):.4f} @ {min(va,key=lambda x:x[1])[0]})"
-    print(s)
-PYD
-python3 - <<'PYE' 2>/dev/null
-import json,glob,collections,math,os
-KEYS=("correct","grounded","landed","ns")
-def load(pat):
-    rows=[]
-    for f in sorted(glob.glob(pat)):
-        for line in open(f):
-            try: rows.append(json.loads(line))
-            except Exception: pass
-    if not rows: return None
-    per={}
-    for k in KEYS:
-        d=collections.defaultdict(list)
-        for r in rows: d[r.get("q","")].append(float(r.get(k) or 0))
-        per[k]={q:sum(v)/len(v) for q,v in d.items()}
-    m={k:sum(float(r.get(k) or 0) for r in rows)/len(rows) for k in KEYS}
-    return len(rows), m, per
-runs=[("bf16","/root/work/ev_out_*.jsonl"),("4bit plain","/root/work/q4_out_*.jsonl"),
-      ("4bit +STE-lora","/root/work/qa_out_*.jsonl"),("4bit +dwq d1","/root/work/dw_out_*.jsonl")]
-for p in sorted(glob.glob("/root/work/d[0-9]_out_0.jsonl")):
-    t=os.path.basename(p).split("_")[0]
-    runs.append((f"4bit +dwq {t}", f"/root/work/{t}_out_*.jsonl"))
-for p in sorted(glob.glob("/root/work/g[0-9]*_out_0.jsonl")):
-    t=os.path.basename(p).split("_")[0]
-    runs.append((f"4bit {t} plain", f"/root/work/{t}_out_*.jsonl"))
-L={n:load(p) for n,p in runs}
-for n,_ in runs:
-    S=L[n]
-    if S: print(f"  {n:16s} {100*S[1]['correct']:5.1f}%  gnd {100*S[1]['grounded']:3.0f}%  "
-                f"land {100*S[1]['landed']:3.0f}%  srch {S[1]['ns']:.1f}  ({S[0]} roll)")
-F=L["bf16"]
-for n,_ in runs[1:]:
-    S=L[n]
-    if not (F and S): continue
-    c=sorted(set(F[2]["correct"])&set(S[2]["correct"]))
-    if not c: continue
-    out=[]
-    for k,sc,u in (("correct",100,"pt"),("grounded",100,"pt"),("landed",100,"pt"),("ns",1,"")):
-        d=[S[2][k][q]-F[2][k][q] for q in c]; m=sum(d)/len(d)
-        sd=(sum((x-m)**2 for x in d)/len(d))**0.5
-        out.append(f"{k[:4]} {sc*m:+.1f}{u}±{sc*sd/math.sqrt(len(d)):.1f}")
-    print(f"  vs bf16 {n:16s} " + "  ".join(out) + f"  ({len(c)} q)")
-PYE
-TTD
-  chmod +x /usr/local/bin/t
-  cat > /root/status.sh <<'STD'
-#!/bin/bash
-t 2>/dev/null
-STD
-  chmod +x /root/status.sh
-  pkill -f "status_pu[b]"; sleep 1
-  cat > /root/status_pub.sh <<'SPD'
-#!/bin/bash
-while true; do
-  { echo "=== $(date -u) === box E (dwq)"; t 2>/dev/null; } > /root/work/status.txt 2>&1
-  echo "--- STATUS $(date -u +%H:%M) ---"; cat /root/work/status.txt
-  sleep 300
-done
-SPD
-  chmod +x /root/status_pub.sh
-  setsid nohup bash /root/status_pub.sh >> /proc/1/fd/1 2>&1 < /dev/null &
   sleep 40; t; echo "DWQ_LAUNCH_DONE $RUN $(date -u)"
   exit 0
 fi
