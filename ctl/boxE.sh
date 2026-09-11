@@ -12,7 +12,7 @@
 cd /root/work
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null)
 DRUN=d3
-MODE=dwq
+MODE=probe
 SHARDS=3
 RAW="https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl"
 for f in pool_eval.py q4.py qat.py dwq.py checkmlx.py build_merged.py web_search.py; do
@@ -20,6 +20,54 @@ for f in pool_eval.py q4.py qat.py dwq.py checkmlx.py build_merged.py web_search
 done
 cp /root/work/web_search.py /root/work/runtime/web_search.py 2>/dev/null
 echo "fetched: pool_eval $(wc -l < /root/work/pool_eval.py) lines, q4 $(wc -l < /root/work/q4.py) lines"
+
+if [ "$MODE" = "probe" ]; then
+  # Three training attempts have each closed most of the KL gap to bf16 and left the score where it
+  # was. Before a fourth, ask a different question: is the format itself the binding constraint?
+  # Group 32 halves how many weights share a scale. It needs one line changed in the app and a
+  # reconversion, so it is a recommendation rather than a drop-in - but if it recovers the gap, that
+  # is the answer, and if it does not, no amount of training the group-64 grid will help either.
+  PRUN=${PRUN:-g32}; PG=${PG:-32}
+  pkill -f "afterkee[p].sh"; pkill -f "evalkee[p].sh"; pkill -f "dwqkee[p].sh"; pkill -f "qat.p[y]"; sleep 5
+  R=baya1116/hypernet-sp-distill; D=pooler_distill/grpo_pool3_step200_q4
+  if [ ! -f /root/.d3_published ] && [ -s /root/dwq_mlx4_d3/model.safetensors ]; then
+    export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null)
+    echo "--- publishing d3 ($(du -shL /root/dwq_mlx4_d3 | cut -f1)) ---"
+    hf upload $R /root/dwq_mlx4_d3 $D/dwq_d3_mlx4 2>&1 | tail -2
+    hf upload $R /root/dwq/d3.pt $D/dwq_d3_params.pt 2>&1 | tail -1
+    hf upload $R /root/dwq_d3.log $D/dwq_d3.log >/dev/null 2>&1
+    for i in 0 1 2; do hf upload $R /root/work/d3_out_$i.jsonl $D/d3_shard$i.jsonl >/dev/null 2>&1; done
+    touch /root/.d3_published; echo "d3 published"
+  fi
+  cat > /root/probekeep.sh <<PKQ
+#!/bin/bash
+PRUN=$PRUN; PG=$PG
+PKQ
+  cat >> /root/probekeep.sh <<'PKQ2'
+while :; do
+  for i in 0 1 2; do
+    want=$(wc -l < /root/work/ev_$i.jsonl 2>/dev/null || echo 0)
+    have=$(wc -l < /root/work/${PRUN}_out_$i.jsonl 2>/dev/null || echo 0)
+    [ "$want" -gt 0 ] && [ "$have" -ge "$want" ] && continue
+    pgrep -f "pool_eval.py .* /root/work/ev_$i.jsonl" >/dev/null && continue
+    echo "[$PRUN-probe $(date -u +%H:%M)] shard $i at $have/$want - starting (group $PG)"
+    grep -viE "^\s*$" /root/${PRUN}_$i.log 2>/dev/null | tail -4 | cut -c1-200
+    cd /root/work && SP_BASE=/root/eval_hf200 SP_RANK=16 SP_NOSYS=1 SP_EPISODIC=1 OMP_NUM_THREADS=1 \
+      PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True setsid nohup python3 /root/work/pool_eval.py \
+      /root/pooler200.safetensors /root/work/ev_$i.jsonl /root/work/${PRUN}_out_$i.jsonl \
+      --n 999 --rw 768 --maxd 384 --samepage 1 --decode plain --q4 1 --q4group $PG --tag "[$PRUN$i]" \
+      >> /root/${PRUN}_$i.log 2>&1 < /dev/null &
+    sleep 60
+  done
+  sleep 120
+done
+PKQ2
+  chmod +x /root/probekeep.sh
+  pkill -f "probekee[p].sh"; sleep 1
+  setsid nohup bash /root/probekeep.sh >> /proc/1/fd/1 2>&1 < /dev/null &
+  sleep 40; t; echo "PROBE_LAUNCH_DONE $PRUN group $PG $(date -u)"
+  exit 0
+fi
 
 if [ "$MODE" = "dwq" ]; then
   # Train the quantization parameters rather than the weights under them, starting from the bf16
@@ -123,6 +171,9 @@ runs=[("bf16","/root/work/ev_out_*.jsonl"),("4bit plain","/root/work/q4_out_*.js
 for p in sorted(glob.glob("/root/work/d[0-9]_out_0.jsonl")):
     t=os.path.basename(p).split("_")[0]
     runs.append((f"4bit +dwq {t}", f"/root/work/{t}_out_*.jsonl"))
+for p in sorted(glob.glob("/root/work/g[0-9]*_out_0.jsonl")):
+    t=os.path.basename(p).split("_")[0]
+    runs.append((f"4bit {t} plain", f"/root/work/{t}_out_*.jsonl"))
 L={n:load(p) for n,p in runs}
 for n,_ in runs:
     S=L[n]
