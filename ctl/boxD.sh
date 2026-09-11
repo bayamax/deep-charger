@@ -11,7 +11,7 @@ cd /root/work
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null)
 python3 -c "import transformers.modeling_utils" 2>/dev/null || pip install -q "huggingface_hub>=0.34,<1.0" 2>&1 | tail -1
 for i in 1 2 3 4 5 6; do curl -sS -o /root/work/grpo_pool.py "https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl/grpo_pool.py?nocache=$(date +%s)" && grep -q "def pg_backward" /root/work/grpo_pool.py && python3 -m py_compile /root/work/grpo_pool.py && break; sleep 5; done
-for f in gold_pooled.py paired.py cnc.py strat.py analyze_pool.py pool_eval.py build_merged.py; do curl -sS -o /root/work/$f "https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl/$f?nocache=$(date +%s)"; done
+for f in gold_pooled.py paired.py cnc.py strat.py analyze_pool.py pool_eval.py build_merged.py q4.py; do curl -sS -o /root/work/$f "https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl/$f?nocache=$(date +%s)"; done
 echo "trainer fetched: $(wc -l < /root/work/grpo_pool.py) lines, v2=$(grep -c "def pg_backward" /root/work/grpo_pool.py)"
 
 # ---- HELD-OUT EVALUATION (user decision 04:10 UTC Sep 11) --------------------------------------------------
@@ -20,7 +20,7 @@ echo "trainer fetched: $(wc -l < /root/work/grpo_pool.py) lines, v2=$(grep -c "d
 # is not whether GRPO helped but whether the step-200 model clears 40% on the held-out 300 with samepage on.
 # The evaluator runs one question at a time, so the 300 are sharded across processes instead; that reuses code
 # that has already been verified rather than adding a batched path to it.
-MODE=publish
+MODE=q4eval
 SHARDS=3
 if [ "$MODE" = "publish" ]; then
   # The 39.7% model, in the form that loads on its own: the evaluation ran against /root/eval_hf200, which is
@@ -58,6 +58,110 @@ PY
   for i in 0 1 2; do hf upload $R /root/work/ev_out_$i.jsonl $D/eval_shard$i.jsonl >/dev/null 2>&1; done
   hf upload $R /root/grpo_pool3/rollouts.jsonl pooler_distill/grpo_pool3/rollouts.jsonl >/dev/null 2>&1
   echo "PUBLISH_DONE $(date -u)"
+  exit 0
+fi
+if [ "$MODE" = "q4eval" ]; then
+  # The phone runs a 4-bit affine conversion of this model, not the bf16 parent, so the number that
+  # matters for the app is this one. Same 300 lines (150 distinct questions, each twice), same
+  # samepage environment, same raw window; the only change is that every weight the conversion
+  # touches is rounded onto its 4-bit grid first. Both runs stay on disk so the comparison is paired
+  # over questions, which removes the between-question variance that dominates the +-3.1 error bar.
+  echo 0 > /root/.grpo_target                      # the watchdog must not put the trainer back
+  pkill -f "switc[h].sh"; pkill -f "keepgoin[g].sh"; pkill -f "grpo_poo[l].py"; sleep 10
+  pkill -9 -f "grpo_poo[l].py" 2>/dev/null
+  echo "=== Q4 EVAL $(date -u) ==="
+  # thirty seconds of checking the quantizer is cheaper than ninety minutes of measuring with a broken one
+  python3 /root/work/q4.py || { echo "Q4 SELFTEST FAILED - not launching"; exit 0; }
+  if [ ! -f /root/eval_hf200/model.safetensors ]; then echo "NO /root/eval_hf200 - nothing to quantize"; exit 0; fi
+  if [ ! -f /root/work/ev_0.jsonl ]; then
+    python3 - <<'PY'
+import json
+qs=[l for l in open("/root/work/eval300.jsonl") if l.strip()][:300]
+S=3
+for i in range(S): open(f"/root/work/ev_{i}.jsonl","w").writelines(qs[i::S])
+print(f"[shard] first 300 lines -> {[len(qs[i::S]) for i in range(S)]}")
+PY
+  fi
+  [ -f /root/.q4_t0 ] || date +%s > /root/.q4_t0
+  for i in $(seq 0 $((SHARDS-1))); do
+    if [ -s /root/q4_$i.log ] && ! pgrep -f "pool_eval.py .* /root/work/ev_$i.jsonl" >/dev/null; then
+      echo "--- q4 shard $i log tail ---"; grep -viE "^\s*$" /root/q4_$i.log | tail -6 | cut -c1-200
+    fi
+    if ! pgrep -f "pool_eval.py .* /root/work/ev_$i.jsonl" >/dev/null; then
+      cd /root/work && SP_BASE=/root/eval_hf200 SP_RANK=16 SP_NOSYS=1 SP_EPISODIC=1 OMP_NUM_THREADS=1 \
+        PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True setsid nohup python3 /root/work/pool_eval.py \
+        /root/pooler200.safetensors /root/work/ev_$i.jsonl /root/work/q4_out_$i.jsonl \
+        --n 999 --rw 768 --maxd 384 --samepage 1 --decode plain --q4 1 --tag "[q$i]" \
+        >> /root/q4_$i.log 2>&1 < /dev/null &
+      echo "q4 shard $i launched"; sleep 40        # stagger the model loads; three at once is what killed a shard last time
+    else
+      echo "q4 shard $i already running"
+    fi
+  done
+  cat > /usr/local/bin/t <<'TT'
+#!/bin/bash
+python3 - <<'PY'
+import json,glob,os,time,math,collections
+
+def read(pat):
+    rows=[]
+    for f in sorted(glob.glob(pat)):
+        for line in open(f):
+            try: rows.append(json.loads(line))
+            except Exception: pass
+    return rows
+
+def summary(rows):
+    n=len(rows)
+    if not n: return None
+    by=collections.defaultdict(list)
+    for r in rows: by[r.get("q","")].append(bool(r.get("correct")))
+    qm={k:sum(v)/len(v) for k,v in by.items()}
+    mu=sum(qm.values())/len(qm)
+    sd=(sum((x-mu)**2 for x in qm.values())/len(qm))**0.5
+    return dict(n=n, q=len(qm), qm=qm,
+                c=100*sum(1 for r in rows if r.get("correct"))/n,
+                g=100*sum(1 for r in rows if r.get("grounded"))/n,
+                l=100*sum(1 for r in rows if r.get("landed"))/n,
+                s=sum(r.get("ns",0) for r in rows)/n,
+                se=100*sd/math.sqrt(len(qm)))
+
+alive=os.popen("pgrep -fc 'pool_eval.p[y]'").read().strip() or "0"
+t0=0
+try: t0=int(open("/root/.q4_t0").read().strip())
+except Exception: pass
+Q=summary(read("/root/work/q4_out_*.jsonl")); F=summary(read("/root/work/ev_out_*.jsonl"))
+nq=Q["n"] if Q else 0
+el=max(time.time()-t0,1) if t0 else 0
+eta=f"  残り~{(300-nq)/(nq/el)/60:.0f}分" if nq and el and nq<300 else ""
+print(f"{time.strftime('%H:%M',time.gmtime())}Z q4eval {alive}  {nq}/300{eta}")
+for tag,S in (("bf16",F),("4bit",Q)):
+    if S: print(f"  {tag}  correct {S['c']:5.1f}% ±{S['se']:.1f}  gnd {S['g']:3.0f}%  land {S['l']:3.0f}%  srch {S['s']:.1f}  ({S['n']} roll / {S['q']} q)")
+if Q and F:
+    common=sorted(set(Q["qm"]) & set(F["qm"]))
+    if common:
+        d=[Q["qm"][k]-F["qm"][k] for k in common]
+        m=sum(d)/len(d)
+        sd=(sum((x-m)**2 for x in d)/len(d))**0.5
+        se=sd/math.sqrt(len(d))
+        print(f"  paired 4bit-bf16 {100*m:+.1f} pt ±{100*se:.1f}  over {len(common)} shared questions")
+PY
+TT
+  chmod +x /usr/local/bin/t
+  pkill -f "status_pu[b]"; sleep 1
+  cat > /root/status_pub.sh <<'SP2'
+#!/bin/bash
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null)
+while true; do
+  { echo "=== $(date -u) === box D (q4 eval)"; t 2>/dev/null; } > /root/work/status.txt 2>&1
+  echo "--- STATUS $(date -u +%H:%M) ---"; cat /root/work/status.txt
+  for i in 0 1 2; do hf upload baya1116/hypernet-sp-distill /root/work/q4_out_$i.jsonl pooler_distill/grpo_pool3_step200/q4_shard$i.jsonl >/dev/null 2>&1; done
+  sleep 300
+done
+SP2
+  chmod +x /root/status_pub.sh
+  setsid nohup bash /root/status_pub.sh >> /proc/1/fd/1 2>&1 < /dev/null &
+  sleep 45; t; echo "Q4EVAL_LAUNCH_DONE $(date -u)"
   exit 0
 fi
 if [ "$MODE" = "eval" ]; then
