@@ -11,7 +11,7 @@
 # questions instead of being read off two independent means.
 cd /root/work
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null)
-MODE=qat
+MODE=publish
 SHARDS=3
 RAW="https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl"
 for f in pool_eval.py q4.py qat.py build_merged.py web_search.py; do
@@ -85,6 +85,32 @@ PYP
     hf upload $R /root/work/q4_out_$i.jsonl $D/before_shard$i.jsonl >/dev/null 2>&1
     hf upload $R /root/work/qa_out_$i.jsonl $D/after_shard$i.jsonl >/dev/null 2>&1
   done
+  # Calibration text for DWQ, in the shape the model actually sees: the harness prompt, the <think>
+  # opener, and the model's own trace. mlx-lm reads a folder of jsonl with a "text" field.
+  mkdir -p /root/work/dwq_calib
+  python3 - <<'PYC'
+import json, os
+from transformers import AutoTokenizer
+tok = AutoTokenizer.from_pretrained("/root/eval_hf200")
+held = set()
+for line in open("/root/work/eval300.jsonl"):
+    try: held.add(json.loads(line).get("q", ""))
+    except Exception: pass
+seen, n = set(), 0
+with open("/root/work/dwq_calib/train.jsonl", "w") as out:
+    for line in open("/root/work/rollouts.jsonl"):
+        try: d = json.loads(line)
+        except Exception: continue
+        q, t = d.get("q", ""), d.get("text", "")
+        if not q or not t or q in held:     # the held-out questions never enter any training input
+            continue
+        head = tok.apply_chat_template([{"role": "user", "content": q}],
+                                       add_generation_prompt=True, tokenize=False) + "<think>\n"
+        out.write(json.dumps({"text": head + t}, ensure_ascii=False) + "\n"); n += 1
+        seen.add(q)
+print(f"[calib] {n} sequences over {len(seen)} questions, {len(held)} held-out questions excluded")
+PYC
+  hf upload $R /root/work/dwq_calib/train.jsonl pooler_distill/dwq_calib/train.jsonl 2>&1 | tail -1
   echo "PUBLISH_DONE $(date -u)"
   exit 0
 fi
