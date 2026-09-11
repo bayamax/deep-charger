@@ -96,6 +96,7 @@ for f in sorted(glob.glob("/root/dwq_d*.log")):
 PYD
 python3 - <<'PYE' 2>/dev/null
 import json,glob,collections,math,os
+KEYS=("correct","grounded","landed","ns")
 def load(pat):
     rows=[]
     for f in sorted(glob.glob(pat)):
@@ -103,9 +104,13 @@ def load(pat):
             try: rows.append(json.loads(line))
             except Exception: pass
     if not rows: return None
-    by=collections.defaultdict(list)
-    for r in rows: by[r.get("q","")].append(bool(r.get("correct")))
-    return len(rows), 100*sum(1 for r in rows if r.get("correct"))/len(rows), {k:sum(v)/len(v) for k,v in by.items()}
+    per={}
+    for k in KEYS:
+        d=collections.defaultdict(list)
+        for r in rows: d[r.get("q","")].append(float(r.get(k) or 0))
+        per[k]={q:sum(v)/len(v) for q,v in d.items()}
+    m={k:sum(float(r.get(k) or 0) for r in rows)/len(rows) for k in KEYS}
+    return len(rows), m, per
 runs=[("bf16","/root/work/ev_out_*.jsonl"),("4bit plain","/root/work/q4_out_*.jsonl"),
       ("4bit +STE-lora","/root/work/qa_out_*.jsonl"),("4bit +dwq d1","/root/work/dw_out_*.jsonl")]
 for p in sorted(glob.glob("/root/work/d[0-9]_out_0.jsonl")):
@@ -113,16 +118,21 @@ for p in sorted(glob.glob("/root/work/d[0-9]_out_0.jsonl")):
     runs.append((f"4bit +dwq {t}", f"/root/work/{t}_out_*.jsonl"))
 L={n:load(p) for n,p in runs}
 for n,_ in runs:
-    if L[n]: print(f"  {n:16s} {L[n][1]:5.1f}%  ({L[n][0]} roll)")
+    S=L[n]
+    if S: print(f"  {n:16s} {100*S[1]['correct']:5.1f}%  gnd {100*S[1]['grounded']:3.0f}%  "
+                f"land {100*S[1]['landed']:3.0f}%  srch {S[1]['ns']:.1f}  ({S[0]} roll)")
 F=L["bf16"]
 for n,_ in runs[1:]:
     S=L[n]
     if not (F and S): continue
-    c=sorted(set(F[2])&set(S[2]))
+    c=sorted(set(F[2]["correct"])&set(S[2]["correct"]))
     if not c: continue
-    d=[S[2][k]-F[2][k] for k in c]; m=sum(d)/len(d)
-    sd=(sum((x-m)**2 for x in d)/len(d))**0.5
-    print(f"  paired {n:16s} vs bf16 {100*m:+.1f} pt ±{100*sd/math.sqrt(len(d)):.1f} over {len(c)} q")
+    out=[]
+    for k,sc,u in (("correct",100,"pt"),("grounded",100,"pt"),("landed",100,"pt"),("ns",1,"")):
+        d=[S[2][k][q]-F[2][k][q] for q in c]; m=sum(d)/len(d)
+        sd=(sum((x-m)**2 for x in d)/len(d))**0.5
+        out.append(f"{k[:4]} {sc*m:+.1f}{u}±{sc*sd/math.sqrt(len(d)):.1f}")
+    print(f"  vs bf16 {n:16s} " + "  ".join(out) + f"  ({len(c)} q)")
 PYE
 TTD
   chmod +x /usr/local/bin/t
