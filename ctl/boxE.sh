@@ -77,10 +77,10 @@ JCLIP=0
 PRUNS="p_t06q4:1:0.6 p_t06bf16:0:0.6"
 PG=64
 PSKIP=
-MODE=publish2
+MODE=pack
 SHARDS=3
 RAW="https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl"
-for f in pool_eval.py q4.py qat.py dwq.py poolerfit.py jointfit.py checkmlx.py build_merged.py web_search.py; do
+for f in pool_eval.py q4.py qat.py dwq.py poolerfit.py jointfit.py checkmlx.py packmlx.py build_merged.py web_search.py; do
   for try in 1 2 3; do curl -sS -o /root/work/$f "$RAW/$f?nocache=$(date +%s)" && python3 -m py_compile /root/work/$f && break; sleep 5; done
 done
 cp /root/work/web_search.py /root/work/runtime/web_search.py 2>/dev/null
@@ -290,6 +290,25 @@ fi
 if [ "$MODE" = "idle" ]; then
   # bootstrapped and waiting for instructions; nothing below must run
   echo "idle $(date -u +%H:%M): $(nvidia-smi --query-gpu=name,memory.used --format=csv,noheader 2>/dev/null)"
+  exit 0
+fi
+if [ "$MODE" = "pack" ]; then
+  # jointfit measured a dequantized directory and saved its trained scales and biases, but never
+  # wrote the packed directory the app loads. Build it, prove it unpacks to what was measured, ship it.
+  export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null)
+  R=baya1116/hypernet-sp-distill; D=pooler_distill/grpo_pool3_step200_q4
+  SRUN=${SRUN:-s1}
+  ls -la /root/sft/$SRUN.pt /root/sft_hf_$SRUN/model.safetensors 2>&1 | tail -2
+  cd /root/work && python3 /root/work/packmlx.py --base /root/eval_hf200 --hf /root/sft_hf_$SRUN \
+    --state /root/sft/$SRUN.pt --out /root/sft_mlx4_$SRUN 2>&1 | tail -4
+  python3 /root/work/checkmlx.py /root/sft_mlx4_$SRUN /root/sft_hf_$SRUN 2>&1 | tail -4
+  echo "--- uploading ($(du -shL /root/sft_mlx4_$SRUN | cut -f1)) ---"
+  hf upload $R /root/sft_mlx4_$SRUN $D/sft_${SRUN}_mlx4 2>&1 | tail -1
+  hf upload $R /root/sft/$SRUN.pt $D/sft_${SRUN}_params.pt 2>&1 | tail -1
+  hf upload $R /root/sft_$SRUN.log $D/logs/sft_$SRUN.log >/dev/null 2>&1
+  hf upload $R /root/sft_run_$SRUN.log $D/logs/sft_run_$SRUN.log >/dev/null 2>&1
+  for i in 0 1 2; do hf upload $R /root/work/${SRUN}_out_$i.jsonl $D/rollouts/${SRUN}_$i.jsonl >/dev/null 2>&1; done
+  echo "PACK_DONE $SRUN $(date -u)"
   exit 0
 fi
 if [ "$MODE" = "publish2" ]; then
