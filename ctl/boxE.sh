@@ -44,7 +44,7 @@ if [ ! -f /root/.bootstrapped ]; then
   ln -sfn /root/hfdl/$S/pooler.safetensors /root/pooler200.safetensors
   for i in 0 1 2; do cp /root/hfdl/$S/eval_shard$i.jsonl /root/work/ev_out_$i.jsonl; done
   # every arm measured on the previous box, so comparisons stay paired and a cut-short arm resumes
-  for a in q4 qa d3 g32 j1 p_embfloat; do
+  for a in q4 qa d3 g32 j1 p_embfloat p_t06q4 p_t06bf16 s1; do
     for i in 0 1 2; do
       f=/root/hfdl/$Q/rollouts/${a}_$i.jsonl
       [ -s $f ] && cp $f /root/work/${a}_out_$i.jsonl
@@ -77,7 +77,7 @@ JCLIP=0
 PRUNS="p_t06q4:1:0.6 p_t06bf16:0:0.6"
 PG=64
 PSKIP=
-MODE=probe
+MODE=sft
 SHARDS=3
 RAW="https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl"
 for f in pool_eval.py q4.py qat.py dwq.py poolerfit.py jointfit.py checkmlx.py build_merged.py web_search.py; do
@@ -224,6 +224,13 @@ with open("/root/work/dwq_calib/correct.jsonl", "w") as out:
 print(f"[sft] {n} correct, grounded, landed traces; held-out questions excluded")
 PYS
   fi
+  R=baya1116/hypernet-sp-distill; D=pooler_distill/grpo_pool3_step200_q4
+  for p in p_t06q4 p_t06bf16; do
+    for i in 0 1 2; do
+      [ -s /root/work/${p}_out_$i.jsonl ] && hf upload $R /root/work/${p}_out_$i.jsonl $D/rollouts/${p}_$i.jsonl >/dev/null 2>&1
+    done
+  done
+  echo "probe rollouts uploaded: $(cat /root/work/p_t06*_out_*.jsonl 2>/dev/null | wc -l)"
   echo "traces that scored: $(wc -l < /root/work/dwq_calib/correct.jsonl)"
   HF=/root/sft_hf_$SRUN; POOL=/root/pooler_sft_$SRUN.safetensors; LOG=/root/sft_$SRUN.log
   RUNNING=0
@@ -351,10 +358,10 @@ print(json.dumps({
 PYP
   cat /root/work/q4_metrics.json
   hf upload $R /root/work/q4_metrics.json $D/q4_metrics.json 2>&1 | tail -1
-  for f in /root/dwq_d3.log /root/dwq_d4.log /root/joint_j1.log /root/joint_j2.log /root/qat.log; do
+  for f in /root/dwq_d3.log /root/dwq_d4.log /root/joint_j1.log /root/joint_j2.log /root/qat.log /root/sft_s1.log; do
     [ -s $f ] && hf upload $R $f $D/logs/$(basename $f) >/dev/null 2>&1
   done
-  for p in q4 qa d3 d4 g32 j1 j2 p_embfloat; do
+  for p in q4 qa d3 d4 g32 j1 j2 p_embfloat p_t06q4 p_t06bf16 s1; do
     for i in 0 1 2; do
       [ -s /root/work/${p}_out_$i.jsonl ] && hf upload $R /root/work/${p}_out_$i.jsonl $D/rollouts/${p}_$i.jsonl >/dev/null 2>&1
     done
@@ -363,6 +370,8 @@ PYP
   for n in d3 d4; do
     [ -s /root/dwq_mlx4_$n/model.safetensors ] && { echo "dwq_$n $(du -shL /root/dwq_mlx4_$n | cut -f1)"; hf upload $R /root/dwq_mlx4_$n $D/dwq_${n}_mlx4 2>&1 | tail -1; }
   done
+  [ -s /root/sft_mlx4_s1/model.safetensors ] && { echo "sft s1 $(du -shL /root/sft_mlx4_s1 | cut -f1)"; hf upload $R /root/sft_mlx4_s1 $D/sft_s1_mlx4 2>&1 | tail -1; }
+  [ -s /root/sft/s1.pt ] && hf upload $R /root/sft/s1.pt $D/sft_s1_params.pt >/dev/null 2>&1
   [ -s /root/joint_hf_j1/model.safetensors ] && { echo "joint j1 $(du -shL /root/joint_hf_j1 | cut -f1)"; hf upload $R /root/joint_hf_j1 $D/joint_j1_hf 2>&1 | tail -1; }
   [ -s /root/pooler_joint_j1.safetensors ] && hf upload $R /root/pooler_joint_j1.safetensors $D/pooler_joint_j1.safetensors 2>&1 | tail -1
   # the pooler-only run: its model directory is the untouched 4-bit grid, so only the pooler is new
