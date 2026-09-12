@@ -16,7 +16,10 @@ DPOL=1
 DFOCUS=1
 PRUN=p_embfloat
 PSKIP=embed_tokens
-MODE=publish2
+JRUN=j2
+JLRQ=0
+JCLIP=0
+MODE=joint
 SHARDS=3
 RAW="https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl"
 for f in pool_eval.py q4.py qat.py dwq.py poolerfit.py jointfit.py checkmlx.py build_merged.py web_search.py; do
@@ -222,14 +225,16 @@ if [ "$MODE" = "joint" ]; then
     cd /root/work && PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python3 /root/work/jointfit.py \
       --ckpt /root/pooler200.safetensors --data /root/work/dwq_calib/train.jsonl \
       --out-hf $HF --out-mlx /root/joint_mlx4_$JRUN --out-pooler $POOL \
-      --state /root/joint/$JRUN.pt --log $LOG --val 8 --val-every 2 --selftest 3 2>&1 | tail -16
+      --state /root/joint/$JRUN.pt --log $LOG --clip-search ${JCLIP:-1} --lr-q ${JLRQ:-2e-6} \
+      --val 8 --val-every 2 --selftest 3 2>&1 | tail -16
     grep -q "^step 3 " $LOG 2>/dev/null || { echo "JOINTFIT SELFTEST FAILED - not launching"; exit 0; }
     rm -f $LOG
     cd /root/work && PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True setsid nohup python3 /root/work/jointfit.py \
       --ckpt /root/pooler200.safetensors --data /root/work/dwq_calib/train.jsonl \
       --out-hf $HF --out-mlx /root/joint_mlx4_$JRUN --out-pooler $POOL \
       --state /root/joint/$JRUN.pt --log $LOG \
-      --steps ${JSTEPS:-1200} --lr-q ${JLRQ:-2e-6} --lr-p ${JLRP:-1e-5} --val 24 --val-every ${JVAL:-50} \
+      --steps ${JSTEPS:-1200} --lr-q ${JLRQ:-2e-6} --lr-p ${JLRP:-1e-5} --clip-search ${JCLIP:-1} \
+      --val 24 --val-every ${JVAL:-50} \
       >> /root/joint_run_$JRUN.log 2>&1 < /dev/null &
     sleep 20
   fi
@@ -255,6 +260,29 @@ while :; do
       >> /root/${JRUN}_$i.log 2>&1 < /dev/null &
     sleep 60
   done
+  done=1
+  for i in 0 1 2; do
+    want=$(wc -l < /root/work/ev_$i.jsonl 2>/dev/null || echo 0)
+    have=$(wc -l < /root/work/${JRUN}_out_$i.jsonl 2>/dev/null || echo 0)
+    [ "$have" -ge "$want" ] || done=0
+  done
+  if [ "$done" = "1" ]; then
+    # The untouched 4-bit arm is the reference every other number leans on and it stopped at 174
+    # rollouts. pool_eval resumes from its own output, so this only runs what is missing.
+    for i in 0 1 2; do
+      want=$(wc -l < /root/work/ev_$i.jsonl 2>/dev/null || echo 0)
+      have=$(wc -l < /root/work/q4_out_$i.jsonl 2>/dev/null || echo 0)
+      [ "$want" -gt 0 ] && [ "$have" -ge "$want" ] && continue
+      pgrep -f "pool_eval.py .* /root/work/ev_$i.jsonl" >/dev/null && continue
+      echo "[baseline $(date -u +%H:%M)] plain 4-bit shard $i at $have/$want - filling in"
+      cd /root/work && SP_BASE=/root/eval_hf200 SP_RANK=16 SP_NOSYS=1 SP_EPISODIC=1 OMP_NUM_THREADS=1 \
+        PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True setsid nohup python3 /root/work/pool_eval.py \
+        /root/pooler200.safetensors /root/work/ev_$i.jsonl /root/work/q4_out_$i.jsonl \
+        --n 999 --rw 768 --maxd 384 --samepage 1 --decode plain --q4 1 --tag "[q4$i]" \
+        >> /root/q4_$i.log 2>&1 < /dev/null &
+      sleep 60
+    done
+  fi
   sleep 120
 done
 JKP2
