@@ -542,7 +542,8 @@ PKQ
 while pgrep -f "dwq.p[y]" >/dev/null; do sleep 60; done
 for spec in $PRUNS; do
   PRUN=${spec%%:*}; rest=${spec#*:}; PQ4=${rest%%:*}; PTEMP=${rest#*:}
-  Q4FLAGS=""; [ "$PQ4" = "1" ] && Q4FLAGS="--q4 1 --q4group $PG --q4skip $PSKIP"
+  Q4FLAGS=""; [ "$PQ4" = "1" ] && Q4FLAGS="--q4 1 --q4group $PG"
+  [ "$PQ4" = "1" ] && [ -n "$PSKIP" ] && Q4FLAGS="$Q4FLAGS --q4skip $PSKIP"
   while :; do
     done=1
     for i in 0 1 2; do
