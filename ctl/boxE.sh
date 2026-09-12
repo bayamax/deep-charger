@@ -30,6 +30,11 @@ echo "fetched: pool_eval $(wc -l < /root/work/pool_eval.py) lines, q4 $(wc -l < 
 cat > /usr/local/bin/t <<'TTD'
 #!/bin/bash
 echo "$(date -u +%H:%M)Z dwq $(pgrep -fc 'dwq.p[y]')本  eval $(pgrep -fc 'pool_eval.p[y]')本  $(nvidia-smi --query-gpu=memory.used --format=csv,noheader)"
+# a shard that is running but has written nothing is indistinguishable from a shard that is stuck,
+# unless someone looks inside it
+for f in $(ls -t /root/*_[0-9].log 2>/dev/null | head -3); do
+  echo "  $(basename $f): $(grep -viE '^\s*$' $f | tail -1 | cut -c1-140)"
+done
 for f in /root/dwq_run_*.log /root/joint_run_*.log; do grep -hE "^\[dwq\]|^\[joint\]|taking step" "$f" 2>/dev/null | tail -3; done
 python3 - <<'PYD' 2>/dev/null
 import re,glob,os
