@@ -38,6 +38,8 @@ ap.add_argument("--group", type=int, default=64); ap.add_argument("--bits", type
 ap.add_argument("--clip-search", type=int, default=1); ap.add_argument("--policy-only", type=int, default=1)
 ap.add_argument("--gen", type=int, default=1500); ap.add_argument("--seed", type=int, default=0)
 ap.add_argument("--selftest", type=int, default=0)
+ap.add_argument("--objective", default="kl", choices=["kl", "ce"],
+                help="kl: match the bf16 system's logits; ce: reproduce the trace's own tokens (use with traces that scored)")
 A = ap.parse_args()
 
 os.environ.setdefault("SP_HOTPOT2", "0"); os.environ.setdefault("SP_BASE", "/root/eval_hf200")
@@ -195,6 +197,13 @@ def kl_of(text, seg_i=None):
     if not keep:
         return None
     idx = torch.tensor(keep, device=DEV)
+    if A.objective == "ce":
+        # The trace scored, so its own tokens are the target: the quantized system learns to
+        # produce the behaviour that worked, in the context it actually runs in. No teacher.
+        set_mode(False)
+        ls = logits_for(q_ids, gen, seg)[idx]
+        tgt = torch.tensor([gen[c0 + i] for i in keep], device=DEV)
+        return F.cross_entropy(ls, tgt)
     set_mode(True)
     with torch.no_grad():
         lt = logits_for(q_ids, gen, seg)[idx]

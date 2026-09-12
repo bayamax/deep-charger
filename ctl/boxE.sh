@@ -96,7 +96,7 @@ done
 for f in /root/dwq_run_*.log /root/joint_run_*.log; do grep -hE "^\[dwq\]|^\[joint\]|taking step" "$f" 2>/dev/null | tail -3; done
 python3 - <<'PYD' 2>/dev/null
 import re,glob,os
-for f in sorted(glob.glob("/root/dwq_d*.log")) + sorted(glob.glob("/root/joint_j*.log")):
+for f in sorted(glob.glob("/root/dwq_d*.log")) + sorted(glob.glob("/root/joint_j*.log")) + sorted(glob.glob("/root/sft_s*.log")):
   tr=[];va=[]
   for l in open(f):
       m=re.match(r"step (\d+) kl=([\d.]+)",l)
@@ -136,7 +136,7 @@ for p in sorted(glob.glob("/root/work/d[0-9]_out_0.jsonl")):
 for p in sorted(glob.glob("/root/work/g[0-9]*_out_0.jsonl")):
   t=os.path.basename(p).split("_")[0]
   runs.append((f"4bit {t} plain", f"/root/work/{t}_out_*.jsonl"))
-for p in sorted(glob.glob("/root/work/j[0-9]_out_0.jsonl")) + sorted(glob.glob("/root/work/p_*_out_0.jsonl")):
+for p in sorted(glob.glob("/root/work/j[0-9]_out_0.jsonl")) + sorted(glob.glob("/root/work/s[0-9]_out_0.jsonl")) + sorted(glob.glob("/root/work/p_*_out_0.jsonl")):
   t=os.path.basename(p)[:-len("_out_0.jsonl")]
   runs.append((f"4bit {t}", f"/root/work/{t}_out_*.jsonl"))
 L={n:load(p) for n,p in runs}
@@ -175,6 +175,91 @@ done
 SPD
 chmod +x /root/status_pub.sh
 setsid nohup bash /root/status_pub.sh >> /proc/1/fd/1 2>&1 < /dev/null &
+
+if [ "$MODE" = "sft" ]; then
+  # Reproduce, under quantization and in the compressed context, the traces that scored. This is
+  # not matching bf16 - it is the quantized system learning the behaviour that worked, which is how
+  # this lineage was trained when it lived in 4-bit. Scales and biases move; codes and pooler stay.
+  SRUN=${SRUN:-s1}
+  pkill -f "afterkee[p].sh"; pkill -f "evalkee[p].sh"; pkill -f "dwqkee[p].sh"; pkill -f "probekee[p].sh"; pkill -f "poolkee[p].sh"; pkill -f "jointkee[p].sh"; sleep 5
+  if [ ! -s /root/work/dwq_calib/correct.jsonl ]; then
+    for try in 1 2 3; do hf download baya1116/hypernet-sp-distill --include "pooler_distill/grpo_pool3/rollouts.jsonl" --local-dir /root/hfdl 2>&1 | tail -1 && break; sleep 10; done
+    python3 - <<'PYS'
+import json
+from transformers import AutoTokenizer
+tok = AutoTokenizer.from_pretrained("/root/eval_hf200")
+held = set()
+for line in open("/root/work/eval300.jsonl"):
+    try: held.add(json.loads(line).get("q", ""))
+    except Exception: pass
+n = 0
+with open("/root/work/dwq_calib/correct.jsonl", "w") as out:
+    for line in open("/root/hfdl/pooler_distill/grpo_pool3/rollouts.jsonl"):
+        try: d = json.loads(line)
+        except Exception: continue
+        if not (d.get("correct") and d.get("grounded") and d.get("landed")): continue
+        q, t = d.get("q", ""), d.get("text", "")
+        if not q or not t or q in held: continue
+        head = tok.apply_chat_template([{"role": "user", "content": q}], add_generation_prompt=True, tokenize=False) + "<think>\n"
+        out.write(json.dumps({"text": head + t}, ensure_ascii=False) + "\n"); n += 1
+print(f"[sft] {n} correct, grounded, landed traces; held-out questions excluded")
+PYS
+  fi
+  echo "traces that scored: $(wc -l < /root/work/dwq_calib/correct.jsonl)"
+  HF=/root/sft_hf_$SRUN; POOL=/root/pooler_sft_$SRUN.safetensors; LOG=/root/sft_$SRUN.log
+  RUNNING=0
+  pgrep -f "jointfit.p[y]" >/dev/null && { RUNNING=1; echo "already running: $(tail -1 $LOG)"; }
+  [ -s $HF/model.safetensors ] && { RUNNING=1; echo "sft run $SRUN already finished"; }
+  if [ "$RUNNING" = "0" ]; then
+    pkill -f "pool_eval.p[y]"; sleep 8; pkill -9 -f "pool_eval.p[y]" 2>/dev/null; sleep 2
+    rm -f $LOG
+    cd /root/work && PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python3 /root/work/jointfit.py \
+      --ckpt /root/pooler200.safetensors --data /root/work/dwq_calib/correct.jsonl --objective ce \
+      --out-hf $HF --out-mlx /root/sft_mlx4_$SRUN --out-pooler $POOL --state /root/sft/$SRUN.pt --log $LOG \
+      --clip-search 0 --lr-q ${SLRQ:-2e-6} --lr-p 0 --val 8 --val-every 2 --selftest 3 2>&1 | tail -14
+    grep -q "^step 3 " $LOG 2>/dev/null || { echo "SFT SELFTEST FAILED - not launching"; exit 0; }
+    rm -f $LOG
+    cd /root/work && PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True setsid nohup python3 /root/work/jointfit.py \
+      --ckpt /root/pooler200.safetensors --data /root/work/dwq_calib/correct.jsonl --objective ce \
+      --out-hf $HF --out-mlx /root/sft_mlx4_$SRUN --out-pooler $POOL --state /root/sft/$SRUN.pt --log $LOG \
+      --clip-search 0 --lr-q ${SLRQ:-2e-6} --lr-p 0 --steps ${SSTEPS:-1500} --val 24 --val-every ${SVAL:-50} \
+      >> /root/sft_run_$SRUN.log 2>&1 < /dev/null &
+    sleep 20
+  fi
+  cat > /root/sftkeep.sh <<SKP
+#!/bin/bash
+SRUN=$SRUN; HF=$HF; POOL=$POOL
+SKP
+  cat >> /root/sftkeep.sh <<'SKP2'
+until [ -s $HF/model.safetensors ] && grep -q JOINTFIT_DONE /root/sft_run_$SRUN.log 2>/dev/null; do sleep 60; done
+pkill -f "jointfit.p[y]"; sleep 10
+while :; do
+  done=1
+  for i in 0 1 2; do
+    want=$(wc -l < /root/work/ev_$i.jsonl 2>/dev/null || echo 0)
+    have=$(wc -l < /root/work/${SRUN}_out_$i.jsonl 2>/dev/null || echo 0)
+    [ "$want" -gt 0 ] && [ "$have" -ge "$want" ] && continue
+    done=0
+    pgrep -f "pool_eval.py .* /root/work/ev_$i.jsonl" >/dev/null && continue
+    echo "[$SRUN-eval $(date -u +%H:%M)] shard $i at $have/$want - starting (quantized, trained on its own scored traces)"
+    cd /root/work && SP_BASE=$HF SP_RANK=16 SP_NOSYS=1 SP_EPISODIC=1 OMP_NUM_THREADS=1 \
+      PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True setsid nohup python3 /root/work/pool_eval.py \
+      /root/pooler200.safetensors /root/work/ev_$i.jsonl /root/work/${SRUN}_out_$i.jsonl \
+      --n 999 --rw 768 --maxd 384 --samepage 1 --decode plain --temp ${STEMP:-0.9} --tag "[$SRUN$i]" \
+      >> /root/${SRUN}_$i.log 2>&1 < /dev/null &
+    sleep 60
+  done
+  [ "$done" = "1" ] && break
+  sleep 120
+done
+echo "[$SRUN-eval $(date -u +%H:%M)] complete"
+SKP2
+  chmod +x /root/sftkeep.sh
+  pkill -f "sftkee[p].sh"; sleep 1
+  setsid nohup bash /root/sftkeep.sh >> /proc/1/fd/1 2>&1 < /dev/null &
+  sleep 30; t; echo "SFT_LAUNCH_DONE $SRUN $(date -u)"
+  exit 0
+fi
 
 if [ "$MODE" = "idle" ]; then
   # bootstrapped and waiting for instructions; nothing below must run
