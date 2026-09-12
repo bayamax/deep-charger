@@ -74,7 +74,7 @@ JCLIP=0
 PRUN=q4
 PG=64
 PSKIP=
-MODE=publish2
+MODE=idle
 SHARDS=3
 RAW="https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl"
 for f in pool_eval.py q4.py qat.py dwq.py poolerfit.py jointfit.py checkmlx.py build_merged.py web_search.py; do
@@ -176,6 +176,11 @@ SPD
 chmod +x /root/status_pub.sh
 setsid nohup bash /root/status_pub.sh >> /proc/1/fd/1 2>&1 < /dev/null &
 
+if [ "$MODE" = "idle" ]; then
+  # bootstrapped and waiting for instructions; nothing below must run
+  echo "idle $(date -u +%H:%M): $(nvidia-smi --query-gpu=name,memory.used --format=csv,noheader 2>/dev/null)"
+  exit 0
+fi
 if [ "$MODE" = "publish2" ]; then
   # Everything worth keeping leaves the box before it is stopped.
   pkill -f "afterkee[p].sh"; pkill -f "evalkee[p].sh"; pkill -f "dwqkee[p].sh"; pkill -f "probekee[p].sh"
