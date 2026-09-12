@@ -11,6 +11,55 @@
 # questions instead of being read off two independent means.
 cd /root/work
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null)
+# ---- one-time bootstrap -------------------------------------------------------------------------
+# This used to live in the instance's onstart. Four hosts in a row refused to create a container with
+# it there, and the only thing that had changed was its content, so it moved here: the onstart is now
+# a handful of lines that fetch this file, and everything the box needs is in git where it can be
+# fixed without renting a new machine.
+if [ ! -f /root/.bootstrapped ]; then
+  echo "=== bootstrap $(date -u) ==="
+  mkdir -p /root/work/fft_out /root/work/runtime /root/work/dwq_calib /root/hfdl
+  touch /root/work/runtime/__init__.py
+  pip install -q "transformers==4.44.2" "peft==0.12.0" "safetensors==0.8.0" \
+    "huggingface_hub>=0.34,<1.0" accelerate certifi datasets scipy 2>&1 | tail -1
+  R=baya1116/hypernet-sp-distill; S=pooler_distill/grpo_pool3_step200; Q=pooler_distill/grpo_pool3_step200_q4
+  for inc in "box_recover/scripts/*" "fft_out/pooler.pt" \
+             "grpo_assets/mus_run/eval_step200/eval_heldout_300q_g2.jsonl" \
+             "pooler_distill/pool_eval_cache.jsonl" "pooler_distill/dwq_calib/*" \
+             "$S/*" "$Q/rollouts/*"; do
+    for try in 1 2 3; do hf download $R --include "$inc" --local-dir /root/hfdl 2>&1 | tail -1 && break; sleep 10; done
+    echo "dl $inc $(date -u +%H:%M)"
+  done
+  SC=/root/hfdl/box_recover/scripts; cp $SC/*.py $SC/*.sh /root/work/ 2>/dev/null
+  ln -sfn /root/hfdl/fft_out/pooler.pt /root/work/fft_out/pooler.pt
+  cp /root/hfdl/grpo_assets/mus_run/eval_step200/eval_heldout_300q_g2.jsonl /root/work/eval300.jsonl
+  cp /root/hfdl/pooler_distill/pool_eval_cache.jsonl /root/work/pool_eval_cache.jsonl
+  cp /root/hfdl/pooler_distill/dwq_calib/train.jsonl /root/work/dwq_calib/train.jsonl
+  ln -sfn /root/hfdl/$S/model /root/eval_hf200
+  ln -sfn /root/hfdl/$S/pooler.safetensors /root/pooler200.safetensors
+  for i in 0 1 2; do cp /root/hfdl/$S/eval_shard$i.jsonl /root/work/ev_out_$i.jsonl; done
+  # every arm measured on the previous box, so comparisons stay paired and a cut-short arm resumes
+  for a in q4 qa d3 g32 j1 p_embfloat; do
+    for i in 0 1 2; do
+      f=/root/hfdl/$Q/rollouts/${a}_$i.jsonl
+      [ -s $f ] && cp $f /root/work/${a}_out_$i.jsonl
+    done
+  done
+  python3 - <<'PYB'
+import json
+qs=[l for l in open("/root/work/eval300.jsonl") if l.strip()][:300]
+for i in range(3): open(f"/root/work/ev_{i}.jsonl","w").writelines(qs[i::3])
+print(f"[shard] first 300 lines, {len({json.loads(l).get('q','') for l in qs})} distinct questions")
+PYB
+  echo "model $(ls -lL /root/eval_hf200/model.safetensors 2>/dev/null | awk '{print $5}') bytes | " \
+       "bf16 $(cat /root/work/ev_out_*.jsonl 2>/dev/null | wc -l) rollouts | " \
+       "plain-4bit $(cat /root/work/q4_out_*.jsonl 2>/dev/null | wc -l) restored | " \
+       "calib $(wc -l < /root/work/dwq_calib/train.jsonl 2>/dev/null)"
+  nvidia-smi --query-gpu=name,memory.total --format=csv,noheader; df -h /root | tail -1
+  [ -s /root/eval_hf200/model.safetensors ] && touch /root/.bootstrapped && echo "BOOTSTRAP_DONE $(date -u)"
+fi
+[ -f /root/.bootstrapped ] || { echo "bootstrap incomplete - stopping here"; exit 0; }
+
 DRUN=d4
 DPOL=1
 DFOCUS=1
