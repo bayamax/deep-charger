@@ -78,6 +78,9 @@ for p in sorted(glob.glob("/root/work/d[0-9]_out_0.jsonl")):
 for p in sorted(glob.glob("/root/work/g[0-9]*_out_0.jsonl")):
   t=os.path.basename(p).split("_")[0]
   runs.append((f"4bit {t} plain", f"/root/work/{t}_out_*.jsonl"))
+for p in sorted(glob.glob("/root/work/j[0-9]_out_0.jsonl")) + sorted(glob.glob("/root/work/p_*_out_0.jsonl")):
+  t=os.path.basename(p)[:-len("_out_0.jsonl")]
+  runs.append((f"4bit {t}", f"/root/work/{t}_out_*.jsonl"))
 L={n:load(p) for n,p in runs}
 for n,_ in runs:
   S=L[n]
