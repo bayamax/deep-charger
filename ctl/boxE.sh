@@ -208,6 +208,7 @@ RUNS = [("bf16", "/root/work/ev_out_*.jsonl"), ("4bit_plain", "/root/work/q4_out
         ("4bit_ste_lora", "/root/work/qa_out_*.jsonl"), ("4bit_dwq_temp2", "/root/work/dw_out_*.jsonl"),
         ("4bit_dwq_temp1", "/root/work/d3_out_*.jsonl"), ("4bit_group32", "/root/work/g32_out_*.jsonl"),
         ("4bit_joint_pooler", "/root/work/j1_out_*.jsonl"),
+        ("4bit_pooler_only", "/root/work/j2_out_*.jsonl"),
         ("4bit_float_embed", "/root/work/p_embfloat_out_*.jsonl")]
 L = {n: load(p) for n, p in RUNS}
 F = L["bf16"]
@@ -241,10 +242,10 @@ print(json.dumps({
 PYP
   cat /root/work/q4_metrics.json
   hf upload $R /root/work/q4_metrics.json $D/q4_metrics.json 2>&1 | tail -1
-  for f in /root/dwq_d3.log /root/dwq_d4.log /root/joint_j1.log /root/qat.log; do
+  for f in /root/dwq_d3.log /root/dwq_d4.log /root/joint_j1.log /root/joint_j2.log /root/qat.log; do
     [ -s $f ] && hf upload $R $f $D/logs/$(basename $f) >/dev/null 2>&1
   done
-  for p in q4 qa d3 d4 g32 j1 p_embfloat; do
+  for p in q4 qa d3 d4 g32 j1 j2 p_embfloat; do
     for i in 0 1 2; do
       [ -s /root/work/${p}_out_$i.jsonl ] && hf upload $R /root/work/${p}_out_$i.jsonl $D/rollouts/${p}_$i.jsonl >/dev/null 2>&1
     done
@@ -255,6 +256,9 @@ PYP
   done
   [ -s /root/joint_hf_j1/model.safetensors ] && { echo "joint j1 $(du -shL /root/joint_hf_j1 | cut -f1)"; hf upload $R /root/joint_hf_j1 $D/joint_j1_hf 2>&1 | tail -1; }
   [ -s /root/pooler_joint_j1.safetensors ] && hf upload $R /root/pooler_joint_j1.safetensors $D/pooler_joint_j1.safetensors 2>&1 | tail -1
+  # the pooler-only run: its model directory is the untouched 4-bit grid, so only the pooler is new
+  [ -s /root/pooler_joint_j2.safetensors ] && hf upload $R /root/pooler_joint_j2.safetensors $D/pooler_only_j2.safetensors 2>&1 | tail -1
+  [ -s /root/joint/j2.pt ] && hf upload $R /root/joint/j2.pt $D/pooler_only_j2_params.pt >/dev/null 2>&1
   [ -s /root/dwq/j1.pt ] && hf upload $R /root/dwq/j1.pt $D/joint_j1_params.pt >/dev/null 2>&1
   [ -s /root/joint/j1.pt ] && hf upload $R /root/joint/j1.pt $D/joint_j1_params.pt 2>&1 | tail -1
   [ -s /root/dwq/d4.pt ] && hf upload $R /root/dwq/d4.pt $D/dwq_d4_params.pt 2>&1 | tail -1

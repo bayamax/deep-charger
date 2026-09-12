@@ -30,7 +30,22 @@ comparison. bf16 scores 39.7% with grounding 64%, landing 98%, 4.7 searches per 
 | DWQ, temperature 2 (`ctl/dwq.py`) | -7.7 ± 5.5 | +2.9 | -2.9 | +1.4 | 52 |
 | DWQ, temperature 1, clipped init | -6.3 ± 3.2 | -4.7 | +0.7 | +0.1 | 150 |
 | group 32 instead of 64 | -11.6 ± 3.7 | -7.7 | -1.1 | +0.6 | 142 |
-| quantization + pooler, joint (`ctl/jointfit.py`) | -7.4 ± 3.3 | -1.7 | -0.3 | +0.3 | 149 |
+| quantization + pooler, joint (`ctl/jointfit.py`) | -8.0 ± 3.3 | -2.3 | -0.3 | +0.3 | 150 |
+| pooler only, on the untouched 4-bit grid | -10.0 ± 3.5 | -15.3 | -1.3 | +0.0 | 150 |
+
+## What the instrument can and cannot see
+
+Measured from the data (`bf16`'s two rollouts per question against each other, and a bootstrap over
+questions and rollouts for every arm): 62% of the 150 questions answer themselves the same way
+twice - 31 always right, 62 always wrong - so the paired difference between two arms has a
+standard error of 3.9 to 4.8 points, and the smallest difference detectable at 80% power is about
+11 points. The four-bit loss itself is about 7; the differences between methods are 0 to 4. Neither
+was ever within reach of this experiment. Resolving 3 points needs roughly 13 times the rollouts,
+about 28 GPU-hours per arm; resolving 5 points needs about 5 times, 10 GPU-hours per arm.
+
+Pooling the four group-64 arms per question gives a four-bit loss of -7.1 ± 2.7, p = 0.008. No
+single arm reaches p < 0.05 against bf16 on its own, and no trained arm differs from the untouched
+one: +3.8 ± 3.9, +2.4 ± 3.8, +0.9 ± 4.7, all p > 0.4.
 
 ## What can be concluded
 
@@ -46,17 +61,29 @@ the questions or four times the rollouts per question.
 **A finer grid is not the answer.** Group 32 halves how many weights share a scale and measured
 worse, not better.
 
-**The training worked; it just did not transfer.** Every run closed most of the KL gap to bf16 - 55%
-to 74% on plain contexts, 66% in the compressed configuration - and grounding recovered from -10.4
-to -1.7. What did not recover is reading: correct over grounded is 62% for bf16, 61% for untrained
-4-bit, and 56% for both trained runs. They find the fact more often and turn it into an answer less
-often.
+**The training worked; it just did not transfer.** Every run that moved the quantization parameters
+closed most of the KL gap to bf16 - 55% to 74% on plain contexts, 66% in the compressed
+configuration - and the joint run brought grounding from -10.4 to -2.3. The score did not follow.
+Of what bf16 gets and a 4-bit arm loses, about half is the fact never being served and half is the
+fact being served and misread, in every arm alike; landing is never the problem. And the measured
+difference is a small net of a large two-way exchange: the untouched arm loses 19.5
+rollout-equivalents to bf16 and wins 11.5 back, so three to five times the net amount changes hands
+in both directions.
 
-**The pooler's input is not the mechanism.** The pooler compresses `embed_tokens` output, which is
-quantized at the largest error of any tensor, and this lineage fitted the pooler against the
-unquantized table - so it looked like the culprit. Measured, it is not: the compressed-context KL
-starts at 0.0364 against 0.0463 for plain contexts, so the compressed path is if anything less
-damaged, and training the pooler jointly recovered grounding without recovering the score.
+**The pooler is neither the mechanism nor the fix.** It compresses `embed_tokens` output, which is
+quantized at the largest error of any tensor, and this lineage fitted it against the unquantized
+table - so it looked like the culprit. Measured, it is not: the compressed-context KL starts at
+0.0364 against 0.0463 for plain contexts, so the compressed path is if anything less damaged.
+Trained on its own, with the grid untouched, the pooler could not move the validation KL at all
+(0.0345 to 0.0344 over 1200 steps) and made grounding worse, -15.3 against the untouched arm's
+-10.4. The joint run's KL gain came entirely from the quantization parameters. One reason the pooler
+run hurt: the loss was computed on the teacher's eviction schedule, so the student pooler's mass
+output - which decides what gets evicted at inference - was never constrained.
+
+**The "reading got worse" story was wrong.** An earlier reading of the aggregates said the untouched
+4-bit model kept the bf16 reading rate and training destroyed it. The conditional rate, correct given
+grounded with a bootstrap over questions, is 61% for bf16 and 50 to 55% for every 4-bit arm,
+untouched included. Reading is down for all of them, about equally.
 
 ## Why matching bf16 does not buy accuracy
 
