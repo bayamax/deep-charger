@@ -301,7 +301,8 @@ if [ "$MODE" = "pack" ]; then
   ls -la /root/sft/$SRUN.pt /root/sft_hf_$SRUN/model.safetensors 2>&1 | tail -2
   cd /root/work && python3 /root/work/packmlx.py --base /root/eval_hf200 --hf /root/sft_hf_$SRUN \
     --state /root/sft/$SRUN.pt --out /root/sft_mlx4_$SRUN 2>&1 | tail -4
-  python3 /root/work/checkmlx.py /root/sft_mlx4_$SRUN /root/sft_hf_$SRUN 2>&1 | tail -4
+  python3 /root/work/checkmlx.py /root/sft_mlx4_$SRUN /root/sft_hf_$SRUN 2>&1 | tail -4 | tee /root/checkmlx_$SRUN.txt
+  grep -q MLX_CHECK_OK /root/checkmlx_$SRUN.txt || { echo "PACK_FAILED $SRUN - not uploading"; exit 0; }
   echo "--- uploading ($(du -shL /root/sft_mlx4_$SRUN | cut -f1)) ---"
   hf upload $R /root/sft_mlx4_$SRUN $D/sft_${SRUN}_mlx4 2>&1 | tail -1
   hf upload $R /root/sft/$SRUN.pt $D/sft_${SRUN}_params.pt 2>&1 | tail -1
