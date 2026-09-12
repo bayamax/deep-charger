@@ -16,7 +16,7 @@ DPOL=1
 DFOCUS=1
 PRUN=p_embfloat
 PSKIP=embed_tokens
-MODE=probe
+MODE=joint
 SHARDS=3
 RAW="https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl"
 for f in pool_eval.py q4.py qat.py dwq.py poolerfit.py jointfit.py checkmlx.py build_merged.py web_search.py; do
