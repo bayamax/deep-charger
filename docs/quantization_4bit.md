@@ -92,6 +92,30 @@ output - which decides what gets evicted at inference - was never constrained.
 grounded with a bootstrap over questions, is 61% for bf16 and 50 to 55% for every 4-bit arm,
 untouched included. Reading is down for all of them, about equally.
 
+## The app's own temperature
+
+Every row above was sampled at 0.9, the temperature the lineage was trained and evaluated at. The app
+samples at 0.6. If the 4-bit damage lived in the tail of the distribution, the colder sampling the
+app actually uses would hide most of it, and the right fix would have been to train and measure at
+0.6 rather than to chase the 0.9 gap. Both models were therefore measured again at 0.6, untouched,
+300 rollouts each on the same 150 questions (2026-09-12, box 50767646).
+
+| arm, temperature 0.6 | correct | grounded | landed | searches | vs bf16 at 0.9 | vs bf16 at 0.6 |
+|---|---|---|---|---|---|---|
+| bf16 | 45.7% | 65% | 96% | 5.0 | +6.0 ± 3.4 | - |
+| 4-bit, untrained | 37.0% | 61% | 97% | 5.7 | -2.7 ± 3.3 | **-8.7 ± 3.0** |
+
+Cooling the sampling lifts both models by about six points. The paired gap between them, read in
+the 0.6 frame, is -8.7 ± 3.0: the same size as the two 0.9 measurements of the untouched grid
+(-11.7 ± 3.0 and -8.7 ± 3.0). The loss is not in the sampling tail, and temperature is not the fix.
+
+Two things follow for the shipped app rather than for the research question. At the temperature it
+runs, the untouched 4-bit conversion scores 37.0% absolute on this set, which is where the 0.9-frame
+target of 37% sits, but that number is the wrong comparison: the same app with the float model would
+score 45.7%, and the eight or nine points between them are what quantization still costs. And the
+grounding difference at 0.6 (-4.0 ± 3.2) is smaller than at 0.9 (-11.0 ± 3.4) while the correctness
+difference is not, which is one more reading in which the 4-bit model finds the page and misreads it.
+
 ## Why matching bf16 does not buy accuracy
 
 All six objectives asked the 4-bit model to imitate the bf16 model on stored traces, teacher-forced,
