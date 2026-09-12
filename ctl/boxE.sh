@@ -20,6 +20,8 @@ export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null)
 # a handful of lines that fetch this file, and everything the box needs is in git where it can be
 # fixed without renting a new machine.
 if [ ! -f /root/.bootstrapped ]; then
+  # one bootstrap at a time: a re-run while this is still downloading must not start a second copy
+  mkdir /root/.bootstrap_lock 2>/dev/null || { echo "bootstrap already running - not starting another"; exit 0; }
   echo "=== bootstrap $(date -u) ==="
   mkdir -p /root/work/fft_out /root/work/runtime /root/work/dwq_calib /root/hfdl
   touch /root/work/runtime/__init__.py
@@ -30,7 +32,7 @@ if [ ! -f /root/.bootstrapped ]; then
              "grpo_assets/mus_run/eval_step200/eval_heldout_300q_g2.jsonl" \
              "pooler_distill/pool_eval_cache.jsonl" "pooler_distill/dwq_calib/*" \
              "$S/*" "$Q/rollouts/*"; do
-    for try in 1 2 3; do hf download $R --include "$inc" --local-dir /root/hfdl 2>&1 | tail -1 && break; sleep 10; done
+    for try in 1 2 3 4 5 6; do hf download $R --include "$inc" --local-dir /root/hfdl 2>&1 | tail -1 && break; sleep 20; done
     echo "dl $inc $(date -u +%H:%M)"
   done
   SC=/root/hfdl/box_recover/scripts; cp $SC/*.py $SC/*.sh /root/work/ 2>/dev/null
@@ -60,6 +62,7 @@ PYB
        "calib $(wc -l < /root/work/dwq_calib/train.jsonl 2>/dev/null)"
   nvidia-smi --query-gpu=name,memory.total --format=csv,noheader; df -h /root | tail -1
   [ -s /root/eval_hf200/model.safetensors ] && touch /root/.bootstrapped && echo "BOOTSTRAP_DONE $(date -u)"
+  rmdir /root/.bootstrap_lock 2>/dev/null
 fi
 [ -f /root/.bootstrapped ] || { echo "bootstrap incomplete - stopping here"; exit 0; }
 
@@ -983,3 +986,4 @@ chmod +x /root/status_pub.sh
 setsid nohup bash /root/status_pub.sh >> /proc/1/fd/1 2>&1 < /dev/null &
 sleep 30; nvidia-smi --query-gpu=name,memory.used,memory.total --format=csv,noheader; t
 echo "Q4EVAL_LAUNCH_DONE $(date -u)"
+# CTL-END

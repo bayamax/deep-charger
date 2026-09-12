@@ -11,7 +11,10 @@ LAST=""
 n=0
 while :; do
   f=$(curl -sS --max-time 20 -H "Cache-Control: no-cache" "$RAW/$BOX.sh?$(date +%s)" 2>/dev/null)
-  if [ -n "$f" ] && ! echo "$f" | grep -q "^404"; then
+  # A cut-off transfer used to hand a truncated script to bash and, once the next fetch came back
+  # whole, run the full one again: every flap re-entered the bootstrap. Only a script that ends with
+  # its sentinel line is complete enough to run.
+  if [ -n "$f" ] && ! echo "$f" | grep -q "^404" && [ "$(echo "$f" | tail -1)" = "# CTL-END" ]; then
     h=$(echo "$f" | md5sum | cut -c1-12)
     if [ "$h" != "$LAST" ]; then
       LAST=$h
