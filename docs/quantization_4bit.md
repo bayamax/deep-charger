@@ -25,13 +25,13 @@ comparison. bf16 scores 39.7% with grounding 64%, landing 98%, 4.7 searches per 
 
 | attempt | correct | grounded | landed | searches | questions |
 |---|---|---|---|---|---|
-| 4-bit, untrained | -8.7 ± 3.0 | -9.7 | +0.7 | -0.7 | 150 |
+| 4-bit, untrained | -11.7 ± 3.0 | -11.0 | +0.0 | -0.4 | 150 |
 | straight-through LoRA (`ctl/qat.py`) | -5.7 ± 3.3 | -3.0 | +0.0 | +0.4 | 150 |
 | DWQ, temperature 2 (`ctl/dwq.py`) | -7.7 ± 5.5 | +2.9 | -2.9 | +1.4 | 52 |
 | DWQ, temperature 1, clipped init | -6.3 ± 3.2 | -4.7 | +0.7 | +0.1 | 150 |
 | group 32 instead of 64 | -11.6 ± 3.7 | -7.7 | -1.1 | +0.6 | 142 |
 | quantization + pooler, joint (`ctl/jointfit.py`) | -8.0 ± 3.3 | -2.3 | -0.3 | +0.3 | 150 |
-| pooler only, on the untouched 4-bit grid | -10.0 ± 3.5 | -15.3 | -1.3 | +0.0 | 150 |
+| pooler only, on the untouched 4-bit grid | -12.3 ± 3.2 | -13.3 | -1.7 | +0.4 | 150 |
 
 ## What the instrument can and cannot see
 
@@ -49,9 +49,14 @@ one: +3.8 ± 3.9, +2.4 ± 3.8, +0.9 ± 4.7, all p > 0.4.
 
 ## What can be concluded
 
-**The loss is real and is eight to nine points.** The untouched arm, once filled to all 150
-questions, sits at -8.7 ± 3.0 on its own, and the four group-64 arms pooled per question give
--7.1 ± 2.7. Every measurement agrees on the direction; the untouched arm now settles the size.
+**The loss is real and is about ten points.** The untouched arm, filled to all 150 questions,
+sits at -11.7 ± 3.0 in the copy on Hugging Face. The same two arms were measured a second time on
+another machine by accident - a stopped instance whose start request had been queued came back
+hours later and ran the same job - and that copy gave -8.7 ± 3.0 for the untouched arm and
+-10.0 ± 3.5 for the pooler-only one. The first 174 rollouts of the untouched arm are shared
+between the two copies; the remaining 126 differ, and that alone moves the score three points.
+Two full measurements of an identical setup disagreeing by three points is the instrument noise the
+power analysis predicts, seen directly.
 
 **None of the six attempts can be told apart from each other, or from doing nothing.** They span
 -5.7 to -11.6 with standard errors of 3.2 to 5.5. That is the honest reading, and it is as much a
@@ -77,8 +82,8 @@ quantized at the largest error of any tensor, and this lineage fitted it against
 table - so it looked like the culprit. Measured, it is not: the compressed-context KL starts at
 0.0364 against 0.0463 for plain contexts, so the compressed path is if anything less damaged.
 Trained on its own, with the grid untouched, the pooler could not move the validation KL at all
-(0.0345 to 0.0344 over 1200 steps) and made grounding worse, -15.3 against the untouched arm's
--10.4. The joint run's KL gain came entirely from the quantization parameters. One reason the pooler
+(0.0345 to 0.0344 over 1200 steps) and did not help: -12.3 against -11.7 in one measurement,
+-10.0 against -8.7 in the other, grounding no better in either. The joint run's KL gain came entirely from the quantization parameters. One reason the pooler
 run hurt: the loss was computed on the teacher's eviction schedule, so the student pooler's mass
 output - which decides what gets evicted at inference - was never constrained.
 
