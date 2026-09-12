@@ -19,7 +19,7 @@ PSKIP=embed_tokens
 MODE=probe
 SHARDS=3
 RAW="https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl"
-for f in pool_eval.py q4.py qat.py dwq.py checkmlx.py build_merged.py web_search.py; do
+for f in pool_eval.py q4.py qat.py dwq.py poolerfit.py checkmlx.py build_merged.py web_search.py; do
   for try in 1 2 3; do curl -sS -o /root/work/$f "$RAW/$f?nocache=$(date +%s)" && python3 -m py_compile /root/work/$f && break; sleep 5; done
 done
 cp /root/work/web_search.py /root/work/runtime/web_search.py 2>/dev/null
@@ -109,6 +109,58 @@ done
 SPD
 chmod +x /root/status_pub.sh
 setsid nohup bash /root/status_pub.sh >> /proc/1/fd/1 2>&1 < /dev/null &
+
+if [ "$MODE" = "pool" ]; then
+  # Fit the pooler to the embedding table the phone actually feeds it. Ships as a pooler file:
+  # no model directory, no size change, no app code.
+  pkill -f "afterkee[p].sh"; pkill -f "evalkee[p].sh"; pkill -f "dwqkee[p].sh"; pkill -f "probekee[p].sh"; sleep 5
+  PRUN=${PRUN:-p_poolfit}
+  RUNNING=0
+  pgrep -f "poolerfit.p[y]" >/dev/null && { RUNNING=1; echo "already running: $(tail -1 /root/poolerfit.log)"; }
+  [ -s /root/pooler_q4.safetensors ] && { RUNNING=1; echo "pooler already fitted"; }
+  if [ "$RUNNING" = "0" ]; then
+    pkill -f "dwq.p[y]"; pkill -f "pool_eval.p[y]"; sleep 8; pkill -9 -f "pool_eval.p[y]" 2>/dev/null; sleep 2
+    cd /root/work && PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python3 /root/work/poolerfit.py \
+      --ckpt /root/pooler200.safetensors --out /root/pooler_q4.safetensors \
+      --data /root/work/dwq_calib/train.jsonl --selftest 3 2>&1 | tail -14
+    grep -q "^step 3 " /root/poolerfit.log 2>/dev/null || { echo "POOLERFIT SELFTEST FAILED - not launching"; exit 0; }
+    cd /root/work && PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True setsid nohup python3 /root/work/poolerfit.py \
+      --ckpt /root/pooler200.safetensors --out /root/pooler_q4.safetensors \
+      --data /root/work/dwq_calib/train.jsonl --steps ${PSTEPS:-3000} --lr ${PLR:-1e-5} \
+      >> /root/poolerfit_run.log 2>&1 < /dev/null &
+    sleep 20
+  fi
+  cat > /root/poolkeep.sh <<PKP
+#!/bin/bash
+PRUN=$PRUN
+PKP
+  cat >> /root/poolkeep.sh <<'PKP2'
+until [ -s /root/pooler_q4.safetensors ] && grep -q POOLERFIT_DONE /root/poolerfit_run.log 2>/dev/null; do sleep 30; done
+pkill -f "poolerfit.p[y]"; sleep 5
+while :; do
+  for i in 0 1 2; do
+    want=$(wc -l < /root/work/ev_$i.jsonl 2>/dev/null || echo 0)
+    have=$(wc -l < /root/work/${PRUN}_out_$i.jsonl 2>/dev/null || echo 0)
+    [ "$want" -gt 0 ] && [ "$have" -ge "$want" ] && continue
+    pgrep -f "pool_eval.py .* /root/work/ev_$i.jsonl" >/dev/null && continue
+    echo "[$PRUN $(date -u +%H:%M)] shard $i at $have/$want - starting (pooler fitted to the 4-bit table)"
+    grep -viE "^\s*$" /root/${PRUN}_$i.log 2>/dev/null | tail -4 | cut -c1-200
+    cd /root/work && SP_BASE=/root/eval_hf200 SP_RANK=16 SP_NOSYS=1 SP_EPISODIC=1 OMP_NUM_THREADS=1 \
+      PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True setsid nohup python3 /root/work/pool_eval.py \
+      /root/pooler_q4.safetensors /root/work/ev_$i.jsonl /root/work/${PRUN}_out_$i.jsonl \
+      --n 999 --rw 768 --maxd 384 --samepage 1 --decode plain --q4 1 --tag "[$PRUN$i]" \
+      >> /root/${PRUN}_$i.log 2>&1 < /dev/null &
+    sleep 60
+  done
+  sleep 120
+done
+PKP2
+  chmod +x /root/poolkeep.sh
+  pkill -f "poolkee[p].sh"; sleep 1
+  setsid nohup bash /root/poolkeep.sh >> /proc/1/fd/1 2>&1 < /dev/null &
+  sleep 30; t; echo "POOLFIT_LAUNCH_DONE $(date -u)"
+  exit 0
+fi
 
 if [ "$MODE" = "probe" ]; then
   # Three training attempts have each closed most of the KL gap to bf16 and left the score where it
