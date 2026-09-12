@@ -77,7 +77,7 @@ JCLIP=0
 PRUNS="p_t06q4:1:0.6 p_t06bf16:0:0.6"
 PG=64
 PSKIP=
-MODE=sft
+MODE=publish2
 SHARDS=3
 RAW="https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl"
 for f in pool_eval.py q4.py qat.py dwq.py poolerfit.py jointfit.py checkmlx.py build_merged.py web_search.py; do
@@ -295,10 +295,12 @@ fi
 if [ "$MODE" = "publish2" ]; then
   # Everything worth keeping leaves the box before it is stopped.
   pkill -f "afterkee[p].sh"; pkill -f "evalkee[p].sh"; pkill -f "dwqkee[p].sh"; pkill -f "probekee[p].sh"
-  pkill -f "poolkee[p].sh"; pkill -f "jointkee[p].sh"; sleep 5
+  pkill -f "poolkee[p].sh"; pkill -f "jointkee[p].sh"; pkill -f "sftkee[p].sh"; sleep 5
   pkill -f "pool_eval.p[y]"; sleep 8; pkill -9 -f "pool_eval.p[y]" 2>/dev/null; sleep 2
   export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null)
   R=baya1116/hypernet-sp-distill; D=pooler_distill/grpo_pool3_step200_q4
+  # the directory the app would load must unpack to the values the evaluator measured
+  [ -s /root/sft_mlx4_s1/model.safetensors ] && python3 /root/work/checkmlx.py /root/sft_mlx4_s1 /root/sft_hf_s1 2>&1 | tail -3
   python3 - <<'PYP' > /root/work/q4_metrics.json
 import json, glob, collections, math, os
 
@@ -324,6 +326,8 @@ RUNS = [("bf16", "/root/work/ev_out_*.jsonl"), ("4bit_plain", "/root/work/q4_out
         ("4bit_ste_lora", "/root/work/qa_out_*.jsonl"), ("4bit_dwq_temp2", "/root/work/dw_out_*.jsonl"),
         ("4bit_dwq_temp1", "/root/work/d3_out_*.jsonl"), ("4bit_group32", "/root/work/g32_out_*.jsonl"),
         ("4bit_joint_pooler", "/root/work/j1_out_*.jsonl"),
+        ("4bit_self_trace_s1", "/root/work/s1_out_*.jsonl"),
+        ("bf16_temp06", "/root/work/p_t06bf16_out_*.jsonl"), ("4bit_plain_temp06", "/root/work/p_t06q4_out_*.jsonl"),
         ("4bit_pooler_only", "/root/work/j2_out_*.jsonl"),
         ("4bit_float_embed", "/root/work/p_embfloat_out_*.jsonl")]
 L = {n: load(p) for n, p in RUNS}
