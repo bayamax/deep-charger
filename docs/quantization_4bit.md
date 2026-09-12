@@ -1,8 +1,8 @@
-# What 4-bit costs this model, and six attempts to get it back
+# What 4-bit costs this model, and the attempt that got it back
 
 The app runs an MLX affine 4-bit conversion of the pooler-distilled student, group size 64. This
-records what that conversion costs on the held-out set, what was tried against it on 2026-09-11, and
-which of those attempts can be told apart from doing nothing.
+records what that conversion costs on the held-out set, what was tried against it on 2026-09-11 and
+2026-09-12, and which of those attempts can be told apart from doing nothing. One can: the last.
 
 ## The format, read off the shipped directory
 
@@ -32,6 +32,7 @@ comparison. bf16 scores 39.7% with grounding 64%, landing 98%, 4.7 searches per 
 | group 32 instead of 64 | -11.6 ± 3.7 | -7.7 | -1.1 | +0.6 | 142 |
 | quantization + pooler, joint (`ctl/jointfit.py`) | -8.0 ± 3.3 | -2.3 | -0.3 | +0.3 | 150 |
 | pooler only, on the untouched 4-bit grid | -12.3 ± 3.2 | -13.3 | -1.7 | +0.4 | 150 |
+| **self-trace fine-tuning under quantization (`ctl/jointfit.py --objective ce`)** | **+2.7 ± 3.4** | +0.3 | +0.0 | +0.5 | 150 |
 
 ## What the instrument can and cannot see
 
@@ -116,6 +117,43 @@ score 45.7%, and the eight or nine points between them are what quantization sti
 grounding difference at 0.6 (-4.0 ± 3.2) is smaller than at 0.9 (-11.0 ± 3.4) while the correctness
 difference is not, which is one more reading in which the 4-bit model finds the page and misreads it.
 
+## The one that worked: learning its own behaviour under quantization
+
+Every objective above asked the 4-bit model to imitate the float model. The last one does not. It
+takes the traces the lineage itself produced during GRPO that were correct, grounded and landed
+(1431 of them, every held-out question excluded by its text), puts them through the compressed
+context exactly as the evaluator builds it (chunking, eviction, the pooler's summaries, one block per
+step), and minimises the cross-entropy of the trace's own tokens through the 4-bit grid. Only the
+scales and biases of the 198 quantized tensors move, at 2e-6 for 1500 steps of about a second each;
+the 4-bit codes, the pooler and everything unquantized stay as shipped. The result packs into the
+same MLX directory the app loads, and the directory was checked to unpack to the values measured.
+
+| arm, temperature 0.9 | correct | grounded | landed | searches | vs bf16 |
+|---|---|---|---|---|---|
+| bf16 | 39.7% | 64% | 98% | 4.7 | - |
+| 4-bit, untrained | 28.0% | 53% | 98% | 4.3 | -11.7 ± 3.0 |
+| 4-bit, self-trace fine-tuned (s1) | **42.3%** | 64% | 98% | 5.2 | **+2.7 ± 3.4** |
+
+On the same 150 questions, paired, the fine-tuned 4-bit model is indistinguishable from bf16 and
+about fourteen points above the untouched grid, with grounding and landing back at the float
+model's values. Training loss went 0.40 to 0.28 and held-out-trace validation 0.79 to 0.63, still
+falling at the last step, so the run was stopped by its budget rather than by convergence. Twenty-
+five minutes of training on one RTX 3090, about $0.10.
+
+Why this worked where six imitation objectives did not is the same reason the imitation objectives
+could not: the traces are on-policy for this lineage, they were produced by this model in this
+environment with this pooler, and the loss is measured in the context the model will actually see.
+Matching bf16 one token ahead constrains agreement on the teacher's path; reproducing scored traces
+in the compressed context constrains the path itself. It is also, in kind, how the lineage was
+trained when it lived in 4-bit.
+
+Caveats, before this becomes the shipped file. One measurement, 300 rollouts, standard error 3.4:
+the honest claim is "at bf16's level, not below it", not "above it". The traces come from GRPO
+rollouts on the training questions; the held-out set was excluded by question text and was never
+in GRPO, but the two draw on the same corpus and the same search index. And the untouched grid's
+own two measurements differ by three points, so a replication of s1 on a second box is the next
+thing worth its cost.
+
 ## Why matching bf16 does not buy accuracy
 
 All six objectives asked the 4-bit model to imitate the bf16 model on stored traces, teacher-forced,
@@ -126,19 +164,23 @@ without recovering the answer is what that looks like from outside.
 
 ## What to try next, in order
 
-1. **Make the measurement able to see three points** before running any more comparisons.
-2. **On-policy distillation.** Sample trajectories from the 4-bit student in the real environment and
+1. **Ship s1 behind a replication.** Run the same 300 rollouts again on another machine; if it holds
+   within noise of bf16, `sft_s1_mlx4` on Hugging Face is the directory to put in the app.
+2. **Continue s1.** Validation was still falling at step 1500; a second 1500 steps from the saved
+   state costs another $0.10 before the $0.60 measurement.
+3. **Make the measurement able to see three points** before comparing s1 variants against each other.
+4. **On-policy distillation.** Sample trajectories from the 4-bit student in the real environment and
    match the teacher on the contexts the student actually reaches. No reward and no groups, so it
    costs a fraction of GRPO, and it removes the off-policy gap above.
-3. **Rotation (QuaRot / SpinQuant).** An orthogonal transform folded into neighbouring weights
+5. **Rotation (QuaRot / SpinQuant).** An orthogonal transform folded into neighbouring weights
    spreads the outliers that make affine 4-bit expensive. Expressible in the weights.
-4. **Sensitivity-driven mixed precision.** Quantize one tensor at a time, measure, and spend more
+6. **Sensitivity-driven mixed precision.** Quantize one tensor at a time, measure, and spend more
    bits only where it hurts. `embed_tokens` and `lm_head` are the candidates; the app's loader
    quantizes exactly the modules the file says are quantized, so leaving them in float needs no code
    change, only about 350MB.
-5. **AWQ-style per-channel scaling** from activation statistics, folded into the preceding norm or
+7. **AWQ-style per-channel scaling** from activation statistics, folded into the preceding norm or
    rows. No training.
 
 The historical lineage adapted the model *while it was quantized*, against the task rather than
-against a float teacher. That remains the other way back, and it is what GRPO under fake
-quantization would do - at roughly ten minutes a step.
+against a float teacher. s1 is the cheap end of that: its own scored traces instead of new
+rollouts. GRPO under fake quantization, at roughly ten minutes a step, remains the expensive end.
