@@ -10,6 +10,9 @@
 # per-rollout output the onstart restores as ev_out_*.jsonl, so the difference can be paired over
 # questions instead of being read off two independent means.
 cd /root/work
+# The token arrives as an environment variable on the instance; keep a copy so anything this
+# script starts later still has it, and so the onstart can stay as short as possible.
+[ -s /root/.hf_token ] || { [ -n "$HF_TOKEN" ] && printf '%s' "$HF_TOKEN" > /root/.hf_token && chmod 600 /root/.hf_token; }
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null)
 # ---- one-time bootstrap -------------------------------------------------------------------------
 # This used to live in the instance's onstart. Four hosts in a row refused to create a container with
