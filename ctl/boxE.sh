@@ -19,7 +19,7 @@ PSKIP=embed_tokens
 MODE=probe
 SHARDS=3
 RAW="https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl"
-for f in pool_eval.py q4.py qat.py dwq.py poolerfit.py checkmlx.py build_merged.py web_search.py; do
+for f in pool_eval.py q4.py qat.py dwq.py poolerfit.py jointfit.py checkmlx.py build_merged.py web_search.py; do
   for try in 1 2 3; do curl -sS -o /root/work/$f "$RAW/$f?nocache=$(date +%s)" && python3 -m py_compile /root/work/$f && break; sleep 5; done
 done
 cp /root/work/web_search.py /root/work/runtime/web_search.py 2>/dev/null
@@ -109,6 +109,67 @@ done
 SPD
 chmod +x /root/status_pub.sh
 setsid nohup bash /root/status_pub.sh >> /proc/1/fd/1 2>&1 < /dev/null &
+
+if [ "$MODE" = "joint" ]; then
+  # The quantization parameters and the pooler, trained together against the 16-bit system, through
+  # the compressed forward the evaluator actually runs. Everything before this trained on plain
+  # contexts, so the pooler - where the compression happens - never saw a gradient at all.
+  JRUN=${JRUN:-j1}
+  pkill -f "afterkee[p].sh"; pkill -f "evalkee[p].sh"; pkill -f "dwqkee[p].sh"; pkill -f "probekee[p].sh"; pkill -f "poolkee[p].sh"; sleep 5
+  HF=/root/joint_hf_$JRUN; POOL=/root/pooler_joint_$JRUN.safetensors; LOG=/root/joint_$JRUN.log
+  RUNNING=0
+  pgrep -f "jointfit.p[y]" >/dev/null && { RUNNING=1; echo "already running: $(tail -1 $LOG)"; }
+  [ -s $HF/model.safetensors ] && { RUNNING=1; echo "joint run $JRUN already finished"; }
+  if [ "$RUNNING" = "0" ]; then
+    pkill -f "dwq.p[y]"; pkill -f "poolerfit.p[y]"; pkill -f "pool_eval.p[y]"; sleep 8
+    pkill -9 -f "pool_eval.p[y]" 2>/dev/null; sleep 2
+    python3 /root/work/q4.py || { echo "Q4 SELFTEST FAILED - not launching"; exit 0; }
+    rm -f $LOG
+    cd /root/work && PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python3 /root/work/jointfit.py \
+      --ckpt /root/pooler200.safetensors --data /root/work/dwq_calib/train.jsonl \
+      --out-hf $HF --out-mlx /root/joint_mlx4_$JRUN --out-pooler $POOL \
+      --state /root/joint/$JRUN.pt --log $LOG --val 8 --val-every 2 --selftest 3 2>&1 | tail -16
+    grep -q "^step 3 " $LOG 2>/dev/null || { echo "JOINTFIT SELFTEST FAILED - not launching"; exit 0; }
+    rm -f $LOG
+    cd /root/work && PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True setsid nohup python3 /root/work/jointfit.py \
+      --ckpt /root/pooler200.safetensors --data /root/work/dwq_calib/train.jsonl \
+      --out-hf $HF --out-mlx /root/joint_mlx4_$JRUN --out-pooler $POOL \
+      --state /root/joint/$JRUN.pt --log $LOG \
+      --steps ${JSTEPS:-1200} --lr-q ${JLRQ:-2e-6} --lr-p ${JLRP:-1e-5} --val 24 --val-every ${JVAL:-50} \
+      >> /root/joint_run_$JRUN.log 2>&1 < /dev/null &
+    sleep 20
+  fi
+  cat > /root/jointkeep.sh <<JKP
+#!/bin/bash
+JRUN=$JRUN; HF=$HF; POOL=$POOL
+JKP
+  cat >> /root/jointkeep.sh <<'JKP2'
+until [ -s $HF/model.safetensors ] && grep -q JOINTFIT_DONE /root/joint_run_$JRUN.log 2>/dev/null; do sleep 60; done
+pkill -f "jointfit.p[y]"; sleep 10
+while :; do
+  for i in 0 1 2; do
+    want=$(wc -l < /root/work/ev_$i.jsonl 2>/dev/null || echo 0)
+    have=$(wc -l < /root/work/${JRUN}_out_$i.jsonl 2>/dev/null || echo 0)
+    [ "$want" -gt 0 ] && [ "$have" -ge "$want" ] && continue
+    pgrep -f "pool_eval.py .* /root/work/ev_$i.jsonl" >/dev/null && continue
+    echo "[$JRUN-eval $(date -u +%H:%M)] shard $i at $have/$want - starting (quantized body + fitted pooler)"
+    grep -viE "^\s*$" /root/${JRUN}_$i.log 2>/dev/null | tail -4 | cut -c1-200
+    cd /root/work && SP_BASE=$HF SP_RANK=16 SP_NOSYS=1 SP_EPISODIC=1 OMP_NUM_THREADS=1 \
+      PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True setsid nohup python3 /root/work/pool_eval.py \
+      $POOL /root/work/ev_$i.jsonl /root/work/${JRUN}_out_$i.jsonl \
+      --n 999 --rw 768 --maxd 384 --samepage 1 --decode plain --tag "[$JRUN$i]" \
+      >> /root/${JRUN}_$i.log 2>&1 < /dev/null &
+    sleep 60
+  done
+  sleep 120
+done
+JKP2
+  chmod +x /root/jointkeep.sh
+  pkill -f "jointkee[p].sh"; sleep 1
+  setsid nohup bash /root/jointkeep.sh >> /proc/1/fd/1 2>&1 < /dev/null &
+  sleep 30; t; echo "JOINT_LAUNCH_DONE $JRUN $(date -u)"
+  exit 0
+fi
 
 if [ "$MODE" = "pool" ]; then
   # Fit the pooler to the embedding table the phone actually feeds it. Ships as a pooler file:
