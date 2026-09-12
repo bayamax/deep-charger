@@ -159,6 +159,22 @@ for n,_ in runs[1:]:
       sd=(sum((x-m)**2 for x in d)/len(d))**0.5
       out.append(f"{k[:4]} {sc*m:+.1f}{u}±{sc*sd/math.sqrt(len(d)):.1f}")
   print(f"  vs bf16 {n:16s} " + "  ".join(out) + f"  ({len(c)} q)")
+# an arm whose tag ends in bf16 is a reference of its own: every arm sharing its prefix is paired
+# against it too, so a probe run at another temperature is read in its own frame as well
+for rn,_ in runs[1:]:
+  if not rn.endswith("bf16") or not L[rn]: continue
+  pre=rn[:-len("bf16")]
+  for n,_ in runs[1:]:
+    if n==rn or not n.startswith(pre) or not L[n]: continue
+    R=L[rn]; S=L[n]
+    c=sorted(set(R[2]["correct"])&set(S[2]["correct"]))
+    if not c: continue
+    out=[]
+    for k,sc,u in (("correct",100,"pt"),("grounded",100,"pt"),("landed",100,"pt"),("ns",1,"")):
+        d=[S[2][k][q]-R[2][k][q] for q in c]; m=sum(d)/len(d)
+        sd=(sum((x-m)**2 for x in d)/len(d))**0.5
+        out.append(f"{k[:4]} {sc*m:+.1f}{u}±{sc*sd/math.sqrt(len(d)):.1f}")
+    print(f"  vs {rn[5:]:12s} {n:16s} " + "  ".join(out) + f"  ({len(c)} q)")
 PYE
 TTD
 chmod +x /usr/local/bin/t
@@ -591,7 +607,7 @@ if [ "$MODE" = "dwq" ]; then
   # The measurement needs no --q4: the directory already holds the 4-bit values, dequantized.
   cat > /root/dwqkeep.sh <<DKQ
 #!/bin/bash
-RUN=$RUN; HF=$HF
+RUN=$RUN; HF=$HF; ET=${DEVALTEMP:-0.9}
 DKQ
   cat >> /root/dwqkeep.sh <<'DKQ2'
 until [ -s $HF/model.safetensors ] && grep -q DWQ_DONE /root/dwq_run_$RUN.log 2>/dev/null; do sleep 60; done
@@ -608,7 +624,7 @@ while :; do
     cd /root/work && SP_BASE=$HF SP_RANK=16 SP_NOSYS=1 SP_EPISODIC=1 OMP_NUM_THREADS=1 \
       PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True setsid nohup python3 /root/work/pool_eval.py \
       /root/pooler200.safetensors /root/work/ev_$i.jsonl /root/work/${RUN}_out_$i.jsonl \
-      --n 999 --rw 768 --maxd 384 --samepage 1 --decode plain --tag "[$RUN$i]" \
+      --n 999 --rw 768 --maxd 384 --samepage 1 --decode plain --temp $ET --tag "[$RUN$i]" \
       >> /root/${RUN}_$i.log 2>&1 < /dev/null &
     sleep 60
   done
