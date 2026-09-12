@@ -30,10 +30,10 @@ echo "fetched: pool_eval $(wc -l < /root/work/pool_eval.py) lines, q4 $(wc -l < 
 cat > /usr/local/bin/t <<'TTD'
 #!/bin/bash
 echo "$(date -u +%H:%M)Z dwq $(pgrep -fc 'dwq.p[y]')本  eval $(pgrep -fc 'pool_eval.p[y]')本  $(nvidia-smi --query-gpu=memory.used --format=csv,noheader)"
-for f in /root/dwq_run_*.log; do grep -hE "^\[dwq\]" "$f" 2>/dev/null | tail -3; done
+for f in /root/dwq_run_*.log /root/joint_run_*.log; do grep -hE "^\[dwq\]|^\[joint\]|taking step" "$f" 2>/dev/null | tail -3; done
 python3 - <<'PYD' 2>/dev/null
 import re,glob,os
-for f in sorted(glob.glob("/root/dwq_d*.log")):
+for f in sorted(glob.glob("/root/dwq_d*.log")) + sorted(glob.glob("/root/joint_j*.log")):
   tr=[];va=[]
   for l in open(f):
       m=re.match(r"step (\d+) kl=([\d.]+)",l)
