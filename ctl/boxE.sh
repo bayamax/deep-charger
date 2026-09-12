@@ -16,7 +16,7 @@ DPOL=1
 DFOCUS=1
 PRUN=p_embfloat
 PSKIP=embed_tokens
-MODE=joint
+MODE=publish2
 SHARDS=3
 RAW="https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl"
 for f in pool_eval.py q4.py qat.py dwq.py poolerfit.py jointfit.py checkmlx.py build_merged.py web_search.py; do
@@ -117,6 +117,92 @@ done
 SPD
 chmod +x /root/status_pub.sh
 setsid nohup bash /root/status_pub.sh >> /proc/1/fd/1 2>&1 < /dev/null &
+
+if [ "$MODE" = "publish2" ]; then
+  # Everything worth keeping leaves the box before it is stopped.
+  pkill -f "afterkee[p].sh"; pkill -f "evalkee[p].sh"; pkill -f "dwqkee[p].sh"; pkill -f "probekee[p].sh"
+  pkill -f "poolkee[p].sh"; pkill -f "jointkee[p].sh"; sleep 5
+  pkill -f "pool_eval.p[y]"; sleep 8; pkill -9 -f "pool_eval.p[y]" 2>/dev/null; sleep 2
+  export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null)
+  R=baya1116/hypernet-sp-distill; D=pooler_distill/grpo_pool3_step200_q4
+  python3 - <<'PYP' > /root/work/q4_metrics.json
+import json, glob, collections, math, os
+
+def load(pat):
+    rows = []
+    for f in sorted(glob.glob(pat)):
+        for line in open(f):
+            try: rows.append(json.loads(line))
+            except Exception: pass
+    if not rows: return None
+    per = {}
+    for k in ("correct", "grounded", "landed", "ns"):
+        d = collections.defaultdict(list)
+        for r in rows: d[r.get("q", "")].append(float(r.get(k) or 0))
+        per[k] = {q: sum(v)/len(v) for q, v in d.items()}
+    return {"rollouts": len(rows), "questions": len(per["correct"]),
+            "correct": round(100*sum(float(r.get("correct") or 0) for r in rows)/len(rows), 1),
+            "grounded": round(100*sum(float(r.get("grounded") or 0) for r in rows)/len(rows), 1),
+            "landed": round(100*sum(float(r.get("landed") or 0) for r in rows)/len(rows), 1),
+            "searches": round(sum(float(r.get("ns") or 0) for r in rows)/len(rows), 2), "_per": per}
+
+RUNS = [("bf16", "/root/work/ev_out_*.jsonl"), ("4bit_plain", "/root/work/q4_out_*.jsonl"),
+        ("4bit_ste_lora", "/root/work/qa_out_*.jsonl"), ("4bit_dwq_temp2", "/root/work/dw_out_*.jsonl"),
+        ("4bit_dwq_temp1", "/root/work/d3_out_*.jsonl"), ("4bit_group32", "/root/work/g32_out_*.jsonl"),
+        ("4bit_joint_pooler", "/root/work/j1_out_*.jsonl"),
+        ("4bit_float_embed", "/root/work/p_embfloat_out_*.jsonl")]
+L = {n: load(p) for n, p in RUNS}
+F = L["bf16"]
+
+def paired(S):
+    if not (F and S): return None
+    c = sorted(set(F["_per"]["correct"]) & set(S["_per"]["correct"]))
+    if not c: return None
+    out = {"questions": len(c)}
+    for k in ("correct", "grounded", "landed", "ns"):
+        d = [S["_per"][k][q] - F["_per"][k][q] for q in c]
+        m = sum(d)/len(d); sd = (sum((x-m)**2 for x in d)/len(d))**0.5
+        sc = 1 if k == "ns" else 100
+        out[k] = {"delta": round(sc*m, 1), "se": round(sc*sd/math.sqrt(len(c)), 1)}
+    return out
+
+print(json.dumps({
+  "what": "What the phone's 4-bit conversion costs this model, and six attempts to recover it",
+  "format": {"scheme": "MLX affine, group 64, 4 bits, scales and biases fp16",
+             "tensors": "7 projections x 28 blocks + embed_tokens + lm_head = 198, 1776.9M weights",
+             "relative_weight_error": {"overall": 9.51, "embed_tokens": 10.19, "lm_head": 10.35}},
+  "heldout": {"file": "eval300.jsonl first 300 lines, 150 distinct questions x 2",
+              "settings": {"rw": 768, "maxd": 384, "samepage": 1, "temp": 0.9, "gen": 1500, "maxs": 5}},
+  "runs": {n: {k: v for k, v in (L[n] or {}).items() if k != "_per"} for n, _ in RUNS if L[n]},
+  "paired_against_bf16": {n: paired(L[n]) for n, _ in RUNS[1:] if L[n]},
+  "conclusion": "The loss is about seven points and none of the six attempts separates from the "
+                "others or from doing nothing: they span -5.7 to -11.6 with standard errors of 3.2 "
+                "to 5.5. Every run closed most of the KL gap to bf16 and recovered grounding; none "
+                "recovered the score. See docs/quantization_4bit.md.",
+}, ensure_ascii=False, indent=2))
+PYP
+  cat /root/work/q4_metrics.json
+  hf upload $R /root/work/q4_metrics.json $D/q4_metrics.json 2>&1 | tail -1
+  for f in /root/dwq_d3.log /root/dwq_d4.log /root/joint_j1.log /root/qat.log; do
+    [ -s $f ] && hf upload $R $f $D/logs/$(basename $f) >/dev/null 2>&1
+  done
+  for p in q4 qa d3 d4 g32 j1 p_embfloat; do
+    for i in 0 1 2; do
+      [ -s /root/work/${p}_out_$i.jsonl ] && hf upload $R /root/work/${p}_out_$i.jsonl $D/rollouts/${p}_$i.jsonl >/dev/null 2>&1
+    done
+  done
+  echo "--- deployable directories ---"
+  for n in d3 d4; do
+    [ -s /root/dwq_mlx4_$n/model.safetensors ] && { echo "dwq_$n $(du -shL /root/dwq_mlx4_$n | cut -f1)"; hf upload $R /root/dwq_mlx4_$n $D/dwq_${n}_mlx4 2>&1 | tail -1; }
+  done
+  [ -s /root/joint_hf_j1/model.safetensors ] && { echo "joint j1 $(du -shL /root/joint_hf_j1 | cut -f1)"; hf upload $R /root/joint_hf_j1 $D/joint_j1_hf 2>&1 | tail -1; }
+  [ -s /root/pooler_joint_j1.safetensors ] && hf upload $R /root/pooler_joint_j1.safetensors $D/pooler_joint_j1.safetensors 2>&1 | tail -1
+  [ -s /root/dwq/j1.pt ] && hf upload $R /root/dwq/j1.pt $D/joint_j1_params.pt >/dev/null 2>&1
+  [ -s /root/joint/j1.pt ] && hf upload $R /root/joint/j1.pt $D/joint_j1_params.pt 2>&1 | tail -1
+  [ -s /root/dwq/d4.pt ] && hf upload $R /root/dwq/d4.pt $D/dwq_d4_params.pt 2>&1 | tail -1
+  echo "PUBLISH2_DONE $(date -u)"
+  exit 0
+fi
 
 if [ "$MODE" = "joint" ]; then
   # The quantization parameters and the pooler, trained together against the 16-bit system, through
