@@ -25,7 +25,7 @@ comparison. bf16 scores 39.7% with grounding 64%, landing 98%, 4.7 searches per 
 
 | attempt | correct | grounded | landed | searches | questions |
 |---|---|---|---|---|---|
-| 4-bit, untrained | -7.5 ± 4.2 | -10.4 | +0.0 | -0.8 | 106 |
+| 4-bit, untrained | -8.7 ± 3.0 | -9.7 | +0.7 | -0.7 | 150 |
 | straight-through LoRA (`ctl/qat.py`) | -5.7 ± 3.3 | -3.0 | +0.0 | +0.4 | 150 |
 | DWQ, temperature 2 (`ctl/dwq.py`) | -7.7 ± 5.5 | +2.9 | -2.9 | +1.4 | 52 |
 | DWQ, temperature 1, clipped init | -6.3 ± 3.2 | -4.7 | +0.7 | +0.1 | 150 |
@@ -49,7 +49,9 @@ one: +3.8 ± 3.9, +2.4 ± 3.8, +0.9 ± 4.7, all p > 0.4.
 
 ## What can be concluded
 
-**The loss is real and is about seven points.** Every measurement agrees on that.
+**The loss is real and is eight to nine points.** The untouched arm, once filled to all 150
+questions, sits at -8.7 ± 3.0 on its own, and the four group-64 arms pooled per question give
+-7.1 ± 2.7. Every measurement agrees on the direction; the untouched arm now settles the size.
 
 **None of the six attempts can be told apart from each other, or from doing nothing.** They span
 -5.7 to -11.6 with standard errors of 3.2 to 5.5. That is the honest reading, and it is as much a
