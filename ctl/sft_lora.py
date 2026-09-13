@@ -37,10 +37,15 @@ def encode(rec):
     head = tok.apply_chat_template([{"role": "user", "content": rec["q"]}], add_generation_prompt=True, tokenize=False)
     if not head.rstrip().endswith("<think>"):
         head += "<think>\n"
-    pre = rec["prefix"]
-    if pre.startswith("<think>"):
-        pre = pre[len("<think>"):].lstrip("\n")
-    body = pre.rstrip("\n") + "\n" + rec["thinking"].strip() + "\n</think>\n" + rec["reply"].strip()
+    if "text" in rec:                      # a strict QA trace, replayed as it was generated
+        body = rec["text"]
+        if body.startswith("<think>"):
+            body = body[len("<think>"):].lstrip("\n")
+    else:
+        pre = rec["prefix"]
+        if pre.startswith("<think>"):
+            pre = pre[len("<think>"):].lstrip("\n")
+        body = pre.rstrip("\n") + "\n" + rec["thinking"].strip() + "\n</think>\n" + rec["reply"].strip()
     ids, mask = tok.encode(head), []
     mask = [0] * len(ids)
     for piece in INFO.split(body):

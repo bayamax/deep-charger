@@ -26,6 +26,8 @@ ap.add_argument("--decode", default="plain", choices=["plain", "guard"], help="p
 ap.add_argument("--q4", type=int, default=0, help="1: round every weight the phone quantizes onto the 4-bit affine grid (group 64) before evaluating")
 ap.add_argument("--q4group", type=int, default=64); ap.add_argument("--q4bits", type=int, default=4)
 ap.add_argument("--q4skip", default="", help="comma-separated leaf modules to leave in float, e.g. embed_tokens")
+ap.add_argument("--stop", default="answer", choices=["answer", "eos"], help="answer = stop once 'answer is ...' is complete (the strict lineage); eos = stop at end of sequence or --replycap tokens after </think> (the conversational lineage)")
+ap.add_argument("--replycap", type=int, default=200)
 A = ap.parse_args()
 
 os.environ.setdefault("SP_HOTPOT2", "0"); os.environ.setdefault("SP_BASE", "/root/fft_hf")
@@ -261,7 +263,9 @@ def rollout(question):
                     if cur_key is not None: seen_pages[cur_key] = page_off
                     blk = f"\n<information>\n{chunk}\n[READER] (no extraction)\n</information>\n"
                 inject(blk); brk = True; break
-            if "</think>" in txt and answer_complete(txt.split("</think>")[-1]):
+            if A.stop == "answer" and "</think>" in txt and answer_complete(txt.split("</think>")[-1]):
+                brk = True; break
+            if A.stop == "eos" and "</think>" in txt and len(tok.encode(txt.split("</think>")[-1], add_special_tokens=False)) >= A.replycap:
                 brk = True; break
             out = model(inputs_embeds=emb([nx]), past_key_values=past, attention_mask=torch.ones(1, npos + 1, device=DEV),
                         position_ids=torch.tensor([[npos]], device=DEV), cache_position=torch.tensor([npos], device=DEV), use_cache=True)
@@ -269,7 +273,9 @@ def rollout(question):
         txt = tok.decode(gen)
         if dead or (brk and gen and gen[-1] == eos):
             break
-        if "</think>" in txt and answer_complete(txt.split("</think>")[-1]):
+        if A.stop == "answer" and "</think>" in txt and answer_complete(txt.split("</think>")[-1]):
+            break
+        if A.stop == "eos" and "</think>" in txt and len(tok.encode(txt.split("</think>")[-1], add_special_tokens=False)) >= A.replycap:
             break
     txt = tok.decode(gen)
     landed = "</think>" in txt and bool(txt.split("</think>")[-1].strip())
@@ -307,7 +313,8 @@ with open(A.out, "a") as fh:
         txt, ans, ns_, nm, served, queries, landed, dead = rollout(q)
         correct = landed and has(ans, g)
         grounded = any(has(s, g) for s in served)
-        rec = {"q": q, "gold": g, "correct": correct, "grounded": grounded, "landed": landed, "dead": dead,
+        tail_tags = landed and ("<search>" in txt.split("</think>")[-1] or "<information>" in txt.split("</think>")[-1])
+        rec = {"q": q, "gold": g, "correct": correct, "grounded": grounded, "landed": landed, "dead": dead, "tail_tags": tail_tags,
                "ns": ns_, "more": nm, "answer": ans, "queries": queries, "text": txt, "rw": A.rw, "maxd": A.maxd, "decode": A.decode, "samepage": A.samepage}
         fh.write(json.dumps(rec, ensure_ascii=False) + "\n"); fh.flush()
         stat["n"] += 1; stat["c"] += correct; stat["g"] += grounded; stat["l"] += landed; stat["s"] += ns_; stat["m"] += nm
