@@ -77,7 +77,7 @@ JCLIP=0
 PRUNS="p_t06q4:1:0.6 p_t06bf16:0:0.6"
 PG=64
 PSKIP=
-MODE=sft2
+MODE=publish3
 SHARDS=3
 RAW="https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl"
 for f in pool_eval.py q4.py qat.py dwq.py poolerfit.py jointfit.py checkmlx.py packmlx.py sft_lora.py build_merged.py web_search.py; do
@@ -310,6 +310,16 @@ if [ "$MODE" = "pack" ]; then
   hf upload $R /root/sft_run_$SRUN.log $D/logs/sft_run_$SRUN.log >/dev/null 2>&1
   for i in 0 1 2; do hf upload $R /root/work/${SRUN}_out_$i.jsonl $D/rollouts/${SRUN}_$i.jsonl >/dev/null 2>&1; done
   echo "PACK_DONE $SRUN $(date -u)"
+  exit 0
+fi
+if [ "$MODE" = "publish3" ]; then
+  # credit is nearly gone: ship what the s2 measurement has produced so far, without stopping it
+  export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null)
+  R=baya1116/hypernet-sp-distill
+  for i in 0 1 2; do [ -s /root/work/s2_out_$i.jsonl ] && hf upload $R /root/work/s2_out_$i.jsonl pooler_distill/chatsft/rollouts/s2_$i.jsonl 2>&1 | tail -1; done
+  for i in 0 1 2; do [ -s /root/s2_$i.log ] && hf upload $R /root/s2_$i.log pooler_distill/chatsft/logs/s2_$i.log >/dev/null 2>&1; done
+  [ -s /root/sft2_run_s2.log ] && hf upload $R /root/sft2_run_s2.log pooler_distill/chatsft/logs/sft2_run_s2.log >/dev/null 2>&1
+  echo "PUBLISH3_DONE $(cat /root/work/s2_out_*.jsonl 2>/dev/null | wc -l) rollouts $(date -u)"
   exit 0
 fi
 if [ "$MODE" = "sft2" ]; then
