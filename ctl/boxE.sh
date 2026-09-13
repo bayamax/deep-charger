@@ -139,7 +139,7 @@ for p in sorted(glob.glob("/root/work/d[0-9]_out_0.jsonl")):
 for p in sorted(glob.glob("/root/work/g[0-9]*_out_0.jsonl")):
   t=os.path.basename(p).split("_")[0]
   runs.append((f"4bit {t} plain", f"/root/work/{t}_out_*.jsonl"))
-for p in sorted(glob.glob("/root/work/j[0-9]_out_0.jsonl")) + sorted(glob.glob("/root/work/s[0-9]_out_0.jsonl")) + sorted(glob.glob("/root/work/p_*_out_0.jsonl")):
+for p in sorted(glob.glob("/root/work/j[0-9]_out_0.jsonl")) + sorted(glob.glob("/root/work/s[0-9]_out_0.jsonl")) + sorted(glob.glob("/root/work/p_*_out_0.jsonl")) + sorted(glob.glob("/root/work/g[0-9]_out_0.jsonl")):
   t=os.path.basename(p)[:-len("_out_0.jsonl")]
   runs.append((f"4bit {t}", f"/root/work/{t}_out_*.jsonl"))
 L={n:load(p) for n,p in runs}
@@ -310,6 +310,58 @@ if [ "$MODE" = "pack" ]; then
   hf upload $R /root/sft_run_$SRUN.log $D/logs/sft_run_$SRUN.log >/dev/null 2>&1
   for i in 0 1 2; do hf upload $R /root/work/${SRUN}_out_$i.jsonl $D/rollouts/${SRUN}_$i.jsonl >/dev/null 2>&1; done
   echo "PACK_DONE $SRUN $(date -u)"
+  exit 0
+fi
+if [ "$MODE" = "gen" ]; then
+  # Data generation for the conversational lineage: the step-200 student answers real questions
+  # (nq_open, people's own search queries) through the same environment the evaluator uses, one
+  # rollout each. Correct, grounded traces become the search prefixes a teacher continues.
+  GRUN=${GRUN:-g1}; GN=${GN:-1500}; GTEMP=${GTEMP:-0.8}
+  pkill -f "afterkee[p].sh"; pkill -f "evalkee[p].sh"; pkill -f "dwqkee[p].sh"; pkill -f "probekee[p].sh"; pkill -f "poolkee[p].sh"; pkill -f "jointkee[p].sh"; pkill -f "sftkee[p].sh"; sleep 5
+  export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null)
+  R=baya1116/hypernet-sp-distill
+  [ -s /root/hfdl/pooler_distill/nq_pool.jsonl ] || for try in 1 2 3; do hf download $R --include "pooler_distill/nq_pool.jsonl" --local-dir /root/hfdl 2>&1 | tail -1 && break; sleep 10; done
+  python3 - <<PYG
+import json
+qs=[l for l in open("/root/hfdl/pooler_distill/nq_pool.jsonl") if l.strip()][:$GN]
+for i in range(3): open(f"/root/work/gq_{i}.jsonl","w").writelines(qs[i::3])
+print(f"[gen] {len(qs)} questions -> {[len(qs[i::3]) for i in range(3)]}")
+PYG
+  for i in 0 1 2; do for try in 1 2 3; do hf download $R --include "pooler_distill/nq_gen/${GRUN}_$i.jsonl" --local-dir /root/hfdl 2>/dev/null | tail -1 && break; sleep 5; done
+    [ -s /root/hfdl/pooler_distill/nq_gen/${GRUN}_$i.jsonl ] && cp /root/hfdl/pooler_distill/nq_gen/${GRUN}_$i.jsonl /root/work/${GRUN}_out_$i.jsonl; done
+  echo "restored $(cat /root/work/${GRUN}_out_*.jsonl 2>/dev/null | wc -l) rollouts"
+  cat > /root/genkeep.sh <<GKQ
+#!/bin/bash
+GRUN=$GRUN; GTEMP=$GTEMP; R=$R
+GKQ
+  cat >> /root/genkeep.sh <<'GKQ2'
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null)
+last_up=0
+while :; do
+  done=1
+  for i in 0 1 2; do
+    want=$(wc -l < /root/work/gq_$i.jsonl 2>/dev/null || echo 0)
+    have=$(wc -l < /root/work/${GRUN}_out_$i.jsonl 2>/dev/null || echo 0)
+    [ "$want" -gt 0 ] && [ "$have" -ge "$want" ] && continue
+    done=0
+    pgrep -f "pool_eval.py .* /root/work/gq_$i.jsonl" >/dev/null && continue
+    echo "[$GRUN-gen $(date -u +%H:%M)] shard $i at $have/$want - starting (temp $GTEMP)"
+    cd /root/work && SP_BASE=/root/eval_hf200 SP_RANK=16 SP_NOSYS=1 SP_EPISODIC=1 OMP_NUM_THREADS=1       PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True setsid nohup python3 /root/work/pool_eval.py       /root/pooler200.safetensors /root/work/gq_$i.jsonl /root/work/${GRUN}_out_$i.jsonl       --n 9999 --rw 768 --maxd 384 --samepage 1 --decode plain --temp $GTEMP --tag "[$GRUN$i]"       >> /root/${GRUN}_$i.log 2>&1 < /dev/null &
+    sleep 60
+  done
+  now=$(date +%s)
+  if [ "$done" = "1" ] || [ $((now - last_up)) -ge 1800 ]; then
+    for i in 0 1 2; do [ -s /root/work/${GRUN}_out_$i.jsonl ] && hf upload $R /root/work/${GRUN}_out_$i.jsonl pooler_distill/nq_gen/${GRUN}_$i.jsonl >/dev/null 2>&1; done
+    last_up=$now; echo "[$GRUN-gen $(date -u +%H:%M)] uploaded $(cat /root/work/${GRUN}_out_*.jsonl 2>/dev/null | wc -l) rollouts"
+  fi
+  [ "$done" = "1" ] && { echo "GEN_DONE $GRUN $(date -u)"; break; }
+  sleep 120
+done
+GKQ2
+  chmod +x /root/genkeep.sh
+  pkill -f "genkee[p].sh"; sleep 1
+  setsid nohup bash /root/genkeep.sh >> /proc/1/fd/1 2>&1 < /dev/null &
+  sleep 30; echo "GEN_LAUNCH_DONE $GRUN n=$GN $(date -u)"
   exit 0
 fi
 if [ "$MODE" = "publish2" ]; then
