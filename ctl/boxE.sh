@@ -130,6 +130,8 @@ def load(pat):
       for r in rows: d[r.get("q","")].append(float(r.get(k) or 0))
       per[k]={q:sum(v)/len(v) for q,v in d.items()}
   m={k:sum(float(r.get(k) or 0) for r in rows)/len(rows) for k in KEYS}
+  m["zs"]=sum(1 for r in rows if not r.get("ns"))/len(rows)
+  m["tt"]=sum(1 for r in rows if r.get("tail_tags") or ("</think>" in (r.get("text") or "") and "<search>" in (r.get("text") or "").split("</think>")[-1]))/len(rows)
   return len(rows), m, per
 runs=[("bf16","/root/work/ev_out_*.jsonl"),("4bit plain","/root/work/q4_out_*.jsonl"),
     ("4bit +STE-lora","/root/work/qa_out_*.jsonl"),("4bit +dwq d1","/root/work/dw_out_*.jsonl")]
@@ -146,7 +148,7 @@ L={n:load(p) for n,p in runs}
 for n,_ in runs:
   S=L[n]
   if S: print(f"  {n:16s} {100*S[1]['correct']:5.1f}%  gnd {100*S[1]['grounded']:3.0f}%  "
-              f"land {100*S[1]['landed']:3.0f}%  srch {S[1]['ns']:.1f}  ({S[0]} roll)")
+              f"land {100*S[1]['landed']:3.0f}%  srch {S[1]['ns']:.1f}  zero-srch {100*S[1]['zs']:.0f}%  tail-tags {100*S[1]['tt']:.0f}%  ({S[0]} roll)")
 F=L["bf16"]
 for n,_ in runs[1:]:
   S=L[n]
@@ -331,7 +333,31 @@ if [ "$MODE" = "sft2" ]; then
   export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null)
   R=baya1116/hypernet-sp-distill
   for try in 1 2 3; do hf download $R --include "$SDATA" --local-dir /root/hfdl 2>&1 | tail -1 && break; sleep 10; done
-  cp /root/hfdl/$SDATA /root/work/sft2_data.jsonl; echo "traces: $(wc -l < /root/work/sft2_data.jsonl)"
+  cp /root/hfdl/$SDATA /root/work/sft2_data.jsonl
+  # replay: strict single-sentence QA traces of the same student, so the search reflex is not traded away
+  if [ "${S2REPLAY:-0}" -gt 0 ]; then
+    [ -s /root/hfdl/pooler_distill/grpo_pool3/rollouts.jsonl ] || for try in 1 2 3; do hf download $R --include "pooler_distill/grpo_pool3/rollouts.jsonl" --local-dir /root/hfdl 2>&1 | tail -1 && break; sleep 10; done
+    python3 - <<PYR
+import json, random
+held=set()
+for line in open("/root/work/eval300.jsonl"):
+    try: held.add(json.loads(line).get("q",""))
+    except Exception: pass
+rows=[]; seen=set()
+for line in open("/root/hfdl/pooler_distill/grpo_pool3/rollouts.jsonl"):
+    try: d=json.loads(line)
+    except Exception: continue
+    if not (d.get("correct") and d.get("grounded") and d.get("landed")): continue
+    q,t=d.get("q",""),d.get("text","")
+    if not q or not t or q in held or (q,t[:200]) in seen: continue
+    seen.add((q,t[:200])); rows.append({"q":q,"text":t})
+random.seed(0); random.shuffle(rows); rows=rows[:$S2REPLAY]
+with open("/root/work/sft2_data.jsonl","a") as f:
+    for r in rows: f.write(json.dumps(r, ensure_ascii=False)+"\n")
+print(f"[sft2] replay {len(rows)} strict traces appended")
+PYR
+  fi
+  echo "traces: $(wc -l < /root/work/sft2_data.jsonl)"
   HF2=/root/sft2_hf_$SRUN2; LOG2=/root/sft2_$SRUN2.log
   RUNNING=0
   pgrep -f "sft_lora.p[y]" >/dev/null && { RUNNING=1; echo "already training: $(tail -1 $LOG2)"; }
@@ -341,7 +367,7 @@ if [ "$MODE" = "sft2" ]; then
     rm -f $LOG2
     cd /root/work && PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True setsid nohup python3 /root/work/sft_lora.py \
       --base /root/eval_hf200 --data /root/work/sft2_data.jsonl --out $HF2 --log $LOG2 \
-      --rank ${S2RANK:-32} --lr ${S2LR:-1e-4} --epochs ${S2EPOCHS:-3} --accum ${S2ACCUM:-8} \
+      --rank ${S2RANK:-16} --lr ${S2LR:-3e-5} --epochs ${S2EPOCHS:-2} --accum ${S2ACCUM:-8} \
       >> /root/sft2_run_$SRUN2.log 2>&1 < /dev/null &
     sleep 20
   fi
@@ -365,7 +391,7 @@ while :; do
     done=0
     pgrep -f "pool_eval.py .* /root/work/ev_$i.jsonl" >/dev/null && continue
     echo "[$SRUN2-eval $(date -u +%H:%M)] shard $i at $have/$want - starting"
-    cd /root/work && SP_BASE=$HF2 SP_RANK=16 SP_NOSYS=1 SP_EPISODIC=1 OMP_NUM_THREADS=1       PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True setsid nohup python3 /root/work/pool_eval.py       /root/pooler200.safetensors /root/work/ev_$i.jsonl /root/work/${SRUN2}_out_$i.jsonl       --n 999 --rw 768 --maxd 384 --samepage 1 --decode plain --temp ${S2TEMP:-0.9} --tag "[$SRUN2$i]"       >> /root/${SRUN2}_$i.log 2>&1 < /dev/null &
+    cd /root/work && SP_BASE=$HF2 SP_RANK=16 SP_NOSYS=1 SP_EPISODIC=1 OMP_NUM_THREADS=1       PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True setsid nohup python3 /root/work/pool_eval.py       /root/pooler200.safetensors /root/work/ev_$i.jsonl /root/work/${SRUN2}_out_$i.jsonl       --n 999 --rw 768 --maxd 384 --samepage 1 --decode plain --temp ${S2TEMP:-0.9} --stop eos --replycap 200 --tag "[$SRUN2$i]"       >> /root/${SRUN2}_$i.log 2>&1 < /dev/null &
     sleep 60
   done
   if [ "$done" = "1" ]; then
