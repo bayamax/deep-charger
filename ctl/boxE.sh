@@ -80,7 +80,7 @@ PSKIP=
 MODE=idle
 SHARDS=3
 RAW="https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl"
-for f in pool_eval.py q4.py qat.py dwq.py poolerfit.py jointfit.py checkmlx.py packmlx.py build_merged.py web_search.py; do
+for f in pool_eval.py q4.py qat.py dwq.py poolerfit.py jointfit.py checkmlx.py packmlx.py sft_lora.py build_merged.py web_search.py; do
   for try in 1 2 3; do curl -sS -o /root/work/$f "$RAW/$f?nocache=$(date +%s)" && python3 -m py_compile /root/work/$f && break; sleep 5; done
 done
 cp /root/work/web_search.py /root/work/runtime/web_search.py 2>/dev/null
@@ -310,6 +310,65 @@ if [ "$MODE" = "pack" ]; then
   hf upload $R /root/sft_run_$SRUN.log $D/logs/sft_run_$SRUN.log >/dev/null 2>&1
   for i in 0 1 2; do hf upload $R /root/work/${SRUN}_out_$i.jsonl $D/rollouts/${SRUN}_$i.jsonl >/dev/null 2>&1; done
   echo "PACK_DONE $SRUN $(date -u)"
+  exit 0
+fi
+if [ "$MODE" = "sft2" ]; then
+  # Supervised fine-tuning of the step-200 student on its own search prefixes continued by a
+  # teacher: the thinking after the last result and a conversational reply. Then the held-out
+  # measurement, so the reply style is checked on the same 150 questions as everything else.
+  SRUN2=${SRUN2:-s2}; SDATA=${SDATA:-pooler_distill/chatsft/search_sft_v2.jsonl}
+  pkill -f "afterkee[p].sh"; pkill -f "evalkee[p].sh"; pkill -f "dwqkee[p].sh"; pkill -f "probekee[p].sh"; pkill -f "poolkee[p].sh"; pkill -f "jointkee[p].sh"; pkill -f "sftkee[p].sh"; pkill -f "genkee[p].sh"; sleep 5
+  export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null)
+  R=baya1116/hypernet-sp-distill
+  for try in 1 2 3; do hf download $R --include "$SDATA" --local-dir /root/hfdl 2>&1 | tail -1 && break; sleep 10; done
+  cp /root/hfdl/$SDATA /root/work/sft2_data.jsonl; echo "traces: $(wc -l < /root/work/sft2_data.jsonl)"
+  HF2=/root/sft2_hf_$SRUN2; LOG2=/root/sft2_$SRUN2.log
+  RUNNING=0
+  pgrep -f "sft_lora.p[y]" >/dev/null && { RUNNING=1; echo "already training: $(tail -1 $LOG2)"; }
+  [ -s $HF2/model.safetensors ] && { RUNNING=1; echo "sft2 $SRUN2 already finished"; }
+  if [ "$RUNNING" = "0" ]; then
+    pkill -f "pool_eval.p[y]"; sleep 8; pkill -9 -f "pool_eval.p[y]" 2>/dev/null; sleep 2
+    rm -f $LOG2
+    cd /root/work && PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True setsid nohup python3 /root/work/sft_lora.py \
+      --base /root/eval_hf200 --data /root/work/sft2_data.jsonl --out $HF2 --log $LOG2 \
+      --rank ${S2RANK:-32} --lr ${S2LR:-1e-4} --epochs ${S2EPOCHS:-3} --accum ${S2ACCUM:-8} \
+      >> /root/sft2_run_$SRUN2.log 2>&1 < /dev/null &
+    sleep 20
+  fi
+  cat > /root/sft2keep.sh <<SK2
+#!/bin/bash
+SRUN2=$SRUN2; HF2=$HF2; R=$R
+SK2
+  cat >> /root/sft2keep.sh <<'SK2B'
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null)
+until [ -s $HF2/model.safetensors ] && grep -q SFT2_DONE /root/sft2_run_$SRUN2.log 2>/dev/null; do sleep 60; done
+pkill -f "sft_lora.p[y]"; sleep 10
+hf upload $R ${HF2}_adapter pooler_distill/chatsft/${SRUN2}_adapter >/dev/null 2>&1
+hf upload $R /root/sft2_$SRUN2.log pooler_distill/chatsft/logs/sft2_$SRUN2.log >/dev/null 2>&1
+echo "[$SRUN2] adapter and log uploaded"
+while :; do
+  done=1
+  for i in 0 1 2; do
+    want=$(wc -l < /root/work/ev_$i.jsonl 2>/dev/null || echo 0)
+    have=$(wc -l < /root/work/${SRUN2}_out_$i.jsonl 2>/dev/null || echo 0)
+    [ "$want" -gt 0 ] && [ "$have" -ge "$want" ] && continue
+    done=0
+    pgrep -f "pool_eval.py .* /root/work/ev_$i.jsonl" >/dev/null && continue
+    echo "[$SRUN2-eval $(date -u +%H:%M)] shard $i at $have/$want - starting"
+    cd /root/work && SP_BASE=$HF2 SP_RANK=16 SP_NOSYS=1 SP_EPISODIC=1 OMP_NUM_THREADS=1       PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True setsid nohup python3 /root/work/pool_eval.py       /root/pooler200.safetensors /root/work/ev_$i.jsonl /root/work/${SRUN2}_out_$i.jsonl       --n 999 --rw 768 --maxd 384 --samepage 1 --decode plain --temp ${S2TEMP:-0.9} --tag "[$SRUN2$i]"       >> /root/${SRUN2}_$i.log 2>&1 < /dev/null &
+    sleep 60
+  done
+  if [ "$done" = "1" ]; then
+    for i in 0 1 2; do hf upload $R /root/work/${SRUN2}_out_$i.jsonl pooler_distill/chatsft/rollouts/${SRUN2}_$i.jsonl >/dev/null 2>&1; done
+    echo "SFT2_EVAL_DONE $SRUN2 $(date -u)"; break
+  fi
+  sleep 120
+done
+SK2B
+  chmod +x /root/sft2keep.sh
+  pkill -f "sft2kee[p].sh"; sleep 1
+  setsid nohup bash /root/sft2keep.sh >> /proc/1/fd/1 2>&1 < /dev/null &
+  sleep 40; tail -3 /root/sft2_run_$SRUN2.log 2>/dev/null | cut -c1-160; echo "SFT2_LAUNCH_DONE $SRUN2 $(date -u)"
   exit 0
 fi
 if [ "$MODE" = "gen" ]; then
