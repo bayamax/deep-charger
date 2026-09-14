@@ -20,6 +20,7 @@ ap.add_argument("--base", default="/root/eval_hf200"); ap.add_argument("--data",
 ap.add_argument("--rank", type=int, default=32); ap.add_argument("--alpha", type=int, default=64); ap.add_argument("--lr", type=float, default=1e-4)
 ap.add_argument("--epochs", type=float, default=3); ap.add_argument("--accum", type=int, default=8); ap.add_argument("--maxlen", type=int, default=3072)
 ap.add_argument("--val", type=int, default=12); ap.add_argument("--log", default="/root/sft2.log"); ap.add_argument("--seed", type=int, default=0)
+ap.add_argument("--patience", type=int, default=0, help="stop when validation loss has not improved for this many validations (0 = never)")
 A = ap.parse_args()
 random.seed(A.seed); torch.manual_seed(A.seed)
 DEV = "cuda"
@@ -97,6 +98,8 @@ for step in range(1, steps + 1):
         print(f"[sft] step {step}/{steps} train {acc:.4f} val {v:.4f}", flush=True)
         if v < best[0]:
             best = (v, step); model.save_pretrained(A.out + "_adapter")
+        elif A.patience and (step - best[1]) >= 10 * A.patience:
+            print(f"[sft] early stop at step {step}: no improvement since step {best[1]}", flush=True); log.write(f"early stop at step {step}\n"); log.flush(); break
 print(f"[sft] best val {best[0]:.4f} at step {best[1]}", flush=True)
 from peft import PeftModel
 base = AutoModelForCausalLM.from_pretrained(A.base, torch_dtype=torch.bfloat16)
