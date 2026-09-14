@@ -63,6 +63,22 @@ Shard 0 in full: 73 answerable questions became 131 chat-register turns
 (`ctl/boxM.sh`, gen mode with `GQFILE`), so the search prefix stays on-policy for the phrasing
 that will actually be seen; the teacher continuation and the flash verifier follow as before.
 
+Result of that run (131 rewritten forms, one rollout each, RTX 3060, 85 minutes): 50% correct and
+grounded, 71% grounded. The polite form ("Who wrote the song ...?") came out at 56%, the casual
+form ("I heard ... earlier, who actually wrote it?") at 44%; per original question, 21 were right
+in both forms, 20 in one, 25 in neither. Because the originals were selected by a single correct
+rollout, part of the drop is sampling, so the same box re-rolls the 73 originals for the
+calibration. The teacher continuation on the 62 gold-bearing prefixes gave 56 verified traces
+(`pooler_distill/chatsft/search_sft_para0.jsonl`), naturalness 5.0, continuity at least 4; the
+rejections were almost all the teacher adding facts not in the served text.
+
+Search Arena (lmarena's real prompts to search-enabled assistants) was checked as an alternative
+source, with the two search-model replies and the cheap judge agreeing on a gold. Of 132 judged
+prompts, 15 asked for a short fact and 4 survived the stable / encyclopedic / agreed-gold
+filter (about 3%): real search-assistant traffic is mostly news, how-to, recommendations and
+comparisons, which this lineage's Wikipedia reader does not serve. The prompts are kept as style
+exemplars for the rewrite instead of as questions.
+
 The no-search side has two sources: R1 answering real prompts (236 verified pairs,
 `chat_sft_v1.jsonl`) and the lineage's own base writing K candidates that the flash judge scores.
 On the first 68 prompts of the K=6 run, 201 of 408 candidates were usable and about one prompt in
