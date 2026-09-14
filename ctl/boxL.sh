@@ -14,6 +14,7 @@ if pgrep -f "selfgen_gpu.p[y]" >/dev/null; then   # the first run is still going
   export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null)
   [ -s /root/work/self_cands2.jsonl ] && hf upload baya1116/hypernet-sp-distill /root/work/self_cands2.jsonl pooler_distill/chatsft/self_cands2_partial.jsonl 2>&1 | tail -1
   echo "PEEK $(wc -l < /root/work/self_cands2.jsonl 2>/dev/null) candidates so far $(date -u)"; nvidia-smi --query-gpu=memory.used --format=csv,noheader
+  echo "PEEK log: $(tail -c 300 /root/selfgen.log 2>/dev/null | tr '\n' ' ')"
   if ! pgrep -f "stage2kee[p].sh" >/dev/null; then
     cat > /root/stage2keep.sh <<'S2K'
 #!/bin/bash
