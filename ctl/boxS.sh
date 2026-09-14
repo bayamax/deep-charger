@@ -399,6 +399,7 @@ while :; do
     [ "$want" -gt 0 ] && [ "$have" -ge "$want" ] && continue
     done=0
     pgrep -f "pool_eval.py .* /root/work/ev_$i.jsonl" >/dev/null && continue
+    [ "$(pgrep -fc "pool_eval.p[y]")" -ge "${S2PAR:-1}" ] && continue   # one evaluator at a time on a 12 GB card
     echo "[$SRUN2-eval $(date -u +%H:%M)] shard $i at $have/$want - starting"
     cd /root/work && SP_BASE=$HF2 SP_RANK=16 SP_NOSYS=1 SP_EPISODIC=1 OMP_NUM_THREADS=1       PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True setsid nohup python3 /root/work/pool_eval.py       /root/pooler200.safetensors /root/work/ev_$i.jsonl /root/work/${SRUN2}_out_$i.jsonl       --n 999 --rw 768 --maxd 384 --samepage 1 --decode plain --temp ${S2TEMP:-0.9} --stop eos --replycap 200 --tag "[$SRUN2$i]"       >> /root/${SRUN2}_$i.log 2>&1 < /dev/null &
     sleep 60
