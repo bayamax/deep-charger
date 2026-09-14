@@ -78,10 +78,10 @@ PRUNS="p_t06q4:1:0.6 p_t06bf16:0:0.6"
 PG=64
 PSKIP=
 MODE=gen
-GRUN=g2
-GN=131
+GRUN=g3
+GN=73
 GPAR=1
-GQFILE=pooler_distill/para_pool0.jsonl
+GQFILE=pooler_distill/nq_cg0.jsonl
 SHARDS=3
 RAW="https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl"
 for f in pool_eval.py q4.py qat.py dwq.py poolerfit.py jointfit.py checkmlx.py packmlx.py sft_lora.py selfgen_gpu.py build_merged.py web_search.py; do
