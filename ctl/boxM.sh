@@ -448,7 +448,8 @@ for i in range(3): open(f"/root/work/gq_{i}.jsonl","w").writelines(qs[i::3])
 print(f"[gen] {len(qs)} questions -> {[len(qs[i::3]) for i in range(3)]}")
 PYG
   for i in 0 1 2; do for try in 1 2 3; do hf download $R --include "pooler_distill/nq_gen/${GRUN}_$i.jsonl" --local-dir /root/hfdl 2>/dev/null | tail -1 && break; sleep 5; done
-    [ -s /root/hfdl/pooler_distill/nq_gen/${GRUN}_$i.jsonl ] && cp /root/hfdl/pooler_distill/nq_gen/${GRUN}_$i.jsonl /root/work/${GRUN}_out_$i.jsonl; done
+    # only restore when the hub copy is longer than what is on disk (a re-run must not roll back live output)
+    [ -s /root/hfdl/pooler_distill/nq_gen/${GRUN}_$i.jsonl ] && [ "$(wc -l < /root/hfdl/pooler_distill/nq_gen/${GRUN}_$i.jsonl)" -gt "$(wc -l < /root/work/${GRUN}_out_$i.jsonl 2>/dev/null || echo 0)" ] && cp /root/hfdl/pooler_distill/nq_gen/${GRUN}_$i.jsonl /root/work/${GRUN}_out_$i.jsonl; done
   echo "restored $(cat /root/work/${GRUN}_out_*.jsonl 2>/dev/null | wc -l) rollouts"
   cat > /root/genkeep.sh <<GKQ
 #!/bin/bash
