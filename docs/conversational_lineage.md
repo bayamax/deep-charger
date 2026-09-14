@@ -43,6 +43,32 @@ stopped at 184 traces (49 continuity-prompt, 135 earlier structured prompt). A p
 Google questions (nq_open, short Wikipedia-answerable golds, held-out excluded) is on the hub for the
 expansion, with a box mode that has the student answer them.
 
+## Where the questions come from, and their register
+
+The nq_open questions are people's own Google queries. Run through the student (shard 0, 499
+questions, one rollout each, RTX 3060 at $0.06/h): 15% correct and grounded, 37% grounded, 63%
+never grounded. The shallow reader (top page, 256-token chunks, at most 8 more) and dated or noisy
+golds account for most of the misses, so the pool yields about 150 usable prefixes per 1000
+questions.
+
+The bigger issue is register: a search box gets "who wrote the song ruby don't take your love to
+town", a chat assistant gets "any idea who wrote the song You Don't Know Me?". Training only on
+the first would teach the search reflex on a phrasing users never type. No public corpus of real
+assistant conversations that also carries a Wikipedia-checkable gold was found, so the answerable
+questions are rewritten into two chat registers by deepseek-flash, with real assistant prompts
+(WildChat, OASST) as style exemplars and a second call that checks the rewrite still asks for
+exactly the same fact. Smoke on 30 questions: 24 rewritten, all 24 kept the need, openers diverse.
+Shard 0 in full: 73 answerable questions became 131 chat-register turns
+(`pooler_distill/para_pool0.jsonl`). A box then runs the student on the rewritten forms
+(`ctl/boxM.sh`, gen mode with `GQFILE`), so the search prefix stays on-policy for the phrasing
+that will actually be seen; the teacher continuation and the flash verifier follow as before.
+
+The no-search side has two sources: R1 answering real prompts (236 verified pairs,
+`chat_sft_v1.jsonl`) and the lineage's own base writing K candidates that the flash judge scores.
+On the first 68 prompts of the K=6 run, 201 of 408 candidates were usable and about one prompt in
+ten got a candidate that passed (the base answers small talk with "I'm here to help" boilerplate,
+naturalness 2-3), so that path is a supplement, not the main source.
+
 ## The first fine-tune (s2) and what it broke
 
 LoRA r=32 on all projections, lr 1e-4, 3 epochs over the 184 traces (65 optimizer steps), loss on
@@ -80,7 +106,8 @@ a fluent wrong answer scores zero.
 
 1. Top up the DeepSeek account; finish the 162 questions with the continuity prompt.
 2. Expand the questions with nq_open through the box's generation mode (about $1.1 per 1000
-   questions), so the corpus is 1000+ questions of the kind people actually ask.
+   questions), rewritten into chat register first (see above), so the corpus is 1000+ questions of
+   the kind people actually type into an assistant.
 3. Gentler fine-tune with replay: r=16, lr 3e-5, 2 epochs, and the strict single-sentence QA traces
    mixed in at about 1:1 so the search reflex is preserved; stop by validation loss.
 4. Change the evaluator's stop rule for this lineage (stop at EOS, cap the reply) and add two
