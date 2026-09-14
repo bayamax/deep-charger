@@ -1216,3 +1216,4 @@ setsid nohup bash /root/status_pub.sh >> /proc/1/fd/1 2>&1 < /dev/null &
 sleep 30; nvidia-smi --query-gpu=name,memory.used,memory.total --format=csv,noheader; t
 echo "Q4EVAL_LAUNCH_DONE $(date -u)"
 # CTL-END
+# peek 03:40
