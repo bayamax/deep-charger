@@ -42,11 +42,11 @@ def encode(rec):
         if body.startswith("<think>"):
             body = body[len("<think>"):].lstrip("\n")
     else:
-        pre = rec["prefix"]
+        pre = rec.get("prefix") or ""          # no prefix: a no-search turn (thinking, then the reply)
         if pre.startswith("<think>"):
             pre = pre[len("<think>"):].lstrip("\n")
-        body = pre.rstrip("\n") + "\n" + rec["thinking"].strip() + "\n</think>\n" + rec["reply"].strip()
-    ids, mask = tok.encode(head), []
+        body = (pre.rstrip("\n") + "\n" if pre.strip() else "") + rec["thinking"].strip() + "\n</think>\n" + rec["reply"].strip()
+    ids, mask = tok.encode(head, add_special_tokens=False), []   # the chat template already carries the BOS
     mask = [0] * len(ids)
     for piece in INFO.split(body):
         if not piece:
