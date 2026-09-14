@@ -81,11 +81,24 @@ filter (about 3%): real search-assistant traffic is mostly news, how-to, recomme
 comparisons, which this lineage's Wikipedia reader does not serve. The prompts are kept as style
 exemplars for the rewrite instead of as questions.
 
-The no-search side has two sources: R1 answering real prompts (236 verified pairs,
-`chat_sft_v1.jsonl`) and the lineage's own base writing K candidates that the flash judge scores.
-On the first 68 prompts of the K=6 run, 201 of 408 candidates were usable and about one prompt in
-ten got a candidate that passed (the base answers small talk with "I'm here to help" boilerplate,
-naturalness 2-3), so that path is a supplement, not the main source.
+The no-search side was meant to have two sources: R1 answering real prompts (236 verified pairs,
+`chat_sft_v1.jsonl`) and the lineage's own checkpoints writing K candidates that the flash judge
+scores. The second source is closed after two full runs on an RTX 2060 (about $1.7 of card time):
+
+| checkpoint | candidates | usable (reached `</think>`, ended, clean) | judged pass |
+|---|---|---|---|
+| plain distill, K=6, 1200 new tokens | 1686 | 836 | 2 of 72 judged (canned "I'm DeepSeek-R1..." self-introductions, markdown lists, "I'm here to help" boilerplate) |
+| earlier deep-charger checkpoint (`fft_out/student.pt`), K=3, 1000 new tokens | 843 | 101 | not judged: average 25 words, and the readable ones confabulate ("Obi Watanabe Kenobi ... born October 28, 1970") |
+
+The candidate files stay on the hub (`chatsft/self_cands2.jsonl`, `self_cands3.jsonl`) but the
+teacher pairs are the no-search data.
+
+The second rewrite pool (nq shard 1: 71 answerable questions, 142 turns) went through the same
+steps on an RTX 2060 in 85 minutes: 61% correct and grounded (polite 68%, casual 54%), 86
+prefixes, 73 verified traces (`search_sft_para1.jsonl`). One operational note: since the evening
+of 2026-09-14 the API serves `deepseek-reasoner` requests with the model field reading
+`deepseek-flash` (about 3 s per continuation, 760 reasoning tokens); the verified quality did not
+change, but the teacher for para1 was effectively the cheap model.
 
 ## The first fine-tune (s2) and what it broke
 
@@ -127,7 +140,9 @@ a fluent wrong answer scores zero.
    questions), rewritten into chat register first (see above), so the corpus is 1000+ questions of
    the kind people actually type into an assistant.
 3. Gentler fine-tune with replay: r=16, lr 3e-5, 2 epochs, and the strict single-sentence QA traces
-   mixed in at about 1:1 so the search reflex is preserved; stop by validation loss.
+   mixed in at about 1:1 so the search reflex is preserved; stop by validation loss. Running as s3
+   (`ctl/boxS.sh`) on the 563-record mix `chatsft/mix_v1.jsonl` (search v3 198, para0 56, para1 73,
+   chat v1 236; held-out overlap checked: none) plus 300 replayed strict traces.
 4. Change the evaluator's stop rule for this lineage (stop at EOS, cap the reply) and add two
    discipline metrics to every measurement: zero-search answers and tags after `</think>`.
 5. Then rejection sampling with the gold reward plus pairwise judging on the student's own samples,
