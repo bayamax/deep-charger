@@ -25,14 +25,17 @@ if [ ! -f /root/.bootstrapped ]; then
   echo "=== bootstrap $(date -u) ==="
   mkdir -p /root/work/fft_out /root/work/runtime /root/work/dwq_calib /root/hfdl
   touch /root/work/runtime/__init__.py
-  pip install -q "transformers==4.44.2" "peft==0.12.0" "safetensors==0.8.0" \
-    "huggingface_hub>=0.34,<1.0" accelerate certifi datasets scipy 2>&1 | tail -1
+  for try in 1 2 3 4; do   # a slow mirror timed out once and left the box without hf; retry the install
+    pip install -q --timeout 120 --retries 5 "transformers==4.44.2" "peft==0.12.0" "safetensors==0.8.0" \
+      "huggingface_hub>=0.34,<1.0" accelerate certifi datasets scipy 2>&1 | tail -1
+    command -v hf >/dev/null && break; echo "pip install failed (try $try)"; sleep 30
+  done
   R=baya1116/hypernet-sp-distill; S=pooler_distill/grpo_pool3_step200; Q=pooler_distill/grpo_pool3_step200_q4
   for inc in "box_recover/scripts/*" "fft_out/pooler.pt" \
              "grpo_assets/mus_run/eval_step200/eval_heldout_300q_g2.jsonl" \
              "pooler_distill/pool_eval_cache.jsonl" "pooler_distill/dwq_calib/*" \
              "$S/*" "$Q/rollouts/*"; do
-    for try in 1 2 3 4 5 6; do hf download $R --include "$inc" --local-dir /root/hfdl 2>&1 | tail -1 && break; sleep 20; done
+    for try in 1 2 3 4 5 6; do hf download $R --include "$inc" --local-dir /root/hfdl 2>&1 | tail -1; [ "${PIPESTATUS[0]}" -eq 0 ] && break; sleep 20; done   # the pipe used to hide the download's own status
     echo "dl $inc $(date -u +%H:%M)"
   done
   SC=/root/hfdl/box_recover/scripts; cp $SC/*.py $SC/*.sh /root/work/ 2>/dev/null
