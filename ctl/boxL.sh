@@ -10,6 +10,12 @@
 # per-rollout output the onstart restores as ev_out_*.jsonl, so the difference can be paired over
 # questions instead of being read off two independent means.
 cd /root/work
+if [ -s /root/work/self_cands2.jsonl ]; then   # peek: ship whatever has been generated so far, leave the job running
+  export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null)
+  hf upload baya1116/hypernet-sp-distill /root/work/self_cands2.jsonl pooler_distill/chatsft/self_cands2_partial.jsonl 2>&1 | tail -1
+  echo "PEEK $(wc -l < /root/work/self_cands2.jsonl) candidates so far $(date -u)"; nvidia-smi --query-gpu=memory.used --format=csv,noheader
+  exit 0
+fi
 # The token arrives as an environment variable on the instance; keep a copy so anything this
 # script starts later still has it, and so the onstart can stay as short as possible.
 [ -s /root/.hf_token ] || { [ -n "$HF_TOKEN" ] && printf '%s' "$HF_TOKEN" > /root/.hf_token && chmod 600 /root/.hf_token; }
