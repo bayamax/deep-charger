@@ -80,7 +80,7 @@ PSKIP=
 MODE=idle
 SHARDS=3
 RAW="https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl"
-for f in pool_eval.py q4.py qat.py dwq.py poolerfit.py jointfit.py checkmlx.py packmlx.py sft_lora.py build_merged.py web_search.py; do
+for f in pool_eval.py q4.py qat.py dwq.py poolerfit.py jointfit.py checkmlx.py packmlx.py sft_lora.py selfgen_gpu.py build_merged.py web_search.py; do
   for try in 1 2 3; do curl -sS -o /root/work/$f "$RAW/$f?nocache=$(date +%s)" && python3 -m py_compile /root/work/$f && break; sleep 5; done
 done
 cp /root/work/web_search.py /root/work/runtime/web_search.py 2>/dev/null
@@ -406,6 +406,24 @@ SK2B
   setsid nohup bash /root/sft2keep.sh >> /proc/1/fd/1 2>&1 < /dev/null &
   sleep 40; tail -3 /root/sft2_run_$SRUN2.log 2>/dev/null | cut -c1-160; echo "SFT2_LAUNCH_DONE $SRUN2 $(date -u)"
   exit 0
+fi
+if [ "$MODE" = "selfgen" ]; then
+  # The no-search side, on-policy: the lineage's base writes candidate replies to real prompts; a judge
+  # picks later, off the box. Then hand the card to the nq_open generation.
+  export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null)
+  R=baya1116/hypernet-sp-distill
+  pkill -f "genkee[p].sh"; sleep 2
+  for try in 1 2 3; do hf download $R --include "pooler_distill/chatsft/chat_prompts.jsonl" --local-dir /root/hfdl 2>&1 | tail -1 && break; sleep 10; done
+  [ -s /root/base_distill/model.safetensors ] || for try in 1 2 3; do hf download deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B --local-dir /root/base_distill 2>&1 | tail -1 && break; sleep 10; done
+  if [ ! -s /root/work/self_cands.jsonl ] || ! grep -q SELFGEN_DONE /root/selfgen.log 2>/dev/null; then
+    cd /root/work && PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python3 /root/work/selfgen_gpu.py \
+      --base /root/base_distill --prompts /root/hfdl/pooler_distill/chatsft/chat_prompts.jsonl --out /root/work/self_cands.jsonl \
+      --k ${SGK:-4} --batch ${SGBATCH:-8} > /root/selfgen.log 2>&1
+    tail -2 /root/selfgen.log
+  fi
+  hf upload $R /root/work/self_cands.jsonl pooler_distill/chatsft/self_cands.jsonl 2>&1 | tail -1
+  echo "SELFGEN_UPLOADED $(wc -l < /root/work/self_cands.jsonl) candidates $(date -u)"
+  MODE=gen   # fall through into the nq_open generation with the same card
 fi
 if [ "$MODE" = "gen" ]; then
   # Data generation for the conversational lineage: the step-200 student answers real questions
