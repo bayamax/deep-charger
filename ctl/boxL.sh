@@ -15,6 +15,8 @@ if pgrep -f "selfgen_gpu.p[y]" >/dev/null; then   # the first run is still going
   [ -s /root/work/self_cands2.jsonl ] && hf upload baya1116/hypernet-sp-distill /root/work/self_cands2.jsonl pooler_distill/chatsft/self_cands2_partial.jsonl 2>&1 | tail -1
   echo "PEEK $(wc -l < /root/work/self_cands2.jsonl 2>/dev/null) candidates so far $(date -u)"; nvidia-smi --query-gpu=memory.used --format=csv,noheader
   echo "PEEK log: $(tail -c 300 /root/selfgen.log 2>/dev/null | tr '\n' ' ')"
+  # re-arm stage 2 with the smaller budget as long as it is still only waiting (nothing built yet)
+  [ -s /root/fft_hf/model.safetensors ] || pkill -f "stage2kee[p].sh"; sleep 2
   if ! pgrep -f "stage2kee[p].sh" >/dev/null; then
     cat > /root/stage2keep.sh <<'S2K'
 #!/bin/bash
@@ -40,7 +42,7 @@ PYF
 fi
 cd /root/work && PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python3 /root/work/selfgen_gpu.py \
   --base /root/fft_hf --prompts /root/hfdl/pooler_distill/chatsft/chat_prompts.jsonl --out /root/work/self_cands3.jsonl \
-  --k 6 --batch 4 --maxnew 1200 > /root/selfgen3.log 2>&1
+  --k 3 --batch 4 --maxnew 1000 > /root/selfgen3.log 2>&1
 tail -1 /root/selfgen3.log
 hf upload $R /root/work/self_cands3.jsonl pooler_distill/chatsft/self_cands3.jsonl 2>&1 | tail -1
 echo "SELFGEN3_UPLOADED $(wc -l < /root/work/self_cands3.jsonl) candidates $(date -u)"
