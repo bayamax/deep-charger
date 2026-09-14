@@ -10,10 +10,43 @@
 # per-rollout output the onstart restores as ev_out_*.jsonl, so the difference can be paired over
 # questions instead of being read off two independent means.
 cd /root/work
-if [ -s /root/work/self_cands2.jsonl ]; then   # peek: ship whatever has been generated so far, leave the job running
+if pgrep -f "selfgen_gpu.p[y]" >/dev/null; then   # the first run is still going: ship what exists, arm stage 2, leave
   export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null)
-  hf upload baya1116/hypernet-sp-distill /root/work/self_cands2.jsonl pooler_distill/chatsft/self_cands2_partial.jsonl 2>&1 | tail -1
-  echo "PEEK $(wc -l < /root/work/self_cands2.jsonl) candidates so far $(date -u)"; nvidia-smi --query-gpu=memory.used --format=csv,noheader
+  [ -s /root/work/self_cands2.jsonl ] && hf upload baya1116/hypernet-sp-distill /root/work/self_cands2.jsonl pooler_distill/chatsft/self_cands2_partial.jsonl 2>&1 | tail -1
+  echo "PEEK $(wc -l < /root/work/self_cands2.jsonl 2>/dev/null) candidates so far $(date -u)"; nvidia-smi --query-gpu=memory.used --format=csv,noheader
+  if ! pgrep -f "stage2kee[p].sh" >/dev/null; then
+    cat > /root/stage2keep.sh <<'S2K'
+#!/bin/bash
+# stage 2: the same prompts through the lineage's own earlier checkpoint (distill + hypernet, the one
+# that was seen chatting), built into a plain model directory the way build_fft_hf.py does it.
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null)
+R=baya1116/hypernet-sp-distill
+until grep -q SELFGEN_DONE /root/selfgen.log 2>/dev/null && ! pgrep -f "selfgen_gpu.p[y]" >/dev/null; do sleep 60; done
+sleep 120   # let the first run's upload finish
+[ -s /root/hfdl/fft_out/student.pt ] || for try in 1 2 3; do hf download $R --include "fft_out/student.pt" --local-dir /root/hfdl 2>&1 | tail -1 && break; sleep 10; done
+if [ ! -s /root/fft_hf/model.safetensors ]; then
+  cd /root/work && python3 - <<'PYF'
+import torch
+from transformers import AutoModelForCausalLM, AutoConfig, AutoTokenizer
+BASE="/root/base_distill"
+m=AutoModelForCausalLM.from_config(AutoConfig.from_pretrained(BASE)).to(torch.bfloat16)
+sd=torch.load("/root/hfdl/fft_out/student.pt", map_location="cpu")
+r=m.load_state_dict(sd, strict=False); print("missing", len(r.missing_keys), "unexpected", len(r.unexpected_keys), r.unexpected_keys[:3])
+assert len(r.missing_keys)==0, r.missing_keys[:5]
+m.save_pretrained("/root/fft_hf", safe_serialization=True); AutoTokenizer.from_pretrained(BASE).save_pretrained("/root/fft_hf")
+print("FFT_HF_DONE")
+PYF
+fi
+cd /root/work && PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python3 /root/work/selfgen_gpu.py \
+  --base /root/fft_hf --prompts /root/hfdl/pooler_distill/chatsft/chat_prompts.jsonl --out /root/work/self_cands3.jsonl \
+  --k 6 --batch 4 --maxnew 1200 > /root/selfgen3.log 2>&1
+tail -1 /root/selfgen3.log
+hf upload $R /root/work/self_cands3.jsonl pooler_distill/chatsft/self_cands3.jsonl 2>&1 | tail -1
+echo "SELFGEN3_UPLOADED $(wc -l < /root/work/self_cands3.jsonl) candidates $(date -u)"
+S2K
+    chmod +x /root/stage2keep.sh; setsid nohup bash /root/stage2keep.sh >> /proc/1/fd/1 2>&1 < /dev/null &
+    echo "stage 2 armed"
+  fi
   exit 0
 fi
 # The token arrives as an environment variable on the instance; keep a copy so anything this
