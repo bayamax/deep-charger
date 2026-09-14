@@ -77,7 +77,9 @@ JCLIP=0
 PRUNS="p_t06q4:1:0.6 p_t06bf16:0:0.6"
 PG=64
 PSKIP=
-MODE=idle
+MODE=selfgen
+GPAR=1
+GN=1500
 SHARDS=3
 RAW="https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl"
 for f in pool_eval.py q4.py qat.py dwq.py poolerfit.py jointfit.py checkmlx.py packmlx.py sft_lora.py selfgen_gpu.py build_merged.py web_search.py; do
@@ -429,7 +431,7 @@ if [ "$MODE" = "gen" ]; then
   # Data generation for the conversational lineage: the step-200 student answers real questions
   # (nq_open, people's own search queries) through the same environment the evaluator uses, one
   # rollout each. Correct, grounded traces become the search prefixes a teacher continues.
-  GRUN=${GRUN:-g1}; GN=${GN:-1500}; GTEMP=${GTEMP:-0.8}
+  GRUN=${GRUN:-g1}; GN=${GN:-1500}; GTEMP=${GTEMP:-0.8}; GPAR=${GPAR:-3}   # GPAR: evaluators at once (1 on a 12 GB card)
   pkill -f "afterkee[p].sh"; pkill -f "evalkee[p].sh"; pkill -f "dwqkee[p].sh"; pkill -f "probekee[p].sh"; pkill -f "poolkee[p].sh"; pkill -f "jointkee[p].sh"; pkill -f "sftkee[p].sh"; sleep 5
   export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null)
   R=baya1116/hypernet-sp-distill
@@ -445,7 +447,7 @@ PYG
   echo "restored $(cat /root/work/${GRUN}_out_*.jsonl 2>/dev/null | wc -l) rollouts"
   cat > /root/genkeep.sh <<GKQ
 #!/bin/bash
-GRUN=$GRUN; GTEMP=$GTEMP; R=$R
+GRUN=$GRUN; GTEMP=$GTEMP; R=$R; GPAR=$GPAR
 GKQ
   cat >> /root/genkeep.sh <<'GKQ2'
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null)
@@ -458,6 +460,7 @@ while :; do
     [ "$want" -gt 0 ] && [ "$have" -ge "$want" ] && continue
     done=0
     pgrep -f "pool_eval.py .* /root/work/gq_$i.jsonl" >/dev/null && continue
+    [ "$(pgrep -fc "pool_eval.p[y]")" -ge "$GPAR" ] && continue
     echo "[$GRUN-gen $(date -u +%H:%M)] shard $i at $have/$want - starting (temp $GTEMP)"
     cd /root/work && SP_BASE=/root/eval_hf200 SP_RANK=16 SP_NOSYS=1 SP_EPISODIC=1 OMP_NUM_THREADS=1       PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True setsid nohup python3 /root/work/pool_eval.py       /root/pooler200.safetensors /root/work/gq_$i.jsonl /root/work/${GRUN}_out_$i.jsonl       --n 9999 --rw 768 --maxd 384 --samepage 1 --decode plain --temp $GTEMP --tag "[$GRUN$i]"       >> /root/${GRUN}_$i.log 2>&1 < /dev/null &
     sleep 60
