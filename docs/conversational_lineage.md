@@ -67,8 +67,10 @@ Result of that run (131 rewritten forms, one rollout each, RTX 3060, 85 minutes)
 grounded, 71% grounded. The polite form ("Who wrote the song ...?") came out at 56%, the casual
 form ("I heard ... earlier, who actually wrote it?") at 44%; per original question, 21 were right
 in both forms, 20 in one, 25 in neither. Because the originals were selected by a single correct
-rollout, part of the drop is sampling, so the same box re-rolls the 73 originals for the
-calibration. The teacher continuation on the 62 gold-bearing prefixes gave 56 verified traces
+rollout, part of the drop is sampling: re-rolling the 73 originals on the same box gave 56%, so
+the polite chat form costs nothing (56% against 56% on the same 66 questions) and the casual form
+costs about 11 points (45% against 55%). The casual phrasings, with their context clauses and
+hedges, are exactly what the rewrite corpus is for. The teacher continuation on the 62 gold-bearing prefixes gave 56 verified traces
 (`pooler_distill/chatsft/search_sft_para0.jsonl`), naturalness 5.0, continuity at least 4; the
 rejections were almost all the teacher adding facts not in the served text.
 
