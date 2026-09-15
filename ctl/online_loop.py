@@ -55,7 +55,7 @@ ap.add_argument("--selftest-batch", type=int, default=0, help="run the greedy eq
 ap.add_argument("--questions", default="/root/work/selfq_all.jsonl"); ap.add_argument("--dolphin", default="/root/work/dolphin_v1.jsonl")
 ap.add_argument("--b", type=int, default=8, help="rollouts per question, decoded together")
 ap.add_argument("--stop", default="eos", choices=["eos", "answer"]); ap.add_argument("--judge", type=int, default=1)
-ap.add_argument("--dolphin-per-step", type=int, default=0, help="0 = as many as accepted rollouts (at least 1)")
+ap.add_argument("--dolphin-ratio", type=float, default=2.0, help="Dolphin records per accepted search rollout in the same step"); ap.add_argument("--dolphin-min", type=int, default=2, help="Dolphin records in a step with no accepted rollout")
 ap.add_argument("--maxlen", type=int, default=4096)
 ap.add_argument("--samepage", type=int, default=1, help="1: a search whose top page was already shown in this rollout serves the NEXT chunk of that page (and says so when the page is used up); 0: teacher environment (always the head)")
 A = ap.parse_args()
@@ -756,7 +756,7 @@ for step in range(state["step"] + 1, A.steps + 1):
             acc_fh.write(json.dumps({"q": item["q"], "gold": item["gold"], "text": r["text"], "step": step}, ensure_ascii=False) + "\n")
         acc_fh.flush()
         opt.step(); opt.zero_grad(set_to_none=True); clear()
-    nd = A.dolphin_per_step or max(1, len(positives))
+    nd = max(A.dolphin_min, int(round(A.dolphin_ratio * len(positives))))
     if dol:
         model.train()
         for _ in range(nd):
