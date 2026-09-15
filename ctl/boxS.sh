@@ -89,6 +89,8 @@ S2LR=5e-5
 S2EPOCHS=3
 S2VAL=100
 S2PATIENCE=6
+S2TEMP=0.6
+CHATTAG=_t06
 SHARDS=3
 RAW="https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl"
 for f in pool_eval.py q4.py qat.py dwq.py poolerfit.py jointfit.py checkmlx.py packmlx.py sft_lora.py selfgen_gpu.py build_merged.py web_search.py; do
@@ -337,6 +339,9 @@ if [ "$MODE" = "publish3" ]; then
 fi
 if [ "$MODE" = "sft2" ]; then
   # one-time: publish the merged s3 model so another box can re-measure it (its adapter upload never landed)
+  if [ -s /root/sft2_hf_s4/model.safetensors ] && [ ! -f /root/.s4_hf_uploaded ]; then
+    ( HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token) hf upload baya1116/hypernet-sp-distill /root/sft2_hf_s4 pooler_distill/chatsft/s4_hf 2>&1 | tail -1; touch /root/.s4_hf_uploaded; echo "S4_HF_UPLOADED $(date -u)" ) >> /proc/1/fd/1 2>&1 &
+  fi
   if [ -s /root/sft2_hf_s3/model.safetensors ] && [ ! -f /root/.s3_hf_uploaded ]; then
     ( HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token) hf upload baya1116/hypernet-sp-distill /root/sft2_hf_s3 pooler_distill/chatsft/s3_hf 2>&1 | tail -1; touch /root/.s3_hf_uploaded; echo "S3_HF_UPLOADED $(date -u)" ) >> /proc/1/fd/1 2>&1 &
   fi
@@ -396,7 +401,7 @@ PYR
   fi
   cat > /root/sft2keep.sh <<SK2
 #!/bin/bash
-SRUN2=$SRUN2; HF2=$HF2; R=$R
+SRUN2=$SRUN2; HF2=$HF2; R=$R; S2TEMP=${S2TEMP:-0.9}; CHATTAG=${CHATTAG:-}
 SK2
   cat >> /root/sft2keep.sh <<'SK2B'
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null)
@@ -423,12 +428,13 @@ while :; do
     echo "SFT2_EVAL_DONE $SRUN2 $(date -u)"
     # the other half of the discipline: real prompts that should NOT be searched (gold empty, so only
     # the search count and the reply text matter; the reply is judged off-box)
-    if [ ! -s /root/work/${SRUN2}_chat_out.jsonl ] || [ "$(wc -l < /root/work/${SRUN2}_chat_out.jsonl)" -lt 60 ]; then
+    CHATOUT=/root/work/${SRUN2}_chat${CHATTAG:-}_out.jsonl
+    if [ ! -s $CHATOUT ] || [ "$(wc -l < $CHATOUT)" -lt 60 ]; then
       [ -s /root/hfdl/pooler_distill/chat_eval60.jsonl ] || hf download $R --include "pooler_distill/chat_eval60.jsonl" --local-dir /root/hfdl 2>&1 | tail -1
       cd /root/work && SP_BASE=$HF2 SP_RANK=16 SP_NOSYS=1 SP_EPISODIC=1 OMP_NUM_THREADS=1 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python3 /root/work/pool_eval.py \
-        /root/pooler200.safetensors /root/hfdl/pooler_distill/chat_eval60.jsonl /root/work/${SRUN2}_chat_out.jsonl \
+        /root/pooler200.safetensors /root/hfdl/pooler_distill/chat_eval60.jsonl $CHATOUT \
         --n 999 --rw 768 --maxd 384 --samepage 1 --decode plain --temp ${S2TEMP:-0.9} --stop eos --replycap 200 --tag "[${SRUN2}chat]" >> /root/${SRUN2}_chat.log 2>&1
-      hf upload $R /root/work/${SRUN2}_chat_out.jsonl pooler_distill/chatsft/rollouts/${SRUN2}_chat.jsonl >/dev/null 2>&1
+      hf upload $R $CHATOUT pooler_distill/chatsft/rollouts/${SRUN2}_chat${CHATTAG:-}.jsonl >/dev/null 2>&1
       echo "SFT2_CHAT_EVAL_DONE $SRUN2 $(tail -1 /root/${SRUN2}_chat.log | cut -c1-120)"
     fi
     break
