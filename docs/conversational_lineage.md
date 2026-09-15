@@ -194,7 +194,7 @@ cyberpunk-horror themed video game."). Two weaknesses remain on this set. When t
 reaches the gold (130 of 300), the reply states an answer anyway: 1 of those 130 hedges. The
 corpus has no example of not finding something. And the zero-search rate went from 2% to 8%.
 
-One caveat, looked into and closed: the base re-measured under the EOS rule scored 30.7% against
+One open question, being checked with argmax decoding on one card (both rules, same 40 questions, outputs diffed): the base re-measured under the EOS rule scored 30.7% against
 39.0% for the same 300 rollouts under the "answer is" rule, about two paired standard errors
 apart. The scoring function is the same for both (first sentence after `</think>` must contain
 the gold, and the served text must too; both files re-scored offline give the same numbers), the
@@ -202,8 +202,8 @@ settings, pooler and query quality are the same, and the only mechanism by which
 lower the strict model's score is the end token being honoured mid-thought, which happened 12
 times against 7, about 2 points. Nothing else in the rollouts explains the rest; the old-rule
 figure has been reproduced many times (39.7, 39.0, 37-42 under 4-bit) and an argmax run under the
-old rule was at 43% after 46 questions. The 30.7% is read as a low draw at temperature 0.9. What
-the check did turn up: near-greedy decoding (temperature 0.01) on two different cards diverges
+old rule was at 43% after 46 questions. Whether anything beyond that changes the generated text is what the argmax diff will show. What
+the first attempt did turn up: near-greedy decoding (temperature 0.01) on two different cards diverges
 mid-thought on 8 of 14 questions from floating-point near-ties, so A/B checks of the evaluator
 need argmax on one card (`pool_eval.py --greedy 1`), which is now available.
 
