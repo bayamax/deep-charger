@@ -10,9 +10,6 @@
 # per-rollout output the onstart restores as ev_out_*.jsonl, so the difference can be paired over
 # questions instead of being read off two independent means.
 cd /root/work
-# PEEK (one run only): ship the partial greedy rollouts, leave the evaluator running
-{ [ -s /root/work/greedy_eos_out_0.jsonl ] && HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token) hf upload baya1116/hypernet-sp-distill /root/work/greedy_eos_out_0.jsonl pooler_distill/chatsft/rollouts/greedy_eos_partial_0.jsonl 2>&1 | tail -1; echo "PEEK greedy_eos $(wc -l < /root/work/greedy_eos_out_0.jsonl 2>/dev/null) rollouts $(date -u +%H:%M)"; } >> /proc/1/fd/1 2>&1
-exit 0
 # The token arrives as an environment variable on the instance; keep a copy so anything this
 # script starts later still has it, and so the onstart can stay as short as possible.
 [ -s /root/.hf_token ] || { [ -n "$HF_TOKEN" ] && printf '%s' "$HF_TOKEN" > /root/.hf_token && chmod 600 /root/.hf_token; }
@@ -81,10 +78,12 @@ PRUNS="p_t06q4:1:0.6 p_t06bf16:0:0.6"
 PG=64
 PSKIP=
 MODE=reeval
-RRUN=greedy_eos
+RRUN=argmax
 RMODEL=base
 RSTOP=eos
-RTEMP=0.01
+RGREEDY=1
+RRUNS="argmax_ans:answer argmax_eos:eos"
+RSHARDS="0"
 SHARDS=3
 RAW="https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl"
 for f in pool_eval.py q4.py qat.py dwq.py poolerfit.py jointfit.py checkmlx.py packmlx.py sft_lora.py selfgen_gpu.py build_merged.py web_search.py; do
@@ -364,18 +363,20 @@ PYM
   [ -s /root/hfdl/pooler_distill/chat_eval60.jsonl ] || hf download $R --include "pooler_distill/chat_eval60.jsonl" --local-dir /root/hfdl 2>&1 | tail -1
   cat > /root/reevalkeep.sh <<RK
 #!/bin/bash
-RRUN=$RRUN; RHF=$RHF; R=$R; RSTOP=${RSTOP:-eos}; RTEMP=${RTEMP:-0.9}
+RRUN=$RRUN; RHF=$RHF; R=$R; RSTOP=${RSTOP:-eos}; RTEMP=${RTEMP:-0.9}; RGREEDY=${RGREEDY:-0}; RRUNS="${RRUNS:-}"; RSHARDS="${RSHARDS:-0 1 2}"
 RK
   cat >> /root/reevalkeep.sh <<'RKB'
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null)
 run_one() {  # $1 questions file, $2 out file, $3 tag
   [ -s "$2" ] && [ "$(wc -l < "$2")" -ge "$(wc -l < "$1")" ] && return 0
-  cd /root/work && SP_BASE=$RHF SP_RANK=16 SP_NOSYS=1 SP_EPISODIC=1 OMP_NUM_THREADS=1 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python3 /root/work/pool_eval.py     /root/pooler200.safetensors "$1" "$2" --n 999 --rw 768 --maxd 384 --samepage 1 --decode plain --temp ${RTEMP:-0.9} --stop ${RSTOP:-eos} --replycap 200 --tag "[$3]" >> /root/${RRUN}_$3.log 2>&1
+  cd /root/work && SP_BASE=$RHF SP_RANK=16 SP_NOSYS=1 SP_EPISODIC=1 OMP_NUM_THREADS=1 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python3 /root/work/pool_eval.py     /root/pooler200.safetensors "$1" "$2" --n 999 --rw 768 --maxd 384 --samepage 1 --decode plain --temp ${RTEMP:-0.9} --greedy ${RGREEDY:-0} --stop ${RSTOP:-eos} --replycap 200 --tag "[$3]" >> /root/${RRUN}_$3.log 2>&1
   [ -s "$2" ] && [ "$(wc -l < "$2")" -ge "$(wc -l < "$1")" ] || { echo "REEVAL_ABORT $RRUN at $3: $(tail -1 /root/${RRUN}_$3.log | cut -c1-100)"; exit 1; }
 }
-for i in 0 1 2; do run_one /root/work/ev_$i.jsonl /root/work/${RRUN}_out_$i.jsonl ${RRUN}$i; hf upload $R /root/work/${RRUN}_out_$i.jsonl pooler_distill/chatsft/rollouts/${RRUN}_$i.jsonl >/dev/null 2>&1; echo "[$RRUN] shard $i uploaded $(tail -1 /root/${RRUN}_${RRUN}$i.log | cut -c1-110)"; done
-[ "$RSTOP" = "eos" ] && run_one /root/hfdl/pooler_distill/chat_eval60.jsonl /root/work/${RRUN}_chat_out.jsonl ${RRUN}chat
-hf upload $R /root/work/${RRUN}_chat_out.jsonl pooler_distill/chatsft/rollouts/${RRUN}_chat.jsonl >/dev/null 2>&1
+one_run() {
+  for i in $RSHARDS; do run_one /root/work/ev_$i.jsonl /root/work/${RRUN}_out_$i.jsonl ${RRUN}$i; hf upload $R /root/work/${RRUN}_out_$i.jsonl pooler_distill/chatsft/rollouts/${RRUN}_$i.jsonl >/dev/null 2>&1; echo "[$RRUN] shard $i uploaded $(tail -1 /root/${RRUN}_${RRUN}$i.log | cut -c1-110)"; done
+  [ "$RSTOP" = "eos" ] && [ "$RSHARDS" = "0 1 2" ] && { run_one /root/hfdl/pooler_distill/chat_eval60.jsonl /root/work/${RRUN}_chat_out.jsonl ${RRUN}chat; hf upload $R /root/work/${RRUN}_chat_out.jsonl pooler_distill/chatsft/rollouts/${RRUN}_chat.jsonl >/dev/null 2>&1; }
+}
+if [ -n "$RRUNS" ]; then for spec in $RRUNS; do RRUN=${spec%%:*}; RSTOP=${spec##*:}; one_run; done; else one_run; fi
 echo "REEVAL_DONE $RRUN $(date -u)"
 RKB
   chmod +x /root/reevalkeep.sh; setsid nohup bash /root/reevalkeep.sh >> /proc/1/fd/1 2>&1 < /dev/null &

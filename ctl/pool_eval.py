@@ -28,6 +28,7 @@ ap.add_argument("--q4group", type=int, default=64); ap.add_argument("--q4bits", 
 ap.add_argument("--q4skip", default="", help="comma-separated leaf modules to leave in float, e.g. embed_tokens")
 ap.add_argument("--stop", default="answer", choices=["answer", "eos"], help="answer = stop once 'answer is ...' is complete (the strict lineage); eos = stop at end of sequence or --replycap tokens after </think> (the conversational lineage)")
 ap.add_argument("--replycap", type=int, default=200)
+ap.add_argument("--greedy", type=int, default=0, help="1: argmax decoding (deterministic up to hardware), for evaluator A/B checks")
 A = ap.parse_args()
 
 os.environ.setdefault("SP_HOTPOT2", "0"); os.environ.setdefault("SP_BASE", "/root/fft_hf")
@@ -171,7 +172,7 @@ def pick_plain(logits, gen):
     """verbatim grpo_ep_more.pick(): temperature sampling; the policy may never write its own information block."""
     lg = logits.float()[0].clone(); tail = tok.decode(gen[-16:]) if gen else ""
     for _ in range(8):
-        t = int(torch.multinomial(torch.softmax(lg / A.temp, dim=-1), 1).item())
+        t = int(torch.argmax(lg).item()) if A.greedy else int(torch.multinomial(torch.softmax(lg / A.temp, dim=-1), 1).item())
         cand = tail + tok.decode([t])
         if TAG in cand or any(cand.endswith(TAG[:k]) for k in range(4, len(TAG) + 1)):
             lg[t] = -1e9; continue
