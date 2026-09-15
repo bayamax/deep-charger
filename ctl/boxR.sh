@@ -332,6 +332,7 @@ if [ "$MODE" = "reeval" ]; then
   # table compares like with like: RMODEL is "base" (the step-200 student) or an adapter name on the hub.
   RRUN=${RRUN:-basefix}; RMODEL=${RMODEL:-base}
   pkill -f "afterkee[p].sh"; pkill -f "evalkee[p].sh"; pkill -f "genkee[p].sh"; pkill -f "sft2kee[p].sh"; pkill -f "reevalkee[p].sh"; sleep 3
+  pkill -f "pool_eval.p[y]"; sleep 8; pkill -9 -f "pool_eval.p[y]" 2>/dev/null; sleep 2   # a re-run must not leave the old evaluator holding the card
   export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null)
   R=baya1116/hypernet-sp-distill
   if [ "$RMODEL" = "base" ]; then RHF=/root/eval_hf200; elif [ "${RKIND:-adapter}" = "dir" ]; then
@@ -366,6 +367,7 @@ export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null)
 run_one() {  # $1 questions file, $2 out file, $3 tag
   [ -s "$2" ] && [ "$(wc -l < "$2")" -ge "$(wc -l < "$1")" ] && return 0
   cd /root/work && SP_BASE=$RHF SP_RANK=16 SP_NOSYS=1 SP_EPISODIC=1 OMP_NUM_THREADS=1 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python3 /root/work/pool_eval.py     /root/pooler200.safetensors "$1" "$2" --n 999 --rw 768 --maxd 384 --samepage 1 --decode plain --temp 0.9 --stop eos --replycap 200 --tag "[$3]" >> /root/${RRUN}_$3.log 2>&1
+  [ -s "$2" ] && [ "$(wc -l < "$2")" -ge "$(wc -l < "$1")" ] || { echo "REEVAL_ABORT $RRUN at $3: $(tail -1 /root/${RRUN}_$3.log | cut -c1-100)"; exit 1; }
 }
 for i in 0 1 2; do run_one /root/work/ev_$i.jsonl /root/work/${RRUN}_out_$i.jsonl ${RRUN}$i; hf upload $R /root/work/${RRUN}_out_$i.jsonl pooler_distill/chatsft/rollouts/${RRUN}_$i.jsonl >/dev/null 2>&1; echo "[$RRUN] shard $i uploaded $(tail -1 /root/${RRUN}_${RRUN}$i.log | cut -c1-110)"; done
 run_one /root/hfdl/pooler_distill/chat_eval60.jsonl /root/work/${RRUN}_chat_out.jsonl ${RRUN}chat
