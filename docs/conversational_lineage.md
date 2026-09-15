@@ -194,10 +194,18 @@ cyberpunk-horror themed video game."). Two weaknesses remain on this set. When t
 reaches the gold (130 of 300), the reply states an answer anyway: 1 of those 130 hedges. The
 corpus has no example of not finding something. And the zero-search rate went from 2% to 8%.
 
-One caveat for the record: the base re-measured under the EOS rule scores 30.7% against 39.0% for
-the same 300 rollouts under the "answer is" rule, about two paired standard errors apart. The
-stop rule changes the strict lineage's number; whether that is the end token being honoured
-mid-thought or chance needs a repeat before the old figure is quoted next to the new ones.
+One caveat, looked into and closed: the base re-measured under the EOS rule scored 30.7% against
+39.0% for the same 300 rollouts under the "answer is" rule, about two paired standard errors
+apart. The scoring function is the same for both (first sentence after `</think>` must contain
+the gold, and the served text must too; both files re-scored offline give the same numbers), the
+settings, pooler and query quality are the same, and the only mechanism by which the EOS rule can
+lower the strict model's score is the end token being honoured mid-thought, which happened 12
+times against 7, about 2 points. Nothing else in the rollouts explains the rest; the old-rule
+figure has been reproduced many times (39.7, 39.0, 37-42 under 4-bit) and an argmax run under the
+old rule was at 43% after 46 questions. The 30.7% is read as a low draw at temperature 0.9. What
+the check did turn up: near-greedy decoding (temperature 0.01) on two different cards diverges
+mid-thought on 8 of 14 questions from floating-point near-ties, so A/B checks of the evaluator
+need argmax on one card (`pool_eval.py --greedy 1`), which is now available.
 
 | "should not search" set, 60 real prompts | base | s4, temp 0.9 | s4, temp 0.6 |
 |---|---|---|---|
@@ -219,7 +227,7 @@ judge-in-the-loop selection rather than more of the same pairs.
 1. Failure-case data for the search side: prefixes whose searches never reached the gold, with the
    teacher writing an honest "I couldn't confirm this" reply, so the model stops inventing an
    answer when the page was not found (130 of 300 held-out rollouts today).
-2. Repeat the base measurement under both stop rules to settle the 30.7% / 39.0% gap.
+2. Quote base and fine-tuned models only from paired runs under the same stop rule; the old-rule history stays as it is.
 3. The no-search side: fix the sampling settings first (0.6 or lower, repetition control) and
    measure with the flash judge; then rejection sampling on the student's own replies against
    that judge, not more teacher pairs.
