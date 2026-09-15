@@ -294,7 +294,9 @@ for line in open(A.questions):
     except Exception:
         continue
     q, g = (d.get("q") or "").strip(), (d.get("gold") or "").strip()
-    if q and g and q not in {x[0] for x in qs}:
+    # a question without a gold is allowed under --stop eos: prompts that should not be searched at
+    # all, where only the search count and the reply are measured (correct/grounded stay false)
+    if q and (g or A.stop == "eos") and q not in {x[0] for x in qs}:
         qs.append((q, g))
 qs = qs[:A.n]
 done = set()
