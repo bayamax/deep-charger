@@ -133,6 +133,26 @@ warranted. This is the expected failure of imitating a stronger teacher's prose 
 and it is why the plan has a second stage: selection and reward on the student's own outputs, where
 a fluent wrong answer scores zero.
 
+## The second fine-tune (s3): the style moves, the stop does not
+
+s3 trained the step-200 student on 863 records (search-side 327 teacher traces, no-search 236,
+and 300 strict single-sentence traces replayed raw), r=16, lr 3e-5, 2 epochs, 213 steps, 13 min
+on an RTX 3060. Validation loss 1.993 -> 1.576, no sign of divergence. Held-out (EOS stop, reply
+cap 200, temperature 0.9), first 100 questions: 35% correct and grounded, 56% grounded, 2.9
+searches per question, 13% answered without searching, 6% with tags after `</think>`, 15% of
+replies with CJK characters. Read side by side with the bf16 baseline (39.7%, single-sentence
+answers, 4% zero-search), the search ability is intact within noise and the output has moved:
+about half the replies open in the reply register ("It is the Danube River. Wachau is one of the
+most prominent tourist destinations of Lower Austria ...") instead of "The answer is X.". But not
+one of 52 inspected replies is a clean conversational answer: 45 of 52 run to the token cap,
+repeating the point or adding facts from nowhere, and the few that stop early are broken
+(a line repeated ten times, an HTML tag). The two reply endings in the data - the strict traces
+end after one sentence, the teacher replies after three or four - were mixed without any signal
+to tell them apart, and 213 gentle steps were not enough to learn the ending at all.
+
+The conclusion is the plain one: more data of one consistent shape, and a proper training run
+from the base with a real validation split. s4 is that run.
+
 ## Next, in order
 
 1. Top up the DeepSeek account; finish the 162 questions with the continuity prompt.
