@@ -194,18 +194,21 @@ cyberpunk-horror themed video game."). Two weaknesses remain on this set. When t
 reaches the gold (130 of 300), the reply states an answer anyway: 1 of those 130 hedges. The
 corpus has no example of not finding something. And the zero-search rate went from 2% to 8%.
 
-One open question, being checked with argmax decoding on one card (both rules, same 40 questions, outputs diffed): the base re-measured under the EOS rule scored 30.7% against
-39.0% for the same 300 rollouts under the "answer is" rule, about two paired standard errors
-apart. The scoring function is the same for both (first sentence after `</think>` must contain
-the gold, and the served text must too; both files re-scored offline give the same numbers), the
-settings, pooler and query quality are the same, and the only mechanism by which the EOS rule can
-lower the strict model's score is the end token being honoured mid-thought, which happened 12
-times against 7, about 2 points. Nothing else in the rollouts explains the rest; the old-rule
-figure has been reproduced many times (39.7, 39.0, 37-42 under 4-bit) and an argmax run under the
-old rule was at 43% after 46 questions. Whether anything beyond that changes the generated text is what the argmax diff will show. What
-the first attempt did turn up: near-greedy decoding (temperature 0.01) on two different cards diverges
-mid-thought on 8 of 14 questions from floating-point near-ties, so A/B checks of the evaluator
-need argmax on one card (`pool_eval.py --greedy 1`), which is now available.
+One question raised by the re-measurement, and settled: the base under the EOS rule scored 30.7%
+against 39.0% for the same 300 rollouts under the "answer is" rule. The scoring is the same
+function for both (re-scoring both files offline gives the same numbers, and cutting the EOS-rule
+texts at the answer sentence after the fact changes nothing), so any difference had to be in the
+generated text. Sampling at temperature 0.9 hides that, so the same 40 held-out questions were run
+with argmax decoding on one card through the old loop and then the new loop: all 40 outputs are
+byte-identical, with identical verdicts (20 of 40 correct and grounded under both). On the same
+card argmax was deterministic 40 of 40 times. The two loops therefore produce the same text and
+the same judgement for the strict model; the only mechanism that can separate them, the end token
+being honoured mid-thought, did not occur in 40 argmax questions and occurred 12 times against 7
+in the two sampled runs (about 2 points). The 8-point gap between the two sampled runs is
+sampling variance at temperature 0.9 (two paired standard errors), and paired runs under one rule
+are the only comparisons to quote. A side finding: near-greedy decoding (temperature 0.01) on two
+different cards diverged mid-thought on 8 of 14 questions from floating-point near-ties, so
+evaluator A/B checks need argmax on one card (`pool_eval.py --greedy 1`).
 
 | "should not search" set, 60 real prompts | base | s4, temp 0.9 | s4, temp 0.6 |
 |---|---|---|---|
