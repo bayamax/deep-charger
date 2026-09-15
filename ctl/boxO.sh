@@ -10,6 +10,9 @@
 # per-rollout output the onstart restores as ev_out_*.jsonl, so the difference can be paired over
 # questions instead of being read off two independent means.
 cd /root/work
+# PEEK (one run only): the loop's own log, leaving the loop running
+{ echo "PEEK loop log:"; grep -E "\[step|\[warn\]|Traceback|Error|error" /root/online_r1.log 2>/dev/null | tail -12 | cut -c1-260; echo "PEEK gpu: $(nvidia-smi --query-gpu=memory.used --format=csv,noheader)"; echo "PEEK done"; } >> /proc/1/fd/1 2>&1
+exit 0
 # The token arrives as an environment variable on the instance; keep a copy so anything this
 # script starts later still has it, and so the onstart can stay as short as possible.
 [ -s /root/.hf_token ] || { [ -n "$HF_TOKEN" ] && printf '%s' "$HF_TOKEN" > /root/.hf_token && chmod 600 /root/.hf_token; }
