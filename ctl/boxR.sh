@@ -10,6 +10,9 @@
 # per-rollout output the onstart restores as ev_out_*.jsonl, so the difference can be paired over
 # questions instead of being read off two independent means.
 cd /root/work
+# PEEK (one run only): which pooler did the evaluator load, and what is on disk
+{ echo "PEEK pooler files:"; ls -la /root/work/fft_out/ /root/pooler200.safetensors 2>&1 | tail -4; echo "PEEK load lines:"; grep -h "\[load\]" /root/*.log 2>/dev/null | sort | uniq -c | head -5; echo "PEEK done"; } >> /proc/1/fd/1 2>&1
+exit 0
 # The token arrives as an environment variable on the instance; keep a copy so anything this
 # script starts later still has it, and so the onstart can stay as short as possible.
 [ -s /root/.hf_token ] || { [ -n "$HF_TOKEN" ] && printf '%s' "$HF_TOKEN" > /root/.hf_token && chmod 600 /root/.hf_token; }
