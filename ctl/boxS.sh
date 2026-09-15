@@ -336,7 +336,7 @@ if [ "$MODE" = "publish3" ]; then
   exit 0
 fi
 if [ "$MODE" = "sft2" ]; then
-  # peek: ship whatever the held-out run has produced so far, so replies can be read before it ends
+  # peek: ship whatever the held-out run has produced so far, so replies can be read before it ends (re-run to refresh)
   for i in 0 1 2; do [ -s /root/work/${SRUN2:-s3}_out_$i.jsonl ] && HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token) hf upload baya1116/hypernet-sp-distill /root/work/${SRUN2:-s3}_out_$i.jsonl pooler_distill/chatsft/rollouts/${SRUN2:-s3}_partial_$i.jsonl 2>&1 | tail -1; done
   # Supervised fine-tuning of the step-200 student on its own search prefixes continued by a
   # teacher: the thinking after the last result and a conversational reply. Then the held-out
