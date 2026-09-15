@@ -80,7 +80,7 @@ PSKIP=
 MODE=online
 ORUN=r1
 OMODEL=s4_hf
-OB=16
+OB=8
 OSTEPS=400
 OTEMP=0.6
 OLR=1e-5
@@ -345,7 +345,8 @@ if [ "$MODE" = "online" ]; then
   cat /root/hfdl/pooler_distill/selfq_?.jsonl > /root/work/selfq_all.jsonl; cp /root/hfdl/pooler_distill/chatsft/dolphin_v1.jsonl /root/work/dolphin_v1.jsonl
   OUT=/root/online_$ORUN; mkdir -p $OUT
   # one-time: the first run used 8 rollouts per step and 6 GB of a 24 GB card; restart with 16 (the loop resumes from its state file)
-  if [ ! -f /root/.restart_b16 ]; then pkill -f "online_loop.p[y]"; sleep 8; pkill -9 -f "online_loop.p[y]" 2>/dev/null; touch /root/.restart_b16; echo "ONLINE_RESTART b=16 $(date -u)"; fi
+  # 16 rollouts per step took 4.5 min against 1.4 min for 8 (per rollout slower, not faster): back to 8, once
+  if [ ! -f /root/.restart_b8 ]; then pkill -f "online_loop.p[y]"; sleep 8; pkill -9 -f "online_loop.p[y]" 2>/dev/null; touch /root/.restart_b8; echo "ONLINE_RESTART b=8 $(date -u)"; fi
   if ! pgrep -f "online_loop.p[y]" >/dev/null; then
     cd /root/work && DSK_KEY=$(cat /root/.dsk 2>/dev/null) PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True setsid nohup python3 /root/work/online_loop.py $OHF $OUT \
       --questions /root/work/selfq_all.jsonl --dolphin /root/work/dolphin_v1.jsonl --heldout /root/work/eval300.jsonl \
