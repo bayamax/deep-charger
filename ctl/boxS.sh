@@ -362,6 +362,13 @@ if [ "$MODE" = "sft2" ]; then
   R=baya1116/hypernet-sp-distill
   for try in 1 2 3; do hf download $R --include "$SDATA" --local-dir /root/hfdl 2>&1 | tail -1 && break; sleep 10; done
   cp /root/hfdl/$SDATA /root/work/sft2_data.jsonl
+  # starting point: the step-200 student, or a merged model directory published under chatsft (the alternating steps)
+  S2FROM=/root/eval_hf200
+  if [ -n "${S2BASE:-}" ]; then
+    S2FROM=/root/hfdl/pooler_distill/chatsft/$S2BASE
+    for try in 1 2 3 4 5 6; do hf download $R --include "pooler_distill/chatsft/${S2BASE}/*" --local-dir /root/hfdl >/dev/null 2>&1; [ -s $S2FROM/model.safetensors ] && break; sleep 30; done
+    [ -s $S2FROM/model.safetensors ] || { echo "SFT2_ABORT: $S2BASE not on the hub"; exit 0; }
+  fi
   # replay: strict single-sentence QA traces of the same student, so the search reflex is not traded away
   if [ "${S2REPLAY:-0}" -gt 0 ]; then
     [ -s /root/hfdl/pooler_distill/grpo_pool3/rollouts.jsonl ] || for try in 1 2 3; do hf download $R --include "pooler_distill/grpo_pool3/rollouts.jsonl" --local-dir /root/hfdl 2>&1 | tail -1 && break; sleep 10; done
@@ -394,14 +401,14 @@ PYR
     pkill -f "pool_eval.p[y]"; sleep 8; pkill -9 -f "pool_eval.p[y]" 2>/dev/null; sleep 2
     rm -f $LOG2
     cd /root/work && PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True setsid nohup python3 /root/work/sft_lora.py \
-      --base /root/eval_hf200 --data /root/work/sft2_data.jsonl --out $HF2 --log $LOG2 \
+      --base $S2FROM --data /root/work/sft2_data.jsonl --out $HF2 --log $LOG2 \
       --rank ${S2RANK:-16} --lr ${S2LR:-3e-5} --epochs ${S2EPOCHS:-2} --accum ${S2ACCUM:-8} --val ${S2VAL:-12} --patience ${S2PATIENCE:-0} \
       >> /root/sft2_run_$SRUN2.log 2>&1 < /dev/null &
     sleep 20
   fi
   cat > /root/sft2keep.sh <<SK2
 #!/bin/bash
-SRUN2=$SRUN2; HF2=$HF2; R=$R; S2TEMP=${S2TEMP:-0.9}; CHATTAG=${CHATTAG:-}
+SRUN2=$SRUN2; HF2=$HF2; R=$R; S2TEMP=${S2TEMP:-0.9}; CHATTAG=${CHATTAG:-}; S2CAP=${S2CAP:-600}
 SK2
   cat >> /root/sft2keep.sh <<'SK2B'
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null)
@@ -420,7 +427,7 @@ while :; do
     pgrep -f "pool_eval.py .* /root/work/ev_$i.jsonl" >/dev/null && continue
     [ "$(pgrep -fc "pool_eval.p[y]")" -ge "${S2PAR:-1}" ] && continue   # one evaluator at a time on a 12 GB card
     echo "[$SRUN2-eval $(date -u +%H:%M)] shard $i at $have/$want - starting"
-    cd /root/work && SP_BASE=$HF2 SP_RANK=16 SP_NOSYS=1 SP_EPISODIC=1 OMP_NUM_THREADS=1       PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True setsid nohup python3 /root/work/pool_eval.py       /root/pooler200.safetensors /root/work/ev_$i.jsonl /root/work/${SRUN2}_out_$i.jsonl       --n 999 --rw 768 --maxd 384 --samepage 1 --decode plain --temp ${S2TEMP:-0.9} --stop eos --replycap 200 --tag "[$SRUN2$i]"       >> /root/${SRUN2}_$i.log 2>&1 < /dev/null &
+    cd /root/work && SP_BASE=$HF2 SP_RANK=16 SP_NOSYS=1 SP_EPISODIC=1 OMP_NUM_THREADS=1       PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True setsid nohup python3 /root/work/pool_eval.py       /root/pooler200.safetensors /root/work/ev_$i.jsonl /root/work/${SRUN2}_out_$i.jsonl       --n 999 --rw 768 --maxd 384 --samepage 1 --decode plain --temp ${S2TEMP:-0.9} --stop eos --replycap ${S2CAP:-600} --tag "[$SRUN2$i]"       >> /root/${SRUN2}_$i.log 2>&1 < /dev/null &
     sleep 60
   done
   if [ "$done" = "1" ]; then
@@ -433,7 +440,7 @@ while :; do
       [ -s /root/hfdl/pooler_distill/chat_eval60.jsonl ] || hf download $R --include "pooler_distill/chat_eval60.jsonl" --local-dir /root/hfdl 2>&1 | tail -1
       cd /root/work && SP_BASE=$HF2 SP_RANK=16 SP_NOSYS=1 SP_EPISODIC=1 OMP_NUM_THREADS=1 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python3 /root/work/pool_eval.py \
         /root/pooler200.safetensors /root/hfdl/pooler_distill/chat_eval60.jsonl $CHATOUT \
-        --n 999 --rw 768 --maxd 384 --samepage 1 --decode plain --temp ${S2TEMP:-0.9} --stop eos --replycap 200 --tag "[${SRUN2}chat]" >> /root/${SRUN2}_chat.log 2>&1
+        --n 999 --rw 768 --maxd 384 --samepage 1 --decode plain --temp ${S2TEMP:-0.9} --stop eos --replycap ${S2CAP:-600} --tag "[${SRUN2}chat]" >> /root/${SRUN2}_chat.log 2>&1
       hf upload $R $CHATOUT pooler_distill/chatsft/rollouts/${SRUN2}_chat${CHATTAG:-}.jsonl >/dev/null 2>&1
       echo "SFT2_CHAT_EVAL_DONE $SRUN2 $(tail -1 /root/${SRUN2}_chat.log | cut -c1-120)"
     fi
