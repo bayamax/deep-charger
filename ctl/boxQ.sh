@@ -329,7 +329,7 @@ fi
 if [ "$MODE" = "reeval" ]; then
   # Re-measure an earlier checkpoint under the fixed conversational stop rule (EOS terminal), so the
   # table compares like with like: RMODEL is "base" (the step-200 student) or an adapter name on the hub.
-  RRUN=${RRUN:-basefix}; RMODEL=${RMODEL:-base}
+  RRUN=${RRUN:-basefix}; RMODEL=${RMODEL:-base}   # re-run for the no-search set
   pkill -f "afterkee[p].sh"; pkill -f "evalkee[p].sh"; pkill -f "genkee[p].sh"; pkill -f "sft2kee[p].sh"; pkill -f "reevalkee[p].sh"; sleep 3
   pkill -f "pool_eval.p[y]"; sleep 8; pkill -9 -f "pool_eval.p[y]" 2>/dev/null; sleep 2   # a re-run must not leave the old evaluator holding the card
   export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null)
