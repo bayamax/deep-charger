@@ -57,6 +57,8 @@ ap.add_argument("--b", type=int, default=8, help="rollouts per question, decoded
 ap.add_argument("--stop", default="eos", choices=["eos", "answer"]); ap.add_argument("--judge", type=int, default=1)
 ap.add_argument("--dolphin-ratio", type=float, default=2.0, help="Dolphin records per accepted search rollout in the same step"); ap.add_argument("--dolphin-min", type=int, default=2, help="Dolphin records in a step with no accepted rollout")
 ap.add_argument("--maxlen", type=int, default=4096)
+ap.add_argument("--replay", default="", help="jsonl of verified search traces {q,text}; each step trains on --replay-per-step of them (the retention data)")
+ap.add_argument("--replay-per-step", type=int, default=2); ap.add_argument("--rollout-every", type=int, default=1, help="do the measurement rollout only every N steps (accepted ones join the replay set)")
 ap.add_argument("--accum", type=int, default=1, help="steps whose gradients are accumulated before one optimizer update (both the search-side and the Dolphin part)")
 ap.add_argument("--samepage", type=int, default=1, help="1: a search whose top page was already shown in this rollout serves the NEXT chunk of that page (and says so when the page is used up); 0: teacher environment (always the head)")
 A = ap.parse_args()
@@ -680,8 +682,32 @@ for line in open(A.dolphin):
     try: r = json.loads(line)
     except Exception: continue
     if r.get("q") and r.get("thinking") and r.get("reply"): dol.append(r)
-rng = random.Random(0); rng.shuffle(pool); rng.shuffle(dol)
-print(f"[data] {len(pool)} questions, {len(dol)} dolphin records", flush=True)
+rep = []
+if A.replay:
+    for line in open(A.replay):
+        try: r = json.loads(line)
+        except Exception: continue
+        if r.get("q") and r.get("text"): rep.append(r)
+rng = random.Random(0); rng.shuffle(pool); rng.shuffle(dol); rng.shuffle(rep)
+INFO_RE = re.compile(r"(<information>.*?</information>\n?)", re.S)
+def replay_backward(rec, coef):
+    """a verified search trace as plain SFT: prompt masked, information blocks masked, EOS trained"""
+    head_t = tok.apply_chat_template([{"role": "user", "content": rec["q"]}], add_generation_prompt=True, tokenize=False)
+    if not head_t.rstrip().endswith("<think>"): head_t += "<think>\n"
+    ids = tok.encode(head_t, add_special_tokens=False); msk = [0] * len(ids)
+    body = rec["text"]; body = body[len("<think>"):].lstrip("\n") if body.startswith("<think>") else body
+    for piece in INFO_RE.split(body):
+        if not piece: continue
+        t = tok.encode(piece, add_special_tokens=False); ids += t; msk += [0 if piece.startswith("<information>") else 1] * len(t)
+    ids.append(eos); msk.append(1); ids, msk = ids[:A.maxlen], msk[:A.maxlen]
+    if sum(msk[1:]) == 0: return 0.0
+    x = torch.tensor([ids], device=DEV)
+    h = BODY(input_ids=x, use_cache=False).last_hidden_state[:, :-1, :]
+    pr = HEAD(h).float(); tgt = x[:, 1:]; tm = torch.tensor([msk[1:]], device=DEV, dtype=torch.float32)
+    ce = torch.nn.functional.cross_entropy(pr.reshape(-1, pr.shape[-1]), tgt.reshape(-1), reduction="none")
+    loss = (ce * tm.reshape(-1)).sum() / tm.sum()
+    (coef * loss).backward(); v = float(loss.item()); del h, pr, ce, loss; clear(); return v
+print(f"[data] {len(pool)} questions, {len(dol)} dolphin records, {len(rep)} replay traces", flush=True)
 
 # ---- the cheap judge (key from the environment, never from the repo) ----
 DSK = os.environ.get("DSK_KEY", "").strip()
@@ -725,16 +751,18 @@ TAGS = ("<search>", "<information>", "</think>", "<think>", "<more")
 log = open(os.path.join(A.outdir, "loop.log"), "a")
 roll_fh = open(os.path.join(A.outdir, "rollouts.jsonl"), "a")
 acc_fh = open(os.path.join(A.outdir, "accepted.jsonl"), "a")
-cum = state.get("cum", {}); t0 = time.time(); di = state.get("di", 0)
+cum = state.get("cum", {}); t0 = time.time(); di = state.get("di", 0); ri = state.get("ri", 0)
 for step in range(state["step"] + 1, A.steps + 1):
     item = pool[(step - 1) % len(pool)]
     if (step - 1) % A.accum == 0: opt.zero_grad(set_to_none=True)
-    try:
-        rolls = rollout_batch(item["q"], A.b)
-    except (KeyboardInterrupt, SystemExit):
-        raise
-    except BaseException as e:
-        print(f"[warn] batch dropped: {type(e).__name__}: {str(e)[:120]}", flush=True); clear(); continue
+    rolls = []
+    if step % A.rollout_every == 0:
+        try:
+            rolls = rollout_batch(item["q"], A.b)
+        except (KeyboardInterrupt, SystemExit):
+            raise
+        except BaseException as e:
+            print(f"[warn] batch dropped: {type(e).__name__}: {str(e)[:120]}", flush=True); clear()
     reasons = []; positives = []
     for r in rolls:
         _, c, g = price(r, item["gold"]); reply = r["text"].split("</think>")[-1] if "</think>" in r["text"] else ""
@@ -755,7 +783,13 @@ for step in range(state["step"] + 1, A.steps + 1):
         for r in positives:
             losses.append(pg_backward(r, 1.0 / (len(positives) * A.accum))); clear()
             acc_fh.write(json.dumps({"q": item["q"], "gold": item["gold"], "text": r["text"], "step": step}, ensure_ascii=False) + "\n")
+            rep.append({"q": item["q"], "text": r["text"], "src": "accepted"})   # joins the retention data
         acc_fh.flush()
+    rl = []
+    if rep and A.replay_per_step > 0:
+        model.train()
+        for _ in range(A.replay_per_step):
+            rl.append(replay_backward(rep[ri % len(rep)], 1.0 / (A.replay_per_step * A.accum))); ri += 1
     nd = max(A.dolphin_min, int(round(A.dolphin_ratio * len(positives))))
     if dol:
         model.train()
@@ -764,10 +798,10 @@ for step in range(state["step"] + 1, A.steps + 1):
     if step % A.accum == 0:
         opt.step(); opt.zero_grad(set_to_none=True); clear()
     tot = sum(cum.values()); acc = cum.get("accepted", 0)
-    line = (f"[step {step}] " + " ".join(f"{k}={sum(1 for x in reasons if x == k)}" for k in ("accepted", "wrong", "page not found", "no reply", "tags", "judge", "judge error") if any(x == k for x in reasons))
-            + f" | sft_ce={sum(losses)/max(len(losses),1):.3f} dolphin_ce={sum(dl)/max(len(dl),1):.3f} | cumulative accept {acc}/{tot} ({100*acc/max(tot,1):.1f}%) "
+    line = (f"[step {step}] " + (" ".join(f"{k}={sum(1 for x in reasons if x == k)}" for k in ("accepted", "wrong", "page not found", "no reply", "tags", "judge", "judge error") if any(x == k for x in reasons)) if rolls else "no rollout")
+            + f" | sft_ce={sum(losses)/max(len(losses),1):.3f} replay_ce={sum(rl)/max(len(rl),1):.3f} dolphin_ce={sum(dl)/max(len(dl),1):.3f} | cumulative accept {acc}/{tot} ({100*acc/max(tot,1):.1f}%) "
             + " ".join(f"{k}:{100*v/max(tot,1):.0f}%" for k, v in sorted(cum.items())) + f" | {(time.time()-t0)/60:.0f} min")
     print(line, flush=True); log.write(line + "\n"); log.flush()
     if step % A.save_every == 0 or step == A.steps:
-        save_ckpt(LATEST); json.dump({"step": step, "cum": cum, "di": di}, open(STATE_F, "w")); print(f"[save] step {step}", flush=True)
+        save_ckpt(LATEST); json.dump({"step": step, "cum": cum, "di": di, "ri": ri}, open(STATE_F, "w")); print(f"[save] step {step}", flush=True)
 print("ONLINE_LOOP_DONE", flush=True)
