@@ -78,16 +78,18 @@ PRUNS="p_t06q4:1:0.6 p_t06bf16:0:0.6"
 PG=64
 PSKIP=
 MODE=online
-ORUN=r2
+ORUN=r3
 OMODEL=s4_hf
 OB=8
 ODRATIO=1
 ODMIN=1
 ODOLPHIN=dolphin_v2.jsonl
-ORESUME=1
+OLR=3e-6
+OACCUM=4
+OLAYERS=20-27
+ORESUME=0
 OSTEPS=400
 OTEMP=0.6
-OLR=1e-5
 SHARDS=3
 RAW="https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl"
 for f in pool_eval.py q4.py qat.py dwq.py poolerfit.py jointfit.py checkmlx.py packmlx.py sft_lora.py selfgen_gpu.py build_merged.py web_search.py grpo_pool.py online_loop.py; do
@@ -358,12 +360,12 @@ if [ "$MODE" = "online" ]; then
   fi
   # one-time: the first run used 8 rollouts per step and 6 GB of a 24 GB card; restart with 16 (the loop resumes from its state file)
   # 16 rollouts per step took 4.5 min against 1.4 min for 8 (per rollout slower, not faster): back to 8, once
-  # r2: run r1 drifted under Dolphin at 2:1 (own thinking 189 -> 336 words, searches 4.9 -> 8.2, cut-offs and thought-marker loops); fresh start from s4 with short-reasoning Dolphin at 1:1
+  # r3: r1 and r2 both drifted around step 40-60 (long looping thinking, 8+ searches) whatever the Dolphin share; r3 lowers the lr to 3e-6, accumulates 4 steps per update and keeps the LoRA on layers 20-27 (the GRPO recipe)
   if [ ! -f /root/.restart_$ORUN ]; then pkill -f "online_loop.p[y]"; sleep 8; pkill -9 -f "online_loop.p[y]" 2>/dev/null; touch /root/.restart_$ORUN; echo "ONLINE_RESTART $ORUN dolphin ratio $ODRATIO min $ODMIN $(date -u)"; fi
   if ! pgrep -f "online_loop.p[y]" >/dev/null; then
     cd /root/work && DSK_KEY=$(cat /root/.dsk 2>/dev/null) PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True setsid nohup python3 /root/work/online_loop.py $OHF $OUT \
       --questions /root/work/selfq_all.jsonl --dolphin /root/work/dolphin_v1.jsonl --heldout /root/work/eval300.jsonl \
-      --b $OB --steps $OSTEPS --temp $OTEMP --lr $OLR --dolphin-ratio ${ODRATIO:-2} --dolphin-min ${ODMIN:-2} --pooler none --lora-rank 16 --lora-layers all --gradckpt 1 --save-every 5 --stop eos \
+      --b $OB --steps $OSTEPS --temp $OTEMP --lr $OLR --dolphin-ratio ${ODRATIO:-2} --dolphin-min ${ODMIN:-2} --accum ${OACCUM:-1} --pooler none --lora-rank 16 --lora-layers ${OLAYERS:-all} --gradckpt 1 --save-every 5 --stop eos \
       >> /root/online_$ORUN.log 2>&1 < /dev/null &
   fi
   cat > /root/onlinekeep.sh <<OK

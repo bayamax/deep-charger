@@ -57,6 +57,7 @@ ap.add_argument("--b", type=int, default=8, help="rollouts per question, decoded
 ap.add_argument("--stop", default="eos", choices=["eos", "answer"]); ap.add_argument("--judge", type=int, default=1)
 ap.add_argument("--dolphin-ratio", type=float, default=2.0, help="Dolphin records per accepted search rollout in the same step"); ap.add_argument("--dolphin-min", type=int, default=2, help="Dolphin records in a step with no accepted rollout")
 ap.add_argument("--maxlen", type=int, default=4096)
+ap.add_argument("--accum", type=int, default=1, help="steps whose gradients are accumulated before one optimizer update (both the search-side and the Dolphin part)")
 ap.add_argument("--samepage", type=int, default=1, help="1: a search whose top page was already shown in this rollout serves the NEXT chunk of that page (and says so when the page is used up); 0: teacher environment (always the head)")
 A = ap.parse_args()
 os.makedirs(A.outdir, exist_ok=True)
@@ -727,7 +728,7 @@ acc_fh = open(os.path.join(A.outdir, "accepted.jsonl"), "a")
 cum = state.get("cum", {}); t0 = time.time(); di = state.get("di", 0)
 for step in range(state["step"] + 1, A.steps + 1):
     item = pool[(step - 1) % len(pool)]
-    opt.zero_grad(set_to_none=True)
+    if (step - 1) % A.accum == 0: opt.zero_grad(set_to_none=True)
     try:
         rolls = rollout_batch(item["q"], A.b)
     except (KeyboardInterrupt, SystemExit):
@@ -752,15 +753,15 @@ for step in range(state["step"] + 1, A.steps + 1):
     if positives:
         model.train()
         for r in positives:
-            losses.append(pg_backward(r, 1.0 / len(positives))); clear()
+            losses.append(pg_backward(r, 1.0 / (len(positives) * A.accum))); clear()
             acc_fh.write(json.dumps({"q": item["q"], "gold": item["gold"], "text": r["text"], "step": step}, ensure_ascii=False) + "\n")
         acc_fh.flush()
-        opt.step(); opt.zero_grad(set_to_none=True); clear()
     nd = max(A.dolphin_min, int(round(A.dolphin_ratio * len(positives))))
     if dol:
         model.train()
         for _ in range(nd):
-            dl.append(plain_backward(dol[di % len(dol)], 1.0 / nd)); di += 1
+            dl.append(plain_backward(dol[di % len(dol)], 1.0 / (nd * A.accum))); di += 1
+    if step % A.accum == 0:
         opt.step(); opt.zero_grad(set_to_none=True); clear()
     tot = sum(cum.values()); acc = cum.get("accepted", 0)
     line = (f"[step {step}] " + " ".join(f"{k}={sum(1 for x in reasons if x == k)}" for k in ("accepted", "wrong", "page not found", "no reply", "tags", "judge", "judge error") if any(x == k for x in reasons))
