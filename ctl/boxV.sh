@@ -10,7 +10,7 @@
 # per-rollout output the onstart restores as ev_out_*.jsonl, so the difference can be paired over
 # questions instead of being read off two independent means.
 cd /root/work
-# PEEK (one run only): ship the partial argmax rollouts, leave the evaluator running
+# PEEK (one run only): ship the partial argmax rollouts, leave the evaluator running (2)
 { for r in argmax_ans argmax_eos; do [ -s /root/work/${r}_out_0.jsonl ] && HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token) hf upload baya1116/hypernet-sp-distill /root/work/${r}_out_0.jsonl pooler_distill/chatsft/rollouts/${r}_partial_0.jsonl 2>&1 | tail -1; echo "PEEK $r $(wc -l < /root/work/${r}_out_0.jsonl 2>/dev/null) rollouts $(date -u +%H:%M)"; done; } >> /proc/1/fd/1 2>&1
 exit 0
 # The token arrives as an environment variable on the instance; keep a copy so anything this
