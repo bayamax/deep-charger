@@ -408,7 +408,18 @@ while :; do
   done
   if [ "$done" = "1" ]; then
     for i in 0 1 2; do hf upload $R /root/work/${SRUN2}_out_$i.jsonl pooler_distill/chatsft/rollouts/${SRUN2}_$i.jsonl >/dev/null 2>&1; done
-    echo "SFT2_EVAL_DONE $SRUN2 $(date -u)"; break
+    echo "SFT2_EVAL_DONE $SRUN2 $(date -u)"
+    # the other half of the discipline: real prompts that should NOT be searched (gold empty, so only
+    # the search count and the reply text matter; the reply is judged off-box)
+    if [ ! -s /root/work/${SRUN2}_chat_out.jsonl ] || [ "$(wc -l < /root/work/${SRUN2}_chat_out.jsonl)" -lt 60 ]; then
+      [ -s /root/hfdl/pooler_distill/chat_eval60.jsonl ] || hf download $R --include "pooler_distill/chat_eval60.jsonl" --local-dir /root/hfdl 2>&1 | tail -1
+      cd /root/work && SP_BASE=$HF2 SP_RANK=16 SP_NOSYS=1 SP_EPISODIC=1 OMP_NUM_THREADS=1 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python3 /root/work/pool_eval.py \
+        /root/pooler200.safetensors /root/hfdl/pooler_distill/chat_eval60.jsonl /root/work/${SRUN2}_chat_out.jsonl \
+        --n 999 --rw 768 --maxd 384 --samepage 1 --decode plain --temp ${S2TEMP:-0.9} --stop eos --replycap 200 --tag "[${SRUN2}chat]" >> /root/${SRUN2}_chat.log 2>&1
+      hf upload $R /root/work/${SRUN2}_chat_out.jsonl pooler_distill/chatsft/rollouts/${SRUN2}_chat.jsonl >/dev/null 2>&1
+      echo "SFT2_CHAT_EVAL_DONE $SRUN2 $(tail -1 /root/${SRUN2}_chat.log | cut -c1-120)"
+    fi
+    break
   fi
   sleep 120
 done
