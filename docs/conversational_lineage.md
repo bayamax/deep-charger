@@ -153,17 +153,74 @@ to tell them apart, and 213 gentle steps were not enough to learn the ending at 
 The conclusion is the plain one: more data of one consistent shape, and a proper training run
 from the base with a real validation split. s4 is that run.
 
+## The evaluator was banning the end token
+
+Before s4 was measured, the evaluator's stop handling was read again. Under `--stop eos`, when
+the model sampled the end token the inner loop broke without appending it, the outer loop then
+checked whether the last token was the end token (it was not) and re-sampled from the same
+logits. In effect the end token was banned: every reply ran to the token cap, and everything
+written after the intended stop (the repetition, the invented facts, the CJK) was the model being
+pushed past its own ending. The strict lineage never saw this because it stops on "the answer is
+...". Fixed in `pool_eval.py` (`ended` flag, only under `--stop eos`; the strict rule is
+untouched), together with a second fix that lets gold-less prompts through under that rule so a
+"should not search" set can be measured.
+
+## s4: one run from the base on 1107 records
+
+Corpus `chatsft/mix_v3.jsonl`: search-side 556 (198 from the GRPO prefixes, 129 + 71 from the
+chat-register rewrites, 110 + 48 from the original nq forms), no-search 551 (236 + 315 teacher
+pairs on real prompts). No raw strict traces. r=16, lr 5e-5, 3 epochs (378 steps), 100-record
+validation every 10 steps with the best adapter kept and early stop on 6 flat validations (never
+triggered); validation loss 2.323 -> 1.660; 27 min on an RTX 3060. The merged model is on the hub
+(`chatsft/s4_hf`, s3 as `chatsft/s3_hf`).
+
+Everything below is the fixed evaluator, EOS stop, reply cap 200, temperature 0.9, the same 150
+held-out questions x 2, all models re-measured under the same rule.
+
+| held-out, 300 rollouts | base (step 200) | s3 | s4 |
+|---|---|---|---|
+| correct and grounded | 30.7% | 31.0% / 33.0% (shards 0, 1) | 31.7% |
+| paired difference to base (150 q) | | | -2.7 pt +- 4.2 |
+| grounded | 61.7% | 52% / 55% | 56.7% |
+| searches per question | 4.85 | 3.5 / 3.8 | 4.05 |
+| answered without searching | 2.3% | | 8.0% |
+| tags after `</think>` | 1.0% | | 1.0% |
+| reply length (words) | 7 ("The answer is X.") | | 41, 2 of 300 at the cap |
+| replies with CJK | 1 | | 8 |
+
+So the search ability is unchanged within noise and the reply is now two or three sentences that
+end where they should ("System Shock is the 1994 PC game. SHODAN is the main antagonist of it, a
+cyberpunk-horror themed video game."). Two weaknesses remain on this set. When the search never
+reaches the gold (130 of 300), the reply states an answer anyway: 1 of those 130 hedges. The
+corpus has no example of not finding something. And the zero-search rate went from 2% to 8%.
+
+One caveat for the record: the base re-measured under the EOS rule scores 30.7% against 39.0% for
+the same 300 rollouts under the "answer is" rule, about two paired standard errors apart. The
+stop rule changes the strict lineage's number; whether that is the end token being honoured
+mid-thought or chance needs a repeat before the old figure is quoted next to the new ones.
+
+| "should not search" set, 60 real prompts | base | s4, temp 0.9 | s4, temp 0.6 |
+|---|---|---|---|
+| searched anyway | 60 of 60 (41 replies "The answer is X.") | 14 | 4 |
+| reply answers the message (flash judge) | | 1 of 47 | 9 of 41 |
+| naturalness 1-5 (flash judge) | | 1.13 | 1.66 |
+| replies with CJK | | 11 | 0 |
+
+The base cannot chat at all; s4 has learnt when not to search (93% at temperature 0.6) but the
+free-form replies are weak: coherent at 0.6 ("Building in Minecraft is basically a lot of trial
+and error, so the key is to keep trying ..."), mushy or invented at 0.9, with made-up citations
+("M. L. Scott's 2010 study") either way. Without served text to lean on, the 1.5B model's own
+knowledge is what shows, and 551 examples do not change that. This side needs its own treatment:
+sampling settings (temperature, repetition control) measured together with the data, and a
+judge-in-the-loop selection rather than more of the same pairs.
+
 ## Next, in order
 
-1. Top up the DeepSeek account; finish the 162 questions with the continuity prompt.
-2. Expand the questions with nq_open through the box's generation mode (about $1.1 per 1000
-   questions), rewritten into chat register first (see above), so the corpus is 1000+ questions of
-   the kind people actually type into an assistant.
-3. Gentler fine-tune with replay: r=16, lr 3e-5, 2 epochs, and the strict single-sentence QA traces
-   mixed in at about 1:1 so the search reflex is preserved; stop by validation loss. Running as s3
-   (`ctl/boxS.sh`) on the 563-record mix `chatsft/mix_v1.jsonl` (search v3 198, para0 56, para1 73,
-   chat v1 236; held-out overlap checked: none) plus 300 replayed strict traces.
-4. Change the evaluator's stop rule for this lineage (stop at EOS, cap the reply) and add two
-   discipline metrics to every measurement: zero-search answers and tags after `</think>`.
-5. Then rejection sampling with the gold reward plus pairwise judging on the student's own samples,
-   and only after that multi-turn.
+1. Failure-case data for the search side: prefixes whose searches never reached the gold, with the
+   teacher writing an honest "I couldn't confirm this" reply, so the model stops inventing an
+   answer when the page was not found (130 of 300 held-out rollouts today).
+2. Repeat the base measurement under both stop rules to settle the 30.7% / 39.0% gap.
+3. The no-search side: fix the sampling settings first (0.6 or lower, repetition control) and
+   measure with the flash judge; then rejection sampling on the student's own replies against
+   that judge, not more teacher pairs.
+4. Only then the 4-bit packing of the chosen checkpoint (`packmlx.py`) and the app.
