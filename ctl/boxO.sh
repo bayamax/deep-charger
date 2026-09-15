@@ -10,9 +10,6 @@
 # per-rollout output the onstart restores as ev_out_*.jsonl, so the difference can be paired over
 # questions instead of being read off two independent means.
 cd /root/work
-# PEEK (one run only): the loop's own log, leaving the loop running
-{ echo "PEEK loop log:"; grep -E "\[step|\[warn\]|Traceback|Error|error" /root/online_r1.log 2>/dev/null | tail -12 | cut -c1-260; echo "PEEK gpu: $(nvidia-smi --query-gpu=memory.used --format=csv,noheader)"; echo "PEEK done"; } >> /proc/1/fd/1 2>&1
-exit 0
 # The token arrives as an environment variable on the instance; keep a copy so anything this
 # script starts later still has it, and so the onstart can stay as short as possible.
 [ -s /root/.hf_token ] || { [ -n "$HF_TOKEN" ] && printf '%s' "$HF_TOKEN" > /root/.hf_token && chmod 600 /root/.hf_token; }
@@ -83,7 +80,7 @@ PSKIP=
 MODE=online
 ORUN=r1
 OMODEL=s4_hf
-OB=8
+OB=16
 OSTEPS=400
 OTEMP=0.6
 OLR=1e-5
@@ -347,6 +344,8 @@ if [ "$MODE" = "online" ]; then
   done
   cat /root/hfdl/pooler_distill/selfq_?.jsonl > /root/work/selfq_all.jsonl; cp /root/hfdl/pooler_distill/chatsft/dolphin_v1.jsonl /root/work/dolphin_v1.jsonl
   OUT=/root/online_$ORUN; mkdir -p $OUT
+  # one-time: the first run used 8 rollouts per step and 6 GB of a 24 GB card; restart with 16 (the loop resumes from its state file)
+  if [ ! -f /root/.restart_b16 ]; then pkill -f "online_loop.p[y]"; sleep 8; pkill -9 -f "online_loop.p[y]" 2>/dev/null; touch /root/.restart_b16; echo "ONLINE_RESTART b=16 $(date -u)"; fi
   if ! pgrep -f "online_loop.p[y]" >/dev/null; then
     cd /root/work && DSK_KEY=$(cat /root/.dsk 2>/dev/null) PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True setsid nohup python3 /root/work/online_loop.py $OHF $OUT \
       --questions /root/work/selfq_all.jsonl --dolphin /root/work/dolphin_v1.jsonl --heldout /root/work/eval300.jsonl \
