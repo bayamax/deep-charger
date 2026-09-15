@@ -192,7 +192,7 @@ def rollout(question):
     n_model, ns_, nm, nmt = 0, 0, 0, 0
     served, queries, page_ids, page_off = [], [], [], 0
     seen_pages, cur_key, nrep = {}, None, 0
-    t0 = time.time(); dead = False
+    t0 = time.time(); dead = False; ended = False
 
     def inject(text):
         ids = tok.encode(text, add_special_tokens=False)
@@ -218,6 +218,10 @@ def rollout(question):
             greedy = "</think>" in txt_tail
             nx = pick_plain(last, gen) if A.decode == "plain" else pick(last, gen, greedy, exempt, allowed_ng)
             if nx == eos:
+                # the strict lineage stops on "the answer is ..." and never looked at this token; the
+                # conversational lineage ends its reply with it, so under --stop eos it is terminal.
+                # (Before, the sample was dropped and the same logits re-sampled: EOS was in effect banned.)
+                if A.stop == "eos": ended = True
                 brk = True; break
             gen.append(nx); n_model += 1
             if len(gen) >= 8 and len(set(gen[-8:])) == 1:
@@ -271,7 +275,7 @@ def rollout(question):
                         position_ids=torch.tensor([[npos]], device=DEV), cache_position=torch.tensor([npos], device=DEV), use_cache=True)
             npos += 1; last = out.logits[:, -1, :]
         txt = tok.decode(gen)
-        if dead or (brk and gen and gen[-1] == eos):
+        if dead or ended or (brk and gen and gen[-1] == eos):
             break
         if A.stop == "answer" and "</think>" in txt and answer_complete(txt.split("</think>")[-1]):
             break

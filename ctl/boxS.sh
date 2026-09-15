@@ -336,6 +336,12 @@ if [ "$MODE" = "publish3" ]; then
   exit 0
 fi
 if [ "$MODE" = "sft2" ]; then
+  # one-time: the evaluator used to ignore the end token under --stop eos; restart the held-out run once with the fixed one
+  if [ ! -f /root/.evalfix_${SRUN2:-s4} ] && [ -s /root/work/${SRUN2:-s4}_out_0.jsonl ]; then
+    pkill -f "sft2kee[p].sh"; pkill -f "pool_eval.p[y]"; sleep 8; pkill -9 -f "pool_eval.p[y]" 2>/dev/null
+    for i in 0 1 2; do mv -f /root/work/${SRUN2:-s4}_out_$i.jsonl /root/work/${SRUN2:-s4}_noeos_$i.jsonl 2>/dev/null; done
+    touch /root/.evalfix_${SRUN2:-s4}; echo "EVALFIX applied: held-out run restarts with the fixed evaluator $(date -u)"
+  fi
   # peek: ship whatever the held-out run has produced so far, so replies can be read before it ends (re-run to refresh)
   for i in 0 1 2; do [ -s /root/work/${SRUN2:-s3}_out_$i.jsonl ] && HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token) hf upload baya1116/hypernet-sp-distill /root/work/${SRUN2:-s3}_out_$i.jsonl pooler_distill/chatsft/rollouts/${SRUN2:-s3}_partial_$i.jsonl 2>&1 | tail -1; done
   # Supervised fine-tuning of the step-200 student on its own search prefixes continued by a
