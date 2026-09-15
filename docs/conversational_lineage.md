@@ -179,14 +179,14 @@ held-out questions x 2, all models re-measured under the same rule.
 
 | held-out, 300 rollouts | base (step 200) | s3 | s4 |
 |---|---|---|---|
-| correct and grounded | 30.7% | 31.0% / 33.0% (shards 0, 1) | 31.7% |
+| correct and grounded | 30.7% | 31.7% | 31.7% |
 | paired difference to base (150 q) | | | -2.7 pt +- 4.2 |
-| grounded | 61.7% | 52% / 55% | 56.7% |
-| searches per question | 4.85 | 3.5 / 3.8 | 4.05 |
-| answered without searching | 2.3% | | 8.0% |
-| tags after `</think>` | 1.0% | | 1.0% |
-| reply length (words) | 7 ("The answer is X.") | | 41, 2 of 300 at the cap |
-| replies with CJK | 1 | | 8 |
+| grounded | 61.7% | 53.7% | 56.7% |
+| searches per question | 4.85 | 3.56 | 4.05 |
+| answered without searching | 2.3% | 12.7% | 8.0% |
+| tags after `</think>` | 1.0% | 0.7% | 1.0% |
+| reply length (words) | 7 ("The answer is X.") | 20 | 41, 2 of 300 at the cap |
+| replies with CJK | 1 | 10 | 8 |
 
 So the search ability is unchanged within noise and the reply is now two or three sentences that
 end where they should ("System Shock is the 1994 PC game. SHODAN is the main antagonist of it, a
