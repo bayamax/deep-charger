@@ -10,6 +10,9 @@
 # per-rollout output the onstart restores as ev_out_*.jsonl, so the difference can be paired over
 # questions instead of being read off two independent means.
 cd /root/work
+# PEEK (one run only): ship the partial greedy rollouts, leave the evaluator running
+{ [ -s /root/work/greedy_eos_out_0.jsonl ] && HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token) hf upload baya1116/hypernet-sp-distill /root/work/greedy_eos_out_0.jsonl pooler_distill/chatsft/rollouts/greedy_eos_partial_0.jsonl 2>&1 | tail -1; echo "PEEK greedy_eos $(wc -l < /root/work/greedy_eos_out_0.jsonl 2>/dev/null) rollouts $(date -u +%H:%M)"; } >> /proc/1/fd/1 2>&1
+exit 0
 # The token arrives as an environment variable on the instance; keep a copy so anything this
 # script starts later still has it, and so the onstart can stay as short as possible.
 [ -s /root/.hf_token ] || { [ -n "$HF_TOKEN" ] && printf '%s' "$HF_TOKEN" > /root/.hf_token && chmod 600 /root/.hf_token; }
