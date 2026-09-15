@@ -402,7 +402,7 @@ PYR
     rm -f $LOG2
     cd /root/work && PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True setsid nohup python3 /root/work/sft_lora.py \
       --base $S2FROM --data /root/work/sft2_data.jsonl --out $HF2 --log $LOG2 \
-      --rank ${S2RANK:-16} --lr ${S2LR:-3e-5} --epochs ${S2EPOCHS:-2} --accum ${S2ACCUM:-8} --val ${S2VAL:-12} --patience ${S2PATIENCE:-0} \
+      --rank ${S2RANK:-16} --lr ${S2LR:-3e-5} --epochs ${S2EPOCHS:-2} --accum ${S2ACCUM:-8} --val ${S2VAL:-12} --patience ${S2PATIENCE:-0} --maxlen ${S2MAXLEN:-3072} \
       >> /root/sft2_run_$SRUN2.log 2>&1 < /dev/null &
     sleep 20
   fi
