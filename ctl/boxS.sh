@@ -336,6 +336,10 @@ if [ "$MODE" = "publish3" ]; then
   exit 0
 fi
 if [ "$MODE" = "sft2" ]; then
+  # one-time: publish the merged s3 model so another box can re-measure it (its adapter upload never landed)
+  if [ -s /root/sft2_hf_s3/model.safetensors ] && [ ! -f /root/.s3_hf_uploaded ]; then
+    ( HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token) hf upload baya1116/hypernet-sp-distill /root/sft2_hf_s3 pooler_distill/chatsft/s3_hf 2>&1 | tail -1; touch /root/.s3_hf_uploaded; echo "S3_HF_UPLOADED $(date -u)" ) >> /proc/1/fd/1 2>&1 &
+  fi
   # one-time: the evaluator used to ignore the end token under --stop eos; restart the held-out run once with the fixed one
   if [ ! -f /root/.evalfix_${SRUN2:-s4} ] && [ -s /root/work/${SRUN2:-s4}_out_0.jsonl ]; then
     pkill -f "sft2kee[p].sh"; pkill -f "pool_eval.p[y]"; sleep 8; pkill -9 -f "pool_eval.p[y]" 2>/dev/null

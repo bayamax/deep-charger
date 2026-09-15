@@ -333,7 +333,14 @@ if [ "$MODE" = "reeval" ]; then
   pkill -f "afterkee[p].sh"; pkill -f "evalkee[p].sh"; pkill -f "genkee[p].sh"; pkill -f "sft2kee[p].sh"; pkill -f "reevalkee[p].sh"; sleep 3
   export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null)
   R=baya1116/hypernet-sp-distill
-  if [ "$RMODEL" = "base" ]; then RHF=/root/eval_hf200; else
+  if [ "$RMODEL" = "base" ]; then RHF=/root/eval_hf200; elif [ "${RKIND:-adapter}" = "dir" ]; then
+    RHF=/root/hfdl/pooler_distill/chatsft/$RMODEL   # a merged model directory published by the training box
+    for try in $(seq 1 60); do   # it may still be uploading: poll for up to an hour
+      hf download $R --include "pooler_distill/chatsft/${RMODEL}/*" --local-dir /root/hfdl >/dev/null 2>&1
+      [ -s $RHF/model.safetensors ] && [ -s $RHF/config.json ] && break; sleep 60
+    done
+    [ -s $RHF/model.safetensors ] || { echo "REEVAL_ABORT $RRUN: $RMODEL not on the hub"; exit 0; }
+  else
     RHF=/root/reeval_hf_$RMODEL
     if [ ! -s $RHF/model.safetensors ]; then
       for try in 1 2 3; do hf download $R --include "pooler_distill/chatsft/${RMODEL}/*" --local-dir /root/hfdl 2>&1 | tail -1; [ "${PIPESTATUS[0]}" -eq 0 ] && break; sleep 10; done
@@ -346,6 +353,7 @@ m = PeftModel.from_pretrained(base, "/root/hfdl/pooler_distill/chatsft/$RMODEL")
 m.save_pretrained("$RHF", safe_serialization=True); AutoTokenizer.from_pretrained("/root/eval_hf200").save_pretrained("$RHF"); print("MERGED $RMODEL")
 PYM
     fi
+    [ -s $RHF/model.safetensors ] || { echo "REEVAL_ABORT $RRUN: merge failed"; exit 0; }
   fi
   [ -s /root/hfdl/pooler_distill/chat_eval60.jsonl ] || hf download $R --include "pooler_distill/chat_eval60.jsonl" --local-dir /root/hfdl 2>&1 | tail -1
   cat > /root/reevalkeep.sh <<RK
