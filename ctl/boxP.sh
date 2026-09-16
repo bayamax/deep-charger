@@ -1,19 +1,3 @@
-# PEEK (one-shot): the replies of the r7 rollouts, early block vs latest block
-python3 - <<'PYS'
-import json
-rows = [json.loads(l) for l in open("/root/online_r7/rollouts.jsonl") if l.strip()]
-mx = max(r["step"] for r in rows)
-def reply(t):
-    return t.split("</think>")[-1].strip().replace("\n", " ") if "</think>" in t else "(no </think>)"
-for lo, hi in ((1, 24), (max(1, mx - 23), mx)):
-    print(f"PEEKREPLY == steps {lo}-{hi}")
-    for r in [x for x in rows if lo <= x["step"] <= hi][:12]:
-        print(f"PEEKREPLY [{r['step']}|{r['why']}] {reply(r['text'])[:230]}")
-import statistics
-w = [len(reply(r["text"]).split()) for r in rows if "</think>" in r["text"]]
-print(f"PEEKREPLY reply words: median {statistics.median(w):.0f} mean {sum(w)/len(w):.0f} max {max(w)} (n={len(w)})")
-PYS
-exit 0
 # box E (24GB, replaces the A4000 whose host had no free GPU left): measure the held-out set through
 # the 4-bit grid the phone actually runs.
 #
@@ -439,7 +423,18 @@ if [ "$MODE" = "reeval" ]; then
   pkill -f "pool_eval.p[y]"; sleep 8; pkill -9 -f "pool_eval.p[y]" 2>/dev/null; sleep 2   # a re-run must not leave the old evaluator holding the card
   export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null)
   R=baya1116/hypernet-sp-distill
-  if [ "$RMODEL" = "base" ]; then RHF=/root/eval_hf200; elif [ "${RKIND:-adapter}" = "dir" ]; then
+  RCKPT=${RCKPT:-/root/pooler200.safetensors}
+  if [ "${RKIND:-adapter}" = "ckpt" ]; then
+    # RMODEL names a run under chatsft/online: its latest.safetensors is a full state dict, so the
+    # structure comes from the step-200 directory and every weight is overwritten at load time.
+    RHF=/root/eval_hf200; RCKPT=/root/reeval_$RRUN.safetensors
+    if [ -s /root/online_$RMODEL/latest.safetensors ]; then cp /root/online_$RMODEL/latest.safetensors $RCKPT
+    else
+      for try in 1 2 3 4 5 6; do hf download $R --include "pooler_distill/chatsft/online/$RMODEL/latest.safetensors" --local-dir /root/hfdl >/dev/null 2>&1; [ -s /root/hfdl/pooler_distill/chatsft/online/$RMODEL/latest.safetensors ] && break; sleep 20; done
+      cp /root/hfdl/pooler_distill/chatsft/online/$RMODEL/latest.safetensors $RCKPT 2>/dev/null
+    fi
+    [ -s $RCKPT ] || { echo "REEVAL_ABORT $RRUN: online/$RMODEL checkpoint not found"; exit 0; }
+  elif [ "$RMODEL" = "base" ]; then RHF=/root/eval_hf200; elif [ "${RKIND:-adapter}" = "dir" ]; then
     RHF=/root/hfdl/pooler_distill/chatsft/$RMODEL   # a merged model directory published by the training box
     for try in $(seq 1 60); do   # it may still be uploading: poll for up to an hour
       hf download $R --include "pooler_distill/chatsft/${RMODEL}/*" --local-dir /root/hfdl >/dev/null 2>&1
@@ -464,13 +459,13 @@ PYM
   [ -s /root/hfdl/pooler_distill/chat_eval60.jsonl ] || hf download $R --include "pooler_distill/chat_eval60.jsonl" --local-dir /root/hfdl 2>&1 | tail -1
   cat > /root/reevalkeep.sh <<RK
 #!/bin/bash
-RRUN=$RRUN; RHF=$RHF; R=$R
+RRUN=$RRUN; RHF=$RHF; R=$R; RCKPT=$RCKPT; RTEMP=${RTEMP:-0.9}; RCAP=${RCAP:-600}
 RK
   cat >> /root/reevalkeep.sh <<'RKB'
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null)
 run_one() {  # $1 questions file, $2 out file, $3 tag
   [ -s "$2" ] && [ "$(wc -l < "$2")" -ge "$(wc -l < "$1")" ] && return 0
-  cd /root/work && SP_BASE=$RHF SP_RANK=16 SP_NOSYS=1 SP_EPISODIC=1 OMP_NUM_THREADS=1 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python3 /root/work/pool_eval.py     /root/pooler200.safetensors "$1" "$2" --n 999 --rw 768 --maxd 384 --samepage 1 --decode plain --temp 0.9 --stop eos --replycap 200 --tag "[$3]" >> /root/${RRUN}_$3.log 2>&1
+  cd /root/work && SP_BASE=$RHF SP_RANK=16 SP_NOSYS=1 SP_EPISODIC=1 OMP_NUM_THREADS=1 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python3 /root/work/pool_eval.py     $RCKPT "$1" "$2" --n 999 --rw 768 --maxd 384 --samepage 1 --decode plain --temp $RTEMP --stop eos --replycap $RCAP --tag "[$3]" >> /root/${RRUN}_$3.log 2>&1
   [ -s "$2" ] && [ "$(wc -l < "$2")" -ge "$(wc -l < "$1")" ] || { echo "REEVAL_ABORT $RRUN at $3: $(tail -1 /root/${RRUN}_$3.log | cut -c1-100)"; exit 1; }
 }
 for i in 0 1 2; do run_one /root/work/ev_$i.jsonl /root/work/${RRUN}_out_$i.jsonl ${RRUN}$i; hf upload $R /root/work/${RRUN}_out_$i.jsonl pooler_distill/chatsft/rollouts/${RRUN}_$i.jsonl >/dev/null 2>&1; echo "[$RRUN] shard $i uploaded $(tail -1 /root/${RRUN}_${RRUN}$i.log | cut -c1-110)"; done
