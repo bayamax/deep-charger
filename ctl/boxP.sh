@@ -1,3 +1,24 @@
+# PEEK (one-shot): the two rails of r11, block by block
+python3 - <<'PYS'
+import re
+rows = []
+for l in open("/root/online_r11/loop.log"):
+    m = re.match(r"\[step (\d+)\] (.*?) \| sft_ce=([\d.]+) replay_ce=([\d.]+) dolphin_ce=([\d.]+)", l)
+    if m: rows.append((int(m.group(1)), m.group(2), float(m.group(3)), float(m.group(5))))
+mx = max(r[0] for r in rows)
+print(f"PEEKRAIL r11 through step {mx}")
+for b in range(0, mx, 50):
+    x = [r for r in rows if b < r[0] <= b + 50]
+    if not x: continue
+    n = len(x); cnt = {}
+    for _, why, _, _ in x:
+        for k in ("accepted", "wrong", "page not found", "no reply", "search loop", "judge error", "judge"):
+            m2 = re.search(re.escape(k) + r"=(\d+)", why)
+            if m2: cnt[k] = cnt.get(k, 0) + int(m2.group(1)); break
+    tot = sum(cnt.values()) or 1
+    cg = cnt.get("accepted", 0) + cnt.get("judge", 0) + cnt.get("judge error", 0)
+    print(f"PEEKRAIL {b+1:>3}-{b+50:<3} self_ce {sum(r[2] for r in x)/n:.3f} dolphin_ce {sum(r[3] for r in x)/n:.3f} | correct&grounded {100*cg//tot}% cut {100*cnt.get('search loop',0)//tot}% no-reply {100*cnt.get('no reply',0)//tot}%")
+PYS
 # box E (24GB, replaces the A4000 whose host had no free GPU left): measure the held-out set through
 # the 4-bit grid the phone actually runs.
 #
@@ -96,6 +117,7 @@ OGEN=4000
 OBUDGET=2400
 OGUARD=1
 OMAXSRCH=15
+OJUDGE=0
 OREPLAYN=0
 OROLLEVERY=1
 OQFILE=pooler_distill/measureq.jsonl
@@ -398,13 +420,15 @@ PYF
   # window holding a couple of capped rollouts would otherwise read as a runaway)
   # once: the guard also watches the share of rollouts cut for searching without end, which is the
   # signal that moves first (5%% at the start of r11, 11%% by step 360 while the mean stayed near 3)
+  # once: the judge decides nothing now that every finished rollout is trained on, so stop calling it
+  if [ ! -f /root/.restart_${ORUN}_nojudge ]; then pkill -f "online_loop.p[y]"; sleep 8; pkill -9 -f "online_loop.p[y]" 2>/dev/null; touch /root/.restart_${ORUN}_nojudge; echo "ONLINE_RESTART $ORUN judge off $(date -u)"; fi
   if [ ! -f /root/.restart_${ORUN}_cut ]; then pkill -f "online_loop.p[y]"; sleep 8; pkill -9 -f "online_loop.p[y]" 2>/dev/null; touch /root/.restart_${ORUN}_cut; echo "ONLINE_RESTART $ORUN guard cut share $(date -u)"; fi
   if [ ! -f /root/.restart_${ORUN}_nsfloor ]; then pkill -f "online_loop.p[y]"; sleep 8; pkill -9 -f "online_loop.p[y]" 2>/dev/null; touch /root/.restart_${ORUN}_nsfloor; echo "ONLINE_RESTART $ORUN guard floor $(date -u)"; fi
   if [ ! -f /root/.restart_$ORUN ]; then pkill -f "online_loop.p[y]"; sleep 8; pkill -9 -f "online_loop.p[y]" 2>/dev/null; touch /root/.restart_$ORUN; echo "ONLINE_RESTART $ORUN dolphin ratio $ODRATIO min $ODMIN $(date -u)"; fi
   if ! pgrep -f "online_loop.p[y]" >/dev/null; then
     cd /root/work && DSK_KEY=$(cat /root/.dsk 2>/dev/null) PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True setsid nohup python3 /root/work/online_loop.py $OHF $OUT \
       --questions /root/work/selfq_all.jsonl --dolphin /root/work/dolphin_v1.jsonl --heldout /root/work/eval300.jsonl \
-      --b $OB --steps $OSTEPS --temp $OTEMP --lr $OLR --dolphin-ratio ${ODRATIO:-2} --dolphin-min ${ODMIN:-2} --accum ${OACCUM:-1} --replay $REPLAYF --replay-per-step ${OREPLAYN:-2} --rollout-every ${OROLLEVERY:-1} --train-all ${OTRAINALL:-0} --queue ${OQUEUE:-0} --complete-only ${OCOMPLETE:-0} --gen ${OGEN:-1500} --budget ${OBUDGET:-900} --guard ${OGUARD:-0} --maxsrch ${OMAXSRCH:-0} --pooler none --lora-rank 16 --lora-layers ${OLAYERS:-all} --gradckpt 1 --save-every 5 --stop eos \
+      --b $OB --steps $OSTEPS --temp $OTEMP --lr $OLR --dolphin-ratio ${ODRATIO:-2} --dolphin-min ${ODMIN:-2} --accum ${OACCUM:-1} --replay $REPLAYF --replay-per-step ${OREPLAYN:-2} --rollout-every ${OROLLEVERY:-1} --train-all ${OTRAINALL:-0} --queue ${OQUEUE:-0} --complete-only ${OCOMPLETE:-0} --gen ${OGEN:-1500} --budget ${OBUDGET:-900} --guard ${OGUARD:-0} --maxsrch ${OMAXSRCH:-0} --judge ${OJUDGE:-1} --pooler none --lora-rank 16 --lora-layers ${OLAYERS:-all} --gradckpt 1 --save-every 5 --stop eos \
       >> /root/online_$ORUN.log 2>&1 < /dev/null &
   fi
   cat > /root/onlinekeep.sh <<OK
