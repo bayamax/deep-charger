@@ -58,7 +58,7 @@ ap.add_argument("--stop", default="eos", choices=["eos", "answer"]); ap.add_argu
 ap.add_argument("--dolphin-ratio", type=float, default=2.0, help="Dolphin records per accepted search rollout in the same step"); ap.add_argument("--dolphin-min", type=int, default=2, help="Dolphin records in a step with no accepted rollout")
 ap.add_argument("--maxlen", type=int, default=4096)
 ap.add_argument("--replay", default="", help="jsonl of verified search traces {q,text}; each step trains on --replay-per-step of them (the retention data)")
-ap.add_argument("--replay-per-step", type=int, default=2); ap.add_argument("--rollout-every", type=int, default=1, help="do the measurement rollout only every N steps (accepted ones join the replay set)")
+ap.add_argument("--train-all", type=int, default=0, help="1: train on every rollout of the step, no selection (the gold and the judge only measure)"); ap.add_argument("--replay-per-step", type=int, default=2); ap.add_argument("--rollout-every", type=int, default=1, help="do the measurement rollout only every N steps (accepted ones join the replay set)")
 ap.add_argument("--accum", type=int, default=1, help="steps whose gradients are accumulated before one optimizer update (both the search-side and the Dolphin part)")
 ap.add_argument("--samepage", type=int, default=1, help="1: a search whose top page was already shown in this rollout serves the NEXT chunk of that page (and says so when the page is used up); 0: teacher environment (always the head)")
 A = ap.parse_args()
@@ -778,10 +778,12 @@ for step in range(state["step"] + 1, A.steps + 1):
         roll_fh.write(json.dumps({"step": step, "q": item["q"], "gold": item["gold"], "why": why, "ns": r["ns"], "text": r["text"]}, ensure_ascii=False) + "\n")
     roll_fh.flush()
     losses = []; dl = []
-    if positives:
+    trainset = rolls if A.train_all else positives   # no selection: every sample of the step is a target
+    if trainset:
         model.train()
+        for r in trainset:
+            losses.append(pg_backward(r, 1.0 / (len(trainset) * A.accum))); clear()
         for r in positives:
-            losses.append(pg_backward(r, 1.0 / (len(positives) * A.accum))); clear()
             acc_fh.write(json.dumps({"q": item["q"], "gold": item["gold"], "text": r["text"], "step": step}, ensure_ascii=False) + "\n")
             rep.append({"q": item["q"], "text": r["text"], "src": "accepted"})   # joins the retention data
         acc_fh.flush()
@@ -790,7 +792,7 @@ for step in range(state["step"] + 1, A.steps + 1):
         model.train()
         for _ in range(A.replay_per_step):
             rl.append(replay_backward(rep[ri % len(rep)], 1.0 / (A.replay_per_step * A.accum))); ri += 1
-    nd = max(A.dolphin_min, int(round(A.dolphin_ratio * len(positives))))
+    nd = max(A.dolphin_min, int(round(A.dolphin_ratio * len(trainset))))
     if dol:
         model.train()
         for _ in range(nd):

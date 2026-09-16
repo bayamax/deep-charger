@@ -78,10 +78,10 @@ PRUNS="p_t06q4:1:0.6 p_t06bf16:0:0.6"
 PG=64
 PSKIP=
 MODE=online
-ORUN=r5
+ORUN=r6
 OMODEL=s4_hf
 OB=8
-ODRATIO=0
+ODRATIO=0.5
 ODMIN=2
 ODOLPHIN=dolphin_v2.jsonl
 OLR=1e-5
@@ -89,11 +89,12 @@ OACCUM=4
 OLAYERS=all
 OREPLAY=replay_v1.jsonl
 OREPLAYFILTER=1
-OREPLAYN=2
-OROLLEVERY=10
+OTRAINALL=1
+OREPLAYN=0
+OROLLEVERY=1
 OQFILE=pooler_distill/measureq.jsonl
 ORESUME=0
-OSTEPS=400
+OSTEPS=200
 OTEMP=0.6
 SHARDS=3
 RAW="https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl"
@@ -386,7 +387,7 @@ PYF
   if ! pgrep -f "online_loop.p[y]" >/dev/null; then
     cd /root/work && DSK_KEY=$(cat /root/.dsk 2>/dev/null) PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True setsid nohup python3 /root/work/online_loop.py $OHF $OUT \
       --questions /root/work/selfq_all.jsonl --dolphin /root/work/dolphin_v1.jsonl --heldout /root/work/eval300.jsonl \
-      --b $OB --steps $OSTEPS --temp $OTEMP --lr $OLR --dolphin-ratio ${ODRATIO:-2} --dolphin-min ${ODMIN:-2} --accum ${OACCUM:-1} --replay $REPLAYF --replay-per-step ${OREPLAYN:-2} --rollout-every ${OROLLEVERY:-1} --pooler none --lora-rank 16 --lora-layers ${OLAYERS:-all} --gradckpt 1 --save-every 5 --stop eos \
+      --b $OB --steps $OSTEPS --temp $OTEMP --lr $OLR --dolphin-ratio ${ODRATIO:-2} --dolphin-min ${ODMIN:-2} --accum ${OACCUM:-1} --replay $REPLAYF --replay-per-step ${OREPLAYN:-2} --rollout-every ${OROLLEVERY:-1} --train-all ${OTRAINALL:-0} --pooler none --lora-rank 16 --lora-layers ${OLAYERS:-all} --gradckpt 1 --save-every 5 --stop eos \
       >> /root/online_$ORUN.log 2>&1 < /dev/null &
   fi
   cat > /root/onlinekeep.sh <<OK
