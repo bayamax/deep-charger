@@ -1,7 +1,3 @@
-# PEEK (one-shot): is the judge API answering at all, and what does it say
-echo "PEEKJ balance: $(curl -s -m 20 -H "Authorization: Bearer $(cat /root/.dsk)" https://api.deepseek.com/user/balance | cut -c1-200)"
-echo "PEEKJ probe: $(curl -s -m 40 -X POST https://api.deepseek.com/chat/completions -H "Content-Type: application/json" -H "Authorization: Bearer $(cat /root/.dsk)" -d '{"model":"deepseek-flash","messages":[{"role":"user","content":"reply with the single word ok"}],"max_tokens":20}' | cut -c1-300)"
-exit 0
 # box E (24GB, replaces the A4000 whose host had no free GPU left): measure the held-out set through
 # the 4-bit grid the phone actually runs.
 #
@@ -400,6 +396,9 @@ PYF
   if [ ! -f /root/.restart_${ORUN}_q ]; then pkill -f "online_loop.p[y]"; sleep 8; pkill -9 -f "online_loop.p[y]" 2>/dev/null; touch /root/.restart_${ORUN}_q; echo "ONLINE_RESTART $ORUN questions=$OQFILE $(date -u)"; fi
   # once: the searches trip needs an absolute floor as well (the capped mean sits near 3, and a
   # window holding a couple of capped rollouts would otherwise read as a runaway)
+  # once: the guard also watches the share of rollouts cut for searching without end, which is the
+  # signal that moves first (5%% at the start of r11, 11%% by step 360 while the mean stayed near 3)
+  if [ ! -f /root/.restart_${ORUN}_cut ]; then pkill -f "online_loop.p[y]"; sleep 8; pkill -9 -f "online_loop.p[y]" 2>/dev/null; touch /root/.restart_${ORUN}_cut; echo "ONLINE_RESTART $ORUN guard cut share $(date -u)"; fi
   if [ ! -f /root/.restart_${ORUN}_nsfloor ]; then pkill -f "online_loop.p[y]"; sleep 8; pkill -9 -f "online_loop.p[y]" 2>/dev/null; touch /root/.restart_${ORUN}_nsfloor; echo "ONLINE_RESTART $ORUN guard floor $(date -u)"; fi
   if [ ! -f /root/.restart_$ORUN ]; then pkill -f "online_loop.p[y]"; sleep 8; pkill -9 -f "online_loop.p[y]" 2>/dev/null; touch /root/.restart_$ORUN; echo "ONLINE_RESTART $ORUN dolphin ratio $ODRATIO min $ODMIN $(date -u)"; fi
   if ! pgrep -f "online_loop.p[y]" >/dev/null; then
