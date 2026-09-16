@@ -78,13 +78,14 @@ PRUNS="p_t06q4:1:0.6 p_t06bf16:0:0.6"
 PG=64
 PSKIP=
 MODE=reeval
-RRUN=r11eval
-RMODEL=r11
-RKIND=ckpt
+RRUN=s4prod
+RMODEL=s4_hf
+RKIND=dir
 RSHARDS=1
 RTEMP=0.6
 RCAP=600
 RGEN=4000
+RN=20
 ORUN=r11
 OMODEL=s4_hf
 OB=8
@@ -487,18 +488,28 @@ PYM
   [ -s /root/hfdl/pooler_distill/chat_eval60.jsonl ] || hf download $R --include "pooler_distill/chat_eval60.jsonl" --local-dir /root/hfdl 2>&1 | tail -1
   cat > /root/reevalkeep.sh <<RK
 #!/bin/bash
-RRUN=$RRUN; RHF=$RHF; R=$R; RCKPT=$RCKPT; RSHARDS=${RSHARDS:-3}; RTEMP=${RTEMP:-0.9}; RCAP=${RCAP:-600}; RGEN=${RGEN:-1500}
+RRUN=$RRUN; RHF=$RHF; R=$R; RCKPT=$RCKPT; RSHARDS=${RSHARDS:-3}; RTEMP=${RTEMP:-0.9}; RCAP=${RCAP:-600}; RGEN=${RGEN:-1500}; RN=${RN:-999}
 RK
   cat >> /root/reevalkeep.sh <<'RKB'
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null)
 run_one() {  # $1 questions file, $2 out file, $3 tag
   [ -s "$2" ] && [ "$(wc -l < "$2")" -ge "$(wc -l < "$1")" ] && return 0
-  cd /root/work && SP_BASE=$RHF SP_RANK=16 SP_NOSYS=1 SP_EPISODIC=1 OMP_NUM_THREADS=1 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python3 /root/work/pool_eval.py     $RCKPT "$1" "$2" --n 999 --rw 768 --maxd 384 --samepage 1 --decode plain --temp $RTEMP --gen $RGEN --stop eos --replycap $RCAP --tag "[$3]" >> /root/${RRUN}_$3.log 2>&1
+  cd /root/work && SP_BASE=$RHF SP_RANK=16 SP_NOSYS=1 SP_EPISODIC=1 OMP_NUM_THREADS=1 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python3 /root/work/pool_eval.py     $RCKPT "$1" "$2" --n $RN --rw 768 --maxd 384 --samepage 1 --decode plain --temp $RTEMP --gen $RGEN --stop eos --replycap $RCAP --tag "[$3]" >> /root/${RRUN}_$3.log 2>&1
   [ -s "$2" ] && [ "$(wc -l < "$2")" -ge "$(wc -l < "$1")" ] || { echo "REEVAL_ABORT $RRUN at $3: $(tail -1 /root/${RRUN}_$3.log | cut -c1-100)"; exit 1; }
 }
 for i in $(seq 0 $((${RSHARDS:-3} - 1))); do run_one /root/work/ev_$i.jsonl /root/work/${RRUN}_out_$i.jsonl ${RRUN}$i; hf upload $R /root/work/${RRUN}_out_$i.jsonl pooler_distill/chatsft/rollouts/${RRUN}_$i.jsonl >/dev/null 2>&1; echo "[$RRUN] shard $i uploaded $(tail -1 /root/${RRUN}_${RRUN}$i.log | cut -c1-110)"; done
 run_one /root/hfdl/pooler_distill/chat_eval60.jsonl /root/work/${RRUN}_chat_out.jsonl ${RRUN}chat
 hf upload $R /root/work/${RRUN}_chat_out.jsonl pooler_distill/chatsft/rollouts/${RRUN}_chat.jsonl >/dev/null 2>&1
+python3 - <<'PYT'
+import json, glob
+for f in sorted(glob.glob("/root/work/" + "s4prod" + "_out_*.jsonl")):
+    for r in [json.loads(l) for l in open(f) if l.strip()][:6]:
+        think, _, reply = r["text"].partition("</think>")
+        print(f"TEXT ===== {r['q'][:100]} | gold {r['gold']} | correct {r['correct']} grounded {r['grounded']} searches {r['ns']}")
+        print("TEXT queries:", "; ".join(r.get("queries", [])[:8]))
+        print("TEXT think tail:", think[-700:].replace("\n", " "))
+        print("TEXT reply:", reply.strip()[:900].replace("\n", " "))
+PYT
 echo "REEVAL_DONE $RRUN $(date -u)"
 RKB
   chmod +x /root/reevalkeep.sh; setsid nohup bash /root/reevalkeep.sh >> /proc/1/fd/1 2>&1 < /dev/null &
