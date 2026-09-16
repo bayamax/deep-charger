@@ -84,6 +84,7 @@ RKIND=ckpt
 RSHARDS=1
 RTEMP=0.6
 RCAP=600
+RGEN=4000
 ORUN=r11
 OMODEL=s4_hf
 OB=8
@@ -486,13 +487,13 @@ PYM
   [ -s /root/hfdl/pooler_distill/chat_eval60.jsonl ] || hf download $R --include "pooler_distill/chat_eval60.jsonl" --local-dir /root/hfdl 2>&1 | tail -1
   cat > /root/reevalkeep.sh <<RK
 #!/bin/bash
-RRUN=$RRUN; RHF=$RHF; R=$R; RCKPT=$RCKPT; RSHARDS=${RSHARDS:-3}; RTEMP=${RTEMP:-0.9}; RCAP=${RCAP:-600}
+RRUN=$RRUN; RHF=$RHF; R=$R; RCKPT=$RCKPT; RSHARDS=${RSHARDS:-3}; RTEMP=${RTEMP:-0.9}; RCAP=${RCAP:-600}; RGEN=${RGEN:-1500}
 RK
   cat >> /root/reevalkeep.sh <<'RKB'
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null)
 run_one() {  # $1 questions file, $2 out file, $3 tag
   [ -s "$2" ] && [ "$(wc -l < "$2")" -ge "$(wc -l < "$1")" ] && return 0
-  cd /root/work && SP_BASE=$RHF SP_RANK=16 SP_NOSYS=1 SP_EPISODIC=1 OMP_NUM_THREADS=1 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python3 /root/work/pool_eval.py     $RCKPT "$1" "$2" --n 999 --rw 768 --maxd 384 --samepage 1 --decode plain --temp $RTEMP --stop eos --replycap $RCAP --tag "[$3]" >> /root/${RRUN}_$3.log 2>&1
+  cd /root/work && SP_BASE=$RHF SP_RANK=16 SP_NOSYS=1 SP_EPISODIC=1 OMP_NUM_THREADS=1 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python3 /root/work/pool_eval.py     $RCKPT "$1" "$2" --n 999 --rw 768 --maxd 384 --samepage 1 --decode plain --temp $RTEMP --gen $RGEN --stop eos --replycap $RCAP --tag "[$3]" >> /root/${RRUN}_$3.log 2>&1
   [ -s "$2" ] && [ "$(wc -l < "$2")" -ge "$(wc -l < "$1")" ] || { echo "REEVAL_ABORT $RRUN at $3: $(tail -1 /root/${RRUN}_$3.log | cut -c1-100)"; exit 1; }
 }
 for i in $(seq 0 $((${RSHARDS:-3} - 1))); do run_one /root/work/ev_$i.jsonl /root/work/${RRUN}_out_$i.jsonl ${RRUN}$i; hf upload $R /root/work/${RRUN}_out_$i.jsonl pooler_distill/chatsft/rollouts/${RRUN}_$i.jsonl >/dev/null 2>&1; echo "[$RRUN] shard $i uploaded $(tail -1 /root/${RRUN}_${RRUN}$i.log | cut -c1-110)"; done
