@@ -58,7 +58,7 @@ ap.add_argument("--stop", default="eos", choices=["eos", "answer"]); ap.add_argu
 ap.add_argument("--dolphin-ratio", type=float, default=2.0, help="Dolphin records per accepted search rollout in the same step"); ap.add_argument("--dolphin-min", type=int, default=2, help="Dolphin records in a step with no accepted rollout")
 ap.add_argument("--maxlen", type=int, default=4096)
 ap.add_argument("--replay", default="", help="jsonl of verified search traces {q,text}; each step trains on --replay-per-step of them (the retention data)")
-ap.add_argument("--guard", type=int, default=0, help="1: watch the share of rollouts that write no reply over a sliding window; when it runs away from the opening baseline, reload the last healthy checkpoint, halve the learning rate and carry on (three times, then stop)"); ap.add_argument("--guard-window", type=int, default=80); ap.add_argument("--guard-floor", type=float, default=0.20, help="no trip below this absolute rate"); ap.add_argument("--guard-mult", type=float, default=2.0, help="trip at this multiple of the opening baseline"); ap.add_argument("--guard-cut", type=float, default=3.0, help="trip at this multiple of the opening share of rollouts cut for searching without end"); ap.add_argument("--guard-cut-floor", type=float, default=0.20); ap.add_argument("--guard-ns-floor", type=float, default=6.0, help="no searches trip below this absolute mean"); ap.add_argument("--guard-ns", type=float, default=1.8, help="trip at this multiple of the opening searches per rollout"); ap.add_argument("--guard-rollbacks", type=int, default=3); ap.add_argument("--complete-only", type=int, default=0, help="1: train only on rollouts that actually finished their turn (EOS reached, no repetition death). Not a quality filter: a rollout cut off by the token cap is an unfinished fragment, and training on it teaches the model not to stop -- r7 went from 5%% to 59%% no-reply that way"); ap.add_argument("--reason", default="", help="jsonl of reasoning problems {q, reply}: the loop leaves the search corpus and runs GRPO on these instead, the teacher scoring each sample against the reference"); ap.add_argument("--reason-g", type=int, default=8, help="samples per problem"); ap.add_argument("--judge-api", default="deepseek", choices=["deepseek", "openai"], help="which teacher scores the reasoning samples"); ap.add_argument("--judge-model", default="", help="model name for that teacher; empty picks the default for the api"); ap.add_argument("--reason-stub", type=int, default=0, help="1: score by shape alone, no teacher call (for a smoke run with no credit)"); ap.add_argument("--queue", type=int, default=0, help="1: each rollout batch takes --b different questions; the rows queue up and every step trains on one of them (no selection) plus Dolphin; a new batch runs when the queue is empty"); ap.add_argument("--train-all", type=int, default=0, help="1: train on every rollout of the step, no selection (the gold and the judge only measure)"); ap.add_argument("--replay-per-step", type=int, default=2); ap.add_argument("--rollout-every", type=int, default=1, help="do the measurement rollout only every N steps (accepted ones join the replay set)")
+ap.add_argument("--guard", type=int, default=0, help="1: watch the share of rollouts that write no reply over a sliding window; when it runs away from the opening baseline, reload the last healthy checkpoint, halve the learning rate and carry on (three times, then stop)"); ap.add_argument("--guard-window", type=int, default=80); ap.add_argument("--guard-floor", type=float, default=0.20, help="no trip below this absolute rate"); ap.add_argument("--guard-mult", type=float, default=2.0, help="trip at this multiple of the opening baseline"); ap.add_argument("--guard-cut", type=float, default=3.0, help="trip at this multiple of the opening share of rollouts cut for searching without end"); ap.add_argument("--guard-cut-floor", type=float, default=0.20); ap.add_argument("--guard-ns-floor", type=float, default=6.0, help="no searches trip below this absolute mean"); ap.add_argument("--guard-ns", type=float, default=1.8, help="trip at this multiple of the opening searches per rollout"); ap.add_argument("--guard-rollbacks", type=int, default=3); ap.add_argument("--complete-only", type=int, default=0, help="1: train only on rollouts that actually finished their turn (EOS reached, no repetition death). Not a quality filter: a rollout cut off by the token cap is an unfinished fragment, and training on it teaches the model not to stop -- r7 went from 5%% to 59%% no-reply that way"); ap.add_argument("--reason", default="", help="jsonl of reasoning problems {q, reply}: the loop leaves the search corpus and runs GRPO on these instead, the teacher scoring each sample against the reference"); ap.add_argument("--reason-g", type=int, default=8, help="samples per problem"); ap.add_argument("--search-every", type=int, default=0, help=">0: every Nth step is a search question from the pool instead of a reasoning problem, scored the same way but on its own reward"); ap.add_argument("--wheels", type=int, default=0, help="1: when all samples of a reasoning group score zero there is no signal, so train on the reference answer instead (the teacher demonstrates the problem the model cannot do)"); ap.add_argument("--judge-api", default="deepseek", choices=["deepseek", "openai"], help="which teacher scores the reasoning samples"); ap.add_argument("--judge-model", default="", help="model name for that teacher; empty picks the default for the api"); ap.add_argument("--reason-stub", type=int, default=0, help="1: score by shape alone, no teacher call (for a smoke run with no credit)"); ap.add_argument("--queue", type=int, default=0, help="1: each rollout batch takes --b different questions; the rows queue up and every step trains on one of them (no selection) plus Dolphin; a new batch runs when the queue is empty"); ap.add_argument("--train-all", type=int, default=0, help="1: train on every rollout of the step, no selection (the gold and the judge only measure)"); ap.add_argument("--replay-per-step", type=int, default=2); ap.add_argument("--rollout-every", type=int, default=1, help="do the measurement rollout only every N steps (accepted ones join the replay set)")
 ap.add_argument("--accum", type=int, default=1, help="steps whose gradients are accumulated before one optimizer update (both the search-side and the Dolphin part)")
 ap.add_argument("--samepage", type=int, default=1, help="1: a search whose top page was already shown in this rollout serves the NEXT chunk of that page (and says so when the page is used up); 0: teacher environment (always the head)")
 A = ap.parse_args()
@@ -761,21 +761,18 @@ REASON_SYS = """You are scoring one answer from a small assistant against a refe
 solves_it means the assistant reaches the same result as the reference (the wording may differ, and a different but equally valid result counts); follows_the_request means it does what was asked, including any count, length or format the question specifies; clean means no tool tags, no repetition loop and no text left unfinished."""
 
 
-def judge_reason(q, ref, text):
-    """teacher score for one reasoning sample; the reward is 1.0 only when every box is ticked"""
-    reply = text.split("</think>")[-1].strip()
-    if not reply: return 0.0, {"unfinished": True}
-    if A.reason_stub:                                     # shape only, for a smoke run with no credit
-        ok = 8 <= len(reply.split()) <= 400 and not any(t in reply for t in TAGS)
-        return (1.0 if ok else 0.0), {"stub": True}
+SEARCH_SYS = """You are scoring the reply of a small assistant that just searched an encyclopedia and answered. The reply is already known to contain the right answer; you are judging how it is written. Reply with JSON only:
+{"sound": true/false, "natural": true/false, "clean": true/false}
+sound means every claim in the reply is the kind of thing the search would have supported, with nothing obviously invented and nothing self-contradictory; natural means it reads as a person speaking, two or three sentences, not a template or a bare fragment; clean means no tool tags, no repetition loop, and nothing left unfinished."""
+
+
+def ask_teacher(system, user, tag):
+    """one scored call to whichever teacher is configured; returns the parsed JSON or an error note"""
     oai = A.judge_api == "openai"
     key = OAI if oai else DSK
-    if not key: return 0.0, {"error": "no key"}
+    if not key: return {"error": "no key"}
     model = A.judge_model or ("gpt-5-nano" if oai else "deepseek-flash")
-    body = {"model": model,
-            "messages": [{"role": "system", "content": REASON_SYS},
-                         {"role": "user", "content": f"QUESTION:\n{q[:2000]}\n\nREFERENCE ANSWER:\n{ref[:3000]}\n\nASSISTANT ANSWER:\n{reply[:3000]}"}]}
-    # both teachers think before answering, and a tight cap comes back as an empty message rather than an error
+    body = {"model": model, "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}]}
     if model.startswith("gpt-5"): body["max_completion_tokens"] = 2000
     else: body["max_tokens"] = 2000; body["temperature"] = 0
     url = "https://api.openai.com/v1/chat/completions" if oai else "https://api.deepseek.com/chat/completions"
@@ -786,12 +783,39 @@ def judge_reason(q, ref, text):
                 headers={"Authorization": "Bearer " + key, "Content-Type": "application/json"}), timeout=180))
         except Exception:
             time.sleep(3); continue
-        if "choices" not in d: return 0.0, {"error": "no choices"}
+        if "choices" not in d: return {"error": "no choices"}
         c = d["choices"][0]["message"].get("content") or ""
-        try: v = json.loads(c[c.find("{"): c.rfind("}") + 1])
-        except Exception: return 0.0, {"error": "unparsable"}
-        return (1.0 if all(bool(v.get(k)) for k in ("solves_it", "follows_the_request", "language_english", "clean")) else 0.0), v
-    return 0.0, {"error": "network"}
+        try: return json.loads(c[c.find("{"): c.rfind("}") + 1])
+        except Exception: return {"error": "unparsable"}
+    return {"error": "network"}
+
+
+def score_search(r, gold):
+    """searched, reached the gold, said the gold -- then the teacher on how the sentence reads"""
+    reply = r["text"].split("</think>")[-1].strip() if "</think>" in r["text"] else ""
+    if not reply: return 0.0, {"unfinished": True}
+    if not r["ns"]: return 0.0, {"no search": True}
+    _, correct, grounded = price(r, gold)
+    if not grounded: return 0.0, {"page not found": True}
+    if not correct: return 0.0, {"wrong": True}
+    if any(t in reply for t in TAGS): return 0.0, {"tags": True}
+    if A.reason_stub: return 1.0, {"stub": True}
+    served = "\n\n".join(r["served"])[-4000:]
+    v = ask_teacher(SEARCH_SYS, f"QUESTION:\n{r['q'] if r.get('q') else ''}\n\nWHAT THE SEARCH RETURNED:\n{served}\n\nREPLY:\n{reply[:2000]}", "search")
+    if "error" in v: return 0.0, v
+    return (1.0 if all(bool(v.get(k)) for k in ("sound", "natural", "clean")) else 0.0), v
+
+
+def judge_reason(q, ref, text):
+    """teacher score for one reasoning sample; the reward is 1.0 only when every box is ticked"""
+    reply = text.split("</think>")[-1].strip()
+    if not reply: return 0.0, {"unfinished": True}
+    if A.reason_stub:                                     # shape only, for a smoke run with no credit
+        ok = 8 <= len(reply.split()) <= 400 and not any(t in reply for t in TAGS)
+        return (1.0 if ok else 0.0), {"stub": True}
+    v = ask_teacher(REASON_SYS, f"QUESTION:\n{q[:2000]}\n\nREFERENCE ANSWER:\n{ref[:3000]}\n\nASSISTANT ANSWER:\n{reply[:3000]}", "reason")
+    if "error" in v: return 0.0, v
+    return (1.0 if all(bool(v.get(k)) for k in ("solves_it", "follows_the_request", "language_english", "clean")) else 0.0), v
 
 
 def judge_ok(v):
@@ -834,7 +858,7 @@ if A.reason:
     for line in open(A.reason):
         try:
             r = json.loads(line)
-            if r.get("q") and r.get("reply"): reason.append({"q": r["q"], "ref": r["reply"]})
+            if r.get("q") and r.get("reply"): reason.append({"q": r["q"], "ref": r["reply"], "thinking": r.get("thinking", "")})
         except Exception: pass
     random.Random(0).shuffle(reason)
     print(f"[data] {len(reason)} reasoning problems, {A.reason_g} samples each, teacher "
@@ -956,33 +980,50 @@ for step in range(state["step"] + 1, A.steps + 1) if not reason else []:
 if not reason: print("ONLINE_LOOP_DONE", flush=True)
 
 
-# ---- GRPO on reasoning problems, the teacher scoring each sample against the reference ----
-# Not the positive-only self-SFT that collapsed in tens of steps: every sample of a group is used,
-# its advantage measured against the group's own mean, so a bad sample is pushed down rather than
-# ignored. A group whose samples all score the same carries no signal and is skipped.
+# ---- GRPO, on the reasoning problems and on the search pool in turn ----
+# Not the self-imitation that r7-r11 were: every sample of a group is used, its advantage measured
+# against the group's own mean, so a sample below the mean is pushed down rather than ignored. A
+# group whose samples all score alike carries no signal; when they all score zero the model cannot
+# do the problem at all, so with --wheels the teacher's own answer is trained on instead.
 for step in range(state["step"] + 1, A.steps + 1) if reason else []:
-    prob = reason[(step - 1) % len(reason)]
+    searching = bool(A.search_every) and step % A.search_every == 0
+    if searching:
+        item = pool[(step - 1) % len(pool)]; qtext, ref = item["q"], None
+    else:
+        prob = reason[(step - 1) % len(reason)]; qtext, ref = prob["q"], prob["ref"]
     if (step - 1) % A.accum == 0: opt.zero_grad(set_to_none=True)
     try:
-        rolls = rollout_batch(prob["q"], A.reason_g)
+        rolls = rollout_batch(qtext, A.reason_g)
     except (KeyboardInterrupt, SystemExit):
         raise
     except BaseException as e:
         print(f"[warn] batch dropped: {type(e).__name__}: {str(e)[:120]}", flush=True); clear(); continue
+    for r in rolls: r.setdefault("q", qtext)
     rw, notes = [], []
+    score = ((lambda x: score_search(x, item["gold"])) if searching
+             else (lambda x: judge_reason(qtext, ref, x["text"])))
     with ThreadPoolExecutor(max_workers=min(8, len(rolls))) as ex:
-        for r, (sc, v) in zip(rolls, ex.map(lambda x: judge_reason(prob["q"], prob["ref"], x["text"]), rolls)):
+        for r, (sc, v) in zip(rolls, ex.map(score, rolls)):
             rw.append(sc); notes.append(v)
-            roll_fh.write(json.dumps({"step": step, "q": prob["q"], "reward": sc, "why": v, "ns": r["ns"],
-                                      "text": r["text"]}, ensure_ascii=False) + "\n")
+            roll_fh.write(json.dumps({"step": step, "kind": "search" if searching else "reason", "q": qtext,
+                                      "reward": sc, "why": v, "ns": r["ns"], "text": r["text"]},
+                                     ensure_ascii=False) + "\n")
     roll_fh.flush()
     mu = sum(rw) / max(len(rw), 1)
     sd = (sum((x - mu) ** 2 for x in rw) / max(len(rw), 1)) ** 0.5
-    losses = []
+    losses = []; wheel = 0.0
     if sd > 1e-6:
         model.train()
         for r, x in zip(rolls, rw):
             losses.append(guarded(pg_backward, r, (x - mu) / sd / (len(rolls) * A.accum))); clear()
+    elif mu == 0.0 and A.wheels:
+        # nothing of its own to learn from: the teacher demonstrates instead
+        model.train()
+        if searching:
+            if rep: wheel = guarded(replay_backward, rep[ri % len(rep)], 1.0 / A.accum); ri += 1
+        else:
+            wheel = guarded(plain_backward, {"q": qtext, "thinking": prob.get("thinking", ""), "reply": ref}, 1.0 / A.accum)
+        clear()
     dl = []
     if dol and A.dolphin_min:
         model.train()
@@ -990,12 +1031,15 @@ for step in range(state["step"] + 1, A.steps + 1) if reason else []:
             dl.append(guarded(plain_backward, dol[di % len(dol)], 1.0 / (A.dolphin_min * A.accum))); di += 1
     if step % A.accum == 0:
         opt.step(); opt.zero_grad(set_to_none=True); clear()
-    cum["pass"] = cum.get("pass", 0) + sum(rw); cum["n"] = cum.get("n", 0) + len(rw)
+    k = "search" if searching else "reason"
+    cum[k + " pass"] = cum.get(k + " pass", 0) + sum(rw); cum[k + " n"] = cum.get(k + " n", 0) + len(rw)
     unfin = sum(1 for v in notes if v.get("unfinished")); err = sum(1 for v in notes if v.get("error"))
-    line = (f"[step {step}] pass {sum(rw):.0f}/{len(rw)}"
+    line = (f"[step {step}] {k} pass {sum(rw):.0f}/{len(rw)}"
             + (f" unfinished={unfin}" if unfin else "") + (f" judge-error={err}" if err else "")
-            + f" | ce={sum(losses)/max(len(losses),1):.3f} dolphin_ce={sum(dl)/max(len(dl),1):.3f}"
-            + f" | cumulative pass {100*cum['pass']/max(cum['n'],1):.1f}% of {cum['n']}"
+            + (" wheels" if wheel else "")
+            + f" | ce={sum(losses)/max(len(losses),1):.3f} wheel_ce={wheel:.3f} dolphin_ce={sum(dl)/max(len(dl),1):.3f}"
+            + f" | cumulative reason {100*cum.get('reason pass',0)/max(cum.get('reason n',0),1):.0f}% of {cum.get('reason n',0)}"
+            + f", search {100*cum.get('search pass',0)/max(cum.get('search n',0),1):.0f}% of {cum.get('search n',0)}"
             + f" | {(time.time()-t0)/60:.0f} min")
     print(line, flush=True); log.write(line + "\n"); log.flush()
     if step % A.save_every == 0 or step == A.steps:

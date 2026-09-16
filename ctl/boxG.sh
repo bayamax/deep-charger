@@ -1,24 +1,3 @@
-# PEEK (one-shot): one sample per problem across the run, and every failure with its verdict
-python3 - <<'PYS'
-import json
-rows = [json.loads(l) for l in open("/root/online_g2/rollouts.jsonl") if l.strip()]
-seen = set(); firsts = []
-for r in rows:
-    if r["q"] not in seen: seen.add(r["q"]); firsts.append(r)
-print(f"QTEXT {len(rows)} samples over {len(seen)} problems")
-for r in firsts[::max(1, len(firsts)//10)][:10]:
-    rep = r["text"].split("</think>")[-1].strip()
-    print(f"QTEXT ===== reward {r['reward']} | {r['q'][:170]}")
-    print(f"QTEXT  -> {rep[:420]}")
-fails = [r for r in rows if r["reward"] == 0.0][-8:]
-print("QTEXT ##### the failures")
-for r in fails:
-    rep = r["text"].split("</think>")[-1].strip()
-    print(f"QTEXT ===== {json.dumps(r['why'], ensure_ascii=False)[:130]}")
-    print(f"QTEXT  q: {r['q'][:170]}")
-    print(f"QTEXT  -> {rep[:420] if rep else '(no reply)'}")
-PYS
-exit 0
 # box E (24GB, replaces the A4000 whose host had no free GPU left): measure the held-out set through
 # the 4-bit grid the phone actually runs.
 #
@@ -109,7 +88,7 @@ RTEMP=0.6
 RCAP=600
 RGEN=4000
 RN=20
-ORUN=g2
+ORUN=g3
 OMODEL=s4_hf
 OB=8
 ODRATIO=1
@@ -128,6 +107,8 @@ OBUDGET=2400
 OGUARD=0
 OREASON=dolphin_v2.jsonl
 OREASONG=8
+OSEARCHEVERY=2
+OWHEELS=1
 OREASONSTUB=0
 OJUDGEAPI=openai
 OJUDGEMODEL=gpt-5-nano
@@ -137,7 +118,7 @@ OREPLAYN=0
 OROLLEVERY=1
 OQFILE=pooler_distill/measureq.jsonl
 ORESUME=0
-OSTEPS=200
+OSTEPS=150
 OTEMP=0.6
 SHARDS=3
 RAW="https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl"
@@ -444,7 +425,7 @@ PYF
   if ! pgrep -f "online_loop.p[y]" >/dev/null; then
     cd /root/work && DSK_KEY=$(cat /root/.dsk 2>/dev/null) OAI_KEY=$(cat /root/.oai 2>/dev/null) PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True setsid nohup python3 /root/work/online_loop.py $OHF $OUT \
       --questions /root/work/selfq_all.jsonl --dolphin /root/work/dolphin_v1.jsonl --heldout /root/work/eval300.jsonl \
-      --b $OB --steps $OSTEPS --temp $OTEMP --lr $OLR --dolphin-ratio ${ODRATIO:-2} --dolphin-min ${ODMIN:-2} --accum ${OACCUM:-1} --replay $REPLAYF --replay-per-step ${OREPLAYN:-2} --rollout-every ${OROLLEVERY:-1} --train-all ${OTRAINALL:-0} --queue ${OQUEUE:-0} --complete-only ${OCOMPLETE:-0} --gen ${OGEN:-1500} --budget ${OBUDGET:-900} --guard ${OGUARD:-0} --maxsrch ${OMAXSRCH:-0} --judge ${OJUDGE:-1} ${OREASON:+--reason /root/hfdl/pooler_distill/chatsft/$OREASON --reason-g ${OREASONG:-8} --reason-stub ${OREASONSTUB:-0} --judge-api ${OJUDGEAPI:-deepseek} --judge-model ${OJUDGEMODEL:-}} --pooler none --lora-rank 16 --lora-layers ${OLAYERS:-all} --gradckpt 1 --save-every 5 --stop eos \
+      --b $OB --steps $OSTEPS --temp $OTEMP --lr $OLR --dolphin-ratio ${ODRATIO:-2} --dolphin-min ${ODMIN:-2} --accum ${OACCUM:-1} --replay $REPLAYF --replay-per-step ${OREPLAYN:-2} --rollout-every ${OROLLEVERY:-1} --train-all ${OTRAINALL:-0} --queue ${OQUEUE:-0} --complete-only ${OCOMPLETE:-0} --gen ${OGEN:-1500} --budget ${OBUDGET:-900} --guard ${OGUARD:-0} --maxsrch ${OMAXSRCH:-0} --judge ${OJUDGE:-1} ${OREASON:+--reason /root/hfdl/pooler_distill/chatsft/$OREASON --reason-g ${OREASONG:-8} --reason-stub ${OREASONSTUB:-0} --judge-api ${OJUDGEAPI:-deepseek} --judge-model ${OJUDGEMODEL:-} --search-every ${OSEARCHEVERY:-0} --wheels ${OWHEELS:-0}} --pooler none --lora-rank 16 --lora-layers ${OLAYERS:-all} --gradckpt 1 --save-every 5 --stop eos \
       >> /root/online_$ORUN.log 2>&1 < /dev/null &
   fi
   # once: in reasoning mode the empty search loop printed the end marker at launch, and the keeper
