@@ -1,6 +1,3 @@
-# PEEK (one-shot): the tail of the second r10 traceback
-awk '/Traceback/{n++} n>=2' /root/online_r10.log | tail -22 | cut -c1-240
-exit 0
 # box E (24GB, replaces the A4000 whose host had no free GPU left): measure the held-out set through
 # the 4-bit grid the phone actually runs.
 #

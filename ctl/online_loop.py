@@ -698,6 +698,28 @@ if A.replay:
         if r.get("q") and r.get("text"): rep.append(r)
 rng = random.Random(0); rng.shuffle(pool); rng.shuffle(dol); rng.shuffle(rep)
 INFO_RE = re.compile(r"(<information>.*?</information>\n?)", re.S)
+def ce_backward(h, tgt, tm, coef, slice_len=256):
+    """cross-entropy through the lm_head without ever holding the whole logits tensor.
+
+    A 4096-token record against a 151k vocabulary is 2.5 GB of float logits, and with the rollouts
+    now running to 4000 tokens there is no longer room for that beside them: r10 died of it at step
+    103. The body runs once; the head runs on one slice at a time, each slice's gradient lands on a
+    detached copy of the hidden states, and one backward carries the sum into the body. Same
+    gradient, a fraction of the memory."""
+    hd = h.detach().requires_grad_(True)
+    n = hd.shape[1]; tot = 0.0; denom = tm.sum().clamp(min=1.0)
+    for a in range(0, n, slice_len):
+        b = min(a + slice_len, n)
+        if float(tm[:, a:b].sum()) == 0: continue
+        pr = HEAD(hd[:, a:b, :]).float()
+        ce = torch.nn.functional.cross_entropy(pr.reshape(-1, pr.shape[-1]), tgt[:, a:b].reshape(-1), reduction="none")
+        part = (ce * tm[:, a:b].reshape(-1)).sum() / denom
+        (coef * part).backward(retain_graph=True); tot += float(part.item())
+        del pr, ce, part
+    if hd.grad is not None: h.backward(gradient=hd.grad)
+    del hd; clear(); return tot
+
+
 def replay_backward(rec, coef):
     """a verified search trace as plain SFT: prompt masked, information blocks masked, EOS trained"""
     head_t = tok.apply_chat_template([{"role": "user", "content": rec["q"]}], add_generation_prompt=True, tokenize=False)
@@ -711,10 +733,8 @@ def replay_backward(rec, coef):
     if sum(msk[1:]) == 0: return 0.0
     x = torch.tensor([ids], device=DEV)
     h = BODY(input_ids=x, use_cache=False).last_hidden_state[:, :-1, :]
-    pr = HEAD(h).float(); tgt = x[:, 1:]; tm = torch.tensor([msk[1:]], device=DEV, dtype=torch.float32)
-    ce = torch.nn.functional.cross_entropy(pr.reshape(-1, pr.shape[-1]), tgt.reshape(-1), reduction="none")
-    loss = (ce * tm.reshape(-1)).sum() / tm.sum()
-    (coef * loss).backward(); v = float(loss.item()); del h, pr, ce, loss; clear(); return v
+    tgt = x[:, 1:]; tm = torch.tensor([msk[1:]], device=DEV, dtype=torch.float32)
+    v = ce_backward(h, tgt, tm, coef); del h; clear(); return v
 print(f"[data] {len(pool)} questions, {len(dol)} dolphin records, {len(rep)} replay traces", flush=True)
 
 # ---- the cheap judge (key from the environment, never from the repo) ----
@@ -749,11 +769,20 @@ def plain_backward(rec, coef):
     if sum(msk) == 0: return 0.0
     x = torch.tensor([ids], device=DEV)
     h = BODY(input_ids=x, use_cache=False).last_hidden_state[:, :-1, :]
-    pr = HEAD(h).float()
     tgt = x[:, 1:]; tm = torch.tensor([msk[1:]], device=DEV, dtype=torch.float32)
-    ce = torch.nn.functional.cross_entropy(pr.reshape(-1, pr.shape[-1]), tgt.reshape(-1), reduction="none")
-    loss = (ce * tm.reshape(-1)).sum() / tm.sum()
-    (coef * loss).backward(); v = float(loss.item()); del h, pr, ce, loss; clear(); return v
+    v = ce_backward(h, tgt, tm, coef); del h; clear(); return v
+
+noom = [0]
+
+
+def guarded(fn, *a):
+    """one record that does not fit costs that record, not the run"""
+    try:
+        return fn(*a)
+    except torch.OutOfMemoryError:
+        noom[0] += 1; print(f"[warn] out of memory in {fn.__name__}, record skipped ({noom[0]} so far)", flush=True)
+        clear(); return 0.0
+
 
 TAGS = ("<search>", "<information>", "</think>", "<think>", "<more")
 log = open(os.path.join(A.outdir, "loop.log"), "a")
@@ -824,7 +853,7 @@ for step in range(state["step"] + 1, A.steps + 1):
     if trainset:
         model.train()
         for r in trainset:
-            losses.append(pg_backward(r, 1.0 / (len(trainset) * A.accum))); clear()
+            losses.append(guarded(pg_backward, r, 1.0 / (len(trainset) * A.accum))); clear()
         for r in positives:
             acc_fh.write(json.dumps({"q": item["q"], "gold": item["gold"], "text": r["text"], "step": step}, ensure_ascii=False) + "\n")
             rep.append({"q": item["q"], "text": r["text"], "src": "accepted"})   # joins the retention data
@@ -833,12 +862,12 @@ for step in range(state["step"] + 1, A.steps + 1):
     if rep and A.replay_per_step > 0:
         model.train()
         for _ in range(A.replay_per_step):
-            rl.append(replay_backward(rep[ri % len(rep)], 1.0 / (A.replay_per_step * A.accum))); ri += 1
+            rl.append(guarded(replay_backward, rep[ri % len(rep)], 1.0 / (A.replay_per_step * A.accum))); ri += 1
     nd = max(A.dolphin_min, int(round(A.dolphin_ratio * len(trainset))))
     if dol:
         model.train()
         for _ in range(nd):
-            dl.append(plain_backward(dol[di % len(dol)], 1.0 / (nd * A.accum))); di += 1
+            dl.append(guarded(plain_backward, dol[di % len(dol)], 1.0 / (nd * A.accum))); di += 1
     if step % A.accum == 0:
         opt.step(); opt.zero_grad(set_to_none=True); clear()
     tot = sum(cum.values()); acc = cum.get("accepted", 0)
