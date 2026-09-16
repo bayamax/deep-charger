@@ -33,7 +33,7 @@ ap.add_argument("init"); ap.add_argument("outdir")
 ap.add_argument("--steps", type=int, default=200); ap.add_argument("--g", type=int, default=12)
 ap.add_argument("--rw", type=int, default=768); ap.add_argument("--maxd", type=int, default=384)
 ap.add_argument("--chunk", type=int, default=128); ap.add_argument("--temp", type=float, default=0.9)
-ap.add_argument("--gen", type=int, default=1500); ap.add_argument("--maxs", type=int, default=5); ap.add_argument("--maxm", type=int, default=8)
+ap.add_argument("--gen", type=int, default=1500); ap.add_argument("--budget", type=int, default=900, help="wall-clock seconds for one packed rollout batch; a row still generating when it runs out is unfinished, and --complete-only drops it"); ap.add_argument("--maxs", type=int, default=5); ap.add_argument("--maxm", type=int, default=8)
 ap.add_argument("--lr", type=float, default=1e-5); ap.add_argument("--pooler-lr", type=float, default=1e-5)
 ap.add_argument("--corpus", default="/root/work/corpus_box_final.jsonl"); ap.add_argument("--heldout", default="/root/work/eval300.jsonl")
 ap.add_argument("--save-every", type=int, default=20)
@@ -153,7 +153,7 @@ if A.gradckpt:
     print("[init] gradient checkpointing ON for the policy-gradient pass", flush=True)
 nT = sum(p.numel() for p in model.parameters() if p.requires_grad) / 1e6
 nP = sum(p.numel() for p in pooler_params) / 1e6
-print(f"[cfg] G={A.g} steps={A.steps} rw={A.rw} maxd={A.maxd} chunk={A.chunk} temp={A.temp} gen={A.gen} maxs={A.maxs} maxm={A.maxm} samepage={A.samepage} maxsrch={A.maxsrch} phantom={A.phantom}x{A.phantom_scale} "
+print(f"[cfg] G={A.g} steps={A.steps} budget={A.budget} rw={A.rw} maxd={A.maxd} chunk={A.chunk} temp={A.temp} gen={A.gen} maxs={A.maxs} maxm={A.maxm} samepage={A.samepage} maxsrch={A.maxsrch} phantom={A.phantom}x{A.phantom_scale} "
       f"lr={A.lr} pooler_lr={A.pooler_lr} pooler={A.pooler}(r={A.pooler_rank}) trainable lora={nT:.1f}M pooler={nP:.2f}M", flush=True)
 # ---- environment: verbatim grpo_ep_more serve() ----
 WAPI = "https://en.wikipedia.org/w/api.php"
@@ -314,7 +314,7 @@ def rollout(question):
         ids = tok.encode(text, add_special_tokens=False)
         gen.extend(ids); msk.extend([0] * len(ids))
 
-    while n_model < A.gen and time.time() - t0 < 600:
+    while n_model < A.gen and time.time() - t0 < A.budget:
         c0 = len(gen); R = min(c0, A.rw); nd = c0 - R
         if nd > absorbed:
             kept.extend(gen[absorbed:nd]); absorbed = nd
@@ -435,7 +435,7 @@ def rollout_batch(question, B):
     # Wall clock, not work: the rows run together, so the batch needs about what one rollout needed. 600 s was
     # nonetheless too tight while the page lookups were serial, and cutting rows off mid answer fed the gradient
     # failures the policy had not caused. 900 s with the lookups overlapped leaves room without hiding a stall.
-    budget = 900
+    budget = A.budget
     t0 = time.time()
 
     def inject(st, text):

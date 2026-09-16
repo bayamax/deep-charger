@@ -78,7 +78,7 @@ PRUNS="p_t06q4:1:0.6 p_t06bf16:0:0.6"
 PG=64
 PSKIP=
 MODE=online
-ORUN=r8
+ORUN=r9
 OMODEL=s4_hf
 OB=8
 ODRATIO=1
@@ -92,6 +92,8 @@ OREPLAYFILTER=1
 OTRAINALL=1
 OQUEUE=1
 OCOMPLETE=1
+OGEN=4000
+OBUDGET=2400
 OREPLAYN=0
 OROLLEVERY=1
 OQFILE=pooler_distill/measureq.jsonl
@@ -389,7 +391,7 @@ PYF
   if ! pgrep -f "online_loop.p[y]" >/dev/null; then
     cd /root/work && DSK_KEY=$(cat /root/.dsk 2>/dev/null) PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True setsid nohup python3 /root/work/online_loop.py $OHF $OUT \
       --questions /root/work/selfq_all.jsonl --dolphin /root/work/dolphin_v1.jsonl --heldout /root/work/eval300.jsonl \
-      --b $OB --steps $OSTEPS --temp $OTEMP --lr $OLR --dolphin-ratio ${ODRATIO:-2} --dolphin-min ${ODMIN:-2} --accum ${OACCUM:-1} --replay $REPLAYF --replay-per-step ${OREPLAYN:-2} --rollout-every ${OROLLEVERY:-1} --train-all ${OTRAINALL:-0} --queue ${OQUEUE:-0} --complete-only ${OCOMPLETE:-0} --pooler none --lora-rank 16 --lora-layers ${OLAYERS:-all} --gradckpt 1 --save-every 5 --stop eos \
+      --b $OB --steps $OSTEPS --temp $OTEMP --lr $OLR --dolphin-ratio ${ODRATIO:-2} --dolphin-min ${ODMIN:-2} --accum ${OACCUM:-1} --replay $REPLAYF --replay-per-step ${OREPLAYN:-2} --rollout-every ${OROLLEVERY:-1} --train-all ${OTRAINALL:-0} --queue ${OQUEUE:-0} --complete-only ${OCOMPLETE:-0} --gen ${OGEN:-1500} --budget ${OBUDGET:-900} --pooler none --lora-rank 16 --lora-layers ${OLAYERS:-all} --gradckpt 1 --save-every 5 --stop eos \
       >> /root/online_$ORUN.log 2>&1 < /dev/null &
   fi
   cat > /root/onlinekeep.sh <<OK
