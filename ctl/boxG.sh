@@ -426,6 +426,9 @@ PYF
       --b $OB --steps $OSTEPS --temp $OTEMP --lr $OLR --dolphin-ratio ${ODRATIO:-2} --dolphin-min ${ODMIN:-2} --accum ${OACCUM:-1} --replay $REPLAYF --replay-per-step ${OREPLAYN:-2} --rollout-every ${OROLLEVERY:-1} --train-all ${OTRAINALL:-0} --queue ${OQUEUE:-0} --complete-only ${OCOMPLETE:-0} --gen ${OGEN:-1500} --budget ${OBUDGET:-900} --guard ${OGUARD:-0} --maxsrch ${OMAXSRCH:-0} --judge ${OJUDGE:-1} ${OREASON:+--reason /root/hfdl/pooler_distill/chatsft/$OREASON --reason-g ${OREASONG:-8} --reason-stub ${OREASONSTUB:-0} --judge-api ${OJUDGEAPI:-deepseek} --judge-model ${OJUDGEMODEL:-}} --pooler none --lora-rank 16 --lora-layers ${OLAYERS:-all} --gradckpt 1 --save-every 5 --stop eos \
       >> /root/online_$ORUN.log 2>&1 < /dev/null &
   fi
+  # once: in reasoning mode the empty search loop printed the end marker at launch, and the keeper
+  # read it as the run being over and stopped uploading. Strip it so the keeper runs to the real end.
+  if [ ! -f /root/.fixed_marker_$ORUN ]; then sed -i '/^ONLINE_LOOP_DONE$/d' /root/online_$ORUN.log 2>/dev/null; touch /root/.fixed_marker_$ORUN; echo "ONLINE_MARKER_FIX $ORUN $(date -u)"; fi
   cat > /root/onlinekeep.sh <<OK
 #!/bin/bash
 ORUN=$ORUN; OUT=$OUT; R=$R

@@ -953,7 +953,7 @@ for step in range(state["step"] + 1, A.steps + 1) if not reason else []:
                 save_ckpt(GOOD)                              # this window still looks like the opening one
     if step % A.save_every == 0 or step == A.steps:
         save_ckpt(LATEST); json.dump({"step": step, "cum": cum, "di": di, "ri": ri, "qi": qi, "base_rate": base_rate, "base_ns": base_ns, "base_cut": base_cut, "rollbacks": nrb, "guard_from": guard_from}, open(STATE_F, "w")); print(f"[save] step {step}", flush=True)
-print("ONLINE_LOOP_DONE", flush=True)
+if not reason: print("ONLINE_LOOP_DONE", flush=True)
 
 
 # ---- GRPO on reasoning problems, the teacher scoring each sample against the reference ----
