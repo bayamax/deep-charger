@@ -1,3 +1,16 @@
+# PEEK (one-shot): how many searches r11 actually issues, block by block
+python3 - <<'PYS'
+import json
+rows = [json.loads(l) for l in open("/root/online_r11/rollouts.jsonl") if l.strip()]
+mx = max(r["step"] for r in rows)
+print(f"PEEKNS r11 {len(rows)} rollouts through step {mx}")
+for b in range(0, mx, 25):
+    x = [r for r in rows if b < r["step"] <= b + 25]
+    if not x: continue
+    ns = sorted(r["ns"] for r in x); n = len(ns)
+    print(f"PEEKNS {b+1:>3}-{b+25:<3} n={n:<2} searches mean {sum(ns)/n:.1f} med {ns[n//2]} p90 {ns[int(n*.9)]} max {ns[-1]} | cut {sum(1 for r in x if r['why']=='search loop')}")
+PYS
+exit 0
 # box E (24GB, replaces the A4000 whose host had no free GPU left): measure the held-out set through
 # the 4-bit grid the phone actually runs.
 #
