@@ -1,3 +1,15 @@
+# PEEK (one-shot): what the fine-tune wrote at the product settings
+python3 - <<'PYT'
+import json
+rows = [json.loads(l) for l in open("/root/work/s4prod_out_0.jsonl") if l.strip()]
+print(f"TEXT {len(rows)} rollouts")
+for r in rows[:7]:
+    think, _, reply = r["text"].partition("</think>")
+    print(f"TEXT ===== {r['q'][:100]} | gold {r['gold']} | correct {r['correct']} grounded {r['grounded']} searches {r['ns']}")
+    print("TEXT queries:", " | ".join(r.get("queries", [])[:8]))
+    print("TEXT reply:", reply.strip()[:700].replace("\n", " "))
+PYT
+exit 0
 # box E (24GB, replaces the A4000 whose host had no free GPU left): measure the held-out set through
 # the 4-bit grid the phone actually runs.
 #
