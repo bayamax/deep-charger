@@ -1,3 +1,26 @@
+# PEEK (one-shot): the r7 losses and outcome mix per 100-step block
+python3 - <<'PYS'
+import re
+rows = []
+for l in open("/root/online_r7/loop.log"):
+    m = re.match(r"\[step (\d+)\] (.*?) \| sft_ce=([\d.]+) replay_ce=([\d.]+) dolphin_ce=([\d.]+)", l)
+    if m: rows.append((int(m.group(1)), m.group(2), float(m.group(3)), float(m.group(5))))
+mx = max(r[0] for r in rows)
+print(f"PEEKLOSS steps 1-{mx}, {len(rows)} lines")
+for b in range(0, mx, 100):
+    x = [r for r in rows if b < r[0] <= b + 100]
+    if not x: continue
+    n = len(x)
+    cnt = {}
+    for _, why, _, _ in x:
+        for k in ("accepted", "wrong", "page not found", "no reply", "judge error", "judge"):
+            m2 = re.search(re.escape(k) + r"=(\d+)", why)
+            if m2: cnt[k] = cnt.get(k, 0) + int(m2.group(1)); break
+    tot = sum(cnt.values()) or 1
+    mix = " ".join(f"{k}:{100*v//tot}%" for k, v in sorted(cnt.items()))
+    print(f"PEEKLOSS {b+1:>3}-{b+100:<3} sft_ce {sum(r[2] for r in x)/n:.3f} dolphin_ce {sum(r[3] for r in x)/n:.3f} | {mix}")
+PYS
+exit 0
 # box E (24GB, replaces the A4000 whose host had no free GPU left): measure the held-out set through
 # the 4-bit grid the phone actually runs.
 #
