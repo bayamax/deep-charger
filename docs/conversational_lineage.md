@@ -225,7 +225,7 @@ knowledge is what shows, and 551 examples do not change that. This side needs it
 sampling settings (temperature, repetition control) measured together with the data, and a
 judge-in-the-loop selection rather than more of the same pairs.
 
-## The on-the-fly loop (r1–r4): self-selection sharpens, replay holds
+## The on-the-fly loop (r1–r11): every form of it spent the search ability
 
 After s4 the plan was one box that alternates every step: sample a packed batch of search
 rollouts, keep only the ones that landed on the gold, were grounded and passed the flash judge,
@@ -279,6 +279,123 @@ or the search count running away, which is the retention the replay was for. Two
 - The stray `<|begin_of_thought|` marker after `<think>` is in s4 already (20% of its rollouts)
   and 41 of the 672 replay traces carry it; replaying them raised its rate to 35% of the
   rollouts by step 400. r5 drops those traces before training (filter on the box).
+
+### r5–r11: no selection, and it still went
+
+The rule "do not select at all" was the answer to the sharpening, and it was followed through:
+r6 onwards trained on every rollout of the step, with the gold and the teacher only counting. To
+keep the card busy while the pages were fetched, r7 gave each row of the packed batch its own
+question (eight questions a batch, each row left-padded with its own prefix and positions), queued
+the eight, and alternated one rollout with one Dolphin record per step. The measurement moved to
+the teacher's own pool, where this model answers around 45%, rather than the nq_open rewrites,
+where it answers 15%.
+
+| run | what changed | what happened |
+|---|---|---|
+| r5 | replay with the marker-carrying traces dropped | superseded before it measured |
+| r6 | no selection at all, rollouts every step | superseded by r7 |
+| r7 | eight questions a batch, queued, one Dolphin record per rollout | no-reply 5% → 59%, self-CE 0.41 → 0.06, correct and grounded 25% → 1% |
+| r8 | unfinished rollouts left out of training | stopped at step 60 for r9 |
+| r9/r10 | generation budget 1500 → 4000, batch budget 900 s → 2400 s | no-reply held at 1–3%, but searches per rollout went 7 → 22 and thinking p90 550 → 2400 words |
+| r11 | a rollout cut at fifteen searches, and left out of training | cut share 5% → 11%, correct and grounded 45% → 36%, self-CE → 0.10 |
+
+Two mechanisms, both worth keeping in mind:
+
+- **Training on truncated text teaches never stopping.** A rollout that runs out of budget has no
+  end token and stops mid-sentence; trained on, it makes the next rollout longer, which makes the
+  next one more likely to truncate. That is the whole of r7's 5% → 59%: a loop with its own gain.
+  Raising the budget and dropping the unfinished ones closed it.
+- **With that closed, the drift moved to the searches.** Nothing in the objective prefers a short
+  search, so the same self-imitation walked the search count up until the rollouts were 22 queries
+  long. Capping and dropping them slowed it; it did not stop it.
+
+What all of r7–r11 have in common is the objective: imitate your own samples. It has no term that
+prefers a right answer over a wrong one, so the only thing it can reliably do is sharpen whatever
+the model already does most, and on this lineage that is searching. Retention was not bought; the
+search ability was spent, by 9 points in r11 and by everything in r7.
+
+## The measurement settings were most of the gap
+
+The held-out table above (base 30.7%, s4 31.7%) was taken at temperature 0.9 with a 1500-token
+budget and a 200-word reply cap. The product runs none of those. Twenty held-out questions through
+`s4_hf` at temperature 0.6 with a 4000-token budget:
+
+| same 20 held-out questions | temperature 0.9, 1500 tokens, 200-word cap | temperature 0.6, 4000 tokens |
+|---|---|---|
+| correct and grounded | 31.7% (300 rollouts) | 60.0% |
+| reached a page carrying the gold | 56.7% | 80.0% |
+| searches per question | 4.05 | 3.45 |
+
+Twenty questions carry about eleven points of error, and the two columns are not the same sample,
+so the exact figures are not comparable; the direction is far outside that. The mechanism is in
+the queries. At 0.9 the model invents the proper noun it is about to search for:
+
+```
+0.9: <search>Northropragh semi retired professional wrestler</search>
+     <search>HalpoAtIndex center of mass person who had a civil suit against Euromas</search>
+     ... and the same César query six times, 29 searches in one rollout
+0.6: <search>semi-retired professional wrestler George Euripides Tragos father</search>
+     <search>27th César Awards ceremony</search>          one query, page reached
+```
+
+A page lookup is a string match, so one wrong character is a miss, and sampling a name at 0.9
+gets characters wrong. That is why 43% of the held-out rollouts never reached the gold. At 0.6
+they reach it and the failures move to reading it: the model answers "Ibou Touray plays for
+Salford City" and then adds two clubs the page never mentioned. That is a different defect, and a
+1.5B-sized one.
+
+The lesson for this lineage: measure at the settings the product runs, and treat every earlier
+number here as a lower bound taken under a hotter decode.
+
+## What the no-search side is actually worth
+
+The same question, asked of the 60 real prompts that should not be searched:
+
+| | base (step 200) | s4, temperature 0.6 |
+|---|---|---|
+| empty reply | 12 of 60 | 4 of 60 |
+| under ten words | 28 of 60 | 10 of 60 |
+| median reply | 6 words | 18 words |
+| searches on a prompt needing none | 9.9 per prompt | 1.4 |
+
+The base was not "1.5B-weak" on these, it was broken: it searched ten times for a chat message and
+answered in six words or not at all. s4 fixed that. Sampling settings do not move what is left:
+top-p 0.4 and 0.5 and repetition penalty 0.5, all at temperature 0.6, change the empty count from
+4 to 1 and nothing else.
+
+Twelve reasoning problems from the Dolphin set, at the product settings, place the remainder. The
+model searched zero times on all twelve. Seven are right, including the percentage increase, the
+exponent expression and the coin-weight comparison, in two or three conversational sentences. The
+five failures are: a constraint it cannot hold ("three titles, each exactly four words" came back
+as the same two-word title three times), code that names the right library and will not run
+(`nx.Graph(graph_data.json)`), a Malay question answered in English and wrongly, a classification
+task it restated instead of doing, and one problem where it thought for 3349 words and never
+replied. Those are 1.5B failures, not lineage damage, except the last, which is worth fixing
+because it is the worst thing a phone can do.
+
+## The teacher that scores the samples
+
+Twelve generations, hand-graded, then scored by each candidate judge on the same four boxes
+(solves it, follows the request, English, clean):
+
+| judge | agreed with the hand grading | cost of one 800-step run at eight samples |
+|---|---|---|
+| gpt-5-nano | 12 of 12 | $0.65 |
+| deepseek-flash | 11 of 12 | $1.65 off-peak, $3.30 peak |
+| gpt-4o-mini | 10 of 12 | $1.65 |
+
+The hand grading was wrong once and all three judges caught it ("numbers between 5 and 9 that are
+greater than 7" is 8, and the model answered "8 and 9"); the table above is after that correction.
+The cheapest judge was also the most accurate, so it is the one wired in. Keys reach the box as
+instance environment and are written to a 600 file there; none of them is in this repository.
+
+## g2: on-policy on the reasoning problems, group-normalised
+
+The run now on the card is not the self-imitation that r7–r11 were. Eight samples per Dolphin
+problem at temperature 0.6, the teacher scoring each against the reference, the advantage measured
+against the group's own mean, so a sample below the mean is pushed down rather than ignored. A
+group whose eight samples all score alike carries no signal and is skipped, which is three or four
+steps in ten. One Dolphin record of ordinary SFT rides along with each step.
 
 ## Next, in order
 
