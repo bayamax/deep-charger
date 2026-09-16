@@ -225,6 +225,61 @@ knowledge is what shows, and 551 examples do not change that. This side needs it
 sampling settings (temperature, repetition control) measured together with the data, and a
 judge-in-the-loop selection rather than more of the same pairs.
 
+## The on-the-fly loop (r1–r4): self-selection sharpens, replay holds
+
+After s4 the plan was one box that alternates every step: sample a packed batch of search
+rollouts, keep only the ones that landed on the gold, were grounded and passed the flash judge,
+train on them at once, then one step of plain SFT on Dolphin-R1 records, and repeat; the held-out
+set only every few dozen steps, the skip rate of the rollouts as the running metric
+(`ctl/online_loop.py`, launched by `ctl/boxO.sh` / `ctl/boxP.sh` on one 3060). GPU use of this
+pipeline is 0–19%: it is bound by Wikipedia and the judge, not by the card.
+
+### r1, r2: training on the accepted rollouts collapses within tens of steps
+
+Both runs start from s4 and train only on their own accepted rollouts (plus Dolphin). The
+measurement below is over the rollouts the loop itself drew (8 per question, the same 8
+questions per 20-step block, so the percentages are coarse):
+
+| run | steps | thinking words, p90 | searches / rollout | rollouts with >5 searches | repetition or stray marker | correct & grounded |
+|---|---|---|---|---|---|---|
+| r1 | 1–20 | 251 | 3.9 | 36 / 376 | 20 / 376 | 24% |
+| r1 | 41–60 | 1103 | 8.2 | 40 / 160 | 21 / 160 | 18% |
+| r1 | 61–72 | 957 | 5.8 | 19 / 96 | 60 / 96 | 11% |
+| r2 | 1–20 | 378 | 5.0 | 20 / 160 | 27 / 160 | 23% |
+| r2 | 41–53 | 1062 | 8.4 | 24 / 104 | 42 / 104 | 18% |
+
+The failure is the same in both and does not depend on the Dolphin share (r2 doubled it): the
+thinking grows, the search count climbs past the cap, and the text falls into repetition loops.
+Selecting the model's own sharpest samples and training on them is the GRPO dynamic without the
+group baseline, so it sharpens the same way GRPO collapsed before layer and learning-rate limits
+were added. The fix chosen here was not to select at all.
+
+### r4: retention by replay, rollouts only to measure
+
+r4 keeps the alternation but trains on a fixed set instead of on fresh samples: every step
+replays two verified search traces (`replay_v1`, 672 traces of the student's own verified
+rollouts, `<information>` blocks masked) and two Dolphin records; rollouts run every 10 steps
+only to measure. Learning rate 1e-5, gradient accumulation 4, LoRA r16 on all layers, 400 steps
+in 84 minutes.
+
+| steps | thinking words, p90 | searches / rollout | >5 searches | repetition or marker | correct & grounded |
+|---|---|---|---|---|---|
+| 1–100 | 788 | 4.7 | 8 / 80 | 13 / 80 | 12% |
+| 101–200 | 876 | 7.4 | 15 / 80 | 15 / 80 | 24% |
+| 201–300 | 303 | 2.1 | 4 / 80 | 10 / 80 | 25% |
+| 301–400 | 220 | 1.7 | 4 / 80 | 28 / 80 | 50% |
+
+Replay cross-entropy went from 0.75 to 0.48 and Dolphin from 0.79 to 0.46 without the thinking
+or the search count running away, which is the retention the replay was for. Two caveats:
+
+- These questions were still the nq_open rewrites, which this model answers at roughly 15% and
+  where half the rollouts never reach a page that carries the gold ("page not found" 45–58% of
+  the outcomes). They measure the ceiling of the corpus more than the model. The measurement
+  moves to the GRPO teacher pool (`pooler_distill/measureq.jsonl`, 2557 questions) from r5.
+- The stray `<|begin_of_thought|` marker after `<think>` is in s4 already (20% of its rollouts)
+  and 41 of the 672 replay traces carry it; replaying them raised its rate to 35% of the
+  rollouts by step 400. r5 drops those traces before training (filter on the box).
+
 ## Next, in order
 
 1. Failure-case data for the search side: prefixes whose searches never reached the gold, with the
