@@ -1,3 +1,10 @@
+# PEEK (one-shot): what the reasoning run is doing
+for i in 1 2 3; do
+  echo "PEEKG2 $(date -u +%H:%M) gpu=$(nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv,noheader) loop=$(pgrep -fc 'online_loop.p[y]')"
+  tail -8 /root/online_g2.log | cut -c1-240
+  sleep 60
+done
+exit 0
 # box E (24GB, replaces the A4000 whose host had no free GPU left): measure the held-out set through
 # the 4-bit grid the phone actually runs.
 #
