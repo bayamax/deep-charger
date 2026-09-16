@@ -78,7 +78,7 @@ PRUNS="p_t06q4:1:0.6 p_t06bf16:0:0.6"
 PG=64
 PSKIP=
 MODE=online
-ORUN=r4
+ORUN=r5
 OMODEL=s4_hf
 OB=8
 ODRATIO=0
@@ -88,6 +88,7 @@ OLR=1e-5
 OACCUM=4
 OLAYERS=all
 OREPLAY=replay_v1.jsonl
+OREPLAYFILTER=1
 OREPLAYN=2
 OROLLEVERY=10
 OQFILE=pooler_distill/measureq.jsonl
@@ -356,6 +357,17 @@ if [ "$MODE" = "online" ]; then
     [ -s /root/hfdl/$OQFILE ] || for try in 1 2 3; do hf download $R --include "$OQFILE" --local-dir /root/hfdl >/dev/null 2>&1; [ -s /root/hfdl/$OQFILE ] && break; sleep 10; done
     cp /root/hfdl/$OQFILE /root/work/selfq_all.jsonl
   else cat /root/hfdl/pooler_distill/selfq_?.jsonl > /root/work/selfq_all.jsonl; fi; cp /root/hfdl/pooler_distill/chatsft/${ODOLPHIN:-dolphin_v1.jsonl} /root/work/dolphin_v1.jsonl
+  # r5: drop replay traces that carry the stray thought markers or a repetition loop (41 of 672 did; replaying them raised the marker rate from 20% to 35% of rollouts in r4)
+  REPLAYF=/root/hfdl/pooler_distill/chatsft/${OREPLAY:-replay_v1.jsonl}
+  if [ "${OREPLAYFILTER:-0}" = "1" ]; then
+    python3 - "$REPLAYF" /root/work/replay_clean.jsonl <<'PYF'
+import json, re, sys
+degen = re.compile(r"begin_of_thought|end_of_thought|\b(\w+(?:\W+\w+){0,3})\b(?:\W+\1\b){4,}")
+keep = [l for l in open(sys.argv[1]) if l.strip() and not degen.search(l)]
+open(sys.argv[2], "w").writelines(keep); print(f"[replay filter] kept {len(keep)}")
+PYF
+    REPLAYF=/root/work/replay_clean.jsonl
+  fi
   OUT=/root/online_$ORUN; mkdir -p $OUT
   # resume from the hub copy of this run (uploaded every 30 min) when this box did not start it
   if [ "${ORESUME:-0}" = "1" ] && [ ! -s $OUT/state.json ]; then
@@ -374,7 +386,7 @@ if [ "$MODE" = "online" ]; then
   if ! pgrep -f "online_loop.p[y]" >/dev/null; then
     cd /root/work && DSK_KEY=$(cat /root/.dsk 2>/dev/null) PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True setsid nohup python3 /root/work/online_loop.py $OHF $OUT \
       --questions /root/work/selfq_all.jsonl --dolphin /root/work/dolphin_v1.jsonl --heldout /root/work/eval300.jsonl \
-      --b $OB --steps $OSTEPS --temp $OTEMP --lr $OLR --dolphin-ratio ${ODRATIO:-2} --dolphin-min ${ODMIN:-2} --accum ${OACCUM:-1} --replay /root/hfdl/pooler_distill/chatsft/${OREPLAY:-replay_v1.jsonl} --replay-per-step ${OREPLAYN:-2} --rollout-every ${OROLLEVERY:-1} --pooler none --lora-rank 16 --lora-layers ${OLAYERS:-all} --gradckpt 1 --save-every 5 --stop eos \
+      --b $OB --steps $OSTEPS --temp $OTEMP --lr $OLR --dolphin-ratio ${ODRATIO:-2} --dolphin-min ${ODMIN:-2} --accum ${OACCUM:-1} --replay $REPLAYF --replay-per-step ${OREPLAYN:-2} --rollout-every ${OROLLEVERY:-1} --pooler none --lora-rank 16 --lora-layers ${OLAYERS:-all} --gradckpt 1 --save-every 5 --stop eos \
       >> /root/online_$ORUN.log 2>&1 < /dev/null &
   fi
   cat > /root/onlinekeep.sh <<OK
