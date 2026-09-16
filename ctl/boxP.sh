@@ -1,5 +1,19 @@
-# PEEK (one-shot): print the r7 loop log for 9 minutes, then leave the box alone
-for i in $(seq 1 9); do echo "PEEK $(date -u +%H:%M) $(nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv,noheader)"; grep -E "^\[step|^\[warn|Traceback|Error" /root/online_r7.log | tail -6 | cut -c1-260; pgrep -f "online_loop.p[y]" >/dev/null || echo "PEEK: loop not running"; sleep 60; done
+# PEEK (one-shot): drift statistics of the r7 rollouts per 40-step block
+echo "PEEKSTATS $(date -u +%H:%M) $(tail -1 /root/online_r7/loop.log | cut -c1-120)"
+python3 - <<'PYS'
+import json, re
+degen = re.compile(r"begin_of_thought|end_of_thought|\b(\w+(?:\W+\w+){0,3})\b(?:\W+\1\b){4,}")
+def tw(t):
+    i = t.find("</think>"); b = t[:i] if i >= 0 else t
+    return len(re.sub(r"<information>.*?</information>", "", b, flags=re.S).split())
+rows = [json.loads(l) for l in open("/root/online_r7/rollouts.jsonl") if l.strip()]
+mx = max(r["step"] for r in rows)
+for b in range(0, mx, 40):
+    x = [r for r in rows if b < r["step"] <= b + 40]
+    if not x: continue
+    n = len(x); w = sorted(tw(r["text"]) for r in x); cg = sum(r["why"] in ("accepted", "judge", "judge error") for r in x)
+    print(f"PEEKSTATS {b+1:>3}-{b+40:<3} n={n:<2} think med {w[n//2]:>4} p90 {w[int(n*.9)]:>4} | srch {sum(r['ns'] for r in x)/n:.1f} >5srch {sum(r['ns']>5 for r in x):>2} | rep/marker {sum(bool(degen.search(r['text'])) for r in x):>2} | no </think> {sum('</think>' not in r['text'] for r in x):>2} | correct&grounded {cg:>2} ({100*cg/n:.0f}%) | no reply {sum(r['why']=='no reply' for r in x)}")
+PYS
 exit 0
 # box E (24GB, replaces the A4000 whose host had no free GPU left): measure the held-out set through
 # the 4-bit grid the phone actually runs.
