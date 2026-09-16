@@ -1,9 +1,6 @@
-# PEEK (one-shot): what the r10 log actually says, tracebacks included
-for i in 1 2 3; do
-  echo "PEEKX $(date -u +%H:%M) gpu=$(nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv,noheader) loop=$(pgrep -fc 'online_loop.p[y]') steps=$(grep -c '^\[step' /root/online_r10/loop.log 2>/dev/null) $(df -h /root | tail -1 | awk '{print $4" free"}')"
-  tail -25 /root/online_r10.log | cut -c1-240
-  sleep 60
-done
+# PEEK (one-shot): why r10 died
+echo "PEEKY $(date -u +%H:%M) loop=$(pgrep -fc 'online_loop.p[y]') $(df -h /root | tail -1 | awk '{print $4" free"}') $(nvidia-smi --query-gpu=memory.used --format=csv,noheader)"
+grep -n -B 2 -A 22 "Traceback" /root/online_r10.log | tail -40 | cut -c1-240
 exit 0
 # box E (24GB, replaces the A4000 whose host had no free GPU left): measure the held-out set through
 # the 4-bit grid the phone actually runs.
