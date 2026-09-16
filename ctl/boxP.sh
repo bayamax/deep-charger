@@ -1,15 +1,3 @@
-# PEEK (one-shot): what the fine-tune wrote at the product settings
-python3 - <<'PYT'
-import json
-rows = [json.loads(l) for l in open("/root/work/s4prod_out_0.jsonl") if l.strip()]
-print(f"TEXT {len(rows)} rollouts")
-for r in rows[:7]:
-    think, _, reply = r["text"].partition("</think>")
-    print(f"TEXT ===== {r['q'][:100]} | gold {r['gold']} | correct {r['correct']} grounded {r['grounded']} searches {r['ns']}")
-    print("TEXT queries:", " | ".join(r.get("queries", [])[:8]))
-    print("TEXT reply:", reply.strip()[:700].replace("\n", " "))
-PYT
-exit 0
 # box E (24GB, replaces the A4000 whose host had no free GPU left): measure the held-out set through
 # the 4-bit grid the phone actually runs.
 #
@@ -90,7 +78,9 @@ PRUNS="p_t06q4:1:0.6 p_t06bf16:0:0.6"
 PG=64
 PSKIP=
 MODE=reeval
-RRUN=s4prod
+RRUN=s4dolph
+RQSRC=dolphin
+RQN=12
 RMODEL=s4_hf
 RKIND=dir
 RSHARDS=1
@@ -497,18 +487,42 @@ PYM
     fi
     [ -s $RHF/model.safetensors ] || { echo "REEVAL_ABORT $RRUN: merge failed"; exit 0; }
   fi
+  if [ "${RQSRC:-}" = "dolphin" ]; then
+    [ -s /root/hfdl/pooler_distill/chatsft/dolphin_v2.jsonl ] || hf download $R --include "pooler_distill/chatsft/dolphin_v2.jsonl" --local-dir /root/hfdl >/dev/null 2>&1
+    python3 - <<PYD
+import json
+rows = [json.loads(l) for l in open("/root/hfdl/pooler_distill/chatsft/dolphin_v2.jsonl") if l.strip()]
+out = open("/root/work/dolphinq.jsonl", "w")
+for r in rows[:${RQN:-12}]:
+    out.write(json.dumps({"q": r["q"]}, ensure_ascii=False) + "\n")
+print("[dolphin questions]", min(len(rows), ${RQN:-12}))
+PYD
+  fi
   [ -s /root/hfdl/pooler_distill/chat_eval60.jsonl ] || hf download $R --include "pooler_distill/chat_eval60.jsonl" --local-dir /root/hfdl 2>&1 | tail -1
   cat > /root/reevalkeep.sh <<RK
 #!/bin/bash
-RRUN=$RRUN; RHF=$RHF; R=$R; RCKPT=$RCKPT; RSHARDS=${RSHARDS:-3}; RTEMP=${RTEMP:-0.9}; RCAP=${RCAP:-600}; RGEN=${RGEN:-1500}; RN=${RN:-999}
+RRUN=$RRUN; RHF=$RHF; R=$R; RCKPT=$RCKPT; RQSRC=${RQSRC:-}; RSHARDS=${RSHARDS:-3}; RTEMP=${RTEMP:-0.9}; RCAP=${RCAP:-600}; RGEN=${RGEN:-1500}; RN=${RN:-999}
 RK
   cat >> /root/reevalkeep.sh <<'RKB'
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null)
 run_one() {  # $1 questions file, $2 out file, $3 tag
-  [ -s "$2" ] && [ "$(wc -l < "$2")" -ge "$(wc -l < "$1")" ] && return 0
+  want=$(wc -l < "$1"); [ "${RN:-999}" -lt "$want" ] && want=${RN:-999}
+  [ -s "$2" ] && [ "$(wc -l < "$2")" -ge "$want" ] && return 0
   cd /root/work && SP_BASE=$RHF SP_RANK=16 SP_NOSYS=1 SP_EPISODIC=1 OMP_NUM_THREADS=1 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python3 /root/work/pool_eval.py     $RCKPT "$1" "$2" --n $RN --rw 768 --maxd 384 --samepage 1 --decode plain --temp $RTEMP --gen $RGEN --stop eos --replycap $RCAP --tag "[$3]" >> /root/${RRUN}_$3.log 2>&1
-  [ -s "$2" ] && [ "$(wc -l < "$2")" -ge "$(wc -l < "$1")" ] || { echo "REEVAL_ABORT $RRUN at $3: $(tail -1 /root/${RRUN}_$3.log | cut -c1-100)"; exit 1; }
+  [ -s "$2" ] && [ "$(wc -l < "$2")" -ge "$want" ] || { echo "REEVAL_ABORT $RRUN at $3: $(tail -1 /root/${RRUN}_$3.log | cut -c1-100)"; exit 1; }
 }
+if [ -n "$RQSRC" ]; then
+  run_one /root/work/dolphinq.jsonl /root/work/${RRUN}_out_0.jsonl ${RRUN}0
+  python3 - <<'PYT'
+import json
+for r in [json.loads(l) for l in open("/root/work/s4dolph_out_0.jsonl") if l.strip()]:
+    think, _, reply = r["text"].partition("</think>")
+    print(f"DTEXT ===== {r['q'][:220]}")
+    print(f"DTEXT searches {r['ns']} | think {len(think.split())} words | reply {len(reply.split())} words")
+    print("DTEXT reply:", reply.strip()[:900].replace("\n", " "))
+PYT
+  echo "REEVAL_DONE $RRUN $(date -u)"; exit 0
+fi
 for i in $(seq 0 $((${RSHARDS:-3} - 1))); do run_one /root/work/ev_$i.jsonl /root/work/${RRUN}_out_$i.jsonl ${RRUN}$i; hf upload $R /root/work/${RRUN}_out_$i.jsonl pooler_distill/chatsft/rollouts/${RRUN}_$i.jsonl >/dev/null 2>&1; echo "[$RRUN] shard $i uploaded $(tail -1 /root/${RRUN}_${RRUN}$i.log | cut -c1-110)"; done
 run_one /root/hfdl/pooler_distill/chat_eval60.jsonl /root/work/${RRUN}_chat_out.jsonl ${RRUN}chat
 hf upload $R /root/work/${RRUN}_chat_out.jsonl pooler_distill/chatsft/rollouts/${RRUN}_chat.jsonl >/dev/null 2>&1
