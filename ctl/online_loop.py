@@ -58,7 +58,7 @@ ap.add_argument("--stop", default="eos", choices=["eos", "answer"]); ap.add_argu
 ap.add_argument("--dolphin-ratio", type=float, default=2.0, help="Dolphin records per accepted search rollout in the same step"); ap.add_argument("--dolphin-min", type=int, default=2, help="Dolphin records in a step with no accepted rollout")
 ap.add_argument("--maxlen", type=int, default=4096)
 ap.add_argument("--replay", default="", help="jsonl of verified search traces {q,text}; each step trains on --replay-per-step of them (the retention data)")
-ap.add_argument("--train-all", type=int, default=0, help="1: train on every rollout of the step, no selection (the gold and the judge only measure)"); ap.add_argument("--replay-per-step", type=int, default=2); ap.add_argument("--rollout-every", type=int, default=1, help="do the measurement rollout only every N steps (accepted ones join the replay set)")
+ap.add_argument("--queue", type=int, default=0, help="1: each rollout batch takes --b different questions; the rows queue up and every step trains on one of them (no selection) plus Dolphin; a new batch runs when the queue is empty"); ap.add_argument("--train-all", type=int, default=0, help="1: train on every rollout of the step, no selection (the gold and the judge only measure)"); ap.add_argument("--replay-per-step", type=int, default=2); ap.add_argument("--rollout-every", type=int, default=1, help="do the measurement rollout only every N steps (accepted ones join the replay set)")
 ap.add_argument("--accum", type=int, default=1, help="steps whose gradients are accumulated before one optimizer update (both the search-side and the Dolphin part)")
 ap.add_argument("--samepage", type=int, default=1, help="1: a search whose top page was already shown in this rollout serves the NEXT chunk of that page (and says so when the page is used up); 0: teacher environment (always the head)")
 A = ap.parse_args()
@@ -410,7 +410,7 @@ def last_logits(**kw):
 
 @torch.no_grad()
 def rollout_batch(question, B):
-    """B independent rollouts of the same question, decoded in lockstep.
+    """B independent rollouts decoded in lockstep: one question for all rows (str), or one question per row (list).
 
     Semantics match rollout() exactly: every row keeps its own generation, pooled set, page offsets and stop
     conditions, and each block is rebuilt from that row's own state against a freshly prefilled question cache.
@@ -418,9 +418,17 @@ def rollout_batch(question, B):
     rollouts are run one at a time. Rows that stop early are carried along with filler tokens; the cache is
     rebuilt from scratch every block, so their pollution never reaches a row that is still generating."""
     model.eval()
-    q_ids = tok.encode(tok.apply_chat_template([{"role": "user", "content": question}],
-                                               add_generation_prompt=True, tokenize=False) + "<think>\n")
-    MQ = len(q_ids)
+    qs = list(question) if isinstance(question, (list, tuple)) else [question] * B
+    B = len(qs)
+    QID = [tok.encode(tok.apply_chat_template([{"role": "user", "content": q}], add_generation_prompt=True, tokenize=False) + "<think>\n")
+           for q in qs]
+    MQs = [len(x) for x in QID]; MQ = max(MQs)                       # MQ = cache slots of the question prefix (left-padded)
+    PAD = tok.pad_token_id if tok.pad_token_id is not None else eos
+    q_in = torch.full((B, MQ), PAD, dtype=torch.long, device=DEV); q_am = torch.zeros(B, MQ, device=DEV)
+    q_pos = torch.zeros(B, MQ, dtype=torch.long, device=DEV)
+    for b, ids in enumerate(QID):                                    # every row's own tokens end on slot MQ-1, positions 0..len-1
+        q_in[b, MQ - len(ids):] = torch.tensor(ids, device=DEV); q_am[b, MQ - len(ids):] = 1
+        q_pos[b, MQ - len(ids):] = torch.arange(len(ids), device=DEV)
     S = [dict(gen=[], msk=[], kept=[], absorbed=0, segs=[], n_model=0, ns_=0, nm=0, nmt=0, served=[], queries=[],
               page_ids=[], page_off=0, seen_pages={}, cur_key=None, nrep=0, dead=False, cut=False, done=False)
          for _ in range(B)]
@@ -513,18 +521,18 @@ def rollout_batch(question, B):
         emb_b = torch.zeros(nA, Lmax, H, device=DEV, dtype=blocks[0].dtype)
         posv = torch.zeros(nA, Lmax, dtype=torch.long, device=DEV)
         amask = torch.zeros(nA, MQ + Lmax, device=DEV)
-        amask[:, :MQ] = 1
+        amask[:, :MQ] = q_am[act]
         for i, blk in enumerate(blocks):               # left-pad: every row's last real token lands on index -1
-            L = Ls[i]
+            L = Ls[i]; mq = MQs[act[i]]
             emb_b[i, Lmax - L:] = blk[0]
-            posv[i, Lmax - L:] = torch.arange(MQ, MQ + L, device=DEV)
+            posv[i, Lmax - L:] = torch.arange(mq, mq + L, device=DEV)
             amask[i, MQ + Lmax - L:] = 1
         past = DynamicCache()
-        BODY(input_ids=torch.tensor([q_ids] * nA, device=DEV), past_key_values=past, use_cache=True)
+        BODY(input_ids=q_in[act], attention_mask=q_am[act], position_ids=q_pos[act], past_key_values=past, use_cache=True)
         cpos = torch.arange(MQ, MQ + Lmax, device=DEV)
         last = last_logits(inputs_embeds=emb_b, past_key_values=past, attention_mask=amask,
                            position_ids=posv, cache_position=cpos, use_cache=True)
-        npos = [MQ + L for L in Ls]
+        npos = [MQs[b] + L for b, L in zip(act, Ls)]
         alive = [True] * nA
         for _ in range(A.chunk):
             # sampling stays serial (it is microseconds of GPU work); advancing does not, because a row that has
@@ -563,11 +571,11 @@ def rollout_batch(question, B):
     if cut_by_time:
         print(f"[warn] {cut_by_time}/{B} rollouts hit the {budget}s batch budget before answering", flush=True)
     outs = []
-    for st in S:
+    for b, st in enumerate(S):
         txt = tok.decode(st["gen"])
         landed = (not st["cut"]) and "</think>" in txt and bool(txt.split("</think>")[-1].strip())
         ans = head_sentence(txt.split("</think>")[-1].strip()) if landed else ""
-        outs.append(dict(q_ids=q_ids, gen=st["gen"], msk=st["msk"], ended=bool(st.get("ended")),
+        outs.append(dict(q_ids=QID[b], q=qs[b], gen=st["gen"], msk=st["msk"], ended=bool(st.get("ended")),
                          segs=[x for x in st["segs"] if x[1] is not None], text=txt, answer=ans,
                          ns=st["ns_"], more=st["nm"], rep=st["nrep"], cut=st["cut"], served=st["served"],
                          queries=st["queries"], landed=landed, dead=st["dead"]))
@@ -752,11 +760,24 @@ log = open(os.path.join(A.outdir, "loop.log"), "a")
 roll_fh = open(os.path.join(A.outdir, "rollouts.jsonl"), "a")
 acc_fh = open(os.path.join(A.outdir, "accepted.jsonl"), "a")
 cum = state.get("cum", {}); t0 = time.time(); di = state.get("di", 0); ri = state.get("ri", 0)
+queue = []; qi = state.get("qi", 0)
 for step in range(state["step"] + 1, A.steps + 1):
     item = pool[(step - 1) % len(pool)]
     if (step - 1) % A.accum == 0: opt.zero_grad(set_to_none=True)
     rolls = []
-    if step % A.rollout_every == 0:
+    if A.queue:
+        if not queue:                                   # B different questions, one rollout each, all of them queued
+            items = [pool[(qi + j) % len(pool)] for j in range(A.b)]; qi += A.b
+            try:
+                for it, r in zip(items, rollout_batch([it["q"] for it in items], A.b)):
+                    r["item"] = it; queue.append(r)
+            except (KeyboardInterrupt, SystemExit):
+                raise
+            except BaseException as e:
+                print(f"[warn] batch dropped: {type(e).__name__}: {str(e)[:120]}", flush=True); clear()
+        if queue:
+            rolls = [queue.pop(0)]; item = rolls[0]["item"]
+    elif step % A.rollout_every == 0:
         try:
             rolls = rollout_batch(item["q"], A.b)
         except (KeyboardInterrupt, SystemExit):
@@ -778,7 +799,7 @@ for step in range(state["step"] + 1, A.steps + 1):
         roll_fh.write(json.dumps({"step": step, "q": item["q"], "gold": item["gold"], "why": why, "ns": r["ns"], "text": r["text"]}, ensure_ascii=False) + "\n")
     roll_fh.flush()
     losses = []; dl = []
-    trainset = rolls if A.train_all else positives   # no selection: every sample of the step is a target
+    trainset = rolls if (A.train_all or A.queue) else positives   # no selection: every sample of the step is a target
     if trainset:
         model.train()
         for r in trainset:
@@ -801,9 +822,9 @@ for step in range(state["step"] + 1, A.steps + 1):
         opt.step(); opt.zero_grad(set_to_none=True); clear()
     tot = sum(cum.values()); acc = cum.get("accepted", 0)
     line = (f"[step {step}] " + (" ".join(f"{k}={sum(1 for x in reasons if x == k)}" for k in ("accepted", "wrong", "page not found", "no reply", "tags", "judge", "judge error") if any(x == k for x in reasons)) if rolls else "no rollout")
-            + f" | sft_ce={sum(losses)/max(len(losses),1):.3f} replay_ce={sum(rl)/max(len(rl),1):.3f} dolphin_ce={sum(dl)/max(len(dl),1):.3f} | cumulative accept {acc}/{tot} ({100*acc/max(tot,1):.1f}%) "
+            + (f" queue={len(queue)}" if A.queue else "") + f" | sft_ce={sum(losses)/max(len(losses),1):.3f} replay_ce={sum(rl)/max(len(rl),1):.3f} dolphin_ce={sum(dl)/max(len(dl),1):.3f} | cumulative accept {acc}/{tot} ({100*acc/max(tot,1):.1f}%) "
             + " ".join(f"{k}:{100*v/max(tot,1):.0f}%" for k, v in sorted(cum.items())) + f" | {(time.time()-t0)/60:.0f} min")
     print(line, flush=True); log.write(line + "\n"); log.flush()
     if step % A.save_every == 0 or step == A.steps:
-        save_ckpt(LATEST); json.dump({"step": step, "cum": cum, "di": di, "ri": ri}, open(STATE_F, "w")); print(f"[save] step {step}", flush=True)
+        save_ckpt(LATEST); json.dump({"step": step, "cum": cum, "di": di, "ri": ri, "qi": qi}, open(STATE_F, "w")); print(f"[save] step {step}", flush=True)
 print("ONLINE_LOOP_DONE", flush=True)
