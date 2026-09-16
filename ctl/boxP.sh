@@ -1,26 +1,3 @@
-# PEEK (one-shot): where r10 stands, block statistics and the latest replies
-python3 - <<'PYS'
-import json, re, statistics
-degen = re.compile(r"begin_of_thought|end_of_thought|\b(\w+(?:\W+\w+){0,3})\b(?:\W+\1\b){4,}")
-rows = [json.loads(l) for l in open("/root/online_r10/rollouts.jsonl") if l.strip()]
-def tw(t):
-    i = t.find("</think>"); b = t[:i] if i >= 0 else t
-    return len(re.sub(r"<information>.*?</information>", "", b, flags=re.S).split())
-def reply(t):
-    return t.split("</think>")[-1].strip().replace("\n", " ") if "</think>" in t else "(unfinished)"
-mx = max(r["step"] for r in rows)
-print(f"PEEKR10 {len(rows)} rollouts through step {mx}")
-for b in range(0, mx, 50):
-    x = [r for r in rows if b < r["step"] <= b + 50]
-    if not x: continue
-    n = len(x); w = sorted(tw(r["text"]) for r in x); rw = [len(reply(r["text"]).split()) for r in x if "</think>" in r["text"]]
-    cg = sum(r["why"] in ("accepted", "judge", "judge error") for r in x)
-    print(f"PEEKR10 {b+1:>3}-{b+50:<3} n={n:<2} think med {w[n//2]:>4} p90 {w[int(n*.9)]:>4} | reply med {statistics.median(rw) if rw else 0:>3.0f} | srch {sum(r['ns'] for r in x)/n:.1f} | rep/marker {sum(bool(degen.search(r['text'])) for r in x):>2} | unfinished {sum('</think>' not in r['text'] for r in x):>2} | correct&grounded {cg:>2} ({100*cg//n}%)")
-print("PEEKR10 --- latest replies")
-for r in rows[-8:]:
-    print(f"PEEKR10 [{r['step']}|{r['why']}] {reply(r['text'])[:200]}")
-PYS
-exit 0
 # box E (24GB, replaces the A4000 whose host had no free GPU left): measure the held-out set through
 # the 4-bit grid the phone actually runs.
 #
@@ -101,7 +78,7 @@ PRUNS="p_t06q4:1:0.6 p_t06bf16:0:0.6"
 PG=64
 PSKIP=
 MODE=online
-ORUN=r10
+ORUN=r11
 OMODEL=s4_hf
 OB=8
 ODRATIO=1
@@ -118,6 +95,7 @@ OCOMPLETE=1
 OGEN=4000
 OBUDGET=2400
 OGUARD=1
+OMAXSRCH=15
 OREPLAYN=0
 OROLLEVERY=1
 OQFILE=pooler_distill/measureq.jsonl
@@ -420,7 +398,7 @@ PYF
   if ! pgrep -f "online_loop.p[y]" >/dev/null; then
     cd /root/work && DSK_KEY=$(cat /root/.dsk 2>/dev/null) PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True setsid nohup python3 /root/work/online_loop.py $OHF $OUT \
       --questions /root/work/selfq_all.jsonl --dolphin /root/work/dolphin_v1.jsonl --heldout /root/work/eval300.jsonl \
-      --b $OB --steps $OSTEPS --temp $OTEMP --lr $OLR --dolphin-ratio ${ODRATIO:-2} --dolphin-min ${ODMIN:-2} --accum ${OACCUM:-1} --replay $REPLAYF --replay-per-step ${OREPLAYN:-2} --rollout-every ${OROLLEVERY:-1} --train-all ${OTRAINALL:-0} --queue ${OQUEUE:-0} --complete-only ${OCOMPLETE:-0} --gen ${OGEN:-1500} --budget ${OBUDGET:-900} --guard ${OGUARD:-0} --pooler none --lora-rank 16 --lora-layers ${OLAYERS:-all} --gradckpt 1 --save-every 5 --stop eos \
+      --b $OB --steps $OSTEPS --temp $OTEMP --lr $OLR --dolphin-ratio ${ODRATIO:-2} --dolphin-min ${ODMIN:-2} --accum ${OACCUM:-1} --replay $REPLAYF --replay-per-step ${OREPLAYN:-2} --rollout-every ${OROLLEVERY:-1} --train-all ${OTRAINALL:-0} --queue ${OQUEUE:-0} --complete-only ${OCOMPLETE:-0} --gen ${OGEN:-1500} --budget ${OBUDGET:-900} --guard ${OGUARD:-0} --maxsrch ${OMAXSRCH:-0} --pooler none --lora-rank 16 --lora-layers ${OLAYERS:-all} --gradckpt 1 --save-every 5 --stop eos \
       >> /root/online_$ORUN.log 2>&1 < /dev/null &
   fi
   cat > /root/onlinekeep.sh <<OK

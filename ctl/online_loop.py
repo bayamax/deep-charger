@@ -58,7 +58,7 @@ ap.add_argument("--stop", default="eos", choices=["eos", "answer"]); ap.add_argu
 ap.add_argument("--dolphin-ratio", type=float, default=2.0, help="Dolphin records per accepted search rollout in the same step"); ap.add_argument("--dolphin-min", type=int, default=2, help="Dolphin records in a step with no accepted rollout")
 ap.add_argument("--maxlen", type=int, default=4096)
 ap.add_argument("--replay", default="", help="jsonl of verified search traces {q,text}; each step trains on --replay-per-step of them (the retention data)")
-ap.add_argument("--guard", type=int, default=0, help="1: watch the share of rollouts that write no reply over a sliding window; when it runs away from the opening baseline, reload the last healthy checkpoint, halve the learning rate and carry on (three times, then stop)"); ap.add_argument("--guard-window", type=int, default=80); ap.add_argument("--guard-floor", type=float, default=0.20, help="no trip below this absolute rate"); ap.add_argument("--guard-mult", type=float, default=2.0, help="trip at this multiple of the opening baseline"); ap.add_argument("--guard-rollbacks", type=int, default=3); ap.add_argument("--complete-only", type=int, default=0, help="1: train only on rollouts that actually finished their turn (EOS reached, no repetition death). Not a quality filter: a rollout cut off by the token cap is an unfinished fragment, and training on it teaches the model not to stop -- r7 went from 5%% to 59%% no-reply that way"); ap.add_argument("--queue", type=int, default=0, help="1: each rollout batch takes --b different questions; the rows queue up and every step trains on one of them (no selection) plus Dolphin; a new batch runs when the queue is empty"); ap.add_argument("--train-all", type=int, default=0, help="1: train on every rollout of the step, no selection (the gold and the judge only measure)"); ap.add_argument("--replay-per-step", type=int, default=2); ap.add_argument("--rollout-every", type=int, default=1, help="do the measurement rollout only every N steps (accepted ones join the replay set)")
+ap.add_argument("--guard", type=int, default=0, help="1: watch the share of rollouts that write no reply over a sliding window; when it runs away from the opening baseline, reload the last healthy checkpoint, halve the learning rate and carry on (three times, then stop)"); ap.add_argument("--guard-window", type=int, default=80); ap.add_argument("--guard-floor", type=float, default=0.20, help="no trip below this absolute rate"); ap.add_argument("--guard-mult", type=float, default=2.0, help="trip at this multiple of the opening baseline"); ap.add_argument("--guard-ns", type=float, default=1.8, help="trip at this multiple of the opening searches per rollout"); ap.add_argument("--guard-rollbacks", type=int, default=3); ap.add_argument("--complete-only", type=int, default=0, help="1: train only on rollouts that actually finished their turn (EOS reached, no repetition death). Not a quality filter: a rollout cut off by the token cap is an unfinished fragment, and training on it teaches the model not to stop -- r7 went from 5%% to 59%% no-reply that way"); ap.add_argument("--queue", type=int, default=0, help="1: each rollout batch takes --b different questions; the rows queue up and every step trains on one of them (no selection) plus Dolphin; a new batch runs when the queue is empty"); ap.add_argument("--train-all", type=int, default=0, help="1: train on every rollout of the step, no selection (the gold and the judge only measure)"); ap.add_argument("--replay-per-step", type=int, default=2); ap.add_argument("--rollout-every", type=int, default=1, help="do the measurement rollout only every N steps (accepted ones join the replay set)")
 ap.add_argument("--accum", type=int, default=1, help="steps whose gradients are accumulated before one optimizer update (both the search-side and the Dolphin part)")
 ap.add_argument("--samepage", type=int, default=1, help="1: a search whose top page was already shown in this rollout serves the NEXT chunk of that page (and says so when the page is used up); 0: teacher environment (always the head)")
 A = ap.parse_args()
@@ -792,7 +792,8 @@ cum = state.get("cum", {}); t0 = time.time(); di = state.get("di", 0); ri = stat
 queue = []; qi = state.get("qi", 0)
 GOOD = os.path.join(A.outdir, "good.safetensors")
 recent = collections.deque(maxlen=A.guard_window)      # sliding window of outcomes, for the collapse guard
-base_rate = state.get("base_rate"); nrb = state.get("rollbacks", 0); guard_from = state.get("guard_from", 0)
+recent_ns = collections.deque(maxlen=A.guard_window)   # and of the searches each rollout issued
+base_rate = state.get("base_rate"); base_ns = state.get("base_ns"); nrb = state.get("rollbacks", 0); guard_from = state.get("guard_from", 0)
 
 
 def noreply_rate(xs):
@@ -833,7 +834,8 @@ for step in range(state["step"] + 1, A.steps + 1):
     reasons = []; positives = []
     for r in rolls:
         _, c, g = price(r, item["gold"]); reply = r["text"].split("</think>")[-1] if "</think>" in r["text"] else ""
-        if not r["landed"]: why = "no reply"
+        if r.get("cut"): why = "search loop"
+        elif not r["landed"]: why = "no reply"
         elif not g: why = "page not found"
         elif not c: why = "wrong"
         elif any(t in reply for t in TAGS): why = "tags"
@@ -871,28 +873,29 @@ for step in range(state["step"] + 1, A.steps + 1):
     if step % A.accum == 0:
         opt.step(); opt.zero_grad(set_to_none=True); clear()
     tot = sum(cum.values()); acc = cum.get("accepted", 0)
-    line = (f"[step {step}] " + (" ".join(f"{k}={sum(1 for x in reasons if x == k)}" for k in ("accepted", "wrong", "page not found", "no reply", "tags", "judge", "judge error") if any(x == k for x in reasons)) if rolls else "no rollout")
+    line = (f"[step {step}] " + (" ".join(f"{k}={sum(1 for x in reasons if x == k)}" for k in ("accepted", "wrong", "page not found", "no reply", "search loop", "tags", "judge", "judge error") if any(x == k for x in reasons)) if rolls else "no rollout")
             + (f" queue={len(queue)}" if A.queue else "") + (f" unfinished={ncut}" if ncut else "") + f" | sft_ce={sum(losses)/max(len(losses),1):.3f} replay_ce={sum(rl)/max(len(rl),1):.3f} dolphin_ce={sum(dl)/max(len(dl),1):.3f} | cumulative accept {acc}/{tot} ({100*acc/max(tot,1):.1f}%) "
             + " ".join(f"{k}:{100*v/max(tot,1):.0f}%" for k, v in sorted(cum.items())) + f" | {(time.time()-t0)/60:.0f} min")
     print(line, flush=True); log.write(line + "\n"); log.flush()
     if A.guard:
-        recent.extend(reasons)
+        recent.extend(reasons); recent_ns.extend(r["ns"] for r in rolls)
         if base_rate is None and len(recent) == recent.maxlen:
-            base_rate = noreply_rate(recent)
-            print(f"[guard] baseline no-reply {100*base_rate:.0f}% over the first {recent.maxlen} rollouts", flush=True)
+            base_rate = noreply_rate(recent); base_ns = sum(recent_ns) / max(len(recent_ns), 1)
+            print(f"[guard] baseline no-reply {100*base_rate:.0f}%, {base_ns:.1f} searches per rollout, over the first {recent.maxlen} rollouts", flush=True)
         elif base_rate is not None and len(recent) == recent.maxlen and step > guard_from + 20:
-            cur = noreply_rate(recent)
-            if cur >= max(A.guard_floor, A.guard_mult * base_rate):
+            cur = noreply_rate(recent); cur_ns = sum(recent_ns) / max(len(recent_ns), 1)
+            trip = cur >= max(A.guard_floor, A.guard_mult * base_rate) or (base_ns and cur_ns >= A.guard_ns * base_ns)
+            if trip:
                 if nrb >= A.guard_rollbacks or not os.path.exists(GOOD):
-                    print(f"ONLINE_COLLAPSE step {step}: no-reply {100*cur:.0f}% vs baseline {100*base_rate:.0f}%, "
+                    print(f"ONLINE_COLLAPSE step {step}: no-reply {100*cur:.0f}% vs {100*base_rate:.0f}%, searches {cur_ns:.1f} vs {base_ns:.1f}, "
                           + ("no healthy checkpoint" if not os.path.exists(GOOD) else f"{nrb} rollbacks spent"), flush=True)
                     save_ckpt(LATEST); break
                 nrb += 1; nu = reload_good()
-                print(f"ONLINE_ROLLBACK {nrb} at step {step}: no-reply {100*cur:.0f}% vs baseline {100*base_rate:.0f}%, "
+                print(f"ONLINE_ROLLBACK {nrb} at step {step}: no-reply {100*cur:.0f}% vs {100*base_rate:.0f}%, searches {cur_ns:.1f} vs {base_ns:.1f}, "
                       f"reloaded {GOOD} ({nu} unexpected), lr now {opt.param_groups[0]['lr']:.2g}", flush=True)
-                recent.clear(); guard_from = step
-            elif step % A.save_every == 0 and cur <= max(base_rate * 1.3, base_rate + 0.03):
+                recent.clear(); recent_ns.clear(); guard_from = step
+            elif step % A.save_every == 0 and cur <= max(base_rate * 1.3, base_rate + 0.03) and cur_ns <= base_ns * 1.2:
                 save_ckpt(GOOD)                              # this window still looks like the opening one
     if step % A.save_every == 0 or step == A.steps:
-        save_ckpt(LATEST); json.dump({"step": step, "cum": cum, "di": di, "ri": ri, "qi": qi, "base_rate": base_rate, "rollbacks": nrb, "guard_from": guard_from}, open(STATE_F, "w")); print(f"[save] step {step}", flush=True)
+        save_ckpt(LATEST); json.dump({"step": step, "cum": cum, "di": di, "ri": ri, "qi": qi, "base_rate": base_rate, "base_ns": base_ns, "rollbacks": nrb, "guard_from": guard_from}, open(STATE_F, "w")); print(f"[save] step {step}", flush=True)
 print("ONLINE_LOOP_DONE", flush=True)
