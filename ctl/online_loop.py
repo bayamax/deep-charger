@@ -58,7 +58,7 @@ ap.add_argument("--stop", default="eos", choices=["eos", "answer"]); ap.add_argu
 ap.add_argument("--dolphin-ratio", type=float, default=2.0, help="Dolphin records per accepted search rollout in the same step"); ap.add_argument("--dolphin-min", type=int, default=2, help="Dolphin records in a step with no accepted rollout")
 ap.add_argument("--maxlen", type=int, default=4096)
 ap.add_argument("--replay", default="", help="jsonl of verified search traces {q,text}; each step trains on --replay-per-step of them (the retention data)")
-ap.add_argument("--queue", type=int, default=0, help="1: each rollout batch takes --b different questions; the rows queue up and every step trains on one of them (no selection) plus Dolphin; a new batch runs when the queue is empty"); ap.add_argument("--train-all", type=int, default=0, help="1: train on every rollout of the step, no selection (the gold and the judge only measure)"); ap.add_argument("--replay-per-step", type=int, default=2); ap.add_argument("--rollout-every", type=int, default=1, help="do the measurement rollout only every N steps (accepted ones join the replay set)")
+ap.add_argument("--complete-only", type=int, default=0, help="1: train only on rollouts that actually finished their turn (EOS reached, no repetition death). Not a quality filter: a rollout cut off by the token cap is an unfinished fragment, and training on it teaches the model not to stop -- r7 went from 5%% to 59%% no-reply that way"); ap.add_argument("--queue", type=int, default=0, help="1: each rollout batch takes --b different questions; the rows queue up and every step trains on one of them (no selection) plus Dolphin; a new batch runs when the queue is empty"); ap.add_argument("--train-all", type=int, default=0, help="1: train on every rollout of the step, no selection (the gold and the judge only measure)"); ap.add_argument("--replay-per-step", type=int, default=2); ap.add_argument("--rollout-every", type=int, default=1, help="do the measurement rollout only every N steps (accepted ones join the replay set)")
 ap.add_argument("--accum", type=int, default=1, help="steps whose gradients are accumulated before one optimizer update (both the search-side and the Dolphin part)")
 ap.add_argument("--samepage", type=int, default=1, help="1: a search whose top page was already shown in this rollout serves the NEXT chunk of that page (and says so when the page is used up); 0: teacher environment (always the head)")
 A = ap.parse_args()
@@ -799,7 +799,11 @@ for step in range(state["step"] + 1, A.steps + 1):
         roll_fh.write(json.dumps({"step": step, "q": item["q"], "gold": item["gold"], "why": why, "ns": r["ns"], "text": r["text"]}, ensure_ascii=False) + "\n")
     roll_fh.flush()
     losses = []; dl = []
-    trainset = rolls if (A.train_all or A.queue) else positives   # no selection: every sample of the step is a target
+    trainset = rolls if (A.train_all or A.queue) else positives
+    ncut = 0
+    if A.complete_only:
+        keep = [r for r in trainset if r.get("ended") and not r.get("dead")]
+        ncut = len(trainset) - len(keep); trainset = keep   # no selection: every sample of the step is a target
     if trainset:
         model.train()
         for r in trainset:
@@ -822,7 +826,7 @@ for step in range(state["step"] + 1, A.steps + 1):
         opt.step(); opt.zero_grad(set_to_none=True); clear()
     tot = sum(cum.values()); acc = cum.get("accepted", 0)
     line = (f"[step {step}] " + (" ".join(f"{k}={sum(1 for x in reasons if x == k)}" for k in ("accepted", "wrong", "page not found", "no reply", "tags", "judge", "judge error") if any(x == k for x in reasons)) if rolls else "no rollout")
-            + (f" queue={len(queue)}" if A.queue else "") + f" | sft_ce={sum(losses)/max(len(losses),1):.3f} replay_ce={sum(rl)/max(len(rl),1):.3f} dolphin_ce={sum(dl)/max(len(dl),1):.3f} | cumulative accept {acc}/{tot} ({100*acc/max(tot,1):.1f}%) "
+            + (f" queue={len(queue)}" if A.queue else "") + (f" unfinished={ncut}" if ncut else "") + f" | sft_ce={sum(losses)/max(len(losses),1):.3f} replay_ce={sum(rl)/max(len(rl),1):.3f} dolphin_ce={sum(dl)/max(len(dl),1):.3f} | cumulative accept {acc}/{tot} ({100*acc/max(tot,1):.1f}%) "
             + " ".join(f"{k}:{100*v/max(tot,1):.0f}%" for k, v in sorted(cum.items())) + f" | {(time.time()-t0)/60:.0f} min")
     print(line, flush=True); log.write(line + "\n"); log.flush()
     if step % A.save_every == 0 or step == A.steps:
