@@ -1,3 +1,10 @@
+# PEEK (one-shot): the r10 loop log for 5 minutes
+for i in $(seq 1 5); do
+  echo "PEEK10 $(date -u +%H:%M) $(nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv,noheader) steps=$(grep -c '^\[step' /root/online_r10/loop.log 2>/dev/null)"
+  grep -E "^\[step|^\[guard\]|^ONLINE_ROLLBACK|^ONLINE_COLLAPSE|Traceback|Error" /root/online_r10.log | tail -4 | cut -c1-260
+  sleep 60
+done
+exit 0
 # box E (24GB, replaces the A4000 whose host had no free GPU left): measure the held-out set through
 # the 4-bit grid the phone actually runs.
 #
