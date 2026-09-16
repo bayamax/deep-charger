@@ -1,3 +1,7 @@
+# PEEK (one-shot): is the judge API answering at all, and what does it say
+echo "PEEKJ balance: $(curl -s -m 20 -H "Authorization: Bearer $(cat /root/.dsk)" https://api.deepseek.com/user/balance | cut -c1-200)"
+echo "PEEKJ probe: $(curl -s -m 40 -X POST https://api.deepseek.com/chat/completions -H "Content-Type: application/json" -H "Authorization: Bearer $(cat /root/.dsk)" -d '{"model":"deepseek-flash","messages":[{"role":"user","content":"reply with the single word ok"}],"max_tokens":20}' | cut -c1-300)"
+exit 0
 # box E (24GB, replaces the A4000 whose host had no free GPU left): measure the held-out set through
 # the 4-bit grid the phone actually runs.
 #
