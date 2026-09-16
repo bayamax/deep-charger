@@ -58,7 +58,7 @@ ap.add_argument("--stop", default="eos", choices=["eos", "answer"]); ap.add_argu
 ap.add_argument("--dolphin-ratio", type=float, default=2.0, help="Dolphin records per accepted search rollout in the same step"); ap.add_argument("--dolphin-min", type=int, default=2, help="Dolphin records in a step with no accepted rollout")
 ap.add_argument("--maxlen", type=int, default=4096)
 ap.add_argument("--replay", default="", help="jsonl of verified search traces {q,text}; each step trains on --replay-per-step of them (the retention data)")
-ap.add_argument("--guard", type=int, default=0, help="1: watch the share of rollouts that write no reply over a sliding window; when it runs away from the opening baseline, reload the last healthy checkpoint, halve the learning rate and carry on (three times, then stop)"); ap.add_argument("--guard-window", type=int, default=80); ap.add_argument("--guard-floor", type=float, default=0.20, help="no trip below this absolute rate"); ap.add_argument("--guard-mult", type=float, default=2.0, help="trip at this multiple of the opening baseline"); ap.add_argument("--guard-cut", type=float, default=3.0, help="trip at this multiple of the opening share of rollouts cut for searching without end"); ap.add_argument("--guard-cut-floor", type=float, default=0.20); ap.add_argument("--guard-ns-floor", type=float, default=6.0, help="no searches trip below this absolute mean"); ap.add_argument("--guard-ns", type=float, default=1.8, help="trip at this multiple of the opening searches per rollout"); ap.add_argument("--guard-rollbacks", type=int, default=3); ap.add_argument("--complete-only", type=int, default=0, help="1: train only on rollouts that actually finished their turn (EOS reached, no repetition death). Not a quality filter: a rollout cut off by the token cap is an unfinished fragment, and training on it teaches the model not to stop -- r7 went from 5%% to 59%% no-reply that way"); ap.add_argument("--queue", type=int, default=0, help="1: each rollout batch takes --b different questions; the rows queue up and every step trains on one of them (no selection) plus Dolphin; a new batch runs when the queue is empty"); ap.add_argument("--train-all", type=int, default=0, help="1: train on every rollout of the step, no selection (the gold and the judge only measure)"); ap.add_argument("--replay-per-step", type=int, default=2); ap.add_argument("--rollout-every", type=int, default=1, help="do the measurement rollout only every N steps (accepted ones join the replay set)")
+ap.add_argument("--guard", type=int, default=0, help="1: watch the share of rollouts that write no reply over a sliding window; when it runs away from the opening baseline, reload the last healthy checkpoint, halve the learning rate and carry on (three times, then stop)"); ap.add_argument("--guard-window", type=int, default=80); ap.add_argument("--guard-floor", type=float, default=0.20, help="no trip below this absolute rate"); ap.add_argument("--guard-mult", type=float, default=2.0, help="trip at this multiple of the opening baseline"); ap.add_argument("--guard-cut", type=float, default=3.0, help="trip at this multiple of the opening share of rollouts cut for searching without end"); ap.add_argument("--guard-cut-floor", type=float, default=0.20); ap.add_argument("--guard-ns-floor", type=float, default=6.0, help="no searches trip below this absolute mean"); ap.add_argument("--guard-ns", type=float, default=1.8, help="trip at this multiple of the opening searches per rollout"); ap.add_argument("--guard-rollbacks", type=int, default=3); ap.add_argument("--complete-only", type=int, default=0, help="1: train only on rollouts that actually finished their turn (EOS reached, no repetition death). Not a quality filter: a rollout cut off by the token cap is an unfinished fragment, and training on it teaches the model not to stop -- r7 went from 5%% to 59%% no-reply that way"); ap.add_argument("--reason", default="", help="jsonl of reasoning problems {q, reply}: the loop leaves the search corpus and runs GRPO on these instead, the teacher scoring each sample against the reference"); ap.add_argument("--reason-g", type=int, default=8, help="samples per problem"); ap.add_argument("--reason-stub", type=int, default=0, help="1: score by shape alone, no teacher call (for a smoke run with no credit)"); ap.add_argument("--queue", type=int, default=0, help="1: each rollout batch takes --b different questions; the rows queue up and every step trains on one of them (no selection) plus Dolphin; a new batch runs when the queue is empty"); ap.add_argument("--train-all", type=int, default=0, help="1: train on every rollout of the step, no selection (the gold and the judge only measure)"); ap.add_argument("--replay-per-step", type=int, default=2); ap.add_argument("--rollout-every", type=int, default=1, help="do the measurement rollout only every N steps (accepted ones join the replay set)")
 ap.add_argument("--accum", type=int, default=1, help="steps whose gradients are accumulated before one optimizer update (both the search-side and the Dolphin part)")
 ap.add_argument("--samepage", type=int, default=1, help="1: a search whose top page was already shown in this rollout serves the NEXT chunk of that page (and says so when the page is used up); 0: teacher environment (always the head)")
 A = ap.parse_args()
@@ -755,6 +755,38 @@ def judge(q, gold, text):
         try: return json.loads(c[c.find("{"): c.rfind("}") + 1])
         except Exception: return {"error": "unparsable"}
     return {"error": "network"}
+REASON_SYS = """You are scoring one answer from a small assistant against a reference answer. Reply with JSON only:
+{"solves_it": true/false, "follows_the_request": true/false, "language_english": true/false, "clean": true/false}
+solves_it means the assistant reaches the same result as the reference (the wording may differ, and a different but equally valid result counts); follows_the_request means it does what was asked, including any count, length or format the question specifies; clean means no tool tags, no repetition loop and no text left unfinished."""
+
+
+def judge_reason(q, ref, text):
+    """teacher score for one reasoning sample; the reward is 1.0 only when every box is ticked"""
+    reply = text.split("</think>")[-1].strip()
+    if not reply: return 0.0, {"unfinished": True}
+    if A.reason_stub:                                     # shape only, for a smoke run with no credit
+        ok = 8 <= len(reply.split()) <= 400 and not any(t in reply for t in TAGS)
+        return (1.0 if ok else 0.0), {"stub": True}
+    if not DSK: return 0.0, {"error": "no key"}
+    body = {"model": "deepseek-flash", "temperature": 0,
+            "messages": [{"role": "system", "content": REASON_SYS},
+                         {"role": "user", "content": f"QUESTION:\n{q}\n\nREFERENCE ANSWER:\n{ref[:3000]}\n\nASSISTANT ANSWER:\n{reply[:3000]}"}],
+            "max_tokens": 300}
+    for _ in range(3):
+        try:
+            d = json.load(urllib.request.urlopen(urllib.request.Request(
+                "https://api.deepseek.com/chat/completions", data=json.dumps(body).encode(),
+                headers={"Authorization": "Bearer " + DSK, "Content-Type": "application/json"}), timeout=120))
+        except Exception:
+            time.sleep(3); continue
+        if "choices" not in d: return 0.0, {"error": "no choices"}
+        c = d["choices"][0]["message"].get("content") or ""
+        try: v = json.loads(c[c.find("{"): c.rfind("}") + 1])
+        except Exception: return 0.0, {"error": "unparsable"}
+        return (1.0 if all(bool(v.get(k)) for k in ("solves_it", "follows_the_request", "language_english", "clean")) else 0.0), v
+    return 0.0, {"error": "network"}
+
+
 def judge_ok(v):
     if v.get("skip"): return True
     return ("error" not in v) and all(bool(v.get(x)) for x in ("commits_to_answer", "matches_reference", "language_english", "clean")) and not v.get("unsupported_claims") and float(v.get("natural") or 0) >= 4
@@ -790,6 +822,15 @@ roll_fh = open(os.path.join(A.outdir, "rollouts.jsonl"), "a")
 acc_fh = open(os.path.join(A.outdir, "accepted.jsonl"), "a")
 cum = state.get("cum", {}); t0 = time.time(); di = state.get("di", 0); ri = state.get("ri", 0)
 queue = []; qi = state.get("qi", 0)
+reason = []
+if A.reason:
+    for line in open(A.reason):
+        try:
+            r = json.loads(line)
+            if r.get("q") and r.get("reply"): reason.append({"q": r["q"], "ref": r["reply"]})
+        except Exception: pass
+    random.Random(0).shuffle(reason)
+    print(f"[data] {len(reason)} reasoning problems, {A.reason_g} samples each, teacher {'stub' if A.reason_stub else 'flash'}", flush=True)
 GOOD = os.path.join(A.outdir, "good.safetensors")
 recent = collections.deque(maxlen=A.guard_window)      # sliding window of outcomes, for the collapse guard
 recent_ns = collections.deque(maxlen=A.guard_window)   # and of the searches each rollout issued
@@ -812,7 +853,7 @@ def reload_good():
     for g in opt.param_groups: g["lr"] = g["lr"] / 2
     return len(missing.unexpected_keys)
 
-for step in range(state["step"] + 1, A.steps + 1):
+for step in range(state["step"] + 1, A.steps + 1) if not reason else []:
     item = pool[(step - 1) % len(pool)]
     if (step - 1) % A.accum == 0: opt.zero_grad(set_to_none=True)
     rolls = []
@@ -905,3 +946,51 @@ for step in range(state["step"] + 1, A.steps + 1):
     if step % A.save_every == 0 or step == A.steps:
         save_ckpt(LATEST); json.dump({"step": step, "cum": cum, "di": di, "ri": ri, "qi": qi, "base_rate": base_rate, "base_ns": base_ns, "base_cut": base_cut, "rollbacks": nrb, "guard_from": guard_from}, open(STATE_F, "w")); print(f"[save] step {step}", flush=True)
 print("ONLINE_LOOP_DONE", flush=True)
+
+
+# ---- GRPO on reasoning problems, the teacher scoring each sample against the reference ----
+# Not the positive-only self-SFT that collapsed in tens of steps: every sample of a group is used,
+# its advantage measured against the group's own mean, so a bad sample is pushed down rather than
+# ignored. A group whose samples all score the same carries no signal and is skipped.
+for step in range(state["step"] + 1, A.steps + 1) if reason else []:
+    prob = reason[(step - 1) % len(reason)]
+    if (step - 1) % A.accum == 0: opt.zero_grad(set_to_none=True)
+    try:
+        rolls = rollout_batch(prob["q"], A.reason_g)
+    except (KeyboardInterrupt, SystemExit):
+        raise
+    except BaseException as e:
+        print(f"[warn] batch dropped: {type(e).__name__}: {str(e)[:120]}", flush=True); clear(); continue
+    rw, notes = [], []
+    with ThreadPoolExecutor(max_workers=min(8, len(rolls))) as ex:
+        for r, (sc, v) in zip(rolls, ex.map(lambda x: judge_reason(prob["q"], prob["ref"], x["text"]), rolls)):
+            rw.append(sc); notes.append(v)
+            roll_fh.write(json.dumps({"step": step, "q": prob["q"], "reward": sc, "why": v, "ns": r["ns"],
+                                      "text": r["text"]}, ensure_ascii=False) + "\n")
+    roll_fh.flush()
+    mu = sum(rw) / max(len(rw), 1)
+    sd = (sum((x - mu) ** 2 for x in rw) / max(len(rw), 1)) ** 0.5
+    losses = []
+    if sd > 1e-6:
+        model.train()
+        for r, x in zip(rolls, rw):
+            losses.append(guarded(pg_backward, r, (x - mu) / sd / (len(rolls) * A.accum))); clear()
+    dl = []
+    if dol and A.dolphin_min:
+        model.train()
+        for _ in range(A.dolphin_min):
+            dl.append(guarded(plain_backward, dol[di % len(dol)], 1.0 / (A.dolphin_min * A.accum))); di += 1
+    if step % A.accum == 0:
+        opt.step(); opt.zero_grad(set_to_none=True); clear()
+    cum["pass"] = cum.get("pass", 0) + sum(rw); cum["n"] = cum.get("n", 0) + len(rw)
+    unfin = sum(1 for v in notes if v.get("unfinished")); err = sum(1 for v in notes if v.get("error"))
+    line = (f"[step {step}] pass {sum(rw):.0f}/{len(rw)}"
+            + (f" unfinished={unfin}" if unfin else "") + (f" judge-error={err}" if err else "")
+            + f" | ce={sum(losses)/max(len(losses),1):.3f} dolphin_ce={sum(dl)/max(len(dl),1):.3f}"
+            + f" | cumulative pass {100*cum['pass']/max(cum['n'],1):.1f}% of {cum['n']}"
+            + f" | {(time.time()-t0)/60:.0f} min")
+    print(line, flush=True); log.write(line + "\n"); log.flush()
+    if step % A.save_every == 0 or step == A.steps:
+        save_ckpt(LATEST); json.dump({"step": step, "cum": cum, "di": di, "ri": ri, "qi": qi}, open(STATE_F, "w"))
+        print(f"[save] step {step}", flush=True)
+if reason: print("ONLINE_LOOP_DONE", flush=True)
