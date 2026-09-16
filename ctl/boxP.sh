@@ -1,24 +1,3 @@
-# PEEK (one-shot): the two rails of r11, block by block
-python3 - <<'PYS'
-import re
-rows = []
-for l in open("/root/online_r11/loop.log"):
-    m = re.match(r"\[step (\d+)\] (.*?) \| sft_ce=([\d.]+) replay_ce=([\d.]+) dolphin_ce=([\d.]+)", l)
-    if m: rows.append((int(m.group(1)), m.group(2), float(m.group(3)), float(m.group(5))))
-mx = max(r[0] for r in rows)
-print(f"PEEKRAIL r11 through step {mx}")
-for b in range(0, mx, 50):
-    x = [r for r in rows if b < r[0] <= b + 50]
-    if not x: continue
-    n = len(x); cnt = {}
-    for _, why, _, _ in x:
-        for k in ("accepted", "wrong", "page not found", "no reply", "search loop", "judge error", "judge"):
-            m2 = re.search(re.escape(k) + r"=(\d+)", why)
-            if m2: cnt[k] = cnt.get(k, 0) + int(m2.group(1)); break
-    tot = sum(cnt.values()) or 1
-    cg = cnt.get("accepted", 0) + cnt.get("judge", 0) + cnt.get("judge error", 0)
-    print(f"PEEKRAIL {b+1:>3}-{b+50:<3} self_ce {sum(r[2] for r in x)/n:.3f} dolphin_ce {sum(r[3] for r in x)/n:.3f} | correct&grounded {100*cg//tot}% cut {100*cnt.get('search loop',0)//tot}% no-reply {100*cnt.get('no reply',0)//tot}%")
-PYS
 # box E (24GB, replaces the A4000 whose host had no free GPU left): measure the held-out set through
 # the 4-bit grid the phone actually runs.
 #
@@ -98,7 +77,13 @@ JCLIP=0
 PRUNS="p_t06q4:1:0.6 p_t06bf16:0:0.6"
 PG=64
 PSKIP=
-MODE=online
+MODE=reeval
+RRUN=r11eval
+RMODEL=r11
+RKIND=ckpt
+RSHARDS=1
+RTEMP=0.6
+RCAP=600
 ORUN=r11
 OMODEL=s4_hf
 OB=8
@@ -457,6 +442,7 @@ OKB
 fi
 
 if [ "$MODE" = "reeval" ]; then
+  pkill -f "onlinekee[p].sh"; pkill -f "online_loop.p[y]"; sleep 5; pkill -9 -f "online_loop.p[y]" 2>/dev/null
   # Re-measure an earlier checkpoint under the fixed conversational stop rule (EOS terminal), so the
   # table compares like with like: RMODEL is "base" (the step-200 student) or an adapter name on the hub.
   RRUN=${RRUN:-basefix}; RMODEL=${RMODEL:-base}   # re-run for the no-search set
@@ -500,7 +486,7 @@ PYM
   [ -s /root/hfdl/pooler_distill/chat_eval60.jsonl ] || hf download $R --include "pooler_distill/chat_eval60.jsonl" --local-dir /root/hfdl 2>&1 | tail -1
   cat > /root/reevalkeep.sh <<RK
 #!/bin/bash
-RRUN=$RRUN; RHF=$RHF; R=$R; RCKPT=$RCKPT; RTEMP=${RTEMP:-0.9}; RCAP=${RCAP:-600}
+RRUN=$RRUN; RHF=$RHF; R=$R; RCKPT=$RCKPT; RSHARDS=${RSHARDS:-3}; RTEMP=${RTEMP:-0.9}; RCAP=${RCAP:-600}
 RK
   cat >> /root/reevalkeep.sh <<'RKB'
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null)
@@ -509,7 +495,7 @@ run_one() {  # $1 questions file, $2 out file, $3 tag
   cd /root/work && SP_BASE=$RHF SP_RANK=16 SP_NOSYS=1 SP_EPISODIC=1 OMP_NUM_THREADS=1 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python3 /root/work/pool_eval.py     $RCKPT "$1" "$2" --n 999 --rw 768 --maxd 384 --samepage 1 --decode plain --temp $RTEMP --stop eos --replycap $RCAP --tag "[$3]" >> /root/${RRUN}_$3.log 2>&1
   [ -s "$2" ] && [ "$(wc -l < "$2")" -ge "$(wc -l < "$1")" ] || { echo "REEVAL_ABORT $RRUN at $3: $(tail -1 /root/${RRUN}_$3.log | cut -c1-100)"; exit 1; }
 }
-for i in 0 1 2; do run_one /root/work/ev_$i.jsonl /root/work/${RRUN}_out_$i.jsonl ${RRUN}$i; hf upload $R /root/work/${RRUN}_out_$i.jsonl pooler_distill/chatsft/rollouts/${RRUN}_$i.jsonl >/dev/null 2>&1; echo "[$RRUN] shard $i uploaded $(tail -1 /root/${RRUN}_${RRUN}$i.log | cut -c1-110)"; done
+for i in $(seq 0 $((${RSHARDS:-3} - 1))); do run_one /root/work/ev_$i.jsonl /root/work/${RRUN}_out_$i.jsonl ${RRUN}$i; hf upload $R /root/work/${RRUN}_out_$i.jsonl pooler_distill/chatsft/rollouts/${RRUN}_$i.jsonl >/dev/null 2>&1; echo "[$RRUN] shard $i uploaded $(tail -1 /root/${RRUN}_${RRUN}$i.log | cut -c1-110)"; done
 run_one /root/hfdl/pooler_distill/chat_eval60.jsonl /root/work/${RRUN}_chat_out.jsonl ${RRUN}chat
 hf upload $R /root/work/${RRUN}_chat_out.jsonl pooler_distill/chatsft/rollouts/${RRUN}_chat.jsonl >/dev/null 2>&1
 echo "REEVAL_DONE $RRUN $(date -u)"
