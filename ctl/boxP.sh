@@ -1,3 +1,6 @@
+# PEEK (one-shot): print the r7 loop log for 9 minutes, then leave the box alone
+for i in $(seq 1 9); do echo "PEEK $(date -u +%H:%M) $(nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv,noheader)"; grep -E "^\[step|^\[warn|Traceback|Error" /root/online_r7.log | tail -6 | cut -c1-260; pgrep -f "online_loop.p[y]" >/dev/null || echo "PEEK: loop not running"; sleep 60; done
+exit 0
 # box E (24GB, replaces the A4000 whose host had no free GPU left): measure the held-out set through
 # the 4-bit grid the phone actually runs.
 #
