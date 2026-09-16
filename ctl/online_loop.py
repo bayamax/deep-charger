@@ -58,7 +58,7 @@ ap.add_argument("--stop", default="eos", choices=["eos", "answer"]); ap.add_argu
 ap.add_argument("--dolphin-ratio", type=float, default=2.0, help="Dolphin records per accepted search rollout in the same step"); ap.add_argument("--dolphin-min", type=int, default=2, help="Dolphin records in a step with no accepted rollout")
 ap.add_argument("--maxlen", type=int, default=4096)
 ap.add_argument("--replay", default="", help="jsonl of verified search traces {q,text}; each step trains on --replay-per-step of them (the retention data)")
-ap.add_argument("--guard", type=int, default=0, help="1: watch the share of rollouts that write no reply over a sliding window; when it runs away from the opening baseline, reload the last healthy checkpoint, halve the learning rate and carry on (three times, then stop)"); ap.add_argument("--guard-window", type=int, default=80); ap.add_argument("--guard-floor", type=float, default=0.20, help="no trip below this absolute rate"); ap.add_argument("--guard-mult", type=float, default=2.0, help="trip at this multiple of the opening baseline"); ap.add_argument("--guard-cut", type=float, default=3.0, help="trip at this multiple of the opening share of rollouts cut for searching without end"); ap.add_argument("--guard-cut-floor", type=float, default=0.20); ap.add_argument("--guard-ns-floor", type=float, default=6.0, help="no searches trip below this absolute mean"); ap.add_argument("--guard-ns", type=float, default=1.8, help="trip at this multiple of the opening searches per rollout"); ap.add_argument("--guard-rollbacks", type=int, default=3); ap.add_argument("--complete-only", type=int, default=0, help="1: train only on rollouts that actually finished their turn (EOS reached, no repetition death). Not a quality filter: a rollout cut off by the token cap is an unfinished fragment, and training on it teaches the model not to stop -- r7 went from 5%% to 59%% no-reply that way"); ap.add_argument("--reason", default="", help="jsonl of reasoning problems {q, reply}: the loop leaves the search corpus and runs GRPO on these instead, the teacher scoring each sample against the reference"); ap.add_argument("--reason-g", type=int, default=8, help="samples per problem"); ap.add_argument("--reason-stub", type=int, default=0, help="1: score by shape alone, no teacher call (for a smoke run with no credit)"); ap.add_argument("--queue", type=int, default=0, help="1: each rollout batch takes --b different questions; the rows queue up and every step trains on one of them (no selection) plus Dolphin; a new batch runs when the queue is empty"); ap.add_argument("--train-all", type=int, default=0, help="1: train on every rollout of the step, no selection (the gold and the judge only measure)"); ap.add_argument("--replay-per-step", type=int, default=2); ap.add_argument("--rollout-every", type=int, default=1, help="do the measurement rollout only every N steps (accepted ones join the replay set)")
+ap.add_argument("--guard", type=int, default=0, help="1: watch the share of rollouts that write no reply over a sliding window; when it runs away from the opening baseline, reload the last healthy checkpoint, halve the learning rate and carry on (three times, then stop)"); ap.add_argument("--guard-window", type=int, default=80); ap.add_argument("--guard-floor", type=float, default=0.20, help="no trip below this absolute rate"); ap.add_argument("--guard-mult", type=float, default=2.0, help="trip at this multiple of the opening baseline"); ap.add_argument("--guard-cut", type=float, default=3.0, help="trip at this multiple of the opening share of rollouts cut for searching without end"); ap.add_argument("--guard-cut-floor", type=float, default=0.20); ap.add_argument("--guard-ns-floor", type=float, default=6.0, help="no searches trip below this absolute mean"); ap.add_argument("--guard-ns", type=float, default=1.8, help="trip at this multiple of the opening searches per rollout"); ap.add_argument("--guard-rollbacks", type=int, default=3); ap.add_argument("--complete-only", type=int, default=0, help="1: train only on rollouts that actually finished their turn (EOS reached, no repetition death). Not a quality filter: a rollout cut off by the token cap is an unfinished fragment, and training on it teaches the model not to stop -- r7 went from 5%% to 59%% no-reply that way"); ap.add_argument("--reason", default="", help="jsonl of reasoning problems {q, reply}: the loop leaves the search corpus and runs GRPO on these instead, the teacher scoring each sample against the reference"); ap.add_argument("--reason-g", type=int, default=8, help="samples per problem"); ap.add_argument("--judge-api", default="deepseek", choices=["deepseek", "openai"], help="which teacher scores the reasoning samples"); ap.add_argument("--judge-model", default="", help="model name for that teacher; empty picks the default for the api"); ap.add_argument("--reason-stub", type=int, default=0, help="1: score by shape alone, no teacher call (for a smoke run with no credit)"); ap.add_argument("--queue", type=int, default=0, help="1: each rollout batch takes --b different questions; the rows queue up and every step trains on one of them (no selection) plus Dolphin; a new batch runs when the queue is empty"); ap.add_argument("--train-all", type=int, default=0, help="1: train on every rollout of the step, no selection (the gold and the judge only measure)"); ap.add_argument("--replay-per-step", type=int, default=2); ap.add_argument("--rollout-every", type=int, default=1, help="do the measurement rollout only every N steps (accepted ones join the replay set)")
 ap.add_argument("--accum", type=int, default=1, help="steps whose gradients are accumulated before one optimizer update (both the search-side and the Dolphin part)")
 ap.add_argument("--samepage", type=int, default=1, help="1: a search whose top page was already shown in this rollout serves the NEXT chunk of that page (and says so when the page is used up); 0: teacher environment (always the head)")
 A = ap.parse_args()
@@ -739,6 +739,7 @@ print(f"[data] {len(pool)} questions, {len(dol)} dolphin records, {len(rep)} rep
 
 # ---- the cheap judge (key from the environment, never from the repo) ----
 DSK = os.environ.get("DSK_KEY", "").strip()
+OAI = os.environ.get("OAI_KEY", "").strip()
 JUDGE_SYS = """You are a strict data-quality checker for a small assistant that searches Wikipedia and then replies in a conversational way. You get the user question, the reference answer, the assistant's whole private thinking (its searches and the results it read), and its reply. Return ONLY a JSON object:
 {"commits_to_answer": true/false, "matches_reference": true/false, "unsupported_claims": ["..."], "language_english": true/false, "clean": true/false, "natural": 1-5}
 where unsupported_claims lists every fact in the reply that is NOT in the results or the question (dates, numbers, names, titles, roles, characterizations; empty if none), clean means no tool tags, no leftover thinking, no repetition, no cut-off sentence, and natural is 5 when the reply reads like a knowledgeable friend answering the question and 1 when robotic or awkward."""
@@ -767,16 +768,22 @@ def judge_reason(q, ref, text):
     if A.reason_stub:                                     # shape only, for a smoke run with no credit
         ok = 8 <= len(reply.split()) <= 400 and not any(t in reply for t in TAGS)
         return (1.0 if ok else 0.0), {"stub": True}
-    if not DSK: return 0.0, {"error": "no key"}
-    body = {"model": "deepseek-flash", "temperature": 0,
+    oai = A.judge_api == "openai"
+    key = OAI if oai else DSK
+    if not key: return 0.0, {"error": "no key"}
+    model = A.judge_model or ("gpt-5-nano" if oai else "deepseek-flash")
+    body = {"model": model,
             "messages": [{"role": "system", "content": REASON_SYS},
-                         {"role": "user", "content": f"QUESTION:\n{q}\n\nREFERENCE ANSWER:\n{ref[:3000]}\n\nASSISTANT ANSWER:\n{reply[:3000]}"}],
-            "max_tokens": 300}
+                         {"role": "user", "content": f"QUESTION:\n{q[:2000]}\n\nREFERENCE ANSWER:\n{ref[:3000]}\n\nASSISTANT ANSWER:\n{reply[:3000]}"}]}
+    # both teachers think before answering, and a tight cap comes back as an empty message rather than an error
+    if model.startswith("gpt-5"): body["max_completion_tokens"] = 2000
+    else: body["max_tokens"] = 2000; body["temperature"] = 0
+    url = "https://api.openai.com/v1/chat/completions" if oai else "https://api.deepseek.com/chat/completions"
     for _ in range(3):
         try:
             d = json.load(urllib.request.urlopen(urllib.request.Request(
-                "https://api.deepseek.com/chat/completions", data=json.dumps(body).encode(),
-                headers={"Authorization": "Bearer " + DSK, "Content-Type": "application/json"}), timeout=120))
+                url, data=json.dumps(body).encode(),
+                headers={"Authorization": "Bearer " + key, "Content-Type": "application/json"}), timeout=180))
         except Exception:
             time.sleep(3); continue
         if "choices" not in d: return 0.0, {"error": "no choices"}
@@ -830,7 +837,8 @@ if A.reason:
             if r.get("q") and r.get("reply"): reason.append({"q": r["q"], "ref": r["reply"]})
         except Exception: pass
     random.Random(0).shuffle(reason)
-    print(f"[data] {len(reason)} reasoning problems, {A.reason_g} samples each, teacher {'stub' if A.reason_stub else 'flash'}", flush=True)
+    print(f"[data] {len(reason)} reasoning problems, {A.reason_g} samples each, teacher "
+          f"{'stub' if A.reason_stub else (A.judge_model or ('gpt-5-nano' if A.judge_api == 'openai' else 'deepseek-flash'))}", flush=True)
 GOOD = os.path.join(A.outdir, "good.safetensors")
 recent = collections.deque(maxlen=A.guard_window)      # sliding window of outcomes, for the collapse guard
 recent_ns = collections.deque(maxlen=A.guard_window)   # and of the searches each rollout issued
