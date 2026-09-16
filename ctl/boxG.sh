@@ -1,21 +1,22 @@
-# PEEK (one-shot): what the reasoning run is producing and how the teacher scores it
+# PEEK (one-shot): one sample per problem across the run, and every failure with its verdict
 python3 - <<'PYS'
-import json, statistics
+import json
 rows = [json.loads(l) for l in open("/root/online_g2/rollouts.jsonl") if l.strip()]
-mx = max(r["step"] for r in rows)
-print(f"GTEXT {len(rows)} samples through step {mx}")
-for b in range(0, mx, 25):
-    x = [r for r in rows if b < r["step"] <= b + 25]
-    if not x: continue
-    th = sorted(len(r["text"].split("</think>")[0].split()) for r in x)
-    rp = [len(r["text"].split("</think>")[-1].split()) for r in x if "</think>" in r["text"]]
-    print(f"GTEXT {b+1:>3}-{b+25:<3} n={len(x):<3} pass {100*sum(r['reward'] for r in x)/len(x):.0f}% | think med {th[len(th)//2]} p90 {th[int(len(th)*.9)]} | reply med {statistics.median(rp) if rp else 0:.0f} | unfinished {sum(1 for r in x if '</think>' not in r['text'])} | searched {sum(1 for r in x if r['ns'])}"),
-last = [r for r in rows if r["step"] > mx - 3]
-for r in last[:10]:
-    think, _, reply = r["text"].partition("</think>")
-    print(f"GTEXT ===== step {r['step']} reward {r['reward']} {json.dumps(r['why'], ensure_ascii=False)[:120]}")
-    print(f"GTEXT q: {r['q'][:150]}")
-    print(f"GTEXT reply ({len(reply.split())} words): {reply.strip()[:500]}")
+seen = set(); firsts = []
+for r in rows:
+    if r["q"] not in seen: seen.add(r["q"]); firsts.append(r)
+print(f"QTEXT {len(rows)} samples over {len(seen)} problems")
+for r in firsts[::max(1, len(firsts)//10)][:10]:
+    rep = r["text"].split("</think>")[-1].strip()
+    print(f"QTEXT ===== reward {r['reward']} | {r['q'][:170]}")
+    print(f"QTEXT  -> {rep[:420]}")
+fails = [r for r in rows if r["reward"] == 0.0][-8:]
+print("QTEXT ##### the failures")
+for r in fails:
+    rep = r["text"].split("</think>")[-1].strip()
+    print(f"QTEXT ===== {json.dumps(r['why'], ensure_ascii=False)[:130]}")
+    print(f"QTEXT  q: {r['q'][:170]}")
+    print(f"QTEXT  -> {rep[:420] if rep else '(no reply)'}")
 PYS
 exit 0
 # box E (24GB, replaces the A4000 whose host had no free GPU left): measure the held-out set through
