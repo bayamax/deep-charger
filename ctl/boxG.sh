@@ -1,6 +1,15 @@
-# PEEK (one-shot): what arguments the running loop actually carries, and where it is
-echo "PEEKA $(date -u +%H:%M)"; pgrep -af "online_loop.p[y]" | tr ' ' '\n' | grep -E "search-demo|search-wheels|wheels|steps|reason|judge-api" | tr '\n' ' '; echo
-tail -3 /root/online_g3.log | cut -c1-200
+# PEEK (one-shot): how often the wheels fired on each side in the first hundred and fifty steps
+python3 - <<'PYS'
+import re
+rows = []
+for l in open("/root/online_g3/loop.log"):
+    m = re.match(r"\[step (\d+)\] (reason|search) pass", l)
+    if m: rows.append((int(m.group(1)), m.group(2), "wheels" in l))
+for kind in ("reason", "search"):
+    x = [r for r in rows if r[1] == kind and r[0] <= 150]
+    y = [r for r in rows if r[1] == kind and r[0] > 150]
+    print(f"WHEEL {kind}: steps 1-150 {sum(1 for r in x if r[2])}/{len(x)} with wheels | steps 151+ {sum(1 for r in y if r[2])}/{len(y)}")
+PYS
 exit 0
 # box E (24GB, replaces the A4000 whose host had no free GPU left): measure the held-out set through
 # the 4-bit grid the phone actually runs.
