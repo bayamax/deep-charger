@@ -1,3 +1,7 @@
+# PEEK (one-shot): what arguments the running loop actually carries, and where it is
+echo "PEEKA $(date -u +%H:%M)"; pgrep -af "online_loop.p[y]" | tr ' ' '\n' | grep -E "search-demo|search-wheels|wheels|steps|reason|judge-api" | tr '\n' ' '; echo
+tail -3 /root/online_g3.log | cut -c1-200
+exit 0
 # box E (24GB, replaces the A4000 whose host had no free GPU left): measure the held-out set through
 # the 4-bit grid the phone actually runs.
 #
