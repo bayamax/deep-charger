@@ -1,3 +1,20 @@
+# PEEK (one-shot): the run in 25-step blocks, both sides
+python3 - <<'PYS'
+import json, statistics
+rows = [json.loads(l) for l in open("/root/online_g3/rollouts.jsonl") if l.strip()]
+mx = max(r["step"] for r in rows)
+print(f"BLK through step {mx}")
+for kind in ("reason", "search"):
+    print(f"BLK == {kind}")
+    for b in range(0, mx, 25):
+        x = [r for r in rows if b < r["step"] <= b + 25 and r.get("kind") == kind]
+        if not x: continue
+        ns = [r["ns"] for r in x]
+        th = [len(r["text"].split("</think>")[0].split()) for r in x]
+        rp = [len(r["text"].split("</think>")[-1].split()) for r in x if "</think>" in r["text"]]
+        print(f"BLK {b+1:>3}-{b+25:<3} n={len(x):<3} pass {100*sum(r['reward'] for r in x)/len(x):>3.0f}% | srch med {statistics.median(ns):>2.0f} 10+ {sum(1 for v in ns if v>=10):>2} | think med {statistics.median(th):>4.0f} | reply med {statistics.median(rp) if rp else 0:>3.0f} | unfin {sum(1 for r in x if '</think>' not in r['text']):>2}")
+PYS
+exit 0
 # box E (24GB, replaces the A4000 whose host had no free GPU left): measure the held-out set through
 # the 4-bit grid the phone actually runs.
 #
