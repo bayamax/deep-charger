@@ -1,3 +1,21 @@
+# PEEK (one-shot): the reasoning score over the run, in halves and in blocks
+python3 - <<'PYS'
+import json, statistics
+rows = [json.loads(l) for l in open("/root/online_g3/rollouts.jsonl") if l.strip()]
+rea = [r for r in rows if r.get("kind") == "reason"]
+mx = max(r["step"] for r in rea)
+print(f"RSCORE {len(rea)} reasoning samples through step {mx}")
+for b in range(0, mx, 50):
+    x = [r for r in rea if b < r["step"] <= b + 50]
+    if not x: continue
+    nq = len(set(r["q"] for r in x))
+    allz = sum(1 for q in set(r["q"] for r in x) if all(y["reward"] == 0 for y in x if y["q"] == q))
+    allp = sum(1 for q in set(r["q"] for r in x) if all(y["reward"] == 1 for y in x if y["q"] == q))
+    print(f"RSCORE {b+1:>3}-{b+50:<3} n={len(x):<3} over {nq} problems | pass {100*sum(r['reward'] for r in x)/len(x):>3.0f}% | all-eight-fail {allz} | all-eight-pass {allp} | mixed {nq-allz-allp}")
+h = len(rea) // 2
+print(f"RSCORE first half {100*sum(r['reward'] for r in rea[:h])/h:.1f}% | second half {100*sum(r['reward'] for r in rea[h:])/(len(rea)-h):.1f}%")
+PYS
+exit 0
 # box E (24GB, replaces the A4000 whose host had no free GPU left): measure the held-out set through
 # the 4-bit grid the phone actually runs.
 #
