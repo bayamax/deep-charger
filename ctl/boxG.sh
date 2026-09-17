@@ -1,3 +1,27 @@
+# PEEK (one-shot): how each side is moving, block by block
+python3 - <<'PYS'
+import json, collections
+rows = [json.loads(l) for l in open("/root/online_g3/rollouts.jsonl") if l.strip()]
+mx = max(r["step"] for r in rows)
+def tw(t):
+    import re
+    b = t.split("</think>")[0]
+    return len(re.sub(r"<information>.*?</information>", "", b, flags=re.S).split())
+for kind in ("reason", "search"):
+    print(f"WTEXT == {kind}")
+    for b in range(0, mx, 20):
+        x = [r for r in rows if b < r["step"] <= b + 20 and r.get("kind") == kind]
+        if not x: continue
+        th = sorted(tw(r["text"]) for r in x)
+        c = collections.Counter()
+        for r in x:
+            w = r["why"]
+            c[next((k for k in ("unfinished", "no search", "page not found", "wrong", "tags", "error") if w.get(k)), "judged")] += 1
+        print(f"WTEXT {b+1:>3}-{b+20:<3} n={len(x):<3} pass {100*sum(r['reward'] for r in x)/len(x):>3.0f}% | think med {th[len(th)//2]:>4} p90 {th[int(len(th)*.9)]:>4} | " + " ".join(f"{k}:{v}" for k, v in c.most_common()))
+wh = [l for l in open("/root/online_g3/loop.log") if "wheels" in l]
+print(f"WTEXT wheels fired on {len(wh)} steps of {mx}")
+PYS
+exit 0
 # box E (24GB, replaces the A4000 whose host had no free GPU left): measure the held-out set through
 # the 4-bit grid the phone actually runs.
 #
