@@ -1,16 +1,3 @@
-# PEEK (one-shot): how far the held-out measurement has got
-echo "PEEKE $(date -u +%H:%M) eval=$(pgrep -fc 'pool_eval.p[y]') rollouts=$(wc -l < /root/work/g3hot_out_0.jsonl 2>/dev/null || echo 0)"
-tail -4 /root/g3hot_g3hot0.log 2>/dev/null | cut -c1-220
-python3 - <<'PYS'
-import json, os
-f = "/root/work/g3hot_out_0.jsonl"
-if os.path.exists(f):
-    rows = [json.loads(l) for l in open(f) if l.strip()]
-    if rows:
-        n = len(rows)
-        print(f"PEEKE so far {n}: correct {100*sum(r['correct'] and r['grounded'] for r in rows)/n:.0f}% grounded {100*sum(r['grounded'] for r in rows)/n:.0f}% landed {100*sum(r['landed'] for r in rows)/n:.0f}% searches {sum(r['ns'] for r in rows)/n:.1f}")
-PYS
-exit 0
 # box E (24GB, replaces the A4000 whose host had no free GPU left): measure the held-out set through
 # the 4-bit grid the phone actually runs.
 #
@@ -91,9 +78,9 @@ PRUNS="p_t06q4:1:0.6 p_t06bf16:0:0.6"
 PG=64
 PSKIP=
 MODE=reeval
-RRUN=g3hot
-RMODEL=g3
-RKIND=ckpt
+RRUN=s4hot
+RMODEL=s4_hf
+RKIND=dir
 RSHARDS=1
 RTEMP=0.6
 RCAP=600
