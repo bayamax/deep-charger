@@ -78,9 +78,11 @@ PRUNS="p_t06q4:1:0.6 p_t06bf16:0:0.6"
 PG=64
 PSKIP=
 MODE=reeval
-RRUN=s4hot
-RMODEL=s4_hf
-RKIND=dir
+RRUN=g3dolph
+RQSRC=dolphin
+RQN=12
+RMODEL=g3
+RKIND=ckpt
 RSHARDS=1
 RTEMP=0.6
 RCAP=600
@@ -531,7 +533,8 @@ if [ -n "$RQSRC" ]; then
   run_one /root/work/dolphinq.jsonl /root/work/${RRUN}_out_0.jsonl ${RRUN}0
   python3 - <<'PYT'
 import json
-for r in [json.loads(l) for l in open("/root/work/s4dolph_out_0.jsonl") if l.strip()]:
+import glob
+for r in [json.loads(l) for l in open(sorted(glob.glob("/root/work/*dolph_out_0.jsonl"))[-1]) if l.strip()]:
     think, _, reply = r["text"].partition("</think>")
     print(f"DTEXT ===== {r['q'][:220]}")
     print(f"DTEXT searches {r['ns']} | think {len(think.split())} words | reply {len(reply.split())} words")
