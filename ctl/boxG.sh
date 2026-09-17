@@ -1,25 +1,22 @@
-# PEEK (one-shot): how each side is moving, block by block
+# PEEK (one-shot): the decision boundary, which is what the tug of war is actually training
 python3 - <<'PYS'
-import json, collections
+import json
 rows = [json.loads(l) for l in open("/root/online_g3/rollouts.jsonl") if l.strip()]
 mx = max(r["step"] for r in rows)
-def tw(t):
-    import re
-    b = t.split("</think>")[0]
-    return len(re.sub(r"<information>.*?</information>", "", b, flags=re.S).split())
-for kind in ("reason", "search"):
-    print(f"WTEXT == {kind}")
-    for b in range(0, mx, 20):
-        x = [r for r in rows if b < r["step"] <= b + 20 and r.get("kind") == kind]
-        if not x: continue
-        th = sorted(tw(r["text"]) for r in x)
-        c = collections.Counter()
-        for r in x:
-            w = r["why"]
-            c[next((k for k in ("unfinished", "no search", "page not found", "wrong", "tags", "error") if w.get(k)), "judged")] += 1
-        print(f"WTEXT {b+1:>3}-{b+20:<3} n={len(x):<3} pass {100*sum(r['reward'] for r in x)/len(x):>3.0f}% | think med {th[len(th)//2]:>4} p90 {th[int(len(th)*.9)]:>4} | " + " ".join(f"{k}:{v}" for k, v in c.most_common()))
-wh = [l for l in open("/root/online_g3/loop.log") if "wheels" in l]
-print(f"WTEXT wheels fired on {len(wh)} steps of {mx}")
+print("BTEXT block | reasoning: searched anyway | search: did not search | reason pass | search pass")
+for b in range(0, mx, 20):
+    rea = [r for r in rows if b < r["step"] <= b + 20 and r.get("kind") == "reason"]
+    sea = [r for r in rows if b < r["step"] <= b + 20 and r.get("kind") == "search"]
+    if not rea and not sea: continue
+    sr = f"{100*sum(1 for r in rea if r['ns'])/len(rea):.0f}% ({sum(1 for r in rea if r['ns'])}/{len(rea)})" if rea else "-"
+    ns = f"{100*sum(1 for r in sea if not r['ns'])/len(sea):.0f}% ({sum(1 for r in sea if not r['ns'])}/{len(sea)})" if sea else "-"
+    rp = f"{100*sum(r['reward'] for r in rea)/len(rea):.0f}%" if rea else "-"
+    sp = f"{100*sum(r['reward'] for r in sea)/len(sea):.0f}%" if sea else "-"
+    print(f"BTEXT {b+1:>3}-{b+20:<3} | {sr:>12} | {ns:>12} | {rp:>5} | {sp:>5}")
+print(f"BTEXT searches per search-rollout, by block:")
+for b in range(0, mx, 20):
+    sea = [r for r in rows if b < r["step"] <= b + 20 and r.get("kind") == "search"]
+    if sea: print(f"BTEXT {b+1:>3}-{b+20:<3} mean {sum(r['ns'] for r in sea)/len(sea):.1f}")
 PYS
 exit 0
 # box E (24GB, replaces the A4000 whose host had no free GPU left): measure the held-out set through
