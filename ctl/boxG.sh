@@ -1,3 +1,19 @@
+# PEEK (one-shot): are the extra searches new pages, or the same page read further
+python3 - <<'PYS'
+import json, os
+for name in ("s4hot", "g3hot"):
+    f = f"/root/work/{name}_out_0.jsonl"
+    if not os.path.exists(f): print("SPLIT", name, "missing"); continue
+    rows = [json.loads(l) for l in open(f) if l.strip()]
+    n = len(rows)
+    ns = sum(r["ns"] for r in rows) / n
+    uq = sum(len(set(q.strip().lower() for q in r.get("queries", []))) for r in rows) / n
+    served = sum(len(r.get("served", [])) for r in rows) / n
+    pages = sum(len(set(s[:120] for s in r.get("served", []))) for r in rows) / n
+    toks = sum(sum(len(s.split()) for s in r.get("served", [])) for r in rows) / n
+    print(f"SPLIT {name}: n={n} | searches {ns:.2f} | distinct queries {uq:.2f} | chunks served {served:.2f} | distinct pages {pages:.2f} | words read {toks:.0f}")
+PYS
+exit 0
 # box E (24GB, replaces the A4000 whose host had no free GPU left): measure the held-out set through
 # the 4-bit grid the phone actually runs.
 #
