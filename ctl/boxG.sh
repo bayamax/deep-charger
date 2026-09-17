@@ -461,22 +461,26 @@ PYF
   # once: in reasoning mode the empty search loop printed the end marker at launch, and the keeper
   # read it as the run being over and stopped uploading. Strip it so the keeper runs to the real end.
   if [ ! -f /root/.fixed_marker_$ORUN ]; then sed -i '/^ONLINE_LOOP_DONE$/d' /root/online_$ORUN.log 2>/dev/null; touch /root/.fixed_marker_$ORUN; echo "ONLINE_MARKER_FIX $ORUN $(date -u)"; fi
+  # only what this launch wrote counts as its end: a previous run's marker sits in the same log and
+  # twice now has made the keeper quit at the first upload, leaving the run saving nothing
+  MARK=$(( $(pgrep -f "online_loop.p[y]" >/dev/null && cat /root/.logmark_$ORUN 2>/dev/null || wc -c < /root/online_$ORUN.log 2>/dev/null || echo 0) + 1 ))
+  [ -f /root/.logmark_$ORUN ] || echo $((MARK - 1)) > /root/.logmark_$ORUN
   cat > /root/onlinekeep.sh <<OK
 #!/bin/bash
-ORUN=$ORUN; OUT=$OUT; R=$R
+ORUN=$ORUN; OUT=$OUT; R=$R; MARK=$MARK
 OK
   cat >> /root/onlinekeep.sh <<'OKB'
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null)
 last=0
 while :; do
   now=$(date +%s)
-  if [ $((now - last)) -ge 1800 ] || grep -q "ONLINE_LOOP_DONE" /root/online_$ORUN.log 2>/dev/null; then
+  if [ $((now - last)) -ge 1800 ] || tail -c +$MARK /root/online_$ORUN.log 2>/dev/null | grep -q "ONLINE_LOOP_DONE"; then
     [ -s $OUT/latest.safetensors ] && hf upload $R $OUT/latest.safetensors pooler_distill/chatsft/online/$ORUN/latest.safetensors >/dev/null 2>&1
     for f in loop.log accepted.jsonl rollouts.jsonl state.json; do [ -s $OUT/$f ] && hf upload $R $OUT/$f pooler_distill/chatsft/online/$ORUN/$f >/dev/null 2>&1; done
     hf upload $R /root/online_$ORUN.log pooler_distill/chatsft/online/$ORUN/run.log >/dev/null 2>&1
     last=$now; echo "[online $ORUN $(date -u +%H:%M)] uploaded | $(tail -1 $OUT/loop.log 2>/dev/null | cut -c1-200)"
     grep -hE "^ONLINE_ROLLBACK|^ONLINE_COLLAPSE|^\[guard\]" /root/online_$ORUN.log 2>/dev/null | tail -3
-    grep -q "ONLINE_LOOP_DONE" /root/online_$ORUN.log 2>/dev/null && { echo "ONLINE_DONE $ORUN $(date -u)"; break; }
+    tail -c +$MARK /root/online_$ORUN.log 2>/dev/null | grep -q "ONLINE_LOOP_DONE" && { echo "ONLINE_DONE $ORUN $(date -u)"; break; }
     pgrep -f "online_loop.p[y]" >/dev/null || { echo "ONLINE_DIED $ORUN: $(grep -E 'Error|error|Traceback' /root/online_$ORUN.log | tail -2 | cut -c1-160)"; break; }
   fi
   sleep 60
