@@ -1,14 +1,17 @@
-# PEEK (one-shot): how often the wheels fired on each side in the first hundred and fifty steps
+# PEEK (one-shot): the live step, and the distribution since the wheels came off the search side
 python3 - <<'PYS'
-import re
-rows = []
-for l in open("/root/online_g3/loop.log"):
-    m = re.match(r"\[step (\d+)\] (reason|search) pass", l)
-    if m: rows.append((int(m.group(1)), m.group(2), "wheels" in l))
-for kind in ("reason", "search"):
-    x = [r for r in rows if r[1] == kind and r[0] <= 150]
-    y = [r for r in rows if r[1] == kind and r[0] > 150]
-    print(f"WHEEL {kind}: steps 1-150 {sum(1 for r in x if r[2])}/{len(x)} with wheels | steps 151+ {sum(1 for r in y if r[2])}/{len(y)}")
+import json, statistics
+rows = [json.loads(l) for l in open("/root/online_g3/rollouts.jsonl") if l.strip()]
+mx = max(r["step"] for r in rows)
+print(f"LIVE through step {mx}")
+for lo, hi, tag in ((1, 150, "steps 1-150 (wheels on both sides)"), (151, mx, "steps 151+ (search wheels off)")):
+    for kind in ("reason", "search"):
+        x = [r for r in rows if lo <= r["step"] <= hi and r.get("kind") == kind]
+        if not x: continue
+        ns = [r["ns"] for r in x]
+        uq = [len(set(q.strip().lower() for q in r.get("queries", []))) for r in x] if kind == "search" else []
+        th = [len(r["text"].split("</think>")[0].split()) for r in x]
+        print(f"LIVE {tag} {kind}: n={len(x)} pass {100*sum(r['reward'] for r in x)/len(x):.0f}% | searches med {statistics.median(ns):.0f} max {max(ns)} | 10+ {sum(1 for v in ns if v >= 10)} | think med {statistics.median(th):.0f} max {max(th)} | unfinished {sum(1 for r in x if '</think>' not in r['text'])}")
 PYS
 exit 0
 # box E (24GB, replaces the A4000 whose host had no free GPU left): measure the held-out set through
