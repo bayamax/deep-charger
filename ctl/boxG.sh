@@ -1,19 +1,3 @@
-# PEEK (one-shot): the live step, and the distribution since the wheels came off the search side
-python3 - <<'PYS'
-import json, statistics
-rows = [json.loads(l) for l in open("/root/online_g3/rollouts.jsonl") if l.strip()]
-mx = max(r["step"] for r in rows)
-print(f"LIVE through step {mx}")
-for lo, hi, tag in ((1, 150, "steps 1-150 (wheels on both sides)"), (151, mx, "steps 151+ (search wheels off)")):
-    for kind in ("reason", "search"):
-        x = [r for r in rows if lo <= r["step"] <= hi and r.get("kind") == kind]
-        if not x: continue
-        ns = [r["ns"] for r in x]
-        uq = [len(set(q.strip().lower() for q in r.get("queries", []))) for r in x] if kind == "search" else []
-        th = [len(r["text"].split("</think>")[0].split()) for r in x]
-        print(f"LIVE {tag} {kind}: n={len(x)} pass {100*sum(r['reward'] for r in x)/len(x):.0f}% | searches med {statistics.median(ns):.0f} max {max(ns)} | 10+ {sum(1 for v in ns if v >= 10)} | think med {statistics.median(th):.0f} max {max(th)} | unfinished {sum(1 for r in x if '</think>' not in r['text'])}")
-PYS
-exit 0
 # box E (24GB, replaces the A4000 whose host had no free GPU left): measure the held-out set through
 # the 4-bit grid the phone actually runs.
 #
@@ -150,7 +134,24 @@ echo "fetched: pool_eval $(wc -l < /root/work/pool_eval.py) lines, q4 $(wc -l < 
 # before the modes - a probe that forgets to reinstall it would otherwise report a stale table.
 cat > /usr/local/bin/t <<'TTD'
 #!/bin/bash
-echo "$(date -u +%H:%M)Z dwq $(pgrep -fc 'dwq.p[y]')本  eval $(pgrep -fc 'pool_eval.p[y]')本  $(nvidia-smi --query-gpu=memory.used --format=csv,noheader)"
+echo "$(date -u +%H:%M)Z loop $(pgrep -fc 'online_loop.p[y]')  eval $(pgrep -fc 'pool_eval.p[y]')  $(nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv,noheader)  $(df -h /root | tail -1 | awk '{print $4" free"}')"
+# the run itself: the last steps, then the distribution that the pass rates hide
+for f in $(ls -t /root/online_*.log 2>/dev/null | head -1); do
+  grep -E "^\[step|^ONLINE_ROLLBACK|^ONLINE_COLLAPSE" "$f" | tail -5 | cut -c1-200
+done
+for d in $(ls -td /root/online_*/ 2>/dev/null | head -1); do
+python3 - "$d" <<'PYT' 2>/dev/null
+import json, statistics, sys
+rows = [json.loads(l) for l in open(sys.argv[1] + "/rollouts.jsonl") if l.strip()]
+mx = max(r["step"] for r in rows)
+for kind in ("reason", "search"):
+    x = [r for r in rows if r.get("kind") == kind and r["step"] > mx - 20]
+    if not x: continue
+    ns = [r["ns"] for r in x]
+    th = [len(r["text"].split("</think>")[0].split()) for r in x]
+    print(f"  last 20 steps {kind}: pass {100*sum(r['reward'] for r in x)/len(x):.0f}% | searches med {statistics.median(ns):.0f} max {max(ns)} | think med {statistics.median(th):.0f} | unfinished {sum(1 for r in x if '</think>' not in r['text'])}/{len(x)}")
+PYT
+done
 # a shard that is running but has written nothing is indistinguishable from a shard that is stuck,
 # unless someone looks inside it
 for f in $(ls -t /root/*_[0-9].log 2>/dev/null | head -3); do
