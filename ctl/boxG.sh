@@ -1,19 +1,3 @@
-# PEEK (one-shot): the distribution, not the mean
-python3 - <<'PYS'
-import json, os, statistics
-def pct(v, q): 
-    v = sorted(v); return v[min(len(v)-1, int(len(v)*q))]
-for name in ("s4hot", "g3hot"):
-    f = f"/root/work/{name}_out_0.jsonl"
-    if not os.path.exists(f): continue
-    rows = [json.loads(l) for l in open(f) if l.strip()]
-    ns = [r["ns"] for r in rows]
-    uq = [len(set(q.strip().lower() for q in r.get("queries", []))) for r in rows]
-    print(f"DIST {name}: searches med {statistics.median(ns):.0f} p75 {pct(ns,.75)} p90 {pct(ns,.9)} max {max(ns)} | distinct queries med {statistics.median(uq):.0f} p75 {pct(uq,.75)} p90 {pct(uq,.9)} max {max(uq)}")
-    over = [r for r in rows if r["ns"] >= 10]
-    print(f"DIST {name}: {len(over)} of {len(rows)} rollouts issued 10+ searches; their distinct queries: med {statistics.median([len(set(q.strip().lower() for q in r.get('queries', []))) for r in over]) if over else 0:.0f}")
-PYS
-exit 0
 # box E (24GB, replaces the A4000 whose host had no free GPU left): measure the held-out set through
 # the 4-bit grid the phone actually runs.
 #
@@ -93,7 +77,7 @@ JCLIP=0
 PRUNS="p_t06q4:1:0.6 p_t06bf16:0:0.6"
 PG=64
 PSKIP=
-MODE=reeval
+MODE=online
 RRUN=g3dolph
 RQSRC=dolphin
 RQN=12
@@ -136,7 +120,7 @@ OREPLAYN=0
 OROLLEVERY=1
 OQFILE=pooler_distill/measureq.jsonl
 ORESUME=0
-OSTEPS=150
+OSTEPS=400
 OTEMP=0.6
 SHARDS=3
 RAW="https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl"
@@ -416,6 +400,12 @@ PYF
     REPLAYF=/root/work/replay_clean.jsonl
   fi
   OUT=/root/online_$ORUN; mkdir -p $OUT
+  if [ ! -f /root/.frozen_${ORUN}_150 ] && [ -s $OUT/latest.safetensors ]; then
+    for f in latest.safetensors state.json loop.log rollouts.jsonl; do
+      [ -s $OUT/$f ] && hf upload $R $OUT/$f pooler_distill/chatsft/online/${ORUN}_step150/$f >/dev/null 2>&1
+    done
+    touch /root/.frozen_${ORUN}_150; echo "ONLINE_FROZEN ${ORUN}_step150 $(date -u)"
+  fi
   # every checkpoint is ~3.5 GB and every run keeps two (latest and the guard's healthy copy): six finished
   # runs filled the disk and killed r10 at step 5 with "No space left on device" while it wrote one.
   for d in /root/online_*/; do [ "$d" = "$OUT/" ] || rm -f $d/latest.safetensors $d/good.safetensors $d/*.tmp; done
