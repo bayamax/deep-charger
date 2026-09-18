@@ -1,9 +1,24 @@
-# PEEK (one-shot): which keys the box will accept, and whether sshd is up
-echo "PEEKSSH $(date -u +%H:%M) sshd=$(pgrep -c sshd) port22=$(ss -ltn 2>/dev/null | grep -c ':22 ')"
-for f in /root/.ssh/authorized_keys /etc/ssh/authorized_keys; do
-  [ -s "$f" ] && ssh-keygen -lf "$f" 2>/dev/null | sed "s|^|PEEKSSH $f |"
-done
-ls -la /usr/local/bin/t /usr/local/bin/s 2>&1 | sed 's/^/PEEKSSH /'
+# PEEK (one-shot): how far the adapter has moved at this learning rate
+python3 - <<'PYS'
+import torch, re
+from safetensors import safe_open
+f = safe_open("/root/online_g5/latest.safetensors", framework="pt")
+keys = list(f.keys()); pairs = {}
+for k in keys:
+    m = re.match(r"(.*)\.lora_([AB])\.(?:default\.)?weight$", k)
+    if m: pairs.setdefault(m.group(1), {})[m.group(2)] = k
+tot_d = tot_w = 0.0
+for base, ab in pairs.items():
+    if "A" not in ab or "B" not in ab: continue
+    A = f.get_tensor(ab["A"]).to(torch.float32); B = f.get_tensor(ab["B"]).to(torch.float32)
+    wk = base + ".base_layer.weight"
+    if wk not in keys: continue
+    W = f.get_tensor(wk).to(torch.float32)
+    d = (B @ A).norm().item() * (32.0 / A.shape[0]); w = W.norm().item()
+    tot_d += d * d; tot_w += w * w
+    del A, B, W
+print(f"LORA5 {len(pairs)} modules | ||adapter|| / ||weights|| = {(tot_d ** .5) / (tot_w ** .5):.5f}   (g3 was 0.00031 after 280 steps at 1e-5)")
+PYS
 exit 0
 # box E (24GB, replaces the A4000 whose host had no free GPU left): measure the held-out set through
 # the 4-bit grid the phone actually runs.
