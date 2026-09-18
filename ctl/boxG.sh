@@ -1,21 +1,3 @@
-# PEEK (one-shot): what actually consumes the minutes in a step
-python3 - <<'PYS'
-import json, re
-mins = {}
-for l in open("/root/online_g5/loop.log"):
-    m = re.match(r"\[step (\d+)\].*\| (\d+) min", l)
-    if m: mins[int(m.group(1))] = int(m.group(2))
-rows = [json.loads(l) for l in open("/root/online_g5/rollouts.jsonl") if l.strip()]
-by = {}
-for r in rows: by.setdefault(r["step"], []).append(r)
-prev = 0
-print("TIME step kind  min  rollouts  max_searches  max_words  unfinished")
-for st in sorted(by):
-    x = by[st]; d = mins.get(st, prev) - prev; prev = mins.get(st, prev)
-    w = max(len(r["text"].split()) for r in x)
-    print(f"TIME {st:>4} {x[0].get('kind','?'):<7} {d:>4} {len(x):>4}  {max(r['ns'] for r in x):>5}  {w:>8}  {sum(1 for r in x if '</think>' not in r['text']):>4}")
-PYS
-exit 0
 # box E (24GB, replaces the A4000 whose host had no free GPU left): measure the held-out set through
 # the 4-bit grid the phone actually runs.
 #
@@ -133,7 +115,7 @@ OSEARCHWHEELS=0
 OREASONSTUB=0
 OJUDGEAPI=openai
 OJUDGEMODEL=gpt-5-nano
-OMAXSRCH=0
+OMAXSRCH=7
 OJUDGE=0
 OREPLAYN=0
 OROLLEVERY=1
@@ -469,6 +451,9 @@ PYF
   # what it collided with was the budget, so the budget moves rather than the thinking being penalised
   # one row that keeps reading holds the whole batch: the wall-clock ceiling comes down so a step
   # costs about twenty-five minutes at worst, which still leaves a long rollout room to finish
+  # past the fifth search the environment returns a notice and no content, so a rollout that issues
+  # 181 of them is reading nothing: it is cut at seven, two past the last one that can serve a page
+  if [ ! -f /root/.restart_${ORUN}_srch7 ]; then pkill -f "online_loop.p[y]"; sleep 8; pkill -9 -f "online_loop.p[y]" 2>/dev/null; touch /root/.restart_${ORUN}_srch7; echo "ONLINE_RESTART $ORUN maxsrch 7 $(date -u)"; fi
   if [ ! -f /root/.restart_${ORUN}_budget ]; then pkill -f "online_loop.p[y]"; sleep 8; pkill -9 -f "online_loop.p[y]" 2>/dev/null; touch /root/.restart_${ORUN}_budget; echo "ONLINE_RESTART $ORUN budget 1500 $(date -u)"; fi
   if [ ! -f /root/.restart_${ORUN}_gen7k ]; then pkill -f "online_loop.p[y]"; sleep 8; pkill -9 -f "online_loop.p[y]" 2>/dev/null; touch /root/.restart_${ORUN}_gen7k; echo "ONLINE_RESTART $ORUN gen 7000 $(date -u)"; fi
   if [ ! -f /root/.restart_${ORUN}_nojudge ]; then pkill -f "online_loop.p[y]"; sleep 8; pkill -9 -f "online_loop.p[y]" 2>/dev/null; touch /root/.restart_${ORUN}_nojudge; echo "ONLINE_RESTART $ORUN judge off $(date -u)"; fi
