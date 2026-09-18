@@ -1,6 +1,3 @@
-# PEEK (one-shot): the corrected table, thinking apart from the pages, with reply lengths
-/usr/local/bin/s 20 2>&1 | sed 's/^/NOW /'
-exit 0
 # box E (24GB, replaces the A4000 whose host had no free GPU left): measure the held-out set through
 # the 4-bit grid the phone actually runs.
 #
