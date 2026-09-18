@@ -133,6 +133,36 @@ echo "fetched: pool_eval $(wc -l < /root/work/pool_eval.py) lines, q4 $(wc -l < 
 
 # The status command is the same whatever mode this file is in, so it is installed once,
 # before the modes - a probe that forgets to reinstall it would otherwise report a stale table.
+cat > /usr/local/bin/s <<'SSD'
+#!/bin/bash
+# the score over the run: mean reward per block, both sides, beside what produced it
+d=$(ls -td /root/online_*/ 2>/dev/null | head -1)
+python3 - "$d" "${1:-20}" <<'PYS'
+import json, statistics, sys
+d, W = sys.argv[1], int(sys.argv[2])
+rows = [json.loads(l) for l in open(d + "/rollouts.jsonl") if l.strip()]
+mx = max(r["step"] for r in rows)
+print(f"{d.rstrip('/').split('/')[-1]}  through step {mx}   ({W}-step blocks)")
+print("  steps    | reason  mean think unfin | search  mean srch think unfin")
+for b in range(0, mx, W):
+    rea = [r for r in rows if b < r["step"] <= b + W and r.get("kind") == "reason"]
+    sea = [r for r in rows if b < r["step"] <= b + W and r.get("kind") == "search"]
+    if not rea and not sea: continue
+    def col(x, s=False):
+        if not x: return "    -     -    -    -    -" if s else "    -     -    -    -"
+        th = statistics.median(len(r["text"].split("</think>")[0].split()) for r in x)
+        un = 100 * sum(1 for r in x if "</think>" not in r["text"]) / len(x)
+        p = 100 * sum(1 for r in x if r["reward"] >= 1.0) / len(x)
+        m = sum(r["reward"] for r in x) / len(x)
+        ns = f" {statistics.median([r['ns'] for r in x]):>3.0f}" if s else ""
+        return f"{p:>5.0f}% {m:>+6.2f}{ns} {th:>5.0f} {un:>4.0f}%"
+    print(f"  {b+1:>4}-{b+W:<4} | {col(rea)} | {col(sea, True)}")
+for k in ("reason", "search"):
+    v = [r["reward"] for r in rows if r.get("kind") == k]
+    if v: print(f"  {k}: {len(v)} samples, mean {sum(v)/len(v):+.2f}, pass {100*sum(1 for x in v if x>=1)/len(v):.0f}%")
+PYS
+SSD
+chmod +x /usr/local/bin/s
 cat > /usr/local/bin/t <<'TTD'
 #!/bin/bash
 echo "$(date -u +%H:%M)Z loop $(pgrep -fc 'online_loop.p[y]')  eval $(pgrep -fc 'pool_eval.p[y]')  $(nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv,noheader)  $(df -h /root | tail -1 | awk '{print $4" free"}')"
