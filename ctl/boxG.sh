@@ -1,21 +1,30 @@
-# PEEK (one-shot): the mean reward as a moving average, both sides
+# PEEK (one-shot): how far the weights have actually moved from the fine-tune
 python3 - <<'PYS'
-import json
-rows = [json.loads(l) for l in open("/root/online_g3/rollouts.jsonl") if l.strip()]
-mx = max(r["step"] for r in rows)
-W = 30
-print(f"AVG mean reward, {W}-step moving window, through step {mx}")
-for kind in ("reason", "search"):
-    x = [r for r in rows if r.get("kind") == kind]
-    pts = []
-    for c in range(W, mx + 1, 10):
-        w = [r["reward"] for r in x if c - W < r["step"] <= c]
-        if len(w) >= 20: pts.append((c, sum(w) / len(w)))
-    print(f"AVG {kind}: " + " ".join(f"{c}:{100*v:.0f}" for c, v in pts))
-for kind in ("reason", "search"):
-    x = [r["reward"] for r in rows if r.get("kind") == kind]
-    q = len(x) // 4
-    print(f"AVG {kind} quarters: " + " ".join(f"{100*sum(x[i*q:(i+1)*q])/q:.1f}%" for i in range(4)))
+import torch, glob
+from safetensors import safe_open
+A = "/root/hfdl/pooler_distill/chatsft/s4_hf/model.safetensors"
+B = "/root/online_g3/latest.safetensors"
+try:
+    fa = safe_open(A, framework="pt"); fb = safe_open(B, framework="pt")
+except Exception as e:
+    print("DELTA cannot open:", str(e)[:150]); raise SystemExit
+ka, kb = set(fa.keys()), set(fb.keys())
+common = sorted(ka & kb)
+print(f"DELTA {len(common)} tensors in common ({len(ka)} vs {len(kb)})")
+tot_d = tot_w = 0.0
+per = []
+for k in common:
+    if not k.endswith(".weight"): continue
+    a = fa.get_tensor(k).to(torch.float32); b = fb.get_tensor(k).to(torch.float32)
+    if a.shape != b.shape: continue
+    d = (b - a).norm().item(); w = a.norm().item()
+    tot_d += d * d; tot_w += w * w
+    if w > 0: per.append((d / w, k))
+    del a, b
+print(f"DELTA overall ||change|| / ||weights|| = {(tot_d ** .5) / (tot_w ** .5):.5f}")
+per.sort(reverse=True)
+for r, k in per[:6]: print(f"DELTA  most moved {r:.5f}  {k}")
+for r, k in per[-3:]: print(f"DELTA least moved {r:.5f}  {k}")
 PYS
 exit 0
 # box E (24GB, replaces the A4000 whose host had no free GPU left): measure the held-out set through
