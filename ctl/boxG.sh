@@ -103,7 +103,7 @@ OTRAINALL=1
 OQUEUE=1
 OCOMPLETE=1
 OGEN=7000
-OBUDGET=3600
+OBUDGET=1500
 OGUARD=0
 OREASON=dolphin_v2.jsonl
 OREASONG=12
@@ -449,6 +449,9 @@ PYF
   # once: the judge decides nothing now that every finished rollout is trained on, so stop calling it
   # thinking has grown to about 850 tokens on the search side, which is what chain of thought is for;
   # what it collided with was the budget, so the budget moves rather than the thinking being penalised
+  # one row that keeps reading holds the whole batch: the wall-clock ceiling comes down so a step
+  # costs about twenty-five minutes at worst, which still leaves a long rollout room to finish
+  if [ ! -f /root/.restart_${ORUN}_budget ]; then pkill -f "online_loop.p[y]"; sleep 8; pkill -9 -f "online_loop.p[y]" 2>/dev/null; touch /root/.restart_${ORUN}_budget; echo "ONLINE_RESTART $ORUN budget 1500 $(date -u)"; fi
   if [ ! -f /root/.restart_${ORUN}_gen7k ]; then pkill -f "online_loop.p[y]"; sleep 8; pkill -9 -f "online_loop.p[y]" 2>/dev/null; touch /root/.restart_${ORUN}_gen7k; echo "ONLINE_RESTART $ORUN gen 7000 $(date -u)"; fi
   if [ ! -f /root/.restart_${ORUN}_nojudge ]; then pkill -f "online_loop.p[y]"; sleep 8; pkill -9 -f "online_loop.p[y]" 2>/dev/null; touch /root/.restart_${ORUN}_nojudge; echo "ONLINE_RESTART $ORUN judge off $(date -u)"; fi
   if [ ! -f /root/.restart_${ORUN}_cut ]; then pkill -f "online_loop.p[y]"; sleep 8; pkill -9 -f "online_loop.p[y]" 2>/dev/null; touch /root/.restart_${ORUN}_cut; echo "ONLINE_RESTART $ORUN guard cut share $(date -u)"; fi
