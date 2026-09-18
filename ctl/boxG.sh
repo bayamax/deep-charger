@@ -1,30 +1,32 @@
-# PEEK (one-shot): how far the weights have actually moved from the fine-tune
+# PEEK (one-shot): the size of the adapter's own contribution, measured against the weights it rides on
 python3 - <<'PYS'
-import torch, glob
+import torch, re
 from safetensors import safe_open
-A = "/root/hfdl/pooler_distill/chatsft/s4_hf/model.safetensors"
-B = "/root/online_g3/latest.safetensors"
-try:
-    fa = safe_open(A, framework="pt"); fb = safe_open(B, framework="pt")
-except Exception as e:
-    print("DELTA cannot open:", str(e)[:150]); raise SystemExit
-ka, kb = set(fa.keys()), set(fb.keys())
-common = sorted(ka & kb)
-print(f"DELTA {len(common)} tensors in common ({len(ka)} vs {len(kb)})")
-tot_d = tot_w = 0.0
-per = []
-for k in common:
-    if not k.endswith(".weight"): continue
-    a = fa.get_tensor(k).to(torch.float32); b = fb.get_tensor(k).to(torch.float32)
-    if a.shape != b.shape: continue
-    d = (b - a).norm().item(); w = a.norm().item()
+f = safe_open("/root/online_g3/latest.safetensors", framework="pt")
+keys = list(f.keys())
+pairs = {}
+for k in keys:
+    m = re.match(r"(.*)\.lora_([AB])\.(?:default\.)?weight$", k)
+    if m: pairs.setdefault(m.group(1), {})[m.group(2)] = k
+print(f"LORA {len(pairs)} adapted modules of {len(keys)} tensors")
+tot_d = tot_w = 0.0; per = []
+for base, ab in sorted(pairs.items()):
+    if "A" not in ab or "B" not in ab: continue
+    A = f.get_tensor(ab["A"]).to(torch.float32); B = f.get_tensor(ab["B"]).to(torch.float32)
+    r = A.shape[0]
+    scale = 32.0 / r                      # lora_alpha 32 over rank, the peft default used here
+    d = (B @ A).norm().item() * scale
+    wk = base + ".base_layer.weight"
+    W = f.get_tensor(wk).to(torch.float32) if wk in keys else None
+    if W is None: continue
+    w = W.norm().item()
     tot_d += d * d; tot_w += w * w
-    if w > 0: per.append((d / w, k))
-    del a, b
-print(f"DELTA overall ||change|| / ||weights|| = {(tot_d ** .5) / (tot_w ** .5):.5f}")
+    per.append((d / w, base.split("base_model.model.model.")[-1]))
+    del A, B, W
+print(f"LORA overall ||adapter|| / ||weights|| = {(tot_d ** .5) / (tot_w ** .5):.5f}")
 per.sort(reverse=True)
-for r, k in per[:6]: print(f"DELTA  most moved {r:.5f}  {k}")
-for r, k in per[-3:]: print(f"DELTA least moved {r:.5f}  {k}")
+for x, k in per[:5]: print(f"LORA  most {x:.5f}  {k}")
+for x, k in per[-3:]: print(f"LORA least {x:.5f}  {k}")
 PYS
 exit 0
 # box E (24GB, replaces the A4000 whose host had no free GPU left): measure the held-out set through
