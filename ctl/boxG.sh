@@ -1,3 +1,21 @@
+# PEEK (one-shot): what actually consumes the minutes in a step
+python3 - <<'PYS'
+import json, re
+mins = {}
+for l in open("/root/online_g5/loop.log"):
+    m = re.match(r"\[step (\d+)\].*\| (\d+) min", l)
+    if m: mins[int(m.group(1))] = int(m.group(2))
+rows = [json.loads(l) for l in open("/root/online_g5/rollouts.jsonl") if l.strip()]
+by = {}
+for r in rows: by.setdefault(r["step"], []).append(r)
+prev = 0
+print("TIME step kind  min  rollouts  max_searches  max_words  unfinished")
+for st in sorted(by):
+    x = by[st]; d = mins.get(st, prev) - prev; prev = mins.get(st, prev)
+    w = max(len(r["text"].split()) for r in x)
+    print(f"TIME {st:>4} {x[0].get('kind','?'):<7} {d:>4} {len(x):>4}  {max(r['ns'] for r in x):>5}  {w:>8}  {sum(1 for r in x if '</think>' not in r['text']):>4}")
+PYS
+exit 0
 # box E (24GB, replaces the A4000 whose host had no free GPU left): measure the held-out set through
 # the 4-bit grid the phone actually runs.
 #
