@@ -1,15 +1,21 @@
-# PEEK (one-shot): which problems the model cannot do at all, and where it now stands
+# PEEK (one-shot): the whole run in 50-step blocks, both sides, since step 1
 python3 - <<'PYS'
 import json, statistics
 rows = [json.loads(l) for l in open("/root/online_g3/rollouts.jsonl") if l.strip()]
-rea = [r for r in rows if r.get("kind") == "reason"]
 mx = max(r["step"] for r in rows)
-by = {}
-for r in rea: by.setdefault(r["q"], []).append(r["reward"])
-hard = [(q, v) for q, v in by.items() if sum(v) == 0 and len(v) >= 8]
-print(f"HARD {len(hard)} problems of {len(by)} where all eight samples failed, through step {mx}")
-for q, v in hard[:14]:
-    print(f"HARD | {q[:190].replace(chr(10), ' ')}")
+print(f"TREND through step {mx}  (gen 4000 to step ~200, then 7000)")
+print("TREND  steps   | reason pass  think  unfin | search pass  think  srch  unfin")
+for b in range(0, mx, 50):
+    rea = [r for r in rows if b < r["step"] <= b + 50 and r.get("kind") == "reason"]
+    sea = [r for r in rows if b < r["step"] <= b + 50 and r.get("kind") == "search"]
+    if not rea and not sea: continue
+    def f(x, k):
+        if not x: return "   -      -     - "
+        th = statistics.median(len(r["text"].split("</think>")[0].split()) for r in x)
+        un = sum(1 for r in x if "</think>" not in r["text"])
+        extra = f" {statistics.median([r['ns'] for r in x]):>2.0f}" if k == "s" else ""
+        return f"{100*sum(r['reward'] for r in x)/len(x):>4.0f}%  {th:>5.0f}{extra}  {100*un/len(x):>3.0f}%"
+    print(f"TREND {b+1:>4}-{b+50:<4} | {f(rea,'r')} | {f(sea,'s')}")
 PYS
 exit 0
 # box E (24GB, replaces the A4000 whose host had no free GPU left): measure the held-out set through
