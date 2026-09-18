@@ -1,23 +1,24 @@
-# PEEK (one-shot): how far the adapter has moved at this learning rate
+# PEEK (one-shot): how much the fine-tune that made s4 moved the weights, for scale
 python3 - <<'PYS'
-import torch, re
+import torch, glob, os
 from safetensors import safe_open
-f = safe_open("/root/online_g5/latest.safetensors", framework="pt")
-keys = list(f.keys()); pairs = {}
-for k in keys:
-    m = re.match(r"(.*)\.lora_([AB])\.(?:default\.)?weight$", k)
-    if m: pairs.setdefault(m.group(1), {})[m.group(2)] = k
-tot_d = tot_w = 0.0
-for base, ab in pairs.items():
-    if "A" not in ab or "B" not in ab: continue
-    A = f.get_tensor(ab["A"]).to(torch.float32); B = f.get_tensor(ab["B"]).to(torch.float32)
-    wk = base + ".base_layer.weight"
-    if wk not in keys: continue
-    W = f.get_tensor(wk).to(torch.float32)
-    d = (B @ A).norm().item() * (32.0 / A.shape[0]); w = W.norm().item()
-    tot_d += d * d; tot_w += w * w
-    del A, B, W
-print(f"LORA5 {len(pairs)} modules | ||adapter|| / ||weights|| = {(tot_d ** .5) / (tot_w ** .5):.5f}   (g3 was 0.00031 after 280 steps at 1e-5)")
+base = "/root/eval_hf200"
+tgt = "/root/hfdl/pooler_distill/chatsft/s4_hf"
+fb = [p for p in glob.glob(base + "/*.safetensors")]
+ft = [p for p in glob.glob(tgt + "/*.safetensors")]
+if not fb or not ft:
+    print("SCALE missing:", bool(fb), bool(ft)); raise SystemExit
+A = safe_open(fb[0], framework="pt"); B = safe_open(ft[0], framework="pt")
+ka, kb = set(A.keys()), set(B.keys())
+tot_d = tot_w = 0.0; n = 0
+for k in sorted(ka & kb):
+    if not k.endswith(".weight"): continue
+    a = A.get_tensor(k).to(torch.float32); b = B.get_tensor(k).to(torch.float32)
+    if a.shape != b.shape: continue
+    tot_d += (b - a).norm().item() ** 2; tot_w += a.norm().item() ** 2; n += 1
+    del a, b
+print(f"SCALE s4 against the step-200 base: {n} tensors | ||change|| / ||weights|| = {(tot_d ** .5) / (tot_w ** .5):.5f}")
+print("SCALE   for comparison: g3 280 steps at 1e-5 = 0.00031, g5 51 steps at 1e-4 = 0.00163")
 PYS
 exit 0
 # box E (24GB, replaces the A4000 whose host had no free GPU left): measure the held-out set through
