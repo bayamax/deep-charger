@@ -519,6 +519,7 @@ while :; do
     for f in loop.log accepted.jsonl rollouts.jsonl state.json; do [ -s $OUT/$f ] && hf upload $R $OUT/$f pooler_distill/chatsft/online/$ORUN/$f >/dev/null 2>&1; done
     hf upload $R /root/online_$ORUN.log pooler_distill/chatsft/online/$ORUN/run.log >/dev/null 2>&1
     last=$now; echo "[online $ORUN $(date -u +%H:%M)] uploaded | $(tail -1 $OUT/loop.log 2>/dev/null | cut -c1-200)"
+    /usr/local/bin/s 20 2>/dev/null | sed 's/^/SCORE /' 
     grep -hE "^ONLINE_ROLLBACK|^ONLINE_COLLAPSE|^\[guard\]" /root/online_$ORUN.log 2>/dev/null | tail -3
     tail -c +$MARK /root/online_$ORUN.log 2>/dev/null | grep -q "ONLINE_LOOP_DONE" && { echo "ONLINE_DONE $ORUN $(date -u)"; break; }
     pgrep -f "online_loop.p[y]" >/dev/null || { echo "ONLINE_DIED $ORUN: $(grep -E 'Error|error|Traceback' /root/online_$ORUN.log | tail -2 | cut -c1-160)"; break; }

@@ -10,6 +10,7 @@
 #   . path/to/runwatch.sh            # defines: run, runq, runfull
 #
 # run      the last few step lines and the latest upload
+# score    the mean reward per block, both sides, as of the box's last half-hourly print
 # runq     one line: where the run is, and both pass rates
 # runfull  the whole tail, for when something looks wrong
 
@@ -40,4 +41,9 @@ runq() {
 
 runfull() {
   _vlog "$@" | tail -60
+}
+
+# score: the run's mean reward per block, as the box last printed it (every half hour)
+score() {
+  _vlog "$@" 12000 | grep '^SCORE' | awk '/through step/{n=NR} {a[NR]=$0} END{for(i=n;i<=NR;i++) print substr(a[i],7)}'
 }
