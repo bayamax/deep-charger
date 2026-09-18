@@ -1,3 +1,18 @@
+# PEEK (one-shot): the table from the freshly installed command, plus recent reasoning replies
+/usr/local/bin/s 20 2>&1 | sed 's/^/NOW2 /'
+python3 - <<'PYS'
+import json, re
+rows = [json.loads(l) for l in open("/root/online_g5/rollouts.jsonl") if l.strip()]
+rea = [r for r in rows if r.get("kind") == "reason"]
+mx = max(r["step"] for r in rea)
+for r in [x for x in rea if x["step"] > mx - 2][:6]:
+    th = re.sub(r"<information>.*?</information>", "", r["text"].split("</think>")[0], flags=re.S)
+    rp = r["text"].split("</think>")[-1].strip()
+    print(f"NOW2 == reward {r['reward']} | think {len(th.split())} w | reply {len(rp.split())} w | {r['q'][:90]}")
+    print(f"NOW2  think: {th.strip()[:300]}")
+    print(f"NOW2  reply: {rp[:300]}")
+PYS
+exit 0
 # box E (24GB, replaces the A4000 whose host had no free GPU left): measure the held-out set through
 # the 4-bit grid the phone actually runs.
 #
