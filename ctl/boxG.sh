@@ -1,26 +1,3 @@
-# PEEK (one-shot): how much the fine-tune that made s4 moved the weights, for scale
-python3 - <<'PYS'
-import torch, glob, os
-from safetensors import safe_open
-base = "/root/eval_hf200"
-tgt = "/root/hfdl/pooler_distill/chatsft/s4_hf"
-fb = [p for p in glob.glob(base + "/*.safetensors")]
-ft = [p for p in glob.glob(tgt + "/*.safetensors")]
-if not fb or not ft:
-    print("SCALE missing:", bool(fb), bool(ft)); raise SystemExit
-A = safe_open(fb[0], framework="pt"); B = safe_open(ft[0], framework="pt")
-ka, kb = set(A.keys()), set(B.keys())
-tot_d = tot_w = 0.0; n = 0
-for k in sorted(ka & kb):
-    if not k.endswith(".weight"): continue
-    a = A.get_tensor(k).to(torch.float32); b = B.get_tensor(k).to(torch.float32)
-    if a.shape != b.shape: continue
-    tot_d += (b - a).norm().item() ** 2; tot_w += a.norm().item() ** 2; n += 1
-    del a, b
-print(f"SCALE s4 against the step-200 base: {n} tensors | ||change|| / ||weights|| = {(tot_d ** .5) / (tot_w ** .5):.5f}")
-print("SCALE   for comparison: g3 280 steps at 1e-5 = 0.00031, g5 51 steps at 1e-4 = 0.00163")
-PYS
-exit 0
 # box E (24GB, replaces the A4000 whose host had no free GPU left): measure the held-out set through
 # the 4-bit grid the phone actually runs.
 #
@@ -161,24 +138,35 @@ cat > /usr/local/bin/s <<'SSD'
 # the score over the run: mean reward per block, both sides, beside what produced it
 d=$(ls -td /root/online_*/ 2>/dev/null | head -1)
 python3 - "$d" "${1:-20}" <<'PYS'
-import json, statistics, sys
+import json, re, statistics, sys
 d, W = sys.argv[1], int(sys.argv[2])
+INFO = re.compile(r"<information>.*?</information>", re.S)
+
+
+def think_words(t):
+    """the model's own thinking: the served pages sit in the same span and are not it"""
+    return len(INFO.sub("", t.split("</think>")[0]).split())
+
+
+def reply_words(t):
+    return len(t.split("</think>")[-1].split()) if "</think>" in t else 0
 rows = [json.loads(l) for l in open(d + "/rollouts.jsonl") if l.strip()]
 mx = max(r["step"] for r in rows)
 print(f"{d.rstrip('/').split('/')[-1]}  through step {mx}   ({W}-step blocks)")
-print("  steps    | reason  mean think unfin | search  mean srch think unfin")
+print("  steps    | reason  mean think reply unfin | search  mean srch think reply unfin")
 for b in range(0, mx, W):
     rea = [r for r in rows if b < r["step"] <= b + W and r.get("kind") == "reason"]
     sea = [r for r in rows if b < r["step"] <= b + W and r.get("kind") == "search"]
     if not rea and not sea: continue
     def col(x, s=False):
-        if not x: return "    -     -    -    -    -" if s else "    -     -    -    -"
-        th = statistics.median(len(r["text"].split("</think>")[0].split()) for r in x)
+        if not x: return "    -     -    -    -    -    -" if s else "    -     -    -    -    -"
+        th = statistics.median(think_words(r["text"]) for r in x)
+        rp = statistics.median(reply_words(r["text"]) for r in x)
         un = 100 * sum(1 for r in x if "</think>" not in r["text"]) / len(x)
         p = 100 * sum(1 for r in x if r["reward"] >= 1.0) / len(x)
         m = sum(r["reward"] for r in x) / len(x)
         ns = f" {statistics.median([r['ns'] for r in x]):>3.0f}" if s else ""
-        return f"{p:>5.0f}% {m:>+6.2f}{ns} {th:>5.0f} {un:>4.0f}%"
+        return f"{p:>5.0f}% {m:>+6.2f}{ns} {th:>5.0f} {rp:>5.0f} {un:>4.0f}%"
     print(f"  {b+1:>4}-{b+W:<4} | {col(rea)} | {col(sea, True)}")
 for k in ("reason", "search"):
     v = [r["reward"] for r in rows if r.get("kind") == k]
