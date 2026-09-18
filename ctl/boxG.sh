@@ -1,3 +1,10 @@
+# PEEK (one-shot): which keys the box will accept, and whether sshd is up
+echo "PEEKSSH $(date -u +%H:%M) sshd=$(pgrep -c sshd) port22=$(ss -ltn 2>/dev/null | grep -c ':22 ')"
+for f in /root/.ssh/authorized_keys /etc/ssh/authorized_keys; do
+  [ -s "$f" ] && ssh-keygen -lf "$f" 2>/dev/null | sed "s|^|PEEKSSH $f |"
+done
+ls -la /usr/local/bin/t /usr/local/bin/s 2>&1 | sed 's/^/PEEKSSH /'
+exit 0
 # box E (24GB, replaces the A4000 whose host had no free GPU left): measure the held-out set through
 # the 4-bit grid the phone actually runs.
 #
