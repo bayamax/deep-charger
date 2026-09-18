@@ -58,7 +58,7 @@ ap.add_argument("--stop", default="eos", choices=["eos", "answer"]); ap.add_argu
 ap.add_argument("--dolphin-ratio", type=float, default=2.0, help="Dolphin records per accepted search rollout in the same step"); ap.add_argument("--dolphin-min", type=int, default=2, help="Dolphin records in a step with no accepted rollout")
 ap.add_argument("--maxlen", type=int, default=4096)
 ap.add_argument("--replay", default="", help="jsonl of verified search traces {q,text}; each step trains on --replay-per-step of them (the retention data)")
-ap.add_argument("--guard", type=int, default=0, help="1: watch the share of rollouts that write no reply over a sliding window; when it runs away from the opening baseline, reload the last healthy checkpoint, halve the learning rate and carry on (three times, then stop)"); ap.add_argument("--guard-window", type=int, default=80); ap.add_argument("--guard-floor", type=float, default=0.20, help="no trip below this absolute rate"); ap.add_argument("--guard-mult", type=float, default=2.0, help="trip at this multiple of the opening baseline"); ap.add_argument("--guard-cut", type=float, default=3.0, help="trip at this multiple of the opening share of rollouts cut for searching without end"); ap.add_argument("--guard-cut-floor", type=float, default=0.20); ap.add_argument("--guard-ns-floor", type=float, default=6.0, help="no searches trip below this absolute mean"); ap.add_argument("--guard-ns", type=float, default=1.8, help="trip at this multiple of the opening searches per rollout"); ap.add_argument("--guard-rollbacks", type=int, default=3); ap.add_argument("--complete-only", type=int, default=0, help="1: train only on rollouts that actually finished their turn (EOS reached, no repetition death). Not a quality filter: a rollout cut off by the token cap is an unfinished fragment, and training on it teaches the model not to stop -- r7 went from 5%% to 59%% no-reply that way"); ap.add_argument("--reason", default="", help="jsonl of reasoning problems {q, reply}: the loop leaves the search corpus and runs GRPO on these instead, the teacher scoring each sample against the reference"); ap.add_argument("--reason-g", type=int, default=8, help="samples per problem"); ap.add_argument("--search-every", type=int, default=0, help=">0: every Nth step is a search question from the pool instead of a reasoning problem, scored the same way but on its own reward"); ap.add_argument("--search-wheels", type=int, default=0, help="1: a search group that scores zero also learns from a demonstration. Off by default: the search side already works at the product settings, and a teacher trajectory carries the old register and the old thinking style"); ap.add_argument("--search-demo", default="", help="jsonl of {q, traj}: the teacher's own trajectory for each search question, trained on (searches only, reply discarded) when a group scores zero"); ap.add_argument("--wheels", type=int, default=0, help="1: when all samples of a reasoning group score zero there is no signal, so train on the reference answer instead (the teacher demonstrates the problem the model cannot do)"); ap.add_argument("--judge-api", default="deepseek", choices=["deepseek", "openai"], help="which teacher scores the reasoning samples"); ap.add_argument("--judge-model", default="", help="model name for that teacher; empty picks the default for the api"); ap.add_argument("--reason-stub", type=int, default=0, help="1: score by shape alone, no teacher call (for a smoke run with no credit)"); ap.add_argument("--queue", type=int, default=0, help="1: each rollout batch takes --b different questions; the rows queue up and every step trains on one of them (no selection) plus Dolphin; a new batch runs when the queue is empty"); ap.add_argument("--train-all", type=int, default=0, help="1: train on every rollout of the step, no selection (the gold and the judge only measure)"); ap.add_argument("--replay-per-step", type=int, default=2); ap.add_argument("--rollout-every", type=int, default=1, help="do the measurement rollout only every N steps (accepted ones join the replay set)")
+ap.add_argument("--guard", type=int, default=0, help="1: watch the share of rollouts that write no reply over a sliding window; when it runs away from the opening baseline, reload the last healthy checkpoint, halve the learning rate and carry on (three times, then stop)"); ap.add_argument("--guard-window", type=int, default=80); ap.add_argument("--guard-floor", type=float, default=0.20, help="no trip below this absolute rate"); ap.add_argument("--guard-mult", type=float, default=2.0, help="trip at this multiple of the opening baseline"); ap.add_argument("--guard-cut", type=float, default=3.0, help="trip at this multiple of the opening share of rollouts cut for searching without end"); ap.add_argument("--guard-cut-floor", type=float, default=0.20); ap.add_argument("--guard-ns-floor", type=float, default=6.0, help="no searches trip below this absolute mean"); ap.add_argument("--guard-ns", type=float, default=1.8, help="trip at this multiple of the opening searches per rollout"); ap.add_argument("--guard-rollbacks", type=int, default=3); ap.add_argument("--complete-only", type=int, default=0, help="1: train only on rollouts that actually finished their turn (EOS reached, no repetition death). Not a quality filter: a rollout cut off by the token cap is an unfinished fragment, and training on it teaches the model not to stop -- r7 went from 5%% to 59%% no-reply that way"); ap.add_argument("--reason", default="", help="jsonl of reasoning problems {q, reply}: the loop leaves the search corpus and runs GRPO on these instead, the teacher scoring each sample against the reference"); ap.add_argument("--reason-g", type=int, default=8, help="samples per problem"); ap.add_argument("--search-every", type=int, default=0, help=">0: every Nth step is a search question from the pool instead of a reasoning problem, scored the same way but on its own reward"); ap.add_argument("--w-talk", type=float, default=0.5, help="what the teacher can add to a grounded-correct search rollout for a reply that reads conversationally"); ap.add_argument("--search-wheels", type=int, default=0, help="1: a search group that scores zero also learns from a demonstration. Off by default: the search side already works at the product settings, and a teacher trajectory carries the old register and the old thinking style"); ap.add_argument("--search-demo", default="", help="jsonl of {q, traj}: the teacher's own trajectory for each search question, trained on (searches only, reply discarded) when a group scores zero"); ap.add_argument("--wheels", type=int, default=0, help="1: when all samples of a reasoning group score zero there is no signal, so train on the reference answer instead (the teacher demonstrates the problem the model cannot do)"); ap.add_argument("--judge-api", default="deepseek", choices=["deepseek", "openai"], help="which teacher scores the reasoning samples"); ap.add_argument("--judge-model", default="", help="model name for that teacher; empty picks the default for the api"); ap.add_argument("--reason-stub", type=int, default=0, help="1: score by shape alone, no teacher call (for a smoke run with no credit)"); ap.add_argument("--queue", type=int, default=0, help="1: each rollout batch takes --b different questions; the rows queue up and every step trains on one of them (no selection) plus Dolphin; a new batch runs when the queue is empty"); ap.add_argument("--train-all", type=int, default=0, help="1: train on every rollout of the step, no selection (the gold and the judge only measure)"); ap.add_argument("--replay-per-step", type=int, default=2); ap.add_argument("--rollout-every", type=int, default=1, help="do the measurement rollout only every N steps (accepted ones join the replay set)")
 ap.add_argument("--accum", type=int, default=1, help="steps whose gradients are accumulated before one optimizer update (both the search-side and the Dolphin part)")
 ap.add_argument("--samepage", type=int, default=1, help="1: a search whose top page was already shown in this rollout serves the NEXT chunk of that page (and says so when the page is used up); 0: teacher environment (always the head)")
 A = ap.parse_args()
@@ -790,20 +790,40 @@ def ask_teacher(system, user, tag):
     return {"error": "network"}
 
 
+# the reward the base model was trained under (grpo_e2e_torch.py, the needs-search branch), kept as it
+# stands. Note what it does NOT do: it never charges for the number of searches. Reading the same page
+# on and on costs nothing while the fact is still missing; what it charges for is carrying on searching
+# AFTER the fact has been surfaced, at 0.1 a step and capped at five. On top of it, and only for a
+# rollout that already earns the grounded-correct 1.5, the teacher adds up to W_TALK for a reply that
+# reads like a person rather than a template.
+W_ACC, W_GND, W_UNGND, W_WRONG, W_RETR, ATTEMPT_T = 1.0, 0.5, 1.0, 0.5, 0.4, 1.0
+W_LATE, LATECAP = 0.1, 5
+
+
 def score_search(r, gold):
-    """searched, reached the gold, said the gold -- then the teacher on how the sentence reads"""
     reply = r["text"].split("</think>")[-1].strip() if "</think>" in r["text"] else ""
-    if not reply: return 0.0, {"unfinished": True}
-    if not r["ns"]: return 0.0, {"no search": True}
+    landed = bool(r["landed"] and reply)
     _, correct, grounded = price(r, gold)
-    if not grounded: return 0.0, {"page not found": True}
-    if not correct: return 0.0, {"wrong": True}
-    if any(t in reply for t in TAGS): return 0.0, {"tags": True}
-    if A.reason_stub: return 1.0, {"stub": True}
-    served = "\n\n".join(r["served"])[-4000:]
-    v = ask_teacher(SEARCH_SYS, f"QUESTION:\n{r['q'] if r.get('q') else ''}\n\nWHAT THE SEARCH RETURNED:\n{served}\n\nREPLY:\n{reply[:2000]}", "search")
-    if "error" in v: return 0.0, v
-    return (1.0 if all(bool(v.get(k)) for k in ("sound", "natural", "clean")) else 0.0), v
+    # which search first surfaced the fact, and how many came after it
+    hit = next((i for i, sv in enumerate(r.get("served", [])) if has(sv, gold)), None)
+    late = (len(r.get("served", [])) - 1 - hit) if hit is not None else 0
+    info_hit = hit is not None
+    if correct:
+        base = (W_ACC + W_GND) if grounded else W_UNGND
+    else:
+        base = -W_WRONG + W_RETR * (1.0 if info_hit else 0.0) * (ATTEMPT_T if landed else 0.5)
+    base -= W_LATE * min(late, LATECAP)
+    why = {"correct": int(correct), "grounded": int(grounded), "late": late,
+           "unfinished": not landed, "tags": any(t in reply for t in TAGS)}
+    if not (correct and grounded and landed) or why["tags"]:
+        return base, why
+    if A.reason_stub:
+        return base + A.w_talk, {**why, "stub": True}
+    served = "\n\n".join(r.get("served", []))[-4000:]
+    v = ask_teacher(SEARCH_SYS, f"QUESTION:\n{r.get('q', '')}\n\nWHAT THE SEARCH RETURNED:\n{served}\n\nREPLY:\n{reply[:2000]}", "search")
+    if "error" in v: return base, {**why, **v}
+    talk = A.w_talk if all(bool(v.get(k)) for k in ("sound", "natural", "clean")) else 0.0
+    return base + talk, {**why, **v}
 
 
 def demo_backward(q, traj, coef):
@@ -1067,14 +1087,15 @@ for step in range(state["step"] + 1, A.steps + 1) if reason else []:
     if step % A.accum == 0:
         opt.step(); opt.zero_grad(set_to_none=True); clear()
     k = "search" if searching else "reason"
-    cum[k + " pass"] = cum.get(k + " pass", 0) + sum(rw); cum[k + " n"] = cum.get(k + " n", 0) + len(rw)
+    cum[k + " pass"] = cum.get(k + " pass", 0) + sum(1 for x in rw if x >= 1.0); cum[k + " n"] = cum.get(k + " n", 0) + len(rw)
+    cum[k + " sum"] = cum.get(k + " sum", 0.0) + sum(rw)
     unfin = sum(1 for v in notes if v.get("unfinished")); err = sum(1 for v in notes if v.get("error"))
-    line = (f"[step {step}] {k} pass {sum(rw):.0f}/{len(rw)}"
+    line = (f"[step {step}] {k} pass {sum(1 for x in rw if x >= 1.0)}/{len(rw)} mean {mu:+.2f}"
             + (f" unfinished={unfin}" if unfin else "") + (f" judge-error={err}" if err else "")
             + (" wheels" if wheel else "")
             + f" | ce={sum(losses)/max(len(losses),1):.3f} wheel_ce={wheel:.3f} dolphin_ce={sum(dl)/max(len(dl),1):.3f}"
-            + f" | cumulative reason {100*cum.get('reason pass',0)/max(cum.get('reason n',0),1):.0f}% of {cum.get('reason n',0)}"
-            + f", search {100*cum.get('search pass',0)/max(cum.get('search n',0),1):.0f}% of {cum.get('search n',0)}"
+            + f" | cumulative reason {100*cum.get('reason pass',0)/max(cum.get('reason n',0),1):.0f}% (mean {cum.get('reason sum',0)/max(cum.get('reason n',0),1):+.2f}) of {cum.get('reason n',0)}"
+            + f", search {100*cum.get('search pass',0)/max(cum.get('search n',0),1):.0f}% (mean {cum.get('search sum',0)/max(cum.get('search n',0),1):+.2f}) of {cum.get('search n',0)}"
             + f" | {(time.time()-t0)/60:.0f} min")
     print(line, flush=True); log.write(line + "\n"); log.flush()
     if step % A.save_every == 0 or step == A.steps:

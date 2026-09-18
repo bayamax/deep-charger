@@ -1,34 +1,3 @@
-# PEEK (one-shot): the size of the adapter's own contribution, measured against the weights it rides on
-python3 - <<'PYS'
-import torch, re
-from safetensors import safe_open
-f = safe_open("/root/online_g3/latest.safetensors", framework="pt")
-keys = list(f.keys())
-pairs = {}
-for k in keys:
-    m = re.match(r"(.*)\.lora_([AB])\.(?:default\.)?weight$", k)
-    if m: pairs.setdefault(m.group(1), {})[m.group(2)] = k
-print(f"LORA {len(pairs)} adapted modules of {len(keys)} tensors")
-tot_d = tot_w = 0.0; per = []
-for base, ab in sorted(pairs.items()):
-    if "A" not in ab or "B" not in ab: continue
-    A = f.get_tensor(ab["A"]).to(torch.float32); B = f.get_tensor(ab["B"]).to(torch.float32)
-    r = A.shape[0]
-    scale = 32.0 / r                      # lora_alpha 32 over rank, the peft default used here
-    d = (B @ A).norm().item() * scale
-    wk = base + ".base_layer.weight"
-    W = f.get_tensor(wk).to(torch.float32) if wk in keys else None
-    if W is None: continue
-    w = W.norm().item()
-    tot_d += d * d; tot_w += w * w
-    per.append((d / w, base.split("base_model.model.model.")[-1]))
-    del A, B, W
-print(f"LORA overall ||adapter|| / ||weights|| = {(tot_d ** .5) / (tot_w ** .5):.5f}")
-per.sort(reverse=True)
-for x, k in per[:5]: print(f"LORA  most {x:.5f}  {k}")
-for x, k in per[-3:]: print(f"LORA least {x:.5f}  {k}")
-PYS
-exit 0
 # box E (24GB, replaces the A4000 whose host had no free GPU left): measure the held-out set through
 # the 4-bit grid the phone actually runs.
 #
@@ -119,14 +88,14 @@ RTEMP=0.6
 RCAP=600
 RGEN=4000
 RN=100
-ORUN=g3
+ORUN=g4
 OMODEL=s4_hf
 OB=8
 ODRATIO=1
 ODMIN=1
 ODOLPHIN=dolphin_v2.jsonl
-OLR=1e-5
-OACCUM=8
+OLR=1e-4
+OACCUM=2
 OLAYERS=all
 OREPLAY=replay_v1.jsonl
 OREPLAYFILTER=1
@@ -140,18 +109,19 @@ OREASON=dolphin_v2.jsonl
 OREASONG=8
 OSEARCHEVERY=2
 OWHEELS=1
+OWTALK=0.5
 OSEARCHDEMO=
 OSEARCHWHEELS=0
 OREASONSTUB=0
 OJUDGEAPI=openai
 OJUDGEMODEL=gpt-5-nano
-OMAXSRCH=15
+OMAXSRCH=0
 OJUDGE=0
 OREPLAYN=0
 OROLLEVERY=1
 OQFILE=pooler_distill/measureq.jsonl
 ORESUME=0
-OSTEPS=400
+OSTEPS=200
 OTEMP=0.6
 SHARDS=3
 RAW="https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl"
@@ -489,7 +459,7 @@ PYF
   if ! pgrep -f "online_loop.p[y]" >/dev/null; then
     cd /root/work && DSK_KEY=$(cat /root/.dsk 2>/dev/null) OAI_KEY=$(cat /root/.oai 2>/dev/null) PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True setsid nohup python3 /root/work/online_loop.py $OHF $OUT \
       --questions /root/work/selfq_all.jsonl --dolphin /root/work/dolphin_v1.jsonl --heldout /root/work/eval300.jsonl \
-      --b $OB --steps $OSTEPS --temp $OTEMP --lr $OLR --dolphin-ratio ${ODRATIO:-2} --dolphin-min ${ODMIN:-2} --accum ${OACCUM:-1} --replay $REPLAYF --replay-per-step ${OREPLAYN:-2} --rollout-every ${OROLLEVERY:-1} --train-all ${OTRAINALL:-0} --queue ${OQUEUE:-0} --complete-only ${OCOMPLETE:-0} --gen ${OGEN:-1500} --budget ${OBUDGET:-900} --guard ${OGUARD:-0} --maxsrch ${OMAXSRCH:-0} --judge ${OJUDGE:-1} ${OREASON:+--reason /root/hfdl/pooler_distill/chatsft/$OREASON --reason-g ${OREASONG:-8} --reason-stub ${OREASONSTUB:-0} --judge-api ${OJUDGEAPI:-deepseek} --judge-model ${OJUDGEMODEL:-} --search-every ${OSEARCHEVERY:-0} --wheels ${OWHEELS:-0} --search-wheels ${OSEARCHWHEELS:-0} ${OSEARCHDEMO:+--search-demo /root/hfdl/$OSEARCHDEMO}} --pooler none --lora-rank 16 --lora-layers ${OLAYERS:-all} --gradckpt 1 --save-every 5 --stop eos \
+      --b $OB --steps $OSTEPS --temp $OTEMP --lr $OLR --dolphin-ratio ${ODRATIO:-2} --dolphin-min ${ODMIN:-2} --accum ${OACCUM:-1} --replay $REPLAYF --replay-per-step ${OREPLAYN:-2} --rollout-every ${OROLLEVERY:-1} --train-all ${OTRAINALL:-0} --queue ${OQUEUE:-0} --complete-only ${OCOMPLETE:-0} --gen ${OGEN:-1500} --budget ${OBUDGET:-900} --guard ${OGUARD:-0} --maxsrch ${OMAXSRCH:-0} --judge ${OJUDGE:-1} ${OREASON:+--reason /root/hfdl/pooler_distill/chatsft/$OREASON --reason-g ${OREASONG:-8} --reason-stub ${OREASONSTUB:-0} --judge-api ${OJUDGEAPI:-deepseek} --judge-model ${OJUDGEMODEL:-} --search-every ${OSEARCHEVERY:-0} --w-talk ${OWTALK:-0.5} --wheels ${OWHEELS:-0} --search-wheels ${OSEARCHWHEELS:-0} ${OSEARCHDEMO:+--search-demo /root/hfdl/$OSEARCHDEMO}} --pooler none --lora-rank 16 --lora-layers ${OLAYERS:-all} --gradckpt 1 --save-every 5 --stop eos \
       >> /root/online_$ORUN.log 2>&1 < /dev/null &
   fi
   # once: in reasoning mode the empty search loop printed the end marker at launch, and the keeper
