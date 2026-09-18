@@ -1,21 +1,21 @@
-# PEEK (one-shot): the whole run in 50-step blocks, both sides, since step 1
+# PEEK (one-shot): the mean reward as a moving average, both sides
 python3 - <<'PYS'
-import json, statistics
+import json
 rows = [json.loads(l) for l in open("/root/online_g3/rollouts.jsonl") if l.strip()]
 mx = max(r["step"] for r in rows)
-print(f"TREND through step {mx}  (gen 4000 to step ~200, then 7000)")
-print("TREND  steps   | reason pass  think  unfin | search pass  think  srch  unfin")
-for b in range(0, mx, 50):
-    rea = [r for r in rows if b < r["step"] <= b + 50 and r.get("kind") == "reason"]
-    sea = [r for r in rows if b < r["step"] <= b + 50 and r.get("kind") == "search"]
-    if not rea and not sea: continue
-    def f(x, k):
-        if not x: return "   -      -     - "
-        th = statistics.median(len(r["text"].split("</think>")[0].split()) for r in x)
-        un = sum(1 for r in x if "</think>" not in r["text"])
-        extra = f" {statistics.median([r['ns'] for r in x]):>2.0f}" if k == "s" else ""
-        return f"{100*sum(r['reward'] for r in x)/len(x):>4.0f}%  {th:>5.0f}{extra}  {100*un/len(x):>3.0f}%"
-    print(f"TREND {b+1:>4}-{b+50:<4} | {f(rea,'r')} | {f(sea,'s')}")
+W = 30
+print(f"AVG mean reward, {W}-step moving window, through step {mx}")
+for kind in ("reason", "search"):
+    x = [r for r in rows if r.get("kind") == kind]
+    pts = []
+    for c in range(W, mx + 1, 10):
+        w = [r["reward"] for r in x if c - W < r["step"] <= c]
+        if len(w) >= 20: pts.append((c, sum(w) / len(w)))
+    print(f"AVG {kind}: " + " ".join(f"{c}:{100*v:.0f}" for c, v in pts))
+for kind in ("reason", "search"):
+    x = [r["reward"] for r in rows if r.get("kind") == kind]
+    q = len(x) // 4
+    print(f"AVG {kind} quarters: " + " ".join(f"{100*sum(x[i*q:(i+1)*q])/q:.1f}%" for i in range(4)))
 PYS
 exit 0
 # box E (24GB, replaces the A4000 whose host had no free GPU left): measure the held-out set through
