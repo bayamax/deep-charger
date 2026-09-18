@@ -1,8 +1,3 @@
-# PEEK (one-shot): the new run's configuration and where it is
-echo "PEEK4 $(date -u +%H:%M) loop=$(pgrep -fc 'online_loop.p[y]')"
-grep -E "^\[cfg\]|^\[init\] weights" /root/online_g4.log | tail -2 | cut -c1-240
-tail -6 /root/online_g4.log | cut -c1-240
-exit 0
 # box E (24GB, replaces the A4000 whose host had no free GPU left): measure the held-out set through
 # the 4-bit grid the phone actually runs.
 #
@@ -93,7 +88,7 @@ RTEMP=0.6
 RCAP=600
 RGEN=4000
 RN=100
-ORUN=g4
+ORUN=g5
 OMODEL=s4_hf
 OB=8
 ODRATIO=1
@@ -111,7 +106,7 @@ OGEN=7000
 OBUDGET=3600
 OGUARD=0
 OREASON=dolphin_v2.jsonl
-OREASONG=8
+OREASONG=12
 OSEARCHEVERY=2
 OWHEELS=1
 OWTALK=0.5
