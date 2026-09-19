@@ -1,3 +1,25 @@
+# PEEK (one-shot): how far the finished run moved the adapter
+python3 - <<'PYS'
+import torch, re
+from safetensors import safe_open
+f = safe_open("/root/online_g5/latest.safetensors", framework="pt")
+keys = list(f.keys()); pairs = {}
+for k in keys:
+    m = re.match(r"(.*)\.lora_([AB])\.(?:default\.)?weight$", k)
+    if m: pairs.setdefault(m.group(1), {})[m.group(2)] = k
+tot_d = tot_w = 0.0
+for base, ab in pairs.items():
+    if "A" not in ab or "B" not in ab: continue
+    A = f.get_tensor(ab["A"]).to(torch.float32); B = f.get_tensor(ab["B"]).to(torch.float32)
+    wk = base + ".base_layer.weight"
+    if wk not in keys: continue
+    W = f.get_tensor(wk).to(torch.float32)
+    tot_d += ((B @ A).norm().item() * (32.0 / A.shape[0])) ** 2; tot_w += W.norm().item() ** 2
+    del A, B, W
+print(f"FINAL g5 at 200 steps: ||adapter|| / ||weights|| = {(tot_d ** .5) / (tot_w ** .5):.5f}")
+print("FINAL   scale: the fine-tune that changed the behaviour moved 0.00662; g5 at 51 steps was 0.00163; g3 at 280 steps at the lower rate was 0.00031")
+PYS
+exit 0
 # PEEK (one-shot): the thinking in tokens, not words, both sides
 python3 - <<'PYS'
 import json, re, statistics, glob
