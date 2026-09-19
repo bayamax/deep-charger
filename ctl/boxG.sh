@@ -77,17 +77,7 @@ JCLIP=0
 PRUNS="p_t06q4:1:0.6 p_t06bf16:0:0.6"
 PG=64
 PSKIP=
-MODE=reeval
-RRUN=g5dolph
-RQSRC=dolphin
-RQN=12
-RMODEL=g5
-RKIND=ckpt
-RSHARDS=1
-RTEMP=0.6
-RCAP=600
-RGEN=7000
-RN=12
+MODE=online
 ORUN=g5
 OMODEL=s4_hf
 OB=8
@@ -126,7 +116,7 @@ OREPLAYN=0
 OROLLEVERY=1
 OQFILE=pooler_distill/measureq.jsonl
 ORESUME=0
-OSTEPS=200
+OSTEPS=1200
 OTEMP=0.6
 SHARDS=3
 RAW="https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl"
@@ -464,6 +454,27 @@ PYF
     REPLAYF=/root/work/replay_clean.jsonl
   fi
   OUT=/root/online_$ORUN; mkdir -p $OUT
+  cat > /root/freeze.sh <<'FZ'
+#!/bin/bash
+# a checkpoint every two hundred steps: the run is five days long and one overwritten file is no record
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null)
+R=baya1116/hypernet-sp-distill; ORUN=$1; OUT=/root/online_$ORUN
+while :; do
+  st=$(python3 -c "import json;print(json.load(open('$OUT/state.json'))['step'])" 2>/dev/null || echo 0)
+  mark=$(( (st / 200) * 200 ))
+  if [ "$mark" -gt 0 ] && [ ! -f /root/.frozen_${ORUN}_$mark ] && [ -s $OUT/latest.safetensors ]; then
+    touch /root/.frozen_${ORUN}_$mark
+    for f in latest.safetensors state.json loop.log rollouts.jsonl; do
+      [ -s $OUT/$f ] && hf upload $R $OUT/$f pooler_distill/chatsft/online/${ORUN}_step$mark/$f >/dev/null 2>&1
+    done
+    echo "ONLINE_FROZEN ${ORUN}_step$mark $(date -u)"
+  fi
+  pgrep -f "online_loop.p[y]" >/dev/null || break
+  sleep 600
+done
+FZ
+  chmod +x /root/freeze.sh
+  pgrep -f "freeze.s[h]" >/dev/null || setsid nohup bash /root/freeze.sh $ORUN >> /proc/1/fd/1 2>&1 < /dev/null &
   if [ ! -f /root/.frozen_${ORUN}_150 ] && [ -s $OUT/latest.safetensors ]; then
     for f in latest.safetensors state.json loop.log rollouts.jsonl; do
       [ -s $OUT/$f ] && hf upload $R $OUT/$f pooler_distill/chatsft/online/${ORUN}_step150/$f >/dev/null 2>&1
