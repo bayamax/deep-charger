@@ -1,18 +1,3 @@
-# PEEK (one-shot): the table from the freshly installed command, plus recent reasoning replies
-/usr/local/bin/s 20 2>&1 | sed 's/^/NOW2 /'
-python3 - <<'PYS'
-import json, re
-rows = [json.loads(l) for l in open("/root/online_g5/rollouts.jsonl") if l.strip()]
-rea = [r for r in rows if r.get("kind") == "reason"]
-mx = max(r["step"] for r in rea)
-for r in [x for x in rea if x["step"] > mx - 2][:6]:
-    th = re.sub(r"<information>.*?</information>", "", r["text"].split("</think>")[0], flags=re.S)
-    rp = r["text"].split("</think>")[-1].strip()
-    print(f"NOW2 == reward {r['reward']} | think {len(th.split())} w | reply {len(rp.split())} w | {r['q'][:90]}")
-    print(f"NOW2  think: {th.strip()[:300]}")
-    print(f"NOW2  reply: {rp[:300]}")
-PYS
-exit 0
 # box E (24GB, replaces the A4000 whose host had no free GPU left): measure the held-out set through
 # the 4-bit grid the phone actually runs.
 #
@@ -120,6 +105,11 @@ OCOMPLETE=1
 OGEN=7000
 OBUDGET=1500
 OGUARD=0
+# the reasoning problems. dolphin_v2 is the short-thinking subset (reference thinking 245 words at the
+# median, 300 at the most); dolphin_v1 is the whole set, 6776 problems whose references think 718 words
+# at the median and 1384 at the ninth decile. Move to v1 when v2 stops teaching anything, which reads as:
+# the constrained-format problems stop scoring zero across all twelve, or the mean reward stops moving
+# over a hundred steps. Changing this line and adding a restart marker is the whole switch.
 OREASON=dolphin_v2.jsonl
 OREASONG=12
 OSEARCHEVERY=2
@@ -452,7 +442,7 @@ if [ "$MODE" = "online" ]; then
   OHF=/root/hfdl/pooler_distill/chatsft/$OMODEL
   for try in 1 2 3 4 5 6; do hf download $R --include "pooler_distill/chatsft/${OMODEL}/*" --local-dir /root/hfdl >/dev/null 2>&1; [ -s $OHF/model.safetensors ] && break; sleep 30; done
   [ -s $OHF/model.safetensors ] || { echo "ONLINE_ABORT: $OMODEL not on the hub"; exit 0; }
-  for f in pooler_distill/chatsft/${ODOLPHIN:-dolphin_v1.jsonl} pooler_distill/chatsft/${OREPLAY:-replay_v1.jsonl} pooler_distill/selfq_0.jsonl pooler_distill/selfq_1.jsonl pooler_distill/selfq_2.jsonl; do
+  for f in pooler_distill/chatsft/${ODOLPHIN:-dolphin_v1.jsonl} pooler_distill/chatsft/${OREASON:-dolphin_v2.jsonl} pooler_distill/chatsft/${OREPLAY:-replay_v1.jsonl} pooler_distill/selfq_0.jsonl pooler_distill/selfq_1.jsonl pooler_distill/selfq_2.jsonl; do
     [ -s /root/hfdl/$f ] || for try in 1 2 3; do hf download $R --include "$f" --local-dir /root/hfdl >/dev/null 2>&1; [ -s /root/hfdl/$f ] && break; sleep 10; done
   done
   if [ -n "${OSEARCHDEMO:-}" ]; then
