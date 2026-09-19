@@ -1,3 +1,8 @@
+# PEEK (one-shot 19 Sep 16:1x): is the loop alive and where is it
+echo "ALIVE $(date -u +%H:%M) loop=$(pgrep -fc 'online_loop.p[y]') keeper=$(pgrep -fc 'onlinekee[p].sh') freeze=$(pgrep -fc 'freeze.s[h]') gpu=$(nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv,noheader)"
+tail -4 /root/online_g5.log | cut -c1-220
+echo "ALIVE state: $(cat /root/online_g5/state.json 2>/dev/null | head -c 120)"
+exit 0
 # box E (24GB, replaces the A4000 whose host had no free GPU left): measure the held-out set through
 # the 4-bit grid the phone actually runs.
 #
