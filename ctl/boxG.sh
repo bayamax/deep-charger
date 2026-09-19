@@ -1,3 +1,13 @@
+# PEEK (one-shot 19 Sep 12:0x): all twelve replies in full, for grading
+python3 - <<'PYS'
+import json
+for i, l in enumerate(open("/root/work/g5dolph_out_0.jsonl")):
+    if not l.strip(): continue
+    r = json.loads(l)
+    rep = r["text"].split("</think>")[-1].strip() if "</think>" in r["text"] else "(no reply)"
+    print(f"G5R {i} ||| {rep[:1200]}")
+PYS
+exit 0
 # box E (24GB, replaces the A4000 whose host had no free GPU left): measure the held-out set through
 # the 4-bit grid the phone actually runs.
 #
