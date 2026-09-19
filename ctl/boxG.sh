@@ -1,25 +1,3 @@
-# PEEK (one-shot): the thinking in tokens, not words, both sides
-python3 - <<'PYS'
-import json, re, statistics, glob
-from transformers import AutoTokenizer
-tok = AutoTokenizer.from_pretrained("/root/eval_hf200")
-INFO = re.compile(r"<information>.*?</information>", re.S)
-rows = [json.loads(l) for l in open("/root/online_g5/rollouts.jsonl") if l.strip()]
-mx = max(r["step"] for r in rows)
-print(f"TOK through step {mx}")
-for kind in ("reason", "search"):
-    x = [r for r in rows if r.get("kind") == kind and r["step"] > mx - 60]
-    if not x: continue
-    th = sorted(len(tok.encode(INFO.sub("", r["text"].split("</think>")[0]), add_special_tokens=False)) for r in x)
-    rp = sorted(len(tok.encode(r["text"].split("</think>")[-1], add_special_tokens=False)) for r in x if "</think>" in r["text"])
-    n = len(th)
-    print(f"TOK {kind}: last 60 steps, n={n} | thinking tokens med {th[n//2]} p75 {th[int(n*.75)]} p90 {th[int(n*.9)]} max {th[-1]} | reply tokens med {rp[len(rp)//2] if rp else 0}")
-    ref = [json.loads(l) for l in open("/root/hfdl/pooler_distill/chatsft/dolphin_v2.jsonl") if l.strip()]
-    if kind == "reason":
-        rt = sorted(len(tok.encode(r.get("thinking",""), add_special_tokens=False)) for r in ref)
-        print(f"TOK   the reference answers it is scored against: med {rt[len(rt)//2]} p90 {rt[int(len(rt)*.9)]} max {rt[-1]}")
-PYS
-exit 0
 # box E (24GB, replaces the A4000 whose host had no free GPU left): measure the held-out set through
 # the 4-bit grid the phone actually runs.
 #
