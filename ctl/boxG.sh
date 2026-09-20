@@ -535,7 +535,8 @@ FZ
   if [ ! -f /root/.restart_${ORUN}_nsfloor ]; then pkill -f "online_loop.p[y]"; sleep 8; pkill -9 -f "online_loop.p[y]" 2>/dev/null; touch /root/.restart_${ORUN}_nsfloor; echo "ONLINE_RESTART $ORUN guard floor $(date -u)"; fi
   # once: a search group that scores zero now learns from that question's own teacher trajectory
   if [ ! -f /root/.restart_${ORUN}_demo ]; then pkill -f "online_loop.p[y]"; sleep 8; pkill -9 -f "online_loop.p[y]" 2>/dev/null; touch /root/.restart_${ORUN}_demo; echo "ONLINE_RESTART $ORUN search demos $(date -u)"; fi
-  # once (2026-09-20): constant-length loss normalisation and no std scaling (the g5 collapse cause, see docs)
+  # once (2026-09-20): constant-length loss normalisation and no std scaling (the g5 collapse cause, see docs).
+  # The first launch died on the flags because the raw fetch of online_loop.py was still the old copy; this re-run refetches.
   if [ ! -f /root/.restart_${ORUN}_drgrpo ]; then pkill -f "online_loop.p[y]"; sleep 8; pkill -9 -f "online_loop.p[y]" 2>/dev/null; touch /root/.restart_${ORUN}_drgrpo; echo "ONLINE_RESTART $ORUN dr-grpo norm $(date -u)"; fi
   # once: search-side wheels back on (replay traces), after g5 collapsed on the side that had none
   if [ ! -f /root/.restart_${ORUN}_swheel ]; then pkill -f "online_loop.p[y]"; sleep 8; pkill -9 -f "online_loop.p[y]" 2>/dev/null; touch /root/.restart_${ORUN}_swheel; echo "ONLINE_RESTART $ORUN search wheels $(date -u)"; fi
