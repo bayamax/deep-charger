@@ -107,7 +107,7 @@ OSEARCHEVERY=2
 OWHEELS=1
 OWTALK=0.5
 OSEARCHDEMO=
-OSEARCHWHEELS=0
+OSEARCHWHEELS=1   # 2026-09-20: an all-zero search group learns one verified replay trace (g5 lost the search side with no way back)
 OREASONSTUB=0
 OJUDGEAPI=openai
 OJUDGEMODEL=gpt-5-nano
@@ -531,6 +531,8 @@ FZ
   if [ ! -f /root/.restart_${ORUN}_nsfloor ]; then pkill -f "online_loop.p[y]"; sleep 8; pkill -9 -f "online_loop.p[y]" 2>/dev/null; touch /root/.restart_${ORUN}_nsfloor; echo "ONLINE_RESTART $ORUN guard floor $(date -u)"; fi
   # once: a search group that scores zero now learns from that question's own teacher trajectory
   if [ ! -f /root/.restart_${ORUN}_demo ]; then pkill -f "online_loop.p[y]"; sleep 8; pkill -9 -f "online_loop.p[y]" 2>/dev/null; touch /root/.restart_${ORUN}_demo; echo "ONLINE_RESTART $ORUN search demos $(date -u)"; fi
+  # once: search-side wheels back on (replay traces), after g5 collapsed on the side that had none
+  if [ ! -f /root/.restart_${ORUN}_swheel ]; then pkill -f "online_loop.p[y]"; sleep 8; pkill -9 -f "online_loop.p[y]" 2>/dev/null; touch /root/.restart_${ORUN}_swheel; echo "ONLINE_RESTART $ORUN search wheels $(date -u)"; fi
   if [ ! -f /root/.restart_$ORUN ]; then pkill -f "online_loop.p[y]"; sleep 8; pkill -9 -f "online_loop.p[y]" 2>/dev/null; touch /root/.restart_$ORUN; echo "ONLINE_RESTART $ORUN dolphin ratio $ODRATIO min $ODMIN $(date -u)"; fi
   if ! pgrep -f "online_loop.p[y]" >/dev/null; then
     cd /root/work && DSK_KEY=$(cat /root/.dsk 2>/dev/null) OAI_KEY=$(cat /root/.oai 2>/dev/null) PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True setsid nohup python3 /root/work/online_loop.py $OHF $OUT \
