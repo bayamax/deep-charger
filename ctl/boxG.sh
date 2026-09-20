@@ -451,6 +451,8 @@ if [ "$MODE" = "online" ]; then
   else cat /root/hfdl/pooler_distill/selfq_?.jsonl > /root/work/selfq_all.jsonl; fi; cp /root/hfdl/pooler_distill/chatsft/${ODOLPHIN:-dolphin_v1.jsonl} /root/work/dolphin_v1.jsonl
   QFILE=/root/work/selfq_all.jsonl
   if [ "${OPOOL3Q:-0}" = 1 ]; then
+    # the corpus pool lives on the hub as box_recover/corpus.jsonl (boxC fetched it the same way for the search GRPO)
+    [ -s /root/work/corpus_box_final.jsonl ] || curl -sSL --retry 3 -o /root/work/corpus_box_final.jsonl "https://huggingface.co/baya1116/hypernet-sp-distill/resolve/main/box_recover/corpus.jsonl"
     python3 - <<'PQ'
 import json
 n=0
@@ -558,6 +560,8 @@ FZ
   if [ ! -f /root/.restart_${ORUN}_wheelfix ] && grep -q "max(rw) <= 0.0" /root/work/online_loop.py; then pkill -f "online_loop.p[y]"; sleep 8; pkill -9 -f "online_loop.p[y]" 2>/dev/null; touch /root/.restart_${ORUN}_wheelfix; echo "ONLINE_RESTART $ORUN wheel trigger $(date -u)"; fi
   # once (2026-09-20): the search side back to the search GRPO's conditions: its own optimizer at 1e-5, temp 0.9, gen 1500, corpus questions, mean/std normalisation
   if [ ! -f /root/.restart_${ORUN}_pool3 ] && grep -q "search-lr" /root/work/online_loop.py; then pkill -f "online_loop.p[y]"; sleep 8; pkill -9 -f "online_loop.p[y]" 2>/dev/null; touch /root/.restart_${ORUN}_pool3; echo "ONLINE_RESTART $ORUN pool3 conditions $(date -u)"; fi
+  # once (2026-09-20): the first pool3 launch had no corpus on this box and started with 0 questions; relaunch once the pool exists
+  if [ ! -f /root/.restart_${ORUN}_pool3q ] && [ -s /root/work/pool3q.jsonl ]; then pkill -f "online_loop.p[y]"; sleep 8; pkill -9 -f "online_loop.p[y]" 2>/dev/null; touch /root/.restart_${ORUN}_pool3q; echo "ONLINE_RESTART $ORUN pool3 questions $(wc -l < /root/work/pool3q.jsonl) $(date -u)"; fi
   # once (2026-09-20): search-side wheels off again
   if [ ! -f /root/.restart_${ORUN}_swoff ]; then pkill -f "online_loop.p[y]"; sleep 8; pkill -9 -f "online_loop.p[y]" 2>/dev/null; touch /root/.restart_${ORUN}_swoff; echo "ONLINE_RESTART $ORUN search wheels off $(date -u)"; fi
   # once (2026-09-20): LoRA back on layers 20-27 as in the search GRPO that produced this model
