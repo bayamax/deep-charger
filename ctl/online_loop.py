@@ -60,6 +60,7 @@ ap.add_argument("--maxlen", type=int, default=4096)
 ap.add_argument("--replay", default="", help="jsonl of verified search traces {q,text}; each step trains on --replay-per-step of them (the retention data)")
 ap.add_argument("--guard", type=int, default=0, help="1: watch the share of rollouts that write no reply over a sliding window; when it runs away from the opening baseline, reload the last healthy checkpoint, halve the learning rate and carry on (three times, then stop)"); ap.add_argument("--guard-window", type=int, default=80); ap.add_argument("--guard-floor", type=float, default=0.20, help="no trip below this absolute rate"); ap.add_argument("--guard-mult", type=float, default=2.0, help="trip at this multiple of the opening baseline"); ap.add_argument("--guard-cut", type=float, default=3.0, help="trip at this multiple of the opening share of rollouts cut for searching without end"); ap.add_argument("--guard-cut-floor", type=float, default=0.20); ap.add_argument("--guard-ns-floor", type=float, default=6.0, help="no searches trip below this absolute mean"); ap.add_argument("--guard-ns", type=float, default=1.8, help="trip at this multiple of the opening searches per rollout"); ap.add_argument("--guard-rollbacks", type=int, default=3); ap.add_argument("--complete-only", type=int, default=0, help="1: train only on rollouts that actually finished their turn (EOS reached, no repetition death). Not a quality filter: a rollout cut off by the token cap is an unfinished fragment, and training on it teaches the model not to stop -- r7 went from 5%% to 59%% no-reply that way"); ap.add_argument("--reason", default="", help="jsonl of reasoning problems {q, reply}: the loop leaves the search corpus and runs GRPO on these instead, the teacher scoring each sample against the reference"); ap.add_argument("--reason-g", type=int, default=8, help="samples per problem"); ap.add_argument("--search-every", type=int, default=0, help=">0: every Nth step is a search question from the pool instead of a reasoning problem, scored the same way but on its own reward"); ap.add_argument("--w-talk", type=float, default=0.5, help="what the teacher can add to a grounded-correct search rollout for a reply that reads conversationally"); ap.add_argument("--search-wheels", type=int, default=0, help="1: a search group that scores zero also learns from a demonstration. Off by default: the search side already works at the product settings, and a teacher trajectory carries the old register and the old thinking style"); ap.add_argument("--search-demo", default="", help="jsonl of {q, traj}: the teacher's own trajectory for each search question, trained on (searches only, reply discarded) when a group scores zero"); ap.add_argument("--wheels", type=int, default=0, help="1: when all samples of a reasoning group score zero there is no signal, so train on the reference answer instead (the teacher demonstrates the problem the model cannot do)"); ap.add_argument("--judge-api", default="deepseek", choices=["deepseek", "openai"], help="which teacher scores the reasoning samples"); ap.add_argument("--judge-model", default="", help="model name for that teacher; empty picks the default for the api"); ap.add_argument("--reason-stub", type=int, default=0, help="1: score by shape alone, no teacher call (for a smoke run with no credit)"); ap.add_argument("--queue", type=int, default=0, help="1: each rollout batch takes --b different questions; the rows queue up and every step trains on one of them (no selection) plus Dolphin; a new batch runs when the queue is empty"); ap.add_argument("--train-all", type=int, default=0, help="1: train on every rollout of the step, no selection (the gold and the judge only measure)"); ap.add_argument("--replay-per-step", type=int, default=2); ap.add_argument("--rollout-every", type=int, default=1, help="do the measurement rollout only every N steps (accepted ones join the replay set)")
 ap.add_argument("--pg-norm", default="mean", choices=["mean", "const"], help="how a rollout's policy-gradient loss is averaged over its tokens. mean: by its own length (a long wrong rollout is then punished less per token than a short one, so wrong rollouts grow: g5 search side 176 -> 436 words, 7%% -> 36%% unfinished). const: by --pg-norm-len, so every token of a wrong rollout costs the same and a long one costs more in total.")
+ap.add_argument("--guard-pass", type=float, default=0.5, help="the guard trips only when, besides the unfinished or search-count rise, the window's pass rate has fallen to this fraction of the baseline pass rate (one hard question in a window is not a collapse)")
 ap.add_argument("--search-lr", type=float, default=0.0, help=">0: the search side gets its own Adam at this rate (the pool3 search GRPO ran 1e-5), the reasoning side and the Dolphin SFT keep --lr. Implies --accum 1.")
 ap.add_argument("--search-temp", type=float, default=0.0, help=">0: sampling temperature for the search rollouts (pool3: 0.9); 0 = --temp")
 ap.add_argument("--search-gen", type=int, default=0, help=">0: generation cap for the search rollouts (pool3: 1500); 0 = --gen")
@@ -929,7 +930,7 @@ if A.search_demo:
             if r.get("q") and r.get("traj"): demos[r["q"].strip()] = r["traj"]
         except Exception: pass
     print(f"[data] {len(demos)} teacher trajectories for the search side", flush=True)
-gw = collections.deque(maxlen=10); gbase = tuple(state["gbase"]) if state.get("gbase") else None
+gw = collections.deque(maxlen=10); gbase = tuple(state["gbase"]) if state.get("gbase") and len(state["gbase"]) == 3 else None
 reason = []
 if A.reason:
     for line in open(A.reason):
@@ -1135,20 +1136,23 @@ for step in range(state["step"] + 1, A.steps + 1) if reason else []:
         # what g5 did at step ~225: searches per rollout 1 -> 5, thinking 174 -> 424 words, half the
         # rollouts never answering. Watched over the last ten search steps against the first ten.
         gw.append((sum(1 for v in notes if v.get("unfinished")) / max(len(notes), 1),
-                   sum(r["ns"] for r in rolls) / max(len(rolls), 1)))
+                   sum(r["ns"] for r in rolls) / max(len(rolls), 1),
+                   sum(1 for x in rw if x >= 1.0) / max(len(rw), 1)))
         if gbase is None and len(gw) == gw.maxlen:
-            gbase = (sum(x[0] for x in gw) / len(gw), sum(x[1] for x in gw) / len(gw))
-            print(f"[guard] baseline over the first {gw.maxlen} search steps: unfinished {100*gbase[0]:.0f}%, {gbase[1]:.1f} searches per rollout", flush=True)
+            gbase = tuple(sum(x[i] for x in gw) / len(gw) for i in range(3))
+            print(f"[guard] baseline over the first {gw.maxlen} search steps: unfinished {100*gbase[0]:.0f}%, {gbase[1]:.1f} searches per rollout, pass {100*gbase[2]:.0f}%", flush=True)
         elif gbase is not None and len(gw) == gw.maxlen and step > guard_from + 2 * gw.maxlen:
-            cu = sum(x[0] for x in gw) / len(gw); cn = sum(x[1] for x in gw) / len(gw)
-            trip = cu >= max(A.guard_floor, A.guard_mult * gbase[0]) or cn >= max(A.guard_ns_floor, A.guard_ns * gbase[1])
+            cu, cn, cp = (sum(x[i] for x in gw) / len(gw) for i in range(3))
+            worse = cu >= max(A.guard_floor, A.guard_mult * gbase[0]) or cn >= max(A.guard_ns_floor, A.guard_ns * gbase[1])
+            trip = worse and cp <= A.guard_pass * gbase[2]      # g7 step 40: one 7-unfinished question tripped it at 43% pass, same as the baseline
+            if worse and not trip: print(f"[guard] window unfinished {100*cu:.0f}%, searches {cn:.1f}, but pass {100*cp:.0f}% vs {100*gbase[2]:.0f}%: not a collapse", flush=True)
             if trip:
                 if nrb >= A.guard_rollbacks or not os.path.exists(GOOD):
                     print(f"ONLINE_COLLAPSE step {step}: unfinished {100*cu:.0f}% vs {100*gbase[0]:.0f}%, searches {cn:.1f} vs {gbase[1]:.1f}, "
                           + ("no healthy checkpoint" if not os.path.exists(GOOD) else f"{nrb} rollbacks spent"), flush=True)
                     save_ckpt(LATEST); break
                 nrb += 1; nu = reload_good()
-                print(f"ONLINE_ROLLBACK {nrb} at step {step}: unfinished {100*cu:.0f}% vs {100*gbase[0]:.0f}%, searches {cn:.1f} vs {gbase[1]:.1f}, "
+                print(f"ONLINE_ROLLBACK {nrb} at step {step}: unfinished {100*cu:.0f}% vs {100*gbase[0]:.0f}%, searches {cn:.1f} vs {gbase[1]:.1f}, pass {100*cp:.0f}% vs {100*gbase[2]:.0f}%, "
                       f"reloaded {GOOD} ({nu} unexpected), lr now {opt.param_groups[0]['lr']:.2g}", flush=True)
                 gw.clear(); guard_from = step
             elif cu <= max(gbase[0] * 1.5, gbase[0] + 0.05) and cn <= max(gbase[1] * 1.5, gbase[1] + 0.5) and step % A.save_every == 0:
