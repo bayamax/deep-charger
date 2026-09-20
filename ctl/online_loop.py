@@ -904,6 +904,7 @@ if A.search_demo:
             if r.get("q") and r.get("traj"): demos[r["q"].strip()] = r["traj"]
         except Exception: pass
     print(f"[data] {len(demos)} teacher trajectories for the search side", flush=True)
+gw = collections.deque(maxlen=10); gbase = tuple(state["gbase"]) if state.get("gbase") else None
 reason = []
 if A.reason:
     for line in open(A.reason):
@@ -1098,7 +1099,29 @@ for step in range(state["step"] + 1, A.steps + 1) if reason else []:
             + f", search {100*cum.get('search pass',0)/max(cum.get('search n',0),1):.0f}% (mean {cum.get('search sum',0)/max(cum.get('search n',0),1):+.2f}) of {cum.get('search n',0)}"
             + f" | {(time.time()-t0)/60:.0f} min")
     print(line, flush=True); log.write(line + "\n"); log.flush()
+    if A.guard and searching:
+        # what g5 did at step ~225: searches per rollout 1 -> 5, thinking 174 -> 424 words, half the
+        # rollouts never answering. Watched over the last ten search steps against the first ten.
+        gw.append((sum(1 for v in notes if v.get("unfinished")) / max(len(notes), 1),
+                   sum(r["ns"] for r in rolls) / max(len(rolls), 1)))
+        if gbase is None and len(gw) == gw.maxlen:
+            gbase = (sum(x[0] for x in gw) / len(gw), sum(x[1] for x in gw) / len(gw))
+            print(f"[guard] baseline over the first {gw.maxlen} search steps: unfinished {100*gbase[0]:.0f}%, {gbase[1]:.1f} searches per rollout", flush=True)
+        elif gbase is not None and len(gw) == gw.maxlen and step > guard_from + 2 * gw.maxlen:
+            cu = sum(x[0] for x in gw) / len(gw); cn = sum(x[1] for x in gw) / len(gw)
+            trip = cu >= max(A.guard_floor, A.guard_mult * gbase[0]) or cn >= max(A.guard_ns_floor, A.guard_ns * gbase[1])
+            if trip:
+                if nrb >= A.guard_rollbacks or not os.path.exists(GOOD):
+                    print(f"ONLINE_COLLAPSE step {step}: unfinished {100*cu:.0f}% vs {100*gbase[0]:.0f}%, searches {cn:.1f} vs {gbase[1]:.1f}, "
+                          + ("no healthy checkpoint" if not os.path.exists(GOOD) else f"{nrb} rollbacks spent"), flush=True)
+                    save_ckpt(LATEST); break
+                nrb += 1; nu = reload_good()
+                print(f"ONLINE_ROLLBACK {nrb} at step {step}: unfinished {100*cu:.0f}% vs {100*gbase[0]:.0f}%, searches {cn:.1f} vs {gbase[1]:.1f}, "
+                      f"reloaded {GOOD} ({nu} unexpected), lr now {opt.param_groups[0]['lr']:.2g}", flush=True)
+                gw.clear(); guard_from = step
+            elif cu <= max(gbase[0] * 1.5, gbase[0] + 0.05) and cn <= max(gbase[1] * 1.5, gbase[1] + 0.5) and step % A.save_every == 0:
+                save_ckpt(GOOD)                                  # this window still looks like the opening one
     if step % A.save_every == 0 or step == A.steps:
-        save_ckpt(LATEST); json.dump({"step": step, "cum": cum, "di": di, "ri": ri, "qi": qi}, open(STATE_F, "w"))
+        save_ckpt(LATEST); json.dump({"step": step, "cum": cum, "di": di, "ri": ri, "qi": qi, "gbase": gbase, "rollbacks": nrb, "guard_from": guard_from}, open(STATE_F, "w"))
         print(f"[save] step {step}", flush=True)
 if reason: print("ONLINE_LOOP_DONE", flush=True)

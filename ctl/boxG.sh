@@ -78,13 +78,14 @@ PRUNS="p_t06q4:1:0.6 p_t06bf16:0:0.6"
 PG=64
 PSKIP=
 MODE=online
-ORUN=g5
+ORUN=g6
+OSEED=g5_step200
 OMODEL=s4_hf
 OB=8
 ODRATIO=1
 ODMIN=1
 ODOLPHIN=dolphin_v2.jsonl
-OLR=1e-4
+OLR=5e-5
 OACCUM=2
 OLAYERS=all
 OREPLAY=replay_v1.jsonl
@@ -487,6 +488,18 @@ FZ
   rm -f /root/reeval_*.safetensors /root/online_*/latest.safetensors.tmp
   echo "[disk] $(df -h /root | tail -1 | awk '{print $3" used, "$4" free"}')"
   # resume from the hub copy of this run (uploaded every 30 min) when this box did not start it
+  # start from a frozen checkpoint of another run: g5 broke at step ~225 with no guard in place, so g6
+  # picks up its step-200 weights and carries on with the guard and half the rate
+  if [ -n "${OSEED:-}" ] && [ ! -s $OUT/state.json ]; then
+    for f in latest.safetensors state.json; do
+      for try in 1 2 3 4 5 6; do hf download $R --include "pooler_distill/chatsft/online/$OSEED/$f" --local-dir /root/hfdl >/dev/null 2>&1; [ -s /root/hfdl/pooler_distill/chatsft/online/$OSEED/$f ] && break; sleep 20; done
+      [ -s /root/hfdl/pooler_distill/chatsft/online/$OSEED/$f ] && cp /root/hfdl/pooler_distill/chatsft/online/$OSEED/$f $OUT/$f
+    done
+    [ -s /root/online_${OSEED%_step*}/latest.safetensors ] && [ ! -s $OUT/latest.safetensors ] && echo "ONLINE_SEED_ABORT $ORUN: $OSEED not on the hub"
+    st=$(python3 -c "import json;print(json.load(open('$OUT/state.json'))['step'])" 2>/dev/null || echo 0)
+    touch /root/.frozen_${ORUN}_$st       # the seed itself is already frozen under its own name
+    echo "ONLINE_SEED $ORUN from $OSEED (step $st) $(date -u)"
+  fi
   if [ "${ORESUME:-0}" = "1" ] && [ ! -s $OUT/state.json ]; then
     for f in latest.safetensors state.json loop.log accepted.jsonl rollouts.jsonl; do
       for try in 1 2 3 4 5 6; do hf download $R --include "pooler_distill/chatsft/online/$ORUN/$f" --local-dir /root/hfdl >/dev/null 2>&1; [ -s /root/hfdl/pooler_distill/chatsft/online/$ORUN/$f ] && break; sleep 20; done
