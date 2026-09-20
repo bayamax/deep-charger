@@ -581,7 +581,7 @@ while :; do
 done
 OKB
   chmod +x /root/onlinekeep.sh; setsid nohup bash /root/onlinekeep.sh >> /proc/1/fd/1 2>&1 < /dev/null &
-  sleep 90; grep -E "^\[init\]|^\[cfg\]" /root/online_$ORUN.log | tail -2 | cut -c1-400; tail -3 /root/online_$ORUN.log | cut -c1-200; echo "ONLINE_LAUNCH_DONE $ORUN $(date -u)"; exit 0
+  sleep 90; echo "loop script: $(wc -l < /root/work/online_loop.py) lines, wheelfix=$(grep -c "max(rw) <= 0.0" /root/work/online_loop.py)"; grep -E "^\[init\]|^\[cfg\]" /root/online_$ORUN.log | tail -2 | cut -c1-400; tail -3 /root/online_$ORUN.log | cut -c1-200; echo "ONLINE_LAUNCH_DONE $ORUN $(date -u)"; exit 0
 fi
 
 if [ "$MODE" = "reeval" ]; then
