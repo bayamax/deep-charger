@@ -77,7 +77,8 @@ JCLIP=0
 PRUNS="p_t06q4:1:0.6 p_t06bf16:0:0.6"
 PG=64
 PSKIP=
-MODE=online
+MODE=reeval       # 2026-09-20 18:30: pause g7 at step ~120 to measure its merged checkpoint on the same 100 held-out as s4 (38%) and g3 (39%)
+RRUN=g7e120; RMODEL=g7; RKIND=merge; RTEMP=0.6; RGEN=4000; RN=34; RSHARDS=3
 ORUN=g7
 OSEED=            # 2026-09-20: g7 starts clean from s4_hf. g6 never carried g5's weights (its seed download left no checkpoint) and after the
                   # layer change ran with layers 0-19 of the stock model; both are now caught at launch (ONLINE_SEED_ABORT, ONLINE_ABORT)
@@ -656,6 +657,22 @@ if [ "$MODE" = "reeval" ]; then
       cp /root/hfdl/pooler_distill/chatsft/online/$RMODEL/latest.safetensors $RCKPT 2>/dev/null
     fi
     [ -s $RCKPT ] || { echo "REEVAL_ABORT $RRUN: online/$RMODEL checkpoint not found"; exit 0; }
+  elif [ "${RKIND:-adapter}" = "merge" ]; then
+    # RMODEL names a run under chatsft/online whose LoRA sits on a subset of layers: fold it into its own base first,
+    # never overlay it on the step-200 structure (that is how g6 ended up with layers 0-19 of the stock model)
+    RHF=/root/reeval_hf_${RMODEL}m; MB=/root/hfdl/pooler_distill/chatsft/${RBASE:-s4_hf}
+    [ -s $MB/model.safetensors ] || hf download $R --include "pooler_distill/chatsft/${RBASE:-s4_hf}/*" --local-dir /root/hfdl >/dev/null 2>&1
+    SRC=/root/online_$RMODEL/latest.safetensors
+    if [ ! -s $SRC ]; then
+      rm -f /root/hfdl/pooler_distill/chatsft/online/$RMODEL/latest.safetensors
+      for try in 1 2 3 4 5 6; do hf download $R --include "pooler_distill/chatsft/online/$RMODEL/latest.safetensors" --local-dir /root/hfdl >/dev/null 2>&1; [ -s /root/hfdl/pooler_distill/chatsft/online/$RMODEL/latest.safetensors ] && break; sleep 20; done
+      SRC=/root/hfdl/pooler_distill/chatsft/online/$RMODEL/latest.safetensors
+    fi
+    [ -s $SRC ] || { echo "REEVAL_ABORT $RRUN: online/$RMODEL checkpoint not found"; exit 0; }
+    RCKPT=/root/reeval_${RMODEL}m_pooler.safetensors; rm -rf $RHF
+    echo "[merge] $SRC (step $(python3 -c "import json;print(json.load(open('/root/online_$RMODEL/state.json'))['step'])" 2>/dev/null || echo ?)) onto ${RBASE:-s4_hf}, lora r16 layers ${RLAYERS:-20-27}"
+    cd /root/work && SP_BASE=$MB SP_NOSYS=1 SP_EPISODIC=1 OMP_NUM_THREADS=1 python3 /root/work/build_merged.py $SRC $RHF $RCKPT 16 ${RLAYERS:-20-27} 2>&1 | grep -E "^\[merge\]|MERGE_DONE|Error|assert|unexpected" | tail -4
+    [ -s $RHF/model.safetensors ] || { echo "REEVAL_ABORT $RRUN: merge of online/$RMODEL failed"; exit 0; }
   elif [ "$RMODEL" = "base" ]; then RHF=/root/eval_hf200; elif [ "${RKIND:-adapter}" = "dir" ]; then
     RHF=/root/hfdl/pooler_distill/chatsft/$RMODEL   # a merged model directory published by the training box
     for try in $(seq 1 60); do   # it may still be uploading: poll for up to an hour
