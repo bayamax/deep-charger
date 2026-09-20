@@ -412,17 +412,25 @@ rollouts went from 12 to 44 to 56 per 180. The reasoning side, at 75% pass, neve
 gradient itself was measured too: on both sides, in every block, the advantage-weighted sum of
 length and of search count was negative, so the reward was not asking for length.
 
-The cause is the loss normalisation. Each rollout's policy-gradient loss was the mean over its own
-tokens, so a wrong rollout's negative advantage was spread over however many tokens it wrote: a
-long wrong rollout was punished less per token than a short one, and a side that is wrong two times
-in three learns to be long when wrong. Once long enough to hit the generation cap it scored the
-same -0.5 as a wrong answer, and nothing pulled it back. The std normalisation of the advantage
-made it worse: an all-wrong group with one rollout at -0.1 (a page hit) and eleven at -0.5 gave
-that one rollout, usually the longest, a +3 sigma push. This is the length bias described for GRPO
-by the Dr. GRPO paper, and the fix is theirs: divide every rollout's loss by the same constant
-(1024 tokens), and use r - mean without the std. g6 carries both from step 200, with the search
-side's own wheels back on (an all-wrong search group learns one verified replay trace) and the
-guard now inside the GRPO loop as the safety net it was meant to be.
+The path it runs away along is the loss normalisation. Each rollout's policy-gradient loss is the
+mean over its own tokens, so a wrong rollout's negative advantage is spread over however many
+tokens it wrote: a long wrong rollout is punished less per token than a short one, and a side
+that is wrong two times in three drifts toward being long when wrong (the length bias the Dr.
+GRPO paper describes). But the search GRPO that made this model had exactly that normalisation
+and did not run away, so the bias is the road, not the driver. What g5 had changed against that
+run was the two limits that had stopped the search GRPO's own early collapse: LoRA on all 28
+layers instead of 20–27, and a rate of 1e-4 instead of 1e-5. Every online run since r1 had been
+on all layers; at 1e-5 that never showed because the weights barely moved.
+
+g6 therefore puts the search side back under the search GRPO's conditions and lets only the
+reasoning side differ. Search: LoRA on layers 20–27, its own Adam at 1e-5 with its own moments,
+temperature 0.9, a 1500-token cap, questions from the same corpus pool (2857, gold of at most
+six words, the 300 held-out removed), the per-rollout mean and std normalisation as before, no
+wheels; the original reward plus the 0.5 conversational bonus, and the cut at the seventh
+search. Reasoning: the same adapter, its own Adam at 5e-5 which also carries the one Dolphin
+record per step, temperature 0.6, a 7000-token cap, the R1 reference when all twelve samples
+fail. One optimizer steps per loop step. The constant-length normalisation stays in the code as
+a flag, off. The guard runs inside the GRPO loop as the safety net.
 
 ## Next, in order
 
