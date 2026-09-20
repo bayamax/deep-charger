@@ -86,7 +86,7 @@ ODRATIO=1
 ODMIN=1
 ODOLPHIN=dolphin_v2.jsonl
 OLR=5e-5
-OACCUM=2
+OACCUM=1          # 2026-09-20: two optimizers now, one step each
 OLAYERS=20-27     # 2026-09-20: back to the layer range the search GRPO (pool3) ran on; every online run so far had LoRA on all 28 layers
 OREPLAY=replay_v1.jsonl
 OREPLAYFILTER=1
@@ -108,8 +108,8 @@ OWHEELS=1
 OWTALK=0.5
 OSEARCHDEMO=
 OSEARCHWHEELS=0   # 2026-09-20: off again, as in the search GRPO; the layer limit is the fix, not a crutch
-OPGNORM=const     # 2026-09-20: Dr-GRPO loss: divide by a fixed 1024 tokens, not by the rollout's own length (the per-length mean let wrong rollouts grow until they never finished: g5 search side)
-OADVSTD=0         # advantage = r - mean, no /std blow-up of all-wrong groups
+OPGNORM=mean      # 2026-09-20: back to the search GRPO's own normalisation (per-rollout mean, /std); the layer limit is the fix
+OADVSTD=1
 OREASONSTUB=0
 OJUDGEAPI=openai
 OJUDGEMODEL=gpt-5-nano
@@ -117,9 +117,13 @@ OMAXSRCH=7
 OJUDGE=0
 OREPLAYN=0
 OROLLEVERY=1
-OQFILE=pooler_distill/measureq.jsonl
+OQFILE=           # 2026-09-20: empty; the search questions come from the corpus pool the search GRPO trained on (OPOOL3Q)
+OPOOL3Q=1         # search questions = corpus q/gold pairs with a gold of at most 6 words, held-out removed, exactly as grpo_pool did
 ORESUME=0
 OSTEPS=1200
+OSEARCHLR=1e-5    # 2026-09-20: the search side steps its own Adam at the search GRPO's rate; --lr is the reasoning side's
+OSEARCHTEMP=0.9   # search rollouts sampled as the search GRPO sampled them
+OSEARCHGEN=1500   # and capped as it capped them; the reasoning side keeps OGEN
 OTEMP=0.6
 SHARDS=3
 RAW="https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl"
@@ -445,6 +449,21 @@ if [ "$MODE" = "online" ]; then
     [ -s /root/hfdl/$OQFILE ] || for try in 1 2 3; do hf download $R --include "$OQFILE" --local-dir /root/hfdl >/dev/null 2>&1; [ -s /root/hfdl/$OQFILE ] && break; sleep 10; done
     cp /root/hfdl/$OQFILE /root/work/selfq_all.jsonl
   else cat /root/hfdl/pooler_distill/selfq_?.jsonl > /root/work/selfq_all.jsonl; fi; cp /root/hfdl/pooler_distill/chatsft/${ODOLPHIN:-dolphin_v1.jsonl} /root/work/dolphin_v1.jsonl
+  QFILE=/root/work/selfq_all.jsonl
+  if [ "${OPOOL3Q:-0}" = 1 ]; then
+    python3 - <<'PQ'
+import json
+n=0
+with open('/root/work/pool3q.jsonl','w') as o:
+    for line in open('/root/work/corpus_box_final.jsonl'):
+        try: r=json.loads(line)
+        except Exception: continue
+        q,g=(r.get('q') or '').strip(),(r.get('gold') or '').strip()
+        if q and g and len(g.split())<=6: o.write(json.dumps({'q':q,'gold':g},ensure_ascii=False)+'\n'); n+=1
+print('[pool3q]',n,'questions')
+PQ
+    QFILE=/root/work/pool3q.jsonl
+  fi
   # r5: drop replay traces that carry the stray thought markers or a repetition loop (41 of 672 did; replaying them raised the marker rate from 20% to 35% of rollouts in r4)
   REPLAYF=/root/hfdl/pooler_distill/chatsft/${OREPLAY:-replay_v1.jsonl}
   if [ "${OREPLAYFILTER:-0}" = "1" ]; then
@@ -537,6 +556,8 @@ FZ
   if [ ! -f /root/.restart_${ORUN}_demo ]; then pkill -f "online_loop.p[y]"; sleep 8; pkill -9 -f "online_loop.p[y]" 2>/dev/null; touch /root/.restart_${ORUN}_demo; echo "ONLINE_RESTART $ORUN search demos $(date -u)"; fi
   # once (2026-09-20): the wheel trigger tested mean == 0, which an all-wrong search group (-0.5 each) never meets; it now tests max <= 0
   if [ ! -f /root/.restart_${ORUN}_wheelfix ] && grep -q "max(rw) <= 0.0" /root/work/online_loop.py; then pkill -f "online_loop.p[y]"; sleep 8; pkill -9 -f "online_loop.p[y]" 2>/dev/null; touch /root/.restart_${ORUN}_wheelfix; echo "ONLINE_RESTART $ORUN wheel trigger $(date -u)"; fi
+  # once (2026-09-20): the search side back to the search GRPO's conditions: its own optimizer at 1e-5, temp 0.9, gen 1500, corpus questions, mean/std normalisation
+  if [ ! -f /root/.restart_${ORUN}_pool3 ] && grep -q "search-lr" /root/work/online_loop.py; then pkill -f "online_loop.p[y]"; sleep 8; pkill -9 -f "online_loop.p[y]" 2>/dev/null; touch /root/.restart_${ORUN}_pool3; echo "ONLINE_RESTART $ORUN pool3 conditions $(date -u)"; fi
   # once (2026-09-20): search-side wheels off again
   if [ ! -f /root/.restart_${ORUN}_swoff ]; then pkill -f "online_loop.p[y]"; sleep 8; pkill -9 -f "online_loop.p[y]" 2>/dev/null; touch /root/.restart_${ORUN}_swoff; echo "ONLINE_RESTART $ORUN search wheels off $(date -u)"; fi
   # once (2026-09-20): LoRA back on layers 20-27 as in the search GRPO that produced this model
@@ -549,8 +570,8 @@ FZ
   if [ ! -f /root/.restart_$ORUN ]; then pkill -f "online_loop.p[y]"; sleep 8; pkill -9 -f "online_loop.p[y]" 2>/dev/null; touch /root/.restart_$ORUN; echo "ONLINE_RESTART $ORUN dolphin ratio $ODRATIO min $ODMIN $(date -u)"; fi
   if ! pgrep -f "online_loop.p[y]" >/dev/null; then
     cd /root/work && DSK_KEY=$(cat /root/.dsk 2>/dev/null) OAI_KEY=$(cat /root/.oai 2>/dev/null) PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True setsid nohup python3 /root/work/online_loop.py $OHF $OUT \
-      --questions /root/work/selfq_all.jsonl --dolphin /root/work/dolphin_v1.jsonl --heldout /root/work/eval300.jsonl \
-      --b $OB --steps $OSTEPS --temp $OTEMP --lr $OLR --dolphin-ratio ${ODRATIO:-2} --dolphin-min ${ODMIN:-2} --accum ${OACCUM:-1} --replay $REPLAYF --replay-per-step ${OREPLAYN:-2} --rollout-every ${OROLLEVERY:-1} --train-all ${OTRAINALL:-0} --queue ${OQUEUE:-0} --complete-only ${OCOMPLETE:-0} --gen ${OGEN:-1500} --budget ${OBUDGET:-900} --guard ${OGUARD:-0} --maxsrch ${OMAXSRCH:-0} --judge ${OJUDGE:-1} ${OREASON:+--reason /root/hfdl/pooler_distill/chatsft/$OREASON --reason-g ${OREASONG:-8} --reason-stub ${OREASONSTUB:-0} --judge-api ${OJUDGEAPI:-deepseek} --judge-model ${OJUDGEMODEL:-} --search-every ${OSEARCHEVERY:-0} --w-talk ${OWTALK:-0.5} --wheels ${OWHEELS:-0} --search-wheels ${OSEARCHWHEELS:-0} --pg-norm ${OPGNORM:-mean} --pg-norm-len 1024 --adv-std ${OADVSTD:-1} ${OSEARCHDEMO:+--search-demo /root/hfdl/$OSEARCHDEMO}} --pooler none --lora-rank 16 --lora-layers ${OLAYERS:-all} --gradckpt 1 --save-every 5 --stop eos \
+      --questions $QFILE --dolphin /root/work/dolphin_v1.jsonl --heldout /root/work/eval300.jsonl \
+      --b $OB --steps $OSTEPS --temp $OTEMP --lr $OLR --dolphin-ratio ${ODRATIO:-2} --dolphin-min ${ODMIN:-2} --accum ${OACCUM:-1} --replay $REPLAYF --replay-per-step ${OREPLAYN:-2} --rollout-every ${OROLLEVERY:-1} --train-all ${OTRAINALL:-0} --queue ${OQUEUE:-0} --complete-only ${OCOMPLETE:-0} --gen ${OGEN:-1500} --budget ${OBUDGET:-900} --guard ${OGUARD:-0} --maxsrch ${OMAXSRCH:-0} --judge ${OJUDGE:-1} ${OREASON:+--reason /root/hfdl/pooler_distill/chatsft/$OREASON --reason-g ${OREASONG:-8} --reason-stub ${OREASONSTUB:-0} --judge-api ${OJUDGEAPI:-deepseek} --judge-model ${OJUDGEMODEL:-} --search-every ${OSEARCHEVERY:-0} --w-talk ${OWTALK:-0.5} --wheels ${OWHEELS:-0} --search-wheels ${OSEARCHWHEELS:-0} --pg-norm ${OPGNORM:-mean} --pg-norm-len 1024 --adv-std ${OADVSTD:-1} --search-lr ${OSEARCHLR:-0} --search-temp ${OSEARCHTEMP:-0} --search-gen ${OSEARCHGEN:-0} ${OSEARCHDEMO:+--search-demo /root/hfdl/$OSEARCHDEMO}} --pooler none --lora-rank 16 --lora-layers ${OLAYERS:-all} --gradckpt 1 --save-every 5 --stop eos \
       >> /root/online_$ORUN.log 2>&1 < /dev/null &
   fi
   # once: in reasoning mode the empty search loop printed the end marker at launch, and the keeper
