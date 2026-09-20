@@ -77,8 +77,7 @@ JCLIP=0
 PRUNS="p_t06q4:1:0.6 p_t06bf16:0:0.6"
 PG=64
 PSKIP=
-MODE=reeval       # 2026-09-20 18:30: pause g7 at step ~120 to measure its merged checkpoint on the same 100 held-out as s4 (38%) and g3 (39%)
-RRUN=g7e120; RMODEL=g7; RKIND=merge; RTEMP=0.6; RGEN=4000; RN=34; RSHARDS=3
+MODE=online       # 2026-09-20 20:45: back to g7 after the step-120 held-out check (35.3% vs s4 38.0%, within noise; eval took 2h16m)
 ORUN=g7
 OSEED=            # 2026-09-20: g7 starts clean from s4_hf. g6 never carried g5's weights (its seed download left no checkpoint) and after the
                   # layer change ran with layers 0-19 of the stock model; both are now caught at launch (ONLINE_SEED_ABORT, ONLINE_ABORT)
