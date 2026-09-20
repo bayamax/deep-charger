@@ -122,7 +122,7 @@ OPOOL3Q=1         # search questions = corpus q/gold pairs with a gold of at mos
 ORESUME=0
 OSTEPS=1200
 OSEARCHLR=1e-5    # 2026-09-20: the search side steps its own Adam at the search GRPO's rate; --lr is the reasoning side's
-OSEARCHTEMP=0.9   # search rollouts sampled as the search GRPO sampled them
+OSEARCHTEMP=0.6   # 2026-09-20: 0.9 as in pool3 stopped this model searching at all (0.1 searches per rollout, 1% pass over 46 steps); at 0.6 it searches (median 1)
 OSEARCHGEN=1500   # and capped as it capped them; the reasoning side keeps OGEN
 OTEMP=0.6
 SHARDS=3
@@ -560,6 +560,18 @@ FZ
   if [ ! -f /root/.restart_${ORUN}_wheelfix ] && grep -q "max(rw) <= 0.0" /root/work/online_loop.py; then pkill -f "online_loop.p[y]"; sleep 8; pkill -9 -f "online_loop.p[y]" 2>/dev/null; touch /root/.restart_${ORUN}_wheelfix; echo "ONLINE_RESTART $ORUN wheel trigger $(date -u)"; fi
   # once (2026-09-20): the search side back to the search GRPO's conditions: its own optimizer at 1e-5, temp 0.9, gen 1500, corpus questions, mean/std normalisation
   if [ ! -f /root/.restart_${ORUN}_pool3 ] && grep -q "search-lr" /root/work/online_loop.py; then pkill -f "online_loop.p[y]"; sleep 8; pkill -9 -f "online_loop.p[y]" 2>/dev/null; touch /root/.restart_${ORUN}_pool3; echo "ONLINE_RESTART $ORUN pool3 conditions $(date -u)"; fi
+  # once (2026-09-20): search temperature back to 0.6, and the guard baseline it learned while the model was not searching is dropped
+  if [ ! -f /root/.restart_${ORUN}_temp06 ]; then pkill -f "online_loop.p[y]"; sleep 8; pkill -9 -f "online_loop.p[y]" 2>/dev/null; touch /root/.restart_${ORUN}_temp06
+    python3 - "$OUT/state.json" <<'GR'
+import json,sys
+p=sys.argv[1]
+try: st=json.load(open(p))
+except Exception: sys.exit(0)
+for k in ('gbase','rollbacks','guard_from'): st.pop(k, None)
+json.dump(st, open(p,'w'))
+print('[guard] baseline reset at step', st.get('step'))
+GR
+    rm -f $OUT/good.safetensors; echo "ONLINE_RESTART $ORUN search temp 0.6 $(date -u)"; fi
   # once (2026-09-20): the first pool3 launch had no corpus on this box and started with 0 questions; relaunch once the pool exists
   if [ ! -f /root/.restart_${ORUN}_pool3q ] && [ -s /root/work/pool3q.jsonl ]; then pkill -f "online_loop.p[y]"; sleep 8; pkill -9 -f "online_loop.p[y]" 2>/dev/null; touch /root/.restart_${ORUN}_pool3q; echo "ONLINE_RESTART $ORUN pool3 questions $(wc -l < /root/work/pool3q.jsonl) $(date -u)"; fi
   # once (2026-09-20): search-side wheels off again
