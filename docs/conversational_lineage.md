@@ -397,6 +397,33 @@ against the group's own mean, so a sample below the mean is pushed down rather t
 group whose eight samples all score alike carries no signal and is skipped, which is three or four
 steps in ten. One Dolphin record of ordinary SFT rides along with each step.
 
+## g3–g6: both sides on-policy, and why g5 lost the search side
+
+g3 (lr 1e-5, 280 steps) barely moved the weights: the adapter came to 0.031% of the base norm and the
+behaviour did not change. g5 raised the rate to 1e-4 and by step 200 the adapter was 0.284% and the
+model was visibly different (working code, longer thinking, 4/12 on the twelve check problems against
+6/12 for its seed). It then lost the search side between steps 220 and 260 with no guard running:
+the guard of that time lived in the search-corpus loop, which the GRPO mode never enters.
+
+The full step record says what happened, and it was not more searching. The median search count
+stayed at one. What grew was the thinking of the *wrong* search rollouts: 176 words in steps
+180–209, 206 in 210–239, 436 in 240–269, while the correct ones stayed at 130–176. Unfinished
+rollouts went from 12 to 44 to 56 per 180. The reasoning side, at 75% pass, never moved. The
+gradient itself was measured too: on both sides, in every block, the advantage-weighted sum of
+length and of search count was negative, so the reward was not asking for length.
+
+The cause is the loss normalisation. Each rollout's policy-gradient loss was the mean over its own
+tokens, so a wrong rollout's negative advantage was spread over however many tokens it wrote: a
+long wrong rollout was punished less per token than a short one, and a side that is wrong two times
+in three learns to be long when wrong. Once long enough to hit the generation cap it scored the
+same -0.5 as a wrong answer, and nothing pulled it back. The std normalisation of the advantage
+made it worse: an all-wrong group with one rollout at -0.1 (a page hit) and eleven at -0.5 gave
+that one rollout, usually the longest, a +3 sigma push. This is the length bias described for GRPO
+by the Dr. GRPO paper, and the fix is theirs: divide every rollout's loss by the same constant
+(1024 tokens), and use r - mean without the std. g6 carries both from step 200, with the search
+side's own wheels back on (an all-wrong search group learns one verified replay trace) and the
+guard now inside the GRPO loop as the safety net it was meant to be.
+
 ## Next, in order
 
 1. Failure-case data for the search side: prefixes whose searches never reached the gold, with the

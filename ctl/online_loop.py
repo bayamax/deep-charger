@@ -59,6 +59,9 @@ ap.add_argument("--dolphin-ratio", type=float, default=2.0, help="Dolphin record
 ap.add_argument("--maxlen", type=int, default=4096)
 ap.add_argument("--replay", default="", help="jsonl of verified search traces {q,text}; each step trains on --replay-per-step of them (the retention data)")
 ap.add_argument("--guard", type=int, default=0, help="1: watch the share of rollouts that write no reply over a sliding window; when it runs away from the opening baseline, reload the last healthy checkpoint, halve the learning rate and carry on (three times, then stop)"); ap.add_argument("--guard-window", type=int, default=80); ap.add_argument("--guard-floor", type=float, default=0.20, help="no trip below this absolute rate"); ap.add_argument("--guard-mult", type=float, default=2.0, help="trip at this multiple of the opening baseline"); ap.add_argument("--guard-cut", type=float, default=3.0, help="trip at this multiple of the opening share of rollouts cut for searching without end"); ap.add_argument("--guard-cut-floor", type=float, default=0.20); ap.add_argument("--guard-ns-floor", type=float, default=6.0, help="no searches trip below this absolute mean"); ap.add_argument("--guard-ns", type=float, default=1.8, help="trip at this multiple of the opening searches per rollout"); ap.add_argument("--guard-rollbacks", type=int, default=3); ap.add_argument("--complete-only", type=int, default=0, help="1: train only on rollouts that actually finished their turn (EOS reached, no repetition death). Not a quality filter: a rollout cut off by the token cap is an unfinished fragment, and training on it teaches the model not to stop -- r7 went from 5%% to 59%% no-reply that way"); ap.add_argument("--reason", default="", help="jsonl of reasoning problems {q, reply}: the loop leaves the search corpus and runs GRPO on these instead, the teacher scoring each sample against the reference"); ap.add_argument("--reason-g", type=int, default=8, help="samples per problem"); ap.add_argument("--search-every", type=int, default=0, help=">0: every Nth step is a search question from the pool instead of a reasoning problem, scored the same way but on its own reward"); ap.add_argument("--w-talk", type=float, default=0.5, help="what the teacher can add to a grounded-correct search rollout for a reply that reads conversationally"); ap.add_argument("--search-wheels", type=int, default=0, help="1: a search group that scores zero also learns from a demonstration. Off by default: the search side already works at the product settings, and a teacher trajectory carries the old register and the old thinking style"); ap.add_argument("--search-demo", default="", help="jsonl of {q, traj}: the teacher's own trajectory for each search question, trained on (searches only, reply discarded) when a group scores zero"); ap.add_argument("--wheels", type=int, default=0, help="1: when all samples of a reasoning group score zero there is no signal, so train on the reference answer instead (the teacher demonstrates the problem the model cannot do)"); ap.add_argument("--judge-api", default="deepseek", choices=["deepseek", "openai"], help="which teacher scores the reasoning samples"); ap.add_argument("--judge-model", default="", help="model name for that teacher; empty picks the default for the api"); ap.add_argument("--reason-stub", type=int, default=0, help="1: score by shape alone, no teacher call (for a smoke run with no credit)"); ap.add_argument("--queue", type=int, default=0, help="1: each rollout batch takes --b different questions; the rows queue up and every step trains on one of them (no selection) plus Dolphin; a new batch runs when the queue is empty"); ap.add_argument("--train-all", type=int, default=0, help="1: train on every rollout of the step, no selection (the gold and the judge only measure)"); ap.add_argument("--replay-per-step", type=int, default=2); ap.add_argument("--rollout-every", type=int, default=1, help="do the measurement rollout only every N steps (accepted ones join the replay set)")
+ap.add_argument("--pg-norm", default="mean", choices=["mean", "const"], help="how a rollout's policy-gradient loss is averaged over its tokens. mean: by its own length (a long wrong rollout is then punished less per token than a short one, so wrong rollouts grow: g5 search side 176 -> 436 words, 7%% -> 36%% unfinished). const: by --pg-norm-len, so every token of a wrong rollout costs the same and a long one costs more in total.")
+ap.add_argument("--pg-norm-len", type=int, default=1024, help="the fixed divisor for --pg-norm const")
+ap.add_argument("--adv-std", type=int, default=1, help="1: advantage = (r - mean) / std within the group. 0: r - mean only, so an all-wrong group with one slightly-less-wrong rollout does not get blown up into a +3 sigma push toward that rollout.")
 ap.add_argument("--accum", type=int, default=1, help="steps whose gradients are accumulated before one optimizer update (both the search-side and the Dolphin part)")
 ap.add_argument("--samepage", type=int, default=1, help="1: a search whose top page was already shown in this rollout serves the NEXT chunk of that page (and says so when the page is used up); 0: teacher environment (always the head)")
 A = ap.parse_args()
@@ -153,7 +156,7 @@ if A.gradckpt:
     print("[init] gradient checkpointing ON for the policy-gradient pass", flush=True)
 nT = sum(p.numel() for p in model.parameters() if p.requires_grad) / 1e6
 nP = sum(p.numel() for p in pooler_params) / 1e6
-print(f"[cfg] G={A.g} steps={A.steps} budget={A.budget} rw={A.rw} maxd={A.maxd} chunk={A.chunk} temp={A.temp} gen={A.gen} maxs={A.maxs} maxm={A.maxm} samepage={A.samepage} maxsrch={A.maxsrch} phantom={A.phantom}x{A.phantom_scale} "
+print(f"[cfg] G={A.g} pg_norm={A.pg_norm}/{A.pg_norm_len} adv_std={A.adv_std} steps={A.steps} budget={A.budget} rw={A.rw} maxd={A.maxd} chunk={A.chunk} temp={A.temp} gen={A.gen} maxs={A.maxs} maxm={A.maxm} samepage={A.samepage} maxsrch={A.maxsrch} phantom={A.phantom}x{A.phantom_scale} "
       f"lr={A.lr} pooler_lr={A.pooler_lr} pooler={A.pooler}(r={A.pooler_rank}) trainable lora={nT:.1f}M pooler={nP:.2f}M", flush=True)
 # ---- environment: verbatim grpo_ep_more serve() ----
 WAPI = "https://en.wikipedia.org/w/api.php"
@@ -600,7 +603,7 @@ def pg_backward(r, coef):
         pr = HEAD(h).float()
         tgt = torch.tensor([gen[c0:c1]], device=DEV); tm = torch.tensor([msk[c0:c1]], device=DEV, dtype=torch.float32)
         ce = torch.nn.functional.cross_entropy(pr.reshape(-1, pr.shape[-1]), tgt.reshape(-1), reduction="none")
-        loss = (ce * tm.reshape(-1)).sum() / ntot
+        loss = (ce * tm.reshape(-1)).sum() / (A.pg_norm_len if A.pg_norm == "const" else ntot)
         (coef * loss).backward()
         tot += float(loss.item()); del h, pr, ce, loss, block; clear()
     return tot
@@ -1067,7 +1070,7 @@ for step in range(state["step"] + 1, A.steps + 1) if reason else []:
     if sd > 1e-6:
         model.train()
         for r, x in zip(rolls, rw):
-            losses.append(guarded(pg_backward, r, (x - mu) / sd / (len(rolls) * A.accum))); clear()
+            losses.append(guarded(pg_backward, r, (x - mu) / (sd if A.adv_std else 1.0) / (len(rolls) * A.accum))); clear()
     elif mu == 0.0 and A.wheels:
         # nothing of its own to learn from: the teacher demonstrates instead
         model.train()
