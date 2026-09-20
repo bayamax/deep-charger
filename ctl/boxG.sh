@@ -87,7 +87,7 @@ ODMIN=1
 ODOLPHIN=dolphin_v2.jsonl
 OLR=5e-5
 OACCUM=2
-OLAYERS=all
+OLAYERS=20-27     # 2026-09-20: back to the layer range the search GRPO (pool3) ran on; every online run so far had LoRA on all 28 layers
 OREPLAY=replay_v1.jsonl
 OREPLAYFILTER=1
 OTRAINALL=1
@@ -535,6 +535,8 @@ FZ
   if [ ! -f /root/.restart_${ORUN}_nsfloor ]; then pkill -f "online_loop.p[y]"; sleep 8; pkill -9 -f "online_loop.p[y]" 2>/dev/null; touch /root/.restart_${ORUN}_nsfloor; echo "ONLINE_RESTART $ORUN guard floor $(date -u)"; fi
   # once: a search group that scores zero now learns from that question's own teacher trajectory
   if [ ! -f /root/.restart_${ORUN}_demo ]; then pkill -f "online_loop.p[y]"; sleep 8; pkill -9 -f "online_loop.p[y]" 2>/dev/null; touch /root/.restart_${ORUN}_demo; echo "ONLINE_RESTART $ORUN search demos $(date -u)"; fi
+  # once (2026-09-20): LoRA back on layers 20-27 as in the search GRPO that produced this model
+  if [ ! -f /root/.restart_${ORUN}_layers ]; then pkill -f "online_loop.p[y]"; sleep 8; pkill -9 -f "online_loop.p[y]" 2>/dev/null; touch /root/.restart_${ORUN}_layers; echo "ONLINE_RESTART $ORUN lora layers 20-27 $(date -u)"; fi
   # once (2026-09-20): constant-length loss normalisation and no std scaling (the g5 collapse cause, see docs).
   # The first launch died on the flags because the raw fetch of online_loop.py was still the old copy; this re-run refetches.
   if [ ! -f /root/.restart_${ORUN}_drgrpo ]; then pkill -f "online_loop.p[y]"; sleep 8; pkill -9 -f "online_loop.p[y]" 2>/dev/null; touch /root/.restart_${ORUN}_drgrpo; echo "ONLINE_RESTART $ORUN dr-grpo norm $(date -u)"; fi
