@@ -78,8 +78,9 @@ PRUNS="p_t06q4:1:0.6 p_t06bf16:0:0.6"
 PG=64
 PSKIP=
 MODE=online
-ORUN=g6
-OSEED=g5_step200
+ORUN=g7
+OSEED=            # 2026-09-20: g7 starts clean from s4_hf. g6 never carried g5's weights (its seed download left no checkpoint) and after the
+                  # layer change ran with layers 0-19 of the stock model; both are now caught at launch (ONLINE_SEED_ABORT, ONLINE_ABORT)
 OMODEL=s4_hf
 OB=8
 ODRATIO=1
@@ -520,7 +521,7 @@ FZ
       for try in 1 2 3 4 5 6; do hf download $R --include "pooler_distill/chatsft/online/$OSEED/$f" --local-dir /root/hfdl >/dev/null 2>&1; [ -s /root/hfdl/pooler_distill/chatsft/online/$OSEED/$f ] && break; sleep 20; done
       [ -s /root/hfdl/pooler_distill/chatsft/online/$OSEED/$f ] && cp /root/hfdl/pooler_distill/chatsft/online/$OSEED/$f $OUT/$f
     done
-    [ -s /root/online_${OSEED%_step*}/latest.safetensors ] && [ ! -s $OUT/latest.safetensors ] && echo "ONLINE_SEED_ABORT $ORUN: $OSEED not on the hub"
+    [ -s $OUT/latest.safetensors ] || { echo "ONLINE_SEED_ABORT $ORUN: $OSEED weights did not arrive; not starting from the bare base under a borrowed step count"; rm -f $OUT/state.json; exit 0; }
     st=$(python3 -c "import json;print(json.load(open('$OUT/state.json'))['step'])" 2>/dev/null || echo 0)
     touch /root/.frozen_${ORUN}_$st       # the seed itself is already frozen under its own name
     echo "ONLINE_SEED $ORUN from $OSEED (step $st) $(date -u)"
@@ -620,7 +621,7 @@ while :; do
 done
 OKB
   chmod +x /root/onlinekeep.sh; setsid nohup bash /root/onlinekeep.sh >> /proc/1/fd/1 2>&1 < /dev/null &
-  sleep 90; echo "loop script: $(wc -l < /root/work/online_loop.py) lines, wheelfix=$(grep -c "max(rw) <= 0.0" /root/work/online_loop.py)"; grep -E "^\[init\]|^\[cfg\]" /root/online_$ORUN.log | tail -2 | cut -c1-400; tail -3 /root/online_$ORUN.log | cut -c1-200; echo "ONLINE_LAUNCH_DONE $ORUN $(date -u)"; exit 0
+  sleep 90; echo "loop script: $(wc -l < /root/work/online_loop.py) lines, wheelfix=$(grep -c "max(rw) <= 0.0" /root/work/online_loop.py)"; grep -E "^\[init\]|^\[cfg\]|ONLINE_ABORT|pool3q" /root/online_$ORUN.log | tail -5 | cut -c1-400; tail -3 /root/online_$ORUN.log | cut -c1-200; echo "ONLINE_LAUNCH_DONE $ORUN $(date -u)"; exit 0
 fi
 
 if [ "$MODE" = "reeval" ]; then

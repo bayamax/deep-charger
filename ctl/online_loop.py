@@ -77,10 +77,11 @@ LAYERS = None if A.lora_layers == "all" else list(range(int(A.lora_layers.split(
 STATE_F = os.path.join(A.outdir, "state.json"); LATEST = os.path.join(A.outdir, "latest.safetensors")
 state = json.load(open(STATE_F)) if os.path.exists(STATE_F) else {"step": 0}
 init_path = LATEST if (state["step"] > 0 and os.path.exists(LATEST)) else A.init
-if os.path.isdir(init_path):                  # merged HF model dir: the weights ARE the base, nothing to overlay
-    os.environ["SP_BASE"] = init_path
-else:
-    os.environ["SP_INIT_FULL"] = init_path
+if os.path.isdir(A.init):                     # merged HF model dir: the weights ARE the base
+    os.environ["SP_BASE"] = A.init            # also under a resume: whatever the checkpoint does not cover must come from
+                                              # this base, never from the stock model the harness would otherwise fetch
+if not os.path.isdir(init_path):
+    os.environ["SP_INIT_FULL"] = init_path    # the run's own checkpoint, overlaid on that base
 import torch  # noqa: E402
 import numpy as np  # noqa: E402
 
@@ -102,7 +103,18 @@ DEV, eos = ns["DEV"], ns["eos"]
 ns["TEMP"] = A.temp; ns["MAXD"] = A.maxd; ns["C"] = A.chunk; ns["RWG"] = A.rw; ns["GREEDY"] = False
 from transformers import DynamicCache  # noqa: E402
 from safetensors.torch import save_file, load_file  # noqa: E402
-print(f"[init] weights <- {init_path} (resume step {state['step']}) lora r={A.lora_rank} layers={A.lora_layers}", flush=True)
+_lb = sum(float(p.detach().float().norm()) ** 2 for n, p in model.named_parameters() if "lora_B" in n) ** 0.5
+print(f"[init] weights <- {init_path} (resume step {state['step']}) lora r={A.lora_rank} layers={A.lora_layers} base={os.environ.get('SP_BASE')} lora_B_norm={_lb:.3f}", flush=True)
+if os.environ.get("SP_INIT_FULL"):
+    # a checkpoint only resumes under the LoRA layout it was saved with: with any other layout the harness loads what
+    # matches and silently leaves the rest at the base (g6 ran layers 0-19 of the stock model for hours this way)
+    from safetensors import safe_open as _so
+    _ck = [k for k in _so(os.environ["SP_INIT_FULL"], "pt").keys() if not k.startswith("pooler.")]
+    _mk = set(model.state_dict().keys()); _bad = [k for k in _ck if k not in _mk]
+    if _bad:
+        print(f"ONLINE_ABORT layout mismatch: {len(_bad)} of {len(_ck)} checkpoint tensors have no place under lora layers={A.lora_layers} (e.g. {_bad[0]}); "
+              f"resume under the layout the checkpoint was saved with, or merge it into a base first", flush=True)
+        sys.exit(1)
 if A.pooler_init and os.path.isdir(init_path) and os.path.exists(A.pooler_init):   # resuming a .safetensors already carries its pooler
     from safetensors.torch import load_file as _lf
     n = pooler.load_sd(_lf(A.pooler_init)); print(f"[init] pooler <- {A.pooler_init} ({n} tensors)", flush=True)
