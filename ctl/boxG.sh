@@ -95,7 +95,7 @@ OQUEUE=1
 OCOMPLETE=1
 OGEN=7000
 OBUDGET=1500
-OGUARD=0
+OGUARD=1
 # the reasoning problems. dolphin_v2 is the short-thinking subset (reference thinking 245 words at the
 # median, 300 at the most); dolphin_v1 is the whole set, 6776 problems whose references think 718 words
 # at the median and 1384 at the ninth decile. Move to v1 when v2 stops teaching anything, which reads as:
