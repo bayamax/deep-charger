@@ -536,7 +536,7 @@ FZ
   # once: a search group that scores zero now learns from that question's own teacher trajectory
   if [ ! -f /root/.restart_${ORUN}_demo ]; then pkill -f "online_loop.p[y]"; sleep 8; pkill -9 -f "online_loop.p[y]" 2>/dev/null; touch /root/.restart_${ORUN}_demo; echo "ONLINE_RESTART $ORUN search demos $(date -u)"; fi
   # once (2026-09-20): the wheel trigger tested mean == 0, which an all-wrong search group (-0.5 each) never meets; it now tests max <= 0
-  if [ ! -f /root/.restart_${ORUN}_wheelfix ]; then pkill -f "online_loop.p[y]"; sleep 8; pkill -9 -f "online_loop.p[y]" 2>/dev/null; touch /root/.restart_${ORUN}_wheelfix; echo "ONLINE_RESTART $ORUN wheel trigger $(date -u)"; fi
+  if [ ! -f /root/.restart_${ORUN}_wheelfix ] && grep -q "max(rw) <= 0.0" /root/work/online_loop.py; then pkill -f "online_loop.p[y]"; sleep 8; pkill -9 -f "online_loop.p[y]" 2>/dev/null; touch /root/.restart_${ORUN}_wheelfix; echo "ONLINE_RESTART $ORUN wheel trigger $(date -u)"; fi
   # once (2026-09-20): LoRA back on layers 20-27 as in the search GRPO that produced this model
   if [ ! -f /root/.restart_${ORUN}_layers ]; then pkill -f "online_loop.p[y]"; sleep 8; pkill -9 -f "online_loop.p[y]" 2>/dev/null; touch /root/.restart_${ORUN}_layers; echo "ONLINE_RESTART $ORUN lora layers 20-27 $(date -u)"; fi
   # once (2026-09-20): constant-length loss normalisation and no std scaling (the g5 collapse cause, see docs).
