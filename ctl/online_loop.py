@@ -1071,7 +1071,7 @@ for step in range(state["step"] + 1, A.steps + 1) if reason else []:
         model.train()
         for r, x in zip(rolls, rw):
             losses.append(guarded(pg_backward, r, (x - mu) / (sd if A.adv_std else 1.0) / (len(rolls) * A.accum))); clear()
-    elif mu == 0.0 and A.wheels:
+    elif max(rw) <= 0.0 and A.wheels:      # every rollout failed (0 on the reasoning side, -0.5 or a page-hit -0.1 on the search side)
         # nothing of its own to learn from: the teacher demonstrates instead
         model.train()
         if searching and not A.search_wheels:
