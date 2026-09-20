@@ -487,6 +487,8 @@ FZ
   for d in /root/online_*/; do [ "$d" = "$OUT/" ] || rm -f $d/latest.safetensors $d/good.safetensors $d/*.tmp; done
   rm -f /root/reeval_*.safetensors /root/online_*/latest.safetensors.tmp
   echo "[disk] $(df -h /root | tail -1 | awk '{print $3" used, "$4" free"}')"
+  # once (2026-09-20): g5 ended unwatched; its full step record is still on this disk and the hub copy stops at step 227
+  if [ ! -f /root/.up_g5_final ] && [ -s /root/online_g5/rollouts.jsonl ]; then ( for f in rollouts.jsonl loop.log; do hf upload $R /root/online_g5/$f pooler_distill/chatsft/online/g5/$f >/dev/null 2>&1; done; touch /root/.up_g5_final; echo "ONLINE_G5_RECORD uploaded $(date -u)" ) & fi
   # resume from the hub copy of this run (uploaded every 30 min) when this box did not start it
   # start from a frozen checkpoint of another run: g5 broke at step ~225 with no guard in place, so g6
   # picks up its step-200 weights and carries on with the guard and half the rate
