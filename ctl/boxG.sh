@@ -563,6 +563,8 @@ FZ
   if [ ! -f /root/.restart_${ORUN}_wheelfix ] && grep -q "max(rw) <= 0.0" /root/work/online_loop.py; then pkill -f "online_loop.p[y]"; sleep 8; pkill -9 -f "online_loop.p[y]" 2>/dev/null; touch /root/.restart_${ORUN}_wheelfix; echo "ONLINE_RESTART $ORUN wheel trigger $(date -u)"; fi
   # once (2026-09-20): the search side back to the search GRPO's conditions: its own optimizer at 1e-5, temp 0.9, gen 1500, corpus questions, mean/std normalisation
   if [ ! -f /root/.restart_${ORUN}_pool3 ] && grep -q "search-lr" /root/work/online_loop.py; then pkill -f "online_loop.p[y]"; sleep 8; pkill -9 -f "online_loop.p[y]" 2>/dev/null; touch /root/.restart_${ORUN}_pool3; echo "ONLINE_RESTART $ORUN pool3 conditions $(date -u)"; fi
+  # once (2026-09-21): the step-200 check's full replies, for grading
+  if [ ! -f /root/.up_g7d200 ] && [ -s /root/work/g7d200_out_0.jsonl ]; then hf upload $R /root/work/g7d200_out_0.jsonl pooler_distill/chatsft/rollouts/g7d200_dolphin.jsonl >/dev/null 2>&1 && touch /root/.up_g7d200 && echo "ONLINE_UPLOADED g7d200 replies"; fi
   # once (2026-09-21): search questions continue pool3's sequence
   if [ ! -f /root/.restart_${ORUN}_poolorder ] && grep -q "pool-order" /root/work/online_loop.py; then pkill -f "online_loop.p[y]"; sleep 8; pkill -9 -f "online_loop.p[y]" 2>/dev/null; touch /root/.restart_${ORUN}_poolorder; echo "ONLINE_RESTART $ORUN pool3 order $(date -u)"; fi
   # once (2026-09-20): the guard also needs the pass rate to fall (g7 tripped at step 40 on one hard question); the false rollback is forgotten
@@ -727,6 +729,7 @@ run_one() {  # $1 questions file, $2 out file, $3 tag
 }
 if [ -n "$RQSRC" ]; then
   run_one /root/work/dolphinq.jsonl /root/work/${RRUN}_out_0.jsonl ${RRUN}0
+  hf upload $R /root/work/${RRUN}_out_0.jsonl pooler_distill/chatsft/rollouts/${RRUN}_dolphin.jsonl >/dev/null 2>&1   # full replies, the log shows 900 chars
   python3 - <<'PYT'
 import json
 import glob
