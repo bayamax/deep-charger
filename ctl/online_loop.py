@@ -173,6 +173,22 @@ if A.search_lr > 0:
     opt_s = torch.optim.Adam([{"params": [p for p in model.parameters() if p.requires_grad], "lr": A.search_lr}])
     A.accum = 1
 BASE_TEMP, BASE_GEN = A.temp, A.gen
+OPT_F = os.path.join(A.outdir, "opt.pt")
+def save_opt():
+    """Adam's moments next to the weights: a resume that rebuilds them from zero takes full-size sign steps for a while
+    (g7's two dips, at 121-140 and 212-230, both followed a resume)"""
+    torch.save({"opt": opt.state_dict(), "opt_s": opt_s.state_dict() if opt_s is not None else None}, OPT_F + ".tmp"); os.replace(OPT_F + ".tmp", OPT_F)
+if state["step"] > 0 and os.path.exists(OPT_F):
+    try:
+        _o = torch.load(OPT_F, map_location=DEV)
+        opt.load_state_dict(_o["opt"])
+        if opt_s is not None and _o.get("opt_s") is not None: opt_s.load_state_dict(_o["opt_s"])
+        for g in opt.param_groups: g["lr"] = A.lr            # the rates always come from the flags, not from the file
+        if opt_s is not None:
+            for g in opt_s.param_groups: g["lr"] = A.search_lr
+        print(f"[init] optimizer moments <- {OPT_F}", flush=True)
+    except Exception as e:
+        print(f"[init] optimizer moments not restored ({type(e).__name__}: {str(e)[:120]}); starting them fresh", flush=True)
 CLM = model.base_model.model            # peft -> causal LM
 BODY, HEAD = CLM.model, CLM.lm_head     # transformer body, lm_head
 if A.gradckpt:
@@ -1172,5 +1188,5 @@ for step in range(state["step"] + 1, A.steps + 1) if reason else []:
                 save_ckpt(GOOD)                                  # this window still looks like the opening one
     if step % A.save_every == 0 or step == A.steps:
         save_ckpt(LATEST); json.dump({"step": step, "cum": cum, "di": di, "ri": ri, "qi": qi, "gbase": gbase, "rollbacks": nrb, "guard_from": guard_from}, open(STATE_F, "w"))
-        print(f"[save] step {step}", flush=True)
+        save_opt(); print(f"[save] step {step}", flush=True)
 if reason: print("ONLINE_LOOP_DONE", flush=True)
