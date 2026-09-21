@@ -642,6 +642,8 @@ OKB
 fi
 
 if [ "$MODE" = "reeval" ]; then
+  # two control runs fired within a minute of each other on 09-21 and merged the same checkpoint side by side: CUDA OOM for both
+  exec 9>/root/.reeval.lock; flock -n 9 || { echo "REEVAL_SKIP: another control run is already doing this"; exit 0; }
   pkill -f "onlinekee[p].sh"; pkill -f "online_loop.p[y]"; sleep 5; pkill -9 -f "online_loop.p[y]" 2>/dev/null
   # Re-measure an earlier checkpoint under the fixed conversational stop rule (EOS terminal), so the
   # table compares like with like: RMODEL is "base" (the step-200 student) or an adapter name on the hub.
