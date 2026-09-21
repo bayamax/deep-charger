@@ -61,6 +61,8 @@ ap.add_argument("--replay", default="", help="jsonl of verified search traces {q
 ap.add_argument("--guard", type=int, default=0, help="1: watch the share of rollouts that write no reply over a sliding window; when it runs away from the opening baseline, reload the last healthy checkpoint, halve the learning rate and carry on (three times, then stop)"); ap.add_argument("--guard-window", type=int, default=80); ap.add_argument("--guard-floor", type=float, default=0.20, help="no trip below this absolute rate"); ap.add_argument("--guard-mult", type=float, default=2.0, help="trip at this multiple of the opening baseline"); ap.add_argument("--guard-cut", type=float, default=3.0, help="trip at this multiple of the opening share of rollouts cut for searching without end"); ap.add_argument("--guard-cut-floor", type=float, default=0.20); ap.add_argument("--guard-ns-floor", type=float, default=6.0, help="no searches trip below this absolute mean"); ap.add_argument("--guard-ns", type=float, default=1.8, help="trip at this multiple of the opening searches per rollout"); ap.add_argument("--guard-rollbacks", type=int, default=3); ap.add_argument("--complete-only", type=int, default=0, help="1: train only on rollouts that actually finished their turn (EOS reached, no repetition death). Not a quality filter: a rollout cut off by the token cap is an unfinished fragment, and training on it teaches the model not to stop -- r7 went from 5%% to 59%% no-reply that way"); ap.add_argument("--reason", default="", help="jsonl of reasoning problems {q, reply}: the loop leaves the search corpus and runs GRPO on these instead, the teacher scoring each sample against the reference"); ap.add_argument("--reason-g", type=int, default=8, help="samples per problem"); ap.add_argument("--search-every", type=int, default=0, help=">0: every Nth step is a search question from the pool instead of a reasoning problem, scored the same way but on its own reward"); ap.add_argument("--w-talk", type=float, default=0.5, help="what the teacher can add to a grounded-correct search rollout for a reply that reads conversationally"); ap.add_argument("--search-wheels", type=int, default=0, help="1: a search group that scores zero also learns from a demonstration. Off by default: the search side already works at the product settings, and a teacher trajectory carries the old register and the old thinking style"); ap.add_argument("--search-demo", default="", help="jsonl of {q, traj}: the teacher's own trajectory for each search question, trained on (searches only, reply discarded) when a group scores zero"); ap.add_argument("--wheels", type=int, default=0, help="1: when all samples of a reasoning group score zero there is no signal, so train on the reference answer instead (the teacher demonstrates the problem the model cannot do)"); ap.add_argument("--judge-api", default="deepseek", choices=["deepseek", "openai"], help="which teacher scores the reasoning samples"); ap.add_argument("--judge-model", default="", help="model name for that teacher; empty picks the default for the api"); ap.add_argument("--reason-stub", type=int, default=0, help="1: score by shape alone, no teacher call (for a smoke run with no credit)"); ap.add_argument("--queue", type=int, default=0, help="1: each rollout batch takes --b different questions; the rows queue up and every step trains on one of them (no selection) plus Dolphin; a new batch runs when the queue is empty"); ap.add_argument("--train-all", type=int, default=0, help="1: train on every rollout of the step, no selection (the gold and the judge only measure)"); ap.add_argument("--replay-per-step", type=int, default=2); ap.add_argument("--rollout-every", type=int, default=1, help="do the measurement rollout only every N steps (accepted ones join the replay set)")
 ap.add_argument("--pg-norm", default="mean", choices=["mean", "const"], help="how a rollout's policy-gradient loss is averaged over its tokens. mean: by its own length (a long wrong rollout is then punished less per token than a short one, so wrong rollouts grow: g5 search side 176 -> 436 words, 7%% -> 36%% unfinished). const: by --pg-norm-len, so every token of a wrong rollout costs the same and a long one costs more in total.")
 ap.add_argument("--guard-pass", type=float, default=0.5, help="the guard trips only when, besides the unfinished or search-count rise, the window's pass rate has fallen to this fraction of the baseline pass rate (one hard question in a window is not a collapse)")
+ap.add_argument("--pool-order", default="loop", choices=["loop", "pool3"], help="pool3: walk the search questions in the order the search GRPO (grpo_pool) walked them: shuffle the whole gold<=6 pool with seed 0, then drop the held-out")
+ap.add_argument("--pool-offset", type=int, default=0, help="the pool index the first search step of the run maps to (pool3 stopped at 200)")
 ap.add_argument("--search-lr", type=float, default=0.0, help=">0: the search side gets its own Adam at this rate (the pool3 search GRPO ran 1e-5), the reasoning side and the Dolphin SFT keep --lr. Implies --accum 1.")
 ap.add_argument("--search-temp", type=float, default=0.0, help=">0: sampling temperature for the search rollouts (pool3: 0.9); 0 = --temp")
 ap.add_argument("--search-gen", type=int, default=0, help=">0: generation cap for the search rollouts (pool3: 1500); 0 = --gen")
@@ -179,7 +181,7 @@ if A.gradckpt:
     print("[init] gradient checkpointing ON for the policy-gradient pass", flush=True)
 nT = sum(p.numel() for p in model.parameters() if p.requires_grad) / 1e6
 nP = sum(p.numel() for p in pooler_params) / 1e6
-print(f"[cfg] G={A.g} pg_norm={A.pg_norm}/{A.pg_norm_len} adv_std={A.adv_std} search_lr={A.search_lr} search_temp={A.search_temp} search_gen={A.search_gen} accum={A.accum} steps={A.steps} budget={A.budget} rw={A.rw} maxd={A.maxd} chunk={A.chunk} temp={A.temp} gen={A.gen} maxs={A.maxs} maxm={A.maxm} samepage={A.samepage} maxsrch={A.maxsrch} phantom={A.phantom}x{A.phantom_scale} "
+print(f"[cfg] G={A.g} pool_order={A.pool_order}+{A.pool_offset} pg_norm={A.pg_norm}/{A.pg_norm_len} adv_std={A.adv_std} search_lr={A.search_lr} search_temp={A.search_temp} search_gen={A.search_gen} accum={A.accum} steps={A.steps} budget={A.budget} rw={A.rw} maxd={A.maxd} chunk={A.chunk} temp={A.temp} gen={A.gen} maxs={A.maxs} maxm={A.maxm} samepage={A.samepage} maxsrch={A.maxsrch} phantom={A.phantom}x{A.phantom_scale} "
       f"lr={A.lr} pooler_lr={A.pooler_lr} pooler={A.pooler}(r={A.pooler_rank}) trainable lora={nT:.1f}M pooler={nP:.2f}M", flush=True)
 # ---- environment: verbatim grpo_ep_more serve() ----
 WAPI = "https://en.wikipedia.org/w/api.php"
@@ -705,11 +707,12 @@ held = set()
 for line in open(A.heldout):
     try: held.add((json.loads(line).get("q") or "").strip())
     except Exception: pass
-pool = []
+pool = []; _allq = []
 for line in open(A.questions):
     try: r = json.loads(line)
     except Exception: continue
     q, gold = (r.get("q") or "").strip(), (r.get("gold") or "").strip()
+    if q and gold: _allq.append({"q": q, "gold": gold})
     if q and gold and q not in held: pool.append({"q": q, "gold": gold})
 dol = []
 for line in open(A.dolphin):
@@ -722,7 +725,17 @@ if A.replay:
         try: r = json.loads(line)
         except Exception: continue
         if r.get("q") and r.get("text"): rep.append(r)
-rng = random.Random(0); rng.shuffle(pool); rng.shuffle(dol); rng.shuffle(rep)
+rng = random.Random(0)
+if A.pool_order == "pool3":
+    rng.shuffle(list(range(len(pool))))       # consume what the plain shuffle would have, so dol and rep keep their order
+    random.Random(0).shuffle(_allq); pool = [x for x in _allq if x["q"] not in held]   # grpo_pool: shuffle first, then drop the held-out
+else:
+    rng.shuffle(pool)
+rng.shuffle(dol); rng.shuffle(rep)
+def pool_item(step):
+    """the search question of this step: loop order indexes by step (odd slots), pool3 order counts search steps from --pool-offset"""
+    if A.pool_order == "pool3": return pool[(A.pool_offset + step // max(A.search_every, 1) - 1) % len(pool)]
+    return pool[(step - 1) % len(pool)]
 INFO_RE = re.compile(r"(<information>.*?</information>\n?)", re.S)
 def ce_backward(h, tgt, tm, coef, slice_len=256):
     """cross-entropy through the lm_head without ever holding the whole logits tensor.
@@ -1069,7 +1082,7 @@ if not reason: print("ONLINE_LOOP_DONE", flush=True)
 for step in range(state["step"] + 1, A.steps + 1) if reason else []:
     searching = bool(A.search_every) and step % A.search_every == 0
     if searching:
-        item = pool[(step - 1) % len(pool)]; qtext, ref = item["q"], None
+        item = pool_item(step); qtext, ref = item["q"], None
     else:
         prob = reason[(step - 1) % len(reason)]; qtext, ref = prob["q"], prob["ref"]
     if (step - 1) % A.accum == 0: opt.zero_grad(set_to_none=True)
