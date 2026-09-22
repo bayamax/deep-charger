@@ -80,10 +80,11 @@ PSKIP=
 # The raw GitHub copy this box fetches can lag and hand a control run an OLDER version of this file (04:48 on 09-22 it
 # relaunched the online loop under the previous mode while the newer run was merging a checkpoint on the same card).
 # Every edit bumps BOXG_SERIAL; a run that sees a lower serial than one already executed stops here.
-BOXG_SERIAL=2026092215
+BOXG_SERIAL=2026092218
 if [ -f /root/.boxg_serial ] && [ "$(cat /root/.boxg_serial)" -gt "$BOXG_SERIAL" ] 2>/dev/null; then echo "BOXG_STALE $BOXG_SERIAL < $(cat /root/.boxg_serial)"; exit 0; fi
 echo $BOXG_SERIAL > /root/.boxg_serial
-MODE=online       # 2026-09-22 08:10: back to g7 after the step-470 held-out check (40.2%; step 120 35.3%, s4 38.0%)
+MODE=reeval       # 2026-09-22 18:05: the exact step-600 freeze, merged, on the held-out (step 120 35.3%, step 470 40.2%, s4 38.0%); ~2 h pause
+RRUN=g7e600; RMODEL=g7_step600; RKIND=merge; RTEMP=0.6; RGEN=4000; RN=34; RSHARDS=3
 ORUN=g7
 OSEED=            # 2026-09-20: g7 starts clean from s4_hf. g6 never carried g5's weights (its seed download left no checkpoint) and after the
                   # layer change ran with layers 0-19 of the stock model; both are now caught at launch (ONLINE_SEED_ABORT, ONLINE_ABORT)
