@@ -165,14 +165,17 @@ if A.pooler == "none":
 else:
     pooler.A = PoolerAdapter(pooler.A, A.pooler, A.pooler_rank, A.pooler_scale)
     pooler_params = pooler.A.trainable()
+# the pooler params ride with the search optimizer when there is one: the pooler is search machinery, and the search
+# GRPO trained it (rank-8 adapter, 1e-5) from the search rollouts alone
 opt = torch.optim.Adam(
     [{"params": [p for p in model.parameters() if p.requires_grad], "lr": A.lr}]
-    + ([{"params": pooler_params, "lr": A.pooler_lr}] if pooler_params else []))
+    + ([{"params": pooler_params, "lr": A.pooler_lr}] if pooler_params and A.search_lr <= 0 else []))
 opt_s = None
 if A.search_lr > 0:
     # the search side steps its own optimizer, with its own moments, at the rate the search GRPO used;
     # each loop step then steps exactly one optimizer, so accumulation across steps is off
-    opt_s = torch.optim.Adam([{"params": [p for p in model.parameters() if p.requires_grad], "lr": A.search_lr}])
+    opt_s = torch.optim.Adam([{"params": [p for p in model.parameters() if p.requires_grad], "lr": A.search_lr}]
+                             + ([{"params": pooler_params, "lr": A.pooler_lr}] if pooler_params else []))
     A.accum = 1
 BASE_TEMP, BASE_GEN = A.temp, A.gen
 OPT_F = os.path.join(A.outdir, "opt.pt")
@@ -1153,6 +1156,7 @@ for step in range(state["step"] + 1, A.steps + 1) if reason else []:
             dl.append(guarded(plain_backward, dol[di % len(dol)], 1.0 / (A.dolphin_min * A.accum))); di += 1
     if step % A.accum == 0:
         opt.step(); opt.zero_grad(set_to_none=True); clear()
+        if opt_s is not None: opt_s.zero_grad(set_to_none=True)   # pooler grads from a reasoning rollout are not search signal
     k = "search" if searching else "reason"
     cum[k + " pass"] = cum.get(k + " pass", 0) + sum(1 for x in rw if x >= 1.0); cum[k + " n"] = cum.get(k + " n", 0) + len(rw)
     cum[k + " sum"] = cum.get(k + " sum", 0.0) + sum(rw)
