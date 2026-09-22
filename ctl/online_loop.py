@@ -1193,4 +1193,6 @@ for step in range(state["step"] + 1, A.steps + 1) if reason else []:
     if step % A.save_every == 0 or step == A.steps:
         save_ckpt(LATEST); json.dump({"step": step, "cum": cum, "di": di, "ri": ri, "qi": qi, "gbase": gbase, "rollbacks": nrb, "guard_from": guard_from}, open(STATE_F, "w"))
         save_opt(); print(f"[save] step {step}", flush=True)
+        if step % 200 == 0:   # the exact-step snapshot the freeze uploads (the 200-step marks used to get whatever "latest" was when a control run noticed)
+            import shutil; shutil.copyfile(LATEST, os.path.join(A.outdir, f"step{step}.safetensors")); shutil.copyfile(STATE_F, os.path.join(A.outdir, f"step{step}.json"))
 if reason: print("ONLINE_LOOP_DONE", flush=True)

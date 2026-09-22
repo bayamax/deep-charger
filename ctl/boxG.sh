@@ -80,11 +80,10 @@ PSKIP=
 # The raw GitHub copy this box fetches can lag and hand a control run an OLDER version of this file (04:48 on 09-22 it
 # relaunched the online loop under the previous mode while the newer run was merging a checkpoint on the same card).
 # Every edit bumps BOXG_SERIAL; a run that sees a lower serial than one already executed stops here.
-BOXG_SERIAL=2026092205
+BOXG_SERIAL=2026092208
 if [ -f /root/.boxg_serial ] && [ "$(cat /root/.boxg_serial)" -gt "$BOXG_SERIAL" ] 2>/dev/null; then echo "BOXG_STALE $BOXG_SERIAL < $(cat /root/.boxg_serial)"; exit 0; fi
 echo $BOXG_SERIAL > /root/.boxg_serial
-MODE=reeval       # 2026-09-22 04:50: the frozen g7_step400, merged, on the same held-out protocol as g7e120 (35.3%) and s4 (38.0%); ~2 h pause
-RRUN=g7e400; RMODEL=g7_step400; RKIND=merge; RTEMP=0.6; RGEN=4000; RN=34; RSHARDS=3
+MODE=online       # 2026-09-22 08:10: back to g7 after the step-470 held-out check (40.2%; step 120 35.3%, s4 38.0%)
 ORUN=g7
 OSEED=            # 2026-09-20: g7 starts clean from s4_hf. g6 never carried g5's weights (its seed download left no checkpoint) and after the
                   # layer change ran with layers 0-19 of the stock model; both are now caught at launch (ONLINE_SEED_ABORT, ONLINE_ABORT)
@@ -520,14 +519,23 @@ R=baya1116/hypernet-sp-distill; ORUN=$1; OUT=/root/online_$ORUN
 while :; do
   st=$(python3 -c "import json;print(json.load(open('$OUT/state.json'))['step'])" 2>/dev/null || echo 0)
   mark=$(( (st / 200) * 200 ))
-  if [ "$mark" -gt 0 ] && [ ! -f /root/.frozen_${ORUN}_$mark ] && [ -s $OUT/latest.safetensors ]; then
+  snap=$OUT/step$mark.safetensors   # the loop writes this at the exact step; before it did, the mark got whatever "latest" was (g7_step400 held step 470)
+  if [ "$mark" -gt 0 ] && [ ! -f /root/.frozen_${ORUN}_$mark ] && { [ -s $snap ] || [ -s $OUT/latest.safetensors ]; }; then
     touch /root/.frozen_${ORUN}_$mark
-    for f in latest.safetensors state.json loop.log rollouts.jsonl; do
-      [ -s $OUT/$f ] && hf upload $R $OUT/$f pooler_distill/chatsft/online/${ORUN}_step$mark/$f >/dev/null 2>&1
-    done
-    echo "ONLINE_FROZEN ${ORUN}_step$mark $(date -u)"
+    if [ -s $snap ]; then
+      hf upload $R $snap pooler_distill/chatsft/online/${ORUN}_step$mark/latest.safetensors >/dev/null 2>&1 && rm -f $snap
+      [ -s $OUT/step$mark.json ] && hf upload $R $OUT/step$mark.json pooler_distill/chatsft/online/${ORUN}_step$mark/state.json >/dev/null 2>&1 && rm -f $OUT/step$mark.json
+      for f in loop.log rollouts.jsonl; do [ -s $OUT/$f ] && hf upload $R $OUT/$f pooler_distill/chatsft/online/${ORUN}_step$mark/$f >/dev/null 2>&1; done
+      echo "ONLINE_FROZEN ${ORUN}_step$mark (exact) $(date -u)"
+    else
+      for f in latest.safetensors state.json loop.log rollouts.jsonl; do
+        [ -s $OUT/$f ] && hf upload $R $OUT/$f pooler_distill/chatsft/online/${ORUN}_step$mark/$f >/dev/null 2>&1
+      done
+      echo "ONLINE_FROZEN ${ORUN}_step$mark (latest, step $st) $(date -u)"
+    fi
   fi
-  pgrep -f "online_loop.p[y]" >/dev/null || break
+  # a restart marker kills the loop for a few seconds; this watcher used to quit on that and stay dead until the next control run
+  if pgrep -f "online_loop.p[y]" >/dev/null; then miss=0; else miss=$((${miss:-0} + 1)); [ "$miss" -ge 6 ] && break; fi
   sleep 600
 done
 FZ
