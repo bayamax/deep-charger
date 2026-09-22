@@ -77,7 +77,8 @@ JCLIP=0
 PRUNS="p_t06q4:1:0.6 p_t06bf16:0:0.6"
 PG=64
 PSKIP=
-MODE=online       # 2026-09-21 05:20: back to g7 after the step-200 12-problem check
+MODE=reeval       # 2026-09-22 04:50: the frozen g7_step400, merged, on the same held-out protocol as g7e120 (35.3%) and s4 (38.0%); ~2 h pause
+RRUN=g7e400; RMODEL=g7_step400; RKIND=merge; RTEMP=0.6; RGEN=4000; RN=34; RSHARDS=3
 ORUN=g7
 OSEED=            # 2026-09-20: g7 starts clean from s4_hf. g6 never carried g5's weights (its seed download left no checkpoint) and after the
                   # layer change ran with layers 0-19 of the stock model; both are now caught at launch (ONLINE_SEED_ABORT, ONLINE_ABORT)
