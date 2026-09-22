@@ -80,7 +80,7 @@ PSKIP=
 # The raw GitHub copy this box fetches can lag and hand a control run an OLDER version of this file (04:48 on 09-22 it
 # relaunched the online loop under the previous mode while the newer run was merging a checkpoint on the same card).
 # Every edit bumps BOXG_SERIAL; a run that sees a lower serial than one already executed stops here.
-BOXG_SERIAL=2026092208
+BOXG_SERIAL=2026092215
 if [ -f /root/.boxg_serial ] && [ "$(cat /root/.boxg_serial)" -gt "$BOXG_SERIAL" ] 2>/dev/null; then echo "BOXG_STALE $BOXG_SERIAL < $(cat /root/.boxg_serial)"; exit 0; fi
 echo $BOXG_SERIAL > /root/.boxg_serial
 MODE=online       # 2026-09-22 08:10: back to g7 after the step-470 held-out check (40.2%; step 120 35.3%, s4 38.0%)
@@ -551,6 +551,9 @@ FZ
   # runs filled the disk and killed r10 at step 5 with "No space left on device" while it wrote one.
   for d in /root/online_*/; do [ "$d" = "$OUT/" ] || rm -f $d/latest.safetensors $d/good.safetensors $d/*.tmp; done
   rm -f /root/reeval_*.safetensors /root/online_*/latest.safetensors.tmp
+  # the merged evaluation copies and the hub downloads of frozen checkpoints are re-creatable: 5.4 GB free on 09-22
+  # would not have held the step-600 snapshot beside the next save
+  rm -rf /root/reeval_hf_* /root/hfdl/pooler_distill/chatsft/online/*/latest.safetensors
   echo "[disk] $(df -h /root | tail -1 | awk '{print $3" used, "$4" free"}')"
   # once (2026-09-20): g5 ended unwatched; its full step record is still on this disk and the hub copy stops at step 227
   if [ ! -f /root/.up_g5_final ] && [ -s /root/online_g5/rollouts.jsonl ]; then ( for f in rollouts.jsonl loop.log; do hf upload $R /root/online_g5/$f pooler_distill/chatsft/online/g5/$f >/dev/null 2>&1; done; touch /root/.up_g5_final; echo "ONLINE_G5_RECORD uploaded $(date -u)" ) & fi
