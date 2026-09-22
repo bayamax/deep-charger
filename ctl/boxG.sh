@@ -194,6 +194,13 @@ if len(blocks) >= 3:
 for k in ("reason", "search"):
     v = [r["reward"] for r in rows if r.get("kind") == k]
     if v: print(f"  {k}: {len(v)} samples, mean {sum(v)/len(v):+.2f}, pass {100*sum(1 for x in v if x>=1)/len(v):.0f}%")
+h = mx // 2   # first half of the run against the second half: the one comparison the blocks cannot show
+for k in ("reason", "search"):
+    a = [r["reward"] for r in rows if r.get("kind") == k and r["step"] <= h]
+    b = [r["reward"] for r in rows if r.get("kind") == k and r["step"] > h]
+    if a and b:
+        f = lambda v: f"pass {100*sum(1 for x in v if x>=1)/len(v):>3.0f}% mean {sum(v)/len(v):+.2f}"
+        print(f"  {k:6s} halves: steps 1-{h} {f(a)} | steps {h+1}-{mx} {f(b)}")
 PYS
 SSD
 chmod +x /usr/local/bin/s
