@@ -159,6 +159,7 @@ def reply_words(t):
     return len(t.split("</think>")[-1].split()) if "</think>" in t else 0
 rows = [json.loads(l) for l in open(d + "/rollouts.jsonl") if l.strip()]
 mx = max(r["step"] for r in rows)
+blocks = []
 print(f"{d.rstrip('/').split('/')[-1]}  through step {mx}   ({W}-step blocks)")
 print("  steps    | reason  mean think reply unfin | search  mean srch think reply unfin")
 for b in range(0, mx, W):
@@ -175,6 +176,20 @@ for b in range(0, mx, W):
         ns = f" {statistics.median([r['ns'] for r in x]):>3.0f}" if s else ""
         return f"{p:>5.0f}% {m:>+6.2f}{ns} {th:>5.0f} {rp:>5.0f} {un:>4.0f}%"
     print(f"  {b+1:>4}-{b+W:<4} | {col(rea)} | {col(sea, True)}")
+    blocks.append((b, [100 * sum(1 for r in x if r["reward"] >= 1.0) / len(x) if x else None for x in (rea, sea)],
+                      [sum(r["reward"] for r in x) / len(x) if x else None for x in (rea, sea)]))
+# the same, smoothed: each block averaged with the one before and the one after (3 blocks = 60 steps at W=20),
+# because one hard question swings a 20-step block by 20 points and the trend is invisible in the raw rows
+if len(blocks) >= 3:
+    print(f"  trend: each block averaged with its neighbours ({3*W} steps)")
+    print("  steps    | reason pass  mean | search pass  mean")
+    for i, (b, _, _) in enumerate(blocks):
+        nb = blocks[max(0, i - 1):i + 2]
+        def avg(j, k):
+            v = [x[j][k] for x in nb if x[j][k] is not None]
+            return sum(v) / len(v) if v else None
+        f = lambda v, pct: ("    -" if v is None else (f"{v:>4.0f}%" if pct else f"{v:>+5.2f}"))
+        print(f"  {b+1:>4}-{b+W:<4} |    {f(avg(1,0),1)}   {f(avg(2,0),0)} |    {f(avg(1,1),1)}   {f(avg(2,1),0)}")
 for k in ("reason", "search"):
     v = [r["reward"] for r in rows if r.get("kind") == k]
     if v: print(f"  {k}: {len(v)} samples, mean {sum(v)/len(v):+.2f}, pass {100*sum(1 for x in v if x>=1)/len(v):.0f}%")
