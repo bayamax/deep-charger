@@ -77,6 +77,12 @@ JCLIP=0
 PRUNS="p_t06q4:1:0.6 p_t06bf16:0:0.6"
 PG=64
 PSKIP=
+# The raw GitHub copy this box fetches can lag and hand a control run an OLDER version of this file (04:48 on 09-22 it
+# relaunched the online loop under the previous mode while the newer run was merging a checkpoint on the same card).
+# Every edit bumps BOXG_SERIAL; a run that sees a lower serial than one already executed stops here.
+BOXG_SERIAL=2026092205
+if [ -f /root/.boxg_serial ] && [ "$(cat /root/.boxg_serial)" -gt "$BOXG_SERIAL" ] 2>/dev/null; then echo "BOXG_STALE $BOXG_SERIAL < $(cat /root/.boxg_serial)"; exit 0; fi
+echo $BOXG_SERIAL > /root/.boxg_serial
 MODE=reeval       # 2026-09-22 04:50: the frozen g7_step400, merged, on the same held-out protocol as g7e120 (35.3%) and s4 (38.0%); ~2 h pause
 RRUN=g7e400; RMODEL=g7_step400; RKIND=merge; RTEMP=0.6; RGEN=4000; RN=34; RSHARDS=3
 ORUN=g7
