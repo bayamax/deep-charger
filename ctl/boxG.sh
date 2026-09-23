@@ -80,12 +80,12 @@ PSKIP=
 # The raw GitHub copy this box fetches can lag and hand a control run an OLDER version of this file (04:48 on 09-22 it
 # relaunched the online loop under the previous mode while the newer run was merging a checkpoint on the same card).
 # Every edit bumps BOXG_SERIAL; a run that sees a lower serial than one already executed stops here.
-BOXG_SERIAL=2026092318
+BOXG_SERIAL=2026092320
 if [ -f /root/.boxg_serial ] && [ "$(cat /root/.boxg_serial)" -gt "$BOXG_SERIAL" ] 2>/dev/null; then echo "BOXG_STALE $BOXG_SERIAL < $(cat /root/.boxg_serial)"; exit 0; fi
 echo $BOXG_SERIAL > /root/.boxg_serial
 MODE=online       # 2026-09-22 20:58: back to g7 after the step-600 held-out check (37.3%; 470 40.2%, 120 35.3%, s4 38.0%)
-ORUN=g8           # 2026-09-23: from s4_hf again. LoRA on all layers (capacity), 3 search : 1 reasoning, Dolphin only on reasoning steps,
-                  # both rates 1e-5, constant-length loss, pooler adapter. g7 (layers 20-27, 1:1, 2e-5) sat at the base's level for 600 steps and drifted after.
+ORUN=g9           # 2026-09-23: g8's settings with the KL anchor from step 0. g8 drifted by step 160 without it, and its "healthy" copy was
+                  # already long-thinking (reasoning 600-1300 words a step after the restart), so the anchor is tested from the base instead.
 OSEED=            # 2026-09-20: g7 starts clean from s4_hf. g6 never carried g5's weights (its seed download left no checkpoint) and after the
                   # layer change ran with layers 0-19 of the stock model; both are now caught at launch (ONLINE_SEED_ABORT, ONLINE_ABORT)
 OMODEL=s4_hf
