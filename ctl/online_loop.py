@@ -63,6 +63,7 @@ ap.add_argument("--pg-norm", default="mean", choices=["mean", "const"], help="ho
 ap.add_argument("--guard-steps", type=int, default=10, help="search steps per guard window (baseline = the first window). 10 steps = 120 rollouts was noisy enough to trip on hard stretches; 20 halves that")
 ap.add_argument("--guard-halve", type=int, default=1, help="1: a rollback also halves both learning rates. 0: weights only")
 ap.add_argument("--guard-pass", type=float, default=0.5, help="the guard trips only when, besides the unfinished or search-count rise, the window's pass rate has fallen to this fraction of the baseline pass rate (one hard question in a window is not a collapse)")
+ap.add_argument("--kl", type=float, default=0.0, help=">0: GRPO's anchor to the reference policy, the base with the adapters disabled (k3 estimator per policy token, this coefficient). g7 and g8 had no anchor at all: the reasoning reward favours longer thinking, and with nothing holding the policy near the base that length leaked into the search side within 200 steps on all layers")
 ap.add_argument("--reason-every", type=int, default=0, help=">0: a reasoning step every N steps and a search step otherwise (3 search : 1 reasoning at 4); overrides --search-every")
 ap.add_argument("--dolphin-on", default="all", choices=["all", "reason"], help="reason: the Dolphin SFT record rides only on reasoning steps, so the search steps carry search signal alone")
 ap.add_argument("--pool-order", default="loop", choices=["loop", "pool3"], help="pool3: walk the search questions in the order the search GRPO (grpo_pool) walked them: shuffle the whole gold<=6 pool with seed 0, then drop the held-out")
@@ -204,7 +205,7 @@ if A.gradckpt:
     print("[init] gradient checkpointing ON for the policy-gradient pass", flush=True)
 nT = sum(p.numel() for p in model.parameters() if p.requires_grad) / 1e6
 nP = sum(p.numel() for p in pooler_params) / 1e6
-print(f"[cfg] G={A.g} reason_every={A.reason_every} dolphin_on={A.dolphin_on} pool_order={A.pool_order}+{A.pool_offset} pg_norm={A.pg_norm}/{A.pg_norm_len} adv_std={A.adv_std} search_lr={A.search_lr} search_temp={A.search_temp} search_gen={A.search_gen} accum={A.accum} steps={A.steps} budget={A.budget} rw={A.rw} maxd={A.maxd} chunk={A.chunk} temp={A.temp} gen={A.gen} maxs={A.maxs} maxm={A.maxm} samepage={A.samepage} maxsrch={A.maxsrch} phantom={A.phantom}x{A.phantom_scale} "
+print(f"[cfg] G={A.g} kl={A.kl} reason_every={A.reason_every} dolphin_on={A.dolphin_on} pool_order={A.pool_order}+{A.pool_offset} pg_norm={A.pg_norm}/{A.pg_norm_len} adv_std={A.adv_std} search_lr={A.search_lr} search_temp={A.search_temp} search_gen={A.search_gen} accum={A.accum} steps={A.steps} budget={A.budget} rw={A.rw} maxd={A.maxd} chunk={A.chunk} temp={A.temp} gen={A.gen} maxs={A.maxs} maxm={A.maxm} samepage={A.samepage} maxsrch={A.maxsrch} phantom={A.phantom}x{A.phantom_scale} "
       f"lr={A.lr} pooler_lr={A.pooler_lr} pooler={A.pooler}(r={A.pooler_rank}) trainable lora={nT:.1f}M pooler={nP:.2f}M", flush=True)
 # ---- environment: verbatim grpo_ep_more serve() ----
 WAPI = "https://en.wikipedia.org/w/api.php"
@@ -651,7 +652,18 @@ def pg_backward(r, coef):
         pr = HEAD(h).float()
         tgt = torch.tensor([gen[c0:c1]], device=DEV); tm = torch.tensor([msk[c0:c1]], device=DEV, dtype=torch.float32)
         ce = torch.nn.functional.cross_entropy(pr.reshape(-1, pr.shape[-1]), tgt.reshape(-1), reduction="none")
-        loss = (ce * tm.reshape(-1)).sum() / (A.pg_norm_len if A.pg_norm == "const" else ntot)
+        denom = (A.pg_norm_len if A.pg_norm == "const" else ntot)
+        loss = (ce * tm.reshape(-1)).sum() / denom
+        if A.kl > 0:
+            # the same block under the base policy (LoRA off; the pooled set is the rollout's own either way), then
+            # k3 = exp(ref - cur) - (ref - cur) - 1 per policy token: zero at the base, always positive, gradient through cur only
+            with torch.no_grad(), model.disable_adapter():
+                hr = BODY(inputs_embeds=block, use_cache=False).last_hidden_state[:, L - cur - 1:L - 1, :]
+                ref_ce = torch.nn.functional.cross_entropy(HEAD(hr).float().reshape(-1, pr.shape[-1]), tgt.reshape(-1), reduction="none")
+                del hr
+            d = ce - ref_ce                       # = logp_ref - logp_cur
+            k3 = torch.exp(d) - d - 1.0
+            loss = loss + A.kl * (k3 * tm.reshape(-1)).sum() / denom
         (coef * loss).backward()
         tot += float(loss.item()); del h, pr, ce, loss, block; clear()
     return tot
