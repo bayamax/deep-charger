@@ -63,6 +63,8 @@ ap.add_argument("--pg-norm", default="mean", choices=["mean", "const"], help="ho
 ap.add_argument("--guard-steps", type=int, default=10, help="search steps per guard window (baseline = the first window). 10 steps = 120 rollouts was noisy enough to trip on hard stretches; 20 halves that")
 ap.add_argument("--guard-halve", type=int, default=1, help="1: a rollback also halves both learning rates. 0: weights only")
 ap.add_argument("--guard-pass", type=float, default=0.5, help="the guard trips only when, besides the unfinished or search-count rise, the window's pass rate has fallen to this fraction of the baseline pass rate (one hard question in a window is not a collapse)")
+ap.add_argument("--reason-every", type=int, default=0, help=">0: a reasoning step every N steps and a search step otherwise (3 search : 1 reasoning at 4); overrides --search-every")
+ap.add_argument("--dolphin-on", default="all", choices=["all", "reason"], help="reason: the Dolphin SFT record rides only on reasoning steps, so the search steps carry search signal alone")
 ap.add_argument("--pool-order", default="loop", choices=["loop", "pool3"], help="pool3: walk the search questions in the order the search GRPO (grpo_pool) walked them: shuffle the whole gold<=6 pool with seed 0, then drop the held-out")
 ap.add_argument("--pool-offset", type=int, default=0, help="the pool index the first search step of the run maps to (pool3 stopped at 200)")
 ap.add_argument("--search-lr", type=float, default=0.0, help=">0: the search side gets its own Adam at this rate (the pool3 search GRPO ran 1e-5), the reasoning side and the Dolphin SFT keep --lr. Implies --accum 1.")
@@ -202,7 +204,7 @@ if A.gradckpt:
     print("[init] gradient checkpointing ON for the policy-gradient pass", flush=True)
 nT = sum(p.numel() for p in model.parameters() if p.requires_grad) / 1e6
 nP = sum(p.numel() for p in pooler_params) / 1e6
-print(f"[cfg] G={A.g} pool_order={A.pool_order}+{A.pool_offset} pg_norm={A.pg_norm}/{A.pg_norm_len} adv_std={A.adv_std} search_lr={A.search_lr} search_temp={A.search_temp} search_gen={A.search_gen} accum={A.accum} steps={A.steps} budget={A.budget} rw={A.rw} maxd={A.maxd} chunk={A.chunk} temp={A.temp} gen={A.gen} maxs={A.maxs} maxm={A.maxm} samepage={A.samepage} maxsrch={A.maxsrch} phantom={A.phantom}x{A.phantom_scale} "
+print(f"[cfg] G={A.g} reason_every={A.reason_every} dolphin_on={A.dolphin_on} pool_order={A.pool_order}+{A.pool_offset} pg_norm={A.pg_norm}/{A.pg_norm_len} adv_std={A.adv_std} search_lr={A.search_lr} search_temp={A.search_temp} search_gen={A.search_gen} accum={A.accum} steps={A.steps} budget={A.budget} rw={A.rw} maxd={A.maxd} chunk={A.chunk} temp={A.temp} gen={A.gen} maxs={A.maxs} maxm={A.maxm} samepage={A.samepage} maxsrch={A.maxsrch} phantom={A.phantom}x{A.phantom_scale} "
       f"lr={A.lr} pooler_lr={A.pooler_lr} pooler={A.pooler}(r={A.pooler_rank}) trainable lora={nT:.1f}M pooler={nP:.2f}M", flush=True)
 # ---- environment: verbatim grpo_ep_more serve() ----
 WAPI = "https://en.wikipedia.org/w/api.php"
@@ -755,7 +757,9 @@ else:
 rng.shuffle(dol); rng.shuffle(rep)
 def pool_item(step):
     """the search question of this step: loop order indexes by step (odd slots), pool3 order counts search steps from --pool-offset"""
-    if A.pool_order == "pool3": return pool[(A.pool_offset + step // max(A.search_every, 1) - 1) % len(pool)]
+    if A.pool_order == "pool3":
+        n_search = (step - step // A.reason_every) if A.reason_every else step // max(A.search_every, 1)   # search steps so far, this one included
+        return pool[(A.pool_offset + n_search - 1) % len(pool)]
     return pool[(step - 1) % len(pool)]
 INFO_RE = re.compile(r"(<information>.*?</information>\n?)", re.S)
 def ce_backward(h, tgt, tm, coef, slice_len=256):
@@ -1103,7 +1107,7 @@ if not reason: print("ONLINE_LOOP_DONE", flush=True)
 # group whose samples all score alike carries no signal; when they all score zero the model cannot
 # do the problem at all, so with --wheels the teacher's own answer is trained on instead.
 for step in range(state["step"] + 1, A.steps + 1) if reason else []:
-    searching = bool(A.search_every) and step % A.search_every == 0
+    searching = (step % A.reason_every != 0) if A.reason_every else (bool(A.search_every) and step % A.search_every == 0)
     if searching:
         item = pool_item(step); qtext, ref = item["q"], None
     else:
@@ -1150,7 +1154,7 @@ for step in range(state["step"] + 1, A.steps + 1) if reason else []:
     if opt_s is not None and searching:
         opt_s.step(); opt_s.zero_grad(set_to_none=True); opt.zero_grad(set_to_none=True); clear()
     dl = []
-    if dol and A.dolphin_min:
+    if dol and A.dolphin_min and not (A.dolphin_on == "reason" and searching):
         model.train()
         for _ in range(A.dolphin_min):
             dl.append(guarded(plain_backward, dol[di % len(dol)], 1.0 / (A.dolphin_min * A.accum))); di += 1

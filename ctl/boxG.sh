@@ -80,11 +80,12 @@ PSKIP=
 # The raw GitHub copy this box fetches can lag and hand a control run an OLDER version of this file (04:48 on 09-22 it
 # relaunched the online loop under the previous mode while the newer run was merging a checkpoint on the same card).
 # Every edit bumps BOXG_SERIAL; a run that sees a lower serial than one already executed stops here.
-BOXG_SERIAL=2026092222
+BOXG_SERIAL=2026092305
 if [ -f /root/.boxg_serial ] && [ "$(cat /root/.boxg_serial)" -gt "$BOXG_SERIAL" ] 2>/dev/null; then echo "BOXG_STALE $BOXG_SERIAL < $(cat /root/.boxg_serial)"; exit 0; fi
 echo $BOXG_SERIAL > /root/.boxg_serial
 MODE=online       # 2026-09-22 20:58: back to g7 after the step-600 held-out check (37.3%; 470 40.2%, 120 35.3%, s4 38.0%)
-ORUN=g7
+ORUN=g8           # 2026-09-23: from s4_hf again. LoRA on all layers (capacity), 3 search : 1 reasoning, Dolphin only on reasoning steps,
+                  # both rates 1e-5, constant-length loss, pooler adapter. g7 (layers 20-27, 1:1, 2e-5) sat at the base's level for 600 steps and drifted after.
 OSEED=            # 2026-09-20: g7 starts clean from s4_hf. g6 never carried g5's weights (its seed download left no checkpoint) and after the
                   # layer change ran with layers 0-19 of the stock model; both are now caught at launch (ONLINE_SEED_ABORT, ONLINE_ABORT)
 OMODEL=s4_hf
@@ -92,9 +93,9 @@ OB=8
 ODRATIO=1
 ODMIN=1
 ODOLPHIN=dolphin_v2.jsonl
-OLR=2e-5          # 2026-09-21: reasoning side down from 5e-5; it was flat at ~75% either way, and its updates were 5x the search side's on the same 8 layers
+OLR=1e-5          # 2026-09-23: the reasoning side at the search side's rate; every higher rate leaked its style into the search side
 OACCUM=1          # 2026-09-20: two optimizers now, one step each
-OLAYERS=20-27     # 2026-09-20: back to the layer range the search GRPO (pool3) ran on; every online run so far had LoRA on all 28 layers
+OLAYERS=all       # 2026-09-23: all 28 layers again (18.5M), this time at 1e-5 with the guard, the constant-length loss and moment-keeping resumes
 OREPLAY=replay_v1.jsonl
 OREPLAYFILTER=1
 OTRAINALL=1
@@ -113,12 +114,14 @@ OGUARDHALVE=0     # a rollback restores the weights only; the rates stay as conf
 OREASON=dolphin_v2.jsonl
 OREASONG=12
 OSEARCHEVERY=2
+OREASONEVERY=4    # 2026-09-23: a reasoning step every 4th step, search otherwise (3:1); overrides OSEARCHEVERY
+ODOLPHINON=reason # the Dolphin SFT record only on reasoning steps
 OWHEELS=1
 OWTALK=0.5
 OSEARCHDEMO=
 OSEARCHWHEELS=0   # 2026-09-20: off again, as in the search GRPO; the layer limit is the fix, not a crutch
-OPGNORM=mean      # 2026-09-20: back to the search GRPO's own normalisation (per-rollout mean, /std); the layer limit is the fix
-OADVSTD=1
+OPGNORM=const     # 2026-09-23: on: the drift g7 showed after step 560 (longer wrong rollouts, more unfinished) is what this removes
+OADVSTD=0
 OREASONSTUB=0
 OJUDGEAPI=openai
 OJUDGEMODEL=gpt-5-nano
@@ -133,7 +136,7 @@ OSTEPS=1200
 OSEARCHLR=1e-5    # 2026-09-20: the search side steps its own Adam at the search GRPO's rate; --lr is the reasoning side's
 OSEARCHTEMP=0.6   # 2026-09-20: 0.9 as in pool3 stopped this model searching at all (0.1 searches per rollout, 1% pass over 46 steps); at 0.6 it searches (median 1)
 OPOOLORDER=pool3  # 2026-09-21: the search questions continue pool3's own sequence from its 201st question (step 162 of g7 = pool index 200)
-OPOOLOFFSET=120
+OPOOLOFFSET=200   # a fresh run: its first search step is pool3's 201st question
 OPOOLER=lora      # 2026-09-22: the pooler's rank-8 adapter trains again, as in the search GRPO (its params ride with the search optimizer)
 OPOOLERRANK=8
 OPOOLERLR=1e-5
@@ -665,7 +668,7 @@ GR
   if ! pgrep -f "online_loop.p[y]" >/dev/null; then
     cd /root/work && DSK_KEY=$(cat /root/.dsk 2>/dev/null) OAI_KEY=$(cat /root/.oai 2>/dev/null) PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True setsid nohup python3 /root/work/online_loop.py $OHF $OUT \
       --questions $QFILE --dolphin /root/work/dolphin_v1.jsonl --heldout /root/work/eval300.jsonl \
-      --b $OB --steps $OSTEPS --temp $OTEMP --lr $OLR --dolphin-ratio ${ODRATIO:-2} --dolphin-min ${ODMIN:-2} --accum ${OACCUM:-1} --replay $REPLAYF --replay-per-step ${OREPLAYN:-2} --rollout-every ${OROLLEVERY:-1} --train-all ${OTRAINALL:-0} --queue ${OQUEUE:-0} --complete-only ${OCOMPLETE:-0} --gen ${OGEN:-1500} --budget ${OBUDGET:-900} --guard ${OGUARD:-0} --maxsrch ${OMAXSRCH:-0} --judge ${OJUDGE:-1} ${OREASON:+--reason /root/hfdl/pooler_distill/chatsft/$OREASON --reason-g ${OREASONG:-8} --reason-stub ${OREASONSTUB:-0} --judge-api ${OJUDGEAPI:-deepseek} --judge-model ${OJUDGEMODEL:-} --search-every ${OSEARCHEVERY:-0} --w-talk ${OWTALK:-0.5} --wheels ${OWHEELS:-0} --search-wheels ${OSEARCHWHEELS:-0} --pg-norm ${OPGNORM:-mean} --pg-norm-len 1024 --adv-std ${OADVSTD:-1} --search-lr ${OSEARCHLR:-0} --guard-pass ${OGUARDPASS:-0.5} --guard-steps ${OGUARDSTEPS:-10} --guard-halve ${OGUARDHALVE:-1} --pool-order ${OPOOLORDER:-loop} --pool-offset ${OPOOLOFFSET:-0} --search-temp ${OSEARCHTEMP:-0} --search-gen ${OSEARCHGEN:-0} ${OSEARCHDEMO:+--search-demo /root/hfdl/$OSEARCHDEMO}} --pooler ${OPOOLER:-none} --pooler-rank ${OPOOLERRANK:-8} --pooler-lr ${OPOOLERLR:-1e-5} --lora-rank 16 --lora-layers ${OLAYERS:-all} --gradckpt 1 --save-every 5 --stop eos \
+      --b $OB --steps $OSTEPS --temp $OTEMP --lr $OLR --dolphin-ratio ${ODRATIO:-2} --dolphin-min ${ODMIN:-2} --accum ${OACCUM:-1} --replay $REPLAYF --replay-per-step ${OREPLAYN:-2} --rollout-every ${OROLLEVERY:-1} --train-all ${OTRAINALL:-0} --queue ${OQUEUE:-0} --complete-only ${OCOMPLETE:-0} --gen ${OGEN:-1500} --budget ${OBUDGET:-900} --guard ${OGUARD:-0} --maxsrch ${OMAXSRCH:-0} --judge ${OJUDGE:-1} ${OREASON:+--reason /root/hfdl/pooler_distill/chatsft/$OREASON --reason-g ${OREASONG:-8} --reason-stub ${OREASONSTUB:-0} --judge-api ${OJUDGEAPI:-deepseek} --judge-model ${OJUDGEMODEL:-} --search-every ${OSEARCHEVERY:-0} --reason-every ${OREASONEVERY:-0} --dolphin-on ${ODOLPHINON:-all} --w-talk ${OWTALK:-0.5} --wheels ${OWHEELS:-0} --search-wheels ${OSEARCHWHEELS:-0} --pg-norm ${OPGNORM:-mean} --pg-norm-len 1024 --adv-std ${OADVSTD:-1} --search-lr ${OSEARCHLR:-0} --guard-pass ${OGUARDPASS:-0.5} --guard-steps ${OGUARDSTEPS:-10} --guard-halve ${OGUARDHALVE:-1} --pool-order ${OPOOLORDER:-loop} --pool-offset ${OPOOLOFFSET:-0} --search-temp ${OSEARCHTEMP:-0} --search-gen ${OSEARCHGEN:-0} ${OSEARCHDEMO:+--search-demo /root/hfdl/$OSEARCHDEMO}} --pooler ${OPOOLER:-none} --pooler-rank ${OPOOLERRANK:-8} --pooler-lr ${OPOOLERLR:-1e-5} --lora-rank 16 --lora-layers ${OLAYERS:-all} --gradckpt 1 --save-every 5 --stop eos \
       >> /root/online_$ORUN.log 2>&1 < /dev/null &
   fi
   # once: in reasoning mode the empty search loop printed the end marker at launch, and the keeper
