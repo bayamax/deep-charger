@@ -80,7 +80,7 @@ PSKIP=
 # The raw GitHub copy this box fetches can lag and hand a control run an OLDER version of this file (04:48 on 09-22 it
 # relaunched the online loop under the previous mode while the newer run was merging a checkpoint on the same card).
 # Every edit bumps BOXG_SERIAL; a run that sees a lower serial than one already executed stops here.
-BOXG_SERIAL=2026092305
+BOXG_SERIAL=2026092312
 if [ -f /root/.boxg_serial ] && [ "$(cat /root/.boxg_serial)" -gt "$BOXG_SERIAL" ] 2>/dev/null; then echo "BOXG_STALE $BOXG_SERIAL < $(cat /root/.boxg_serial)"; exit 0; fi
 echo $BOXG_SERIAL > /root/.boxg_serial
 MODE=online       # 2026-09-22 20:58: back to g7 after the step-600 held-out check (37.3%; 470 40.2%, 120 35.3%, s4 38.0%)
@@ -195,13 +195,15 @@ for b in range(0, mx, W):
 if len(blocks) >= 3:
     print(f"  trend: each block averaged with its neighbours ({3*W} steps)")
     print("  steps    | reason pass  mean | search pass  mean")
+    done = [x for x in blocks if x[0] + W <= mx]          # a block still filling is shown on its own row but never averaged into its neighbours
     for i, (b, _, _) in enumerate(blocks):
-        nb = blocks[max(0, i - 1):i + 2]
+        partial = b + W > mx
+        nb = [blocks[i]] if partial else [x for x in blocks[max(0, i - 1):i + 2] if x in done]
         def avg(j, k):
             v = [x[j][k] for x in nb if x[j][k] is not None]
             return sum(v) / len(v) if v else None
         f = lambda v, pct: ("    -" if v is None else (f"{v:>4.0f}%" if pct else f"{v:>+5.2f}"))
-        print(f"  {b+1:>4}-{b+W:<4} |    {f(avg(1,0),1)}   {f(avg(2,0),0)} |    {f(avg(1,1),1)}   {f(avg(2,1),0)}")
+        print(f"  {b+1:>4}-{b+W:<4} |    {f(avg(1,0),1)}   {f(avg(2,0),0)} |    {f(avg(1,1),1)}   {f(avg(2,1),0)}" + (f"   (through {mx}, not averaged)" if partial else ""))
 for k in ("reason", "search"):
     v = [r["reward"] for r in rows if r.get("kind") == k]
     if v: print(f"  {k}: {len(v)} samples, mean {sum(v)/len(v):+.2f}, pass {100*sum(1 for x in v if x>=1)/len(v):.0f}%")
