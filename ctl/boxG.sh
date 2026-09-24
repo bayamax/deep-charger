@@ -80,12 +80,13 @@ PSKIP=
 # The raw GitHub copy this box fetches can lag and hand a control run an OLDER version of this file (04:48 on 09-22 it
 # relaunched the online loop under the previous mode while the newer run was merging a checkpoint on the same card).
 # Every edit bumps BOXG_SERIAL; a run that sees a lower serial than one already executed stops here.
-BOXG_SERIAL=2026092406
+BOXG_SERIAL=2026092409
 if [ -f /root/.boxg_serial ] && [ "$(cat /root/.boxg_serial)" -gt "$BOXG_SERIAL" ] 2>/dev/null; then echo "BOXG_STALE $BOXG_SERIAL < $(cat /root/.boxg_serial)"; exit 0; fi
 echo $BOXG_SERIAL > /root/.boxg_serial
 MODE=online       # 2026-09-22 20:58: back to g7 after the step-600 held-out check (37.3%; 470 40.2%, 120 35.3%, s4 38.0%)
-ORUN=g9           # 2026-09-23: g8's settings with the KL anchor from step 0. g8 drifted by step 160 without it, and its "healthy" copy was
-                  # already long-thinking (reasoning 600-1300 words a step after the restart), so the anchor is tested from the base instead.
+ORUN=g10          # 2026-09-24: the diagnostic. Search side ONLY, from s4_hf, under the search GRPO's own recipe (layers 20-27, pooler adapter,
+                  # 1e-5, temp 0.9, gen 1500, mean/std, corpus questions from pool3's 201st, no KL). If this climbs like pool3 did, the joint
+                  # runs failed because of the reasoning side; if it does not, the conversational base itself is the problem.
 OSEED=            # 2026-09-20: g7 starts clean from s4_hf. g6 never carried g5's weights (its seed download left no checkpoint) and after the
                   # layer change ran with layers 0-19 of the stock model; both are now caught at launch (ONLINE_SEED_ABORT, ONLINE_ABORT)
 OMODEL=s4_hf
@@ -95,7 +96,7 @@ ODMIN=0           # 2026-09-24: the Dolphin SFT record off. Its references think
 ODOLPHIN=dolphin_v2.jsonl
 OLR=1e-5          # 2026-09-23: the reasoning side at the search side's rate; every higher rate leaked its style into the search side
 OACCUM=1          # 2026-09-20: two optimizers now, one step each
-OLAYERS=all       # 2026-09-23: all 28 layers again (18.5M), this time at 1e-5 with the guard, the constant-length loss and moment-keeping resumes
+OLAYERS=20-27     # 2026-09-24: pool3's range
 OREPLAY=replay_v1.jsonl
 OREPLAYFILTER=1
 OTRAINALL=1
@@ -113,16 +114,16 @@ OGUARDHALVE=0     # a rollback restores the weights only; the rates stay as conf
 # over a hundred steps. Changing this line and adding a restart marker is the whole switch.
 OREASON=dolphin_v2.jsonl
 OREASONG=12
-OSEARCHEVERY=2
-OKL=0.2           # 2026-09-24: 0.04 only delayed g8's drift by ~20 steps (g9: search thinking 142 -> 303 words by step 170); five times that
-OREASONEVERY=4    # 2026-09-23: a reasoning step every 4th step, search otherwise (3:1); overrides OSEARCHEVERY
+OSEARCHEVERY=1    # 2026-09-24: every step is a search step
+OKL=0             # 2026-09-24: off, as in pool3
+OREASONEVERY=0    # 2026-09-24: no reasoning steps at all
 ODOLPHINON=reason # the Dolphin SFT record only on reasoning steps
 OWHEELS=1
 OWTALK=0.5
 OSEARCHDEMO=
 OSEARCHWHEELS=0   # 2026-09-20: off again, as in the search GRPO; the layer limit is the fix, not a crutch
-OPGNORM=const     # 2026-09-23: on: the drift g7 showed after step 560 (longer wrong rollouts, more unfinished) is what this removes
-OADVSTD=0
+OPGNORM=mean      # 2026-09-24: pool3's normalisation
+OADVSTD=1
 OREASONSTUB=0
 OJUDGEAPI=openai
 OJUDGEMODEL=gpt-5-nano
@@ -133,9 +134,9 @@ OROLLEVERY=1
 OQFILE=           # 2026-09-20: empty; the search questions come from the corpus pool the search GRPO trained on (OPOOL3Q)
 OPOOL3Q=1         # search questions = corpus q/gold pairs with a gold of at most 6 words, held-out removed, exactly as grpo_pool did
 ORESUME=0
-OSTEPS=1200
+OSTEPS=400
 OSEARCHLR=1e-5    # 2026-09-20: the search side steps its own Adam at the search GRPO's rate; --lr is the reasoning side's
-OSEARCHTEMP=0.6   # 2026-09-20: 0.9 as in pool3 stopped this model searching at all (0.1 searches per rollout, 1% pass over 46 steps); at 0.6 it searches (median 1)
+OSEARCHTEMP=0.9   # 2026-09-24: pool3's temperature; the guard watches the zero-search rate
 OPOOLORDER=pool3  # 2026-09-21: the search questions continue pool3's own sequence from its 201st question (step 162 of g7 = pool index 200)
 OPOOLOFFSET=200   # a fresh run: its first search step is pool3's 201st question
 OPOOLER=lora      # 2026-09-22: the pooler's rank-8 adapter trains again, as in the search GRPO (its params ride with the search optimizer)
