@@ -80,7 +80,7 @@ PSKIP=
 # The raw GitHub copy this box fetches can lag and hand a control run an OLDER version of this file (04:48 on 09-22 it
 # relaunched the online loop under the previous mode while the newer run was merging a checkpoint on the same card).
 # Every edit bumps BOXG_SERIAL; a run that sees a lower serial than one already executed stops here.
-BOXG_SERIAL=2026092421
+BOXG_SERIAL=2026092422
 if [ -f /root/.boxg_serial ] && [ "$(cat /root/.boxg_serial)" -gt "$BOXG_SERIAL" ] 2>/dev/null; then echo "BOXG_STALE $BOXG_SERIAL < $(cat /root/.boxg_serial)"; exit 0; fi
 echo $BOXG_SERIAL > /root/.boxg_serial
 MODE=online       # 2026-09-22 20:58: back to g7 after the step-600 held-out check (37.3%; 470 40.2%, 120 35.3%, s4 38.0%)
@@ -553,12 +553,7 @@ FZ
   # the watcher is per run: the one started for the previous run kept running, never saw this run's marks, and blocked a new one
   pgrep -f "freeze.s[h]" >/dev/null && ! pgrep -f "freeze.sh $ORUN\b" >/dev/null && { pkill -f "freeze.s[h]"; sleep 2; }
   pgrep -f "freeze.sh $ORUN\b" >/dev/null || setsid nohup bash /root/freeze.sh $ORUN >> /proc/1/fd/1 2>&1 < /dev/null &
-  if [ ! -f /root/.frozen_${ORUN}_150 ] && [ -s $OUT/latest.safetensors ]; then
-    for f in latest.safetensors state.json loop.log rollouts.jsonl; do
-      [ -s $OUT/$f ] && hf upload $R $OUT/$f pooler_distill/chatsft/online/${ORUN}_step150/$f >/dev/null 2>&1
-    done
-    touch /root/.frozen_${ORUN}_150; echo "ONLINE_FROZEN ${ORUN}_step150 $(date -u)"
-  fi
+  # (the one-off step-150 upload of the g3 days is gone: it labelled whatever "latest" was as step 150 - g10_step150 on the hub is really step ~285)
   # every checkpoint is ~3.5 GB and every run keeps two (latest and the guard's healthy copy): six finished
   # runs filled the disk and killed r10 at step 5 with "No space left on device" while it wrote one.
   for d in /root/online_*/; do [ "$d" = "$OUT/" ] || rm -f $d/latest.safetensors $d/good.safetensors $d/*.tmp; done
