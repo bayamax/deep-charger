@@ -80,7 +80,7 @@ PSKIP=
 # The raw GitHub copy this box fetches can lag and hand a control run an OLDER version of this file (04:48 on 09-22 it
 # relaunched the online loop under the previous mode while the newer run was merging a checkpoint on the same card).
 # Every edit bumps BOXG_SERIAL; a run that sees a lower serial than one already executed stops here.
-BOXG_SERIAL=2026092320
+BOXG_SERIAL=2026092406
 if [ -f /root/.boxg_serial ] && [ "$(cat /root/.boxg_serial)" -gt "$BOXG_SERIAL" ] 2>/dev/null; then echo "BOXG_STALE $BOXG_SERIAL < $(cat /root/.boxg_serial)"; exit 0; fi
 echo $BOXG_SERIAL > /root/.boxg_serial
 MODE=online       # 2026-09-22 20:58: back to g7 after the step-600 held-out check (37.3%; 470 40.2%, 120 35.3%, s4 38.0%)
@@ -91,7 +91,7 @@ OSEED=            # 2026-09-20: g7 starts clean from s4_hf. g6 never carried g5'
 OMODEL=s4_hf
 OB=8
 ODRATIO=1
-ODMIN=1
+ODMIN=0           # 2026-09-24: the Dolphin SFT record off. Its references think ~245 words against the model's ~110, a length pressure of its own; the KL anchor now does the retention
 ODOLPHIN=dolphin_v2.jsonl
 OLR=1e-5          # 2026-09-23: the reasoning side at the search side's rate; every higher rate leaked its style into the search side
 OACCUM=1          # 2026-09-20: two optimizers now, one step each
@@ -114,7 +114,7 @@ OGUARDHALVE=0     # a rollback restores the weights only; the rates stay as conf
 OREASON=dolphin_v2.jsonl
 OREASONG=12
 OSEARCHEVERY=2
-OKL=0.04          # 2026-09-23: the anchor to the base policy (k3, adapters off). g8 drifted by step 160 without one: reasoning thinking 114 -> 631 words, search side in step
+OKL=0.2           # 2026-09-24: 0.04 only delayed g8's drift by ~20 steps (g9: search thinking 142 -> 303 words by step 170); five times that
 OREASONEVERY=4    # 2026-09-23: a reasoning step every 4th step, search otherwise (3:1); overrides OSEARCHEVERY
 ODOLPHINON=reason # the Dolphin SFT record only on reasoning steps
 OWHEELS=1
@@ -614,6 +614,17 @@ FZ
   if [ ! -f /root/.restart_${ORUN}_wheelfix ] && grep -q "max(rw) <= 0.0" /root/work/online_loop.py; then pkill -f "online_loop.p[y]"; sleep 8; pkill -9 -f "online_loop.p[y]" 2>/dev/null; touch /root/.restart_${ORUN}_wheelfix; echo "ONLINE_RESTART $ORUN wheel trigger $(date -u)"; fi
   # once (2026-09-20): the search side back to the search GRPO's conditions: its own optimizer at 1e-5, temp 0.9, gen 1500, corpus questions, mean/std normalisation
   if [ ! -f /root/.restart_${ORUN}_pool3 ] && grep -q "search-lr" /root/work/online_loop.py; then pkill -f "online_loop.p[y]"; sleep 8; pkill -9 -f "online_loop.p[y]" 2>/dev/null; touch /root/.restart_${ORUN}_pool3; echo "ONLINE_RESTART $ORUN pool3 conditions $(date -u)"; fi
+  # once (2026-09-24): KL 0.2 and the Dolphin record off; the rollback count is forgotten
+  if [ ! -f /root/.restart_${ORUN}_kl02 ]; then pkill -f "online_loop.p[y]"; sleep 8; pkill -9 -f "online_loop.p[y]" 2>/dev/null; touch /root/.restart_${ORUN}_kl02
+    python3 - "$OUT/state.json" <<'GR5'
+import json,sys
+p=sys.argv[1]
+try: st=json.load(open(p))
+except Exception: sys.exit(0)
+for k in ('rollbacks','guard_from'): st.pop(k, None)
+json.dump(st, open(p,'w'))
+GR5
+    echo "ONLINE_RESTART $ORUN kl 0.2, dolphin off $(date -u)"; fi
   # once (2026-09-23): the KL run starts from the guard's last healthy copy, not from the drifted step-205 save the rollback had already discarded
   if [ ! -f /root/.restart_${ORUN}_fromgood ] && [ -s $OUT/good.safetensors ] && grep -q "disable_adapter" /root/work/online_loop.py; then pkill -f "online_loop.p[y]"; sleep 8; pkill -9 -f "online_loop.p[y]" 2>/dev/null; touch /root/.restart_${ORUN}_fromgood; cp $OUT/good.safetensors $OUT/latest.safetensors; echo "ONLINE_RESTART $ORUN from good.safetensors $(date -u)"; fi
   # once (2026-09-23): the KL anchor; the one rollback so far is forgotten, the baseline kept
