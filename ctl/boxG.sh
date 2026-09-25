@@ -80,7 +80,7 @@ PSKIP=
 # The raw GitHub copy this box fetches can lag and hand a control run an OLDER version of this file (04:48 on 09-22 it
 # relaunched the online loop under the previous mode while the newer run was merging a checkpoint on the same card).
 # Every edit bumps BOXG_SERIAL; a run that sees a lower serial than one already executed stops here.
-BOXG_SERIAL=2026092422
+BOXG_SERIAL=2026092500
 if [ -f /root/.boxg_serial ] && [ "$(cat /root/.boxg_serial)" -gt "$BOXG_SERIAL" ] 2>/dev/null; then echo "BOXG_STALE $BOXG_SERIAL < $(cat /root/.boxg_serial)"; exit 0; fi
 echo $BOXG_SERIAL > /root/.boxg_serial
 MODE=online       # 2026-09-22 20:58: back to g7 after the step-600 held-out check (37.3%; 470 40.2%, 120 35.3%, s4 38.0%)
@@ -804,7 +804,7 @@ PYD
   [ -s /root/hfdl/pooler_distill/chat_eval60.jsonl ] || hf download $R --include "pooler_distill/chat_eval60.jsonl" --local-dir /root/hfdl 2>&1 | tail -1
   cat > /root/reevalkeep.sh <<RK
 #!/bin/bash
-RRUN=$RRUN; RHF=$RHF; R=$R; RCKPT=$RCKPT; RQSRC=${RQSRC:-}; RSHARDS=${RSHARDS:-3}; RTEMP=${RTEMP:-0.9}; RCAP=${RCAP:-600}; RGEN=${RGEN:-1500}; RN=${RN:-999}
+RRUN=$RRUN; RHF=$RHF; R=$R; RCKPT=$RCKPT; RQSRC=${RQSRC:-}; RHINT=${RHINT:-}; RSHARDS=${RSHARDS:-3}; RTEMP=${RTEMP:-0.9}; RCAP=${RCAP:-600}; RGEN=${RGEN:-1500}; RN=${RN:-999}
 RK
   cat >> /root/reevalkeep.sh <<'RKB'
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null)
@@ -828,7 +828,24 @@ for r in [json.loads(l) for l in open(sorted(glob.glob("/root/work/*dolph_out_0.
 PYT
   echo "REEVAL_DONE $RRUN $(date -u)"; exit 0
 fi
-for i in $(seq 0 $((${RSHARDS:-3} - 1))); do run_one /root/work/ev_$i.jsonl /root/work/${RRUN}_out_$i.jsonl ${RRUN}$i; hf upload $R /root/work/${RRUN}_out_$i.jsonl pooler_distill/chatsft/rollouts/${RRUN}_$i.jsonl >/dev/null 2>&1; echo "[$RRUN] shard $i uploaded $(tail -1 /root/${RRUN}_${RRUN}$i.log | cut -c1-110)"; done
+# RHINT: one instruction put in front of every held-out question (the "knob" test: does a drifted checkpoint search again
+# when told to?). The gold and the scoring are untouched; the hinted copies are separate files.
+EVP=ev
+if [ -n "$RHINT" ]; then
+  EVP=evh_${RRUN}
+  python3 - "$RHINT" "${RSHARDS:-3}" "$EVP" <<'PYH'
+import json, sys
+hint, n, out = sys.argv[1], int(sys.argv[2]), sys.argv[3]
+for i in range(n):
+    with open(f"/root/work/{out}_{i}.jsonl", "w") as o:
+        for l in open(f"/root/work/ev_{i}.jsonl"):
+            try: r = json.loads(l)
+            except Exception: continue
+            r["q"] = hint.strip() + " " + r["q"]; o.write(json.dumps(r, ensure_ascii=False) + "\n")
+print("[hint]", repr(hint))
+PYH
+fi
+for i in $(seq 0 $((${RSHARDS:-3} - 1))); do run_one /root/work/${EVP}_$i.jsonl /root/work/${RRUN}_out_$i.jsonl ${RRUN}$i; hf upload $R /root/work/${RRUN}_out_$i.jsonl pooler_distill/chatsft/rollouts/${RRUN}_$i.jsonl >/dev/null 2>&1; echo "[$RRUN] shard $i uploaded $(tail -1 /root/${RRUN}_${RRUN}$i.log | cut -c1-110)"; done
 run_one /root/hfdl/pooler_distill/chat_eval60.jsonl /root/work/${RRUN}_chat_out.jsonl ${RRUN}chat
 hf upload $R /root/work/${RRUN}_chat_out.jsonl pooler_distill/chatsft/rollouts/${RRUN}_chat.jsonl >/dev/null 2>&1
 python3 - <<'PYT'
