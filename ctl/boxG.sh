@@ -80,7 +80,7 @@ PSKIP=
 # The raw GitHub copy this box fetches can lag and hand a control run an OLDER version of this file (04:48 on 09-22 it
 # relaunched the online loop under the previous mode while the newer run was merging a checkpoint on the same card).
 # Every edit bumps BOXG_SERIAL; a run that sees a lower serial than one already executed stops here.
-BOXG_SERIAL=2026092517
+BOXG_SERIAL=2026092518
 if [ -f /root/.boxg_serial ] && [ "$(cat /root/.boxg_serial)" -gt "$BOXG_SERIAL" ] 2>/dev/null; then echo "BOXG_STALE $BOXG_SERIAL < $(cat /root/.boxg_serial)"; exit 0; fi
 echo $BOXG_SERIAL > /root/.boxg_serial
 MODE=online       # 2026-09-25 11:00: g12 (Dolphin RFT from g10's search result). Baselines of s4: Dolphin held-out 56%, GSM8K 64%, search held-out 38%
@@ -353,8 +353,8 @@ chmod +x /root/status_pub.sh
 setsid nohup bash /root/status_pub.sh >> /proc/1/fd/1 2>&1 < /dev/null &
 
 # ---- the box's own logs, mirrored to the hub every ten minutes: readable without the Vast API ----
-pkill -f "logmirro[r].sh" 2>/dev/null   # replaced by logmirror2 (adds evaluation progress)
-cat > /root/logmirror2.sh <<'LM'
+pkill -f "logmirro[r].sh" 2>/dev/null; pkill -f "logmirror[2].sh" 2>/dev/null   # replaced by logmirror3 (adds the score table)
+cat > /root/logmirror3.sh <<'LM'
 #!/bin/bash
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); R=baya1116/hypernet-sp-distill
 while :; do
@@ -362,13 +362,14 @@ while :; do
     echo "--- reeval.log (tail) ---"; tail -n 120 /root/reeval.log 2>/dev/null | cut -c1-300
     for f in $(ls -t /root/online_*.log 2>/dev/null | head -1); do echo "--- $f (tail) ---"; tail -n 60 "$f" | cut -c1-300; done
     echo "--- gpu ---"; nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv,noheader 2>/dev/null; df -h /root | tail -1
+    [ -x /usr/local/bin/s ] && /usr/local/bin/s 20 2>/dev/null | sed 's/^/SCORE /'
     echo "--- eval progress ---"; for f in $(ls -t /root/work/*_out_*.jsonl 2>/dev/null | head -3); do echo "$f $(wc -l < $f) lines, last write $(date -u -r $f +%H:%M)"; done
     echo "--- processes ---"; pgrep -fa "online_loop.p[y]|pool_eval.p[y]|reevalkee[p].sh|build_merged.p[y]" | cut -c1-120; } > /root/boxlog.txt 2>&1
   hf upload $R /root/boxlog.txt pooler_distill/chatsft/audit/boxlog.txt >/dev/null 2>&1
   sleep 600
 done
 LM
-chmod +x /root/logmirror2.sh; pgrep -f "logmirror[2].sh" >/dev/null || setsid nohup bash /root/logmirror2.sh >> /proc/1/fd/1 2>&1 < /dev/null &
+chmod +x /root/logmirror3.sh; pgrep -f "logmirror[3].sh" >/dev/null || setsid nohup bash /root/logmirror3.sh >> /proc/1/fd/1 2>&1 < /dev/null &
 # ---- the teacher judge's reachability, every control run (one tiny call; the status and the error text, never the key) ----
 if [ -s /root/.dsk ]; then
   python3 - <<'DD'
