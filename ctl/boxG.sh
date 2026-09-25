@@ -512,6 +512,26 @@ for f in ("train", "test"):
     print(f"[gsm8k] {f}: {n} problems")
 PG
     REASONF=/root/work/gsm8k_train.jsonl
+  elif [ "${OREASONSRC:-}" = "dolphin_rft" ]; then
+    # dolphin_v1 minus a fixed held-out hundred (seed 0). The held-out is the reasoning yardstick from here on: never trained on.
+    for f in dolphin_v1.jsonl dolphin_v2.jsonl; do [ -s /root/hfdl/pooler_distill/chatsft/$f ] || hf download $R --include "pooler_distill/chatsft/$f" --local-dir /root/hfdl >/dev/null 2>&1; done
+    python3 - <<'PD'
+import json, random
+v1 = [json.loads(l) for l in open("/root/hfdl/pooler_distill/chatsft/dolphin_v1.jsonl") if l.strip()]
+v1 = [r for r in v1 if r.get("q") and r.get("reply")]
+v2q = set((json.loads(l).get("q") or "").strip() for l in open("/root/hfdl/pooler_distill/chatsft/dolphin_v2.jsonl") if l.strip())
+cand = [r for r in v1 if r["q"].strip() not in v2q]; random.Random(0).shuffle(cand)
+held = cand[:100]; hq = set(r["q"].strip() for r in held)
+with open("/root/work/dolphin_heldout100.jsonl", "w") as o:
+    for r in held: o.write(json.dumps({"q": r["q"], "ref": r["reply"]}, ensure_ascii=False) + "\n")
+with open("/root/work/dolphin_rft.jsonl", "w") as o:
+    n = 0
+    for r in v1:
+        if r["q"].strip() in hq: continue
+        o.write(json.dumps(r, ensure_ascii=False) + "\n"); n += 1
+print(f"[dolphin_rft] {n} training problems, 100 held out")
+PD
+    REASONF=/root/work/dolphin_rft.jsonl
   else REASONF=/root/hfdl/pooler_distill/chatsft/$OREASON; fi
   QFILE=/root/work/selfq_all.jsonl
   if [ "${OPOOL3Q:-0}" = 1 ]; then
@@ -714,7 +734,7 @@ GR
   if ! pgrep -f "online_loop.p[y]" >/dev/null; then
     cd /root/work && DSK_KEY=$(cat /root/.dsk 2>/dev/null) OAI_KEY=$(cat /root/.oai 2>/dev/null) PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True setsid nohup python3 /root/work/online_loop.py $OHF $OUT \
       --questions $QFILE --dolphin /root/work/dolphin_v1.jsonl --heldout /root/work/eval300.jsonl \
-      --b $OB --steps $OSTEPS --temp $OTEMP --lr $OLR --dolphin-ratio ${ODRATIO:-2} --dolphin-min ${ODMIN:-2} --accum ${OACCUM:-1} --replay $REPLAYF --replay-per-step ${OREPLAYN:-2} --rollout-every ${OROLLEVERY:-1} --train-all ${OTRAINALL:-0} --queue ${OQUEUE:-0} --complete-only ${OCOMPLETE:-0} --gen ${OGEN:-1500} --budget ${OBUDGET:-900} --guard ${OGUARD:-0} --maxsrch ${OMAXSRCH:-0} --judge ${OJUDGE:-1} ${OREASON:+--reason $REASONF --reason-verify ${OREASONVERIFY:-judge} --reason-g ${OREASONG:-8} --reason-stub ${OREASONSTUB:-0} --judge-api ${OJUDGEAPI:-deepseek} --judge-model ${OJUDGEMODEL:-} --search-every ${OSEARCHEVERY:-0} --reason-every ${OREASONEVERY:-0} --kl ${OKL:-0} --dolphin-on ${ODOLPHINON:-all} --w-talk ${OWTALK:-0.5} --wheels ${OWHEELS:-0} --search-wheels ${OSEARCHWHEELS:-0} --pg-norm ${OPGNORM:-mean} --pg-norm-len 1024 --adv-std ${OADVSTD:-1} --search-lr ${OSEARCHLR:-0} --guard-pass ${OGUARDPASS:-0.5} --guard-steps ${OGUARDSTEPS:-10} --guard-halve ${OGUARDHALVE:-1} --pool-order ${OPOOLORDER:-loop} --pool-offset ${OPOOLOFFSET:-0} --search-temp ${OSEARCHTEMP:-0} --search-gen ${OSEARCHGEN:-0} ${OSEARCHDEMO:+--search-demo /root/hfdl/$OSEARCHDEMO}} --pooler ${OPOOLER:-none} --pooler-rank ${OPOOLERRANK:-8} --pooler-lr ${OPOOLERLR:-1e-5} --lora-rank 16 --lora-layers ${OLAYERS:-all} --gradckpt 1 --save-every 5 --stop eos \
+      --b $OB --steps $OSTEPS --temp $OTEMP --lr $OLR --dolphin-ratio ${ODRATIO:-2} --dolphin-min ${ODMIN:-2} --accum ${OACCUM:-1} --replay $REPLAYF --replay-per-step ${OREPLAYN:-2} --rollout-every ${OROLLEVERY:-1} --train-all ${OTRAINALL:-0} --queue ${OQUEUE:-0} --complete-only ${OCOMPLETE:-0} --gen ${OGEN:-1500} --budget ${OBUDGET:-900} --guard ${OGUARD:-0} --maxsrch ${OMAXSRCH:-0} --judge ${OJUDGE:-1} ${OREASON:+--reason $REASONF --reason-verify ${OREASONVERIFY:-judge} --rft ${ORFT:-0} --rft-replay ${ORFTREPLAY:-0.5} --reason-g ${OREASONG:-8} --reason-stub ${OREASONSTUB:-0} --judge-api ${OJUDGEAPI:-deepseek} --judge-model ${OJUDGEMODEL:-} --search-every ${OSEARCHEVERY:-0} --reason-every ${OREASONEVERY:-0} --kl ${OKL:-0} --dolphin-on ${ODOLPHINON:-all} --w-talk ${OWTALK:-0.5} --wheels ${OWHEELS:-0} --search-wheels ${OSEARCHWHEELS:-0} --pg-norm ${OPGNORM:-mean} --pg-norm-len 1024 --adv-std ${OADVSTD:-1} --search-lr ${OSEARCHLR:-0} --guard-pass ${OGUARDPASS:-0.5} --guard-steps ${OGUARDSTEPS:-10} --guard-halve ${OGUARDHALVE:-1} --pool-order ${OPOOLORDER:-loop} --pool-offset ${OPOOLOFFSET:-0} --search-temp ${OSEARCHTEMP:-0} --search-gen ${OSEARCHGEN:-0} ${OSEARCHDEMO:+--search-demo /root/hfdl/$OSEARCHDEMO}} --pooler ${OPOOLER:-none} --pooler-rank ${OPOOLERRANK:-8} --pooler-lr ${OPOOLERLR:-1e-5} --lora-rank 16 --lora-layers ${OLAYERS:-all} --gradckpt 1 --save-every 5 --stop eos \
       >> /root/online_$ORUN.log 2>&1 < /dev/null &
   fi
   # once: in reasoning mode the empty search loop printed the end marker at launch, and the keeper
@@ -822,6 +842,16 @@ for r in rows[:${RQN:-12}]:
 print("[dolphin questions]", min(len(rows), ${RQN:-12}))
 PYD
   fi
+  if [ "${RQSRC:-}" = "dolphinh" ]; then
+    [ -s /root/work/dolphin_heldout100.jsonl ] || { echo "REEVAL_ABORT $RRUN: no dolphin_heldout100.jsonl (an online launch with OREASONSRC=dolphin_rft builds it)"; exit 0; }
+    python3 - <<'PYH2'
+import json
+rows = [json.loads(l) for l in open("/root/work/dolphin_heldout100.jsonl") if l.strip()]
+with open("/root/work/dolphinq.jsonl", "w") as o:
+    for r in rows: o.write(json.dumps({"q": r["q"]}, ensure_ascii=False) + "\n")
+print("[dolphin held-out questions]", len(rows))
+PYH2
+  fi
   if [ "${RQSRC:-}" = "gsm" ]; then
     [ -s /root/work/gsm8k_test.raw ] || curl -sSL --retry 3 -o /root/work/gsm8k_test.raw "https://raw.githubusercontent.com/openai/grade-school-math/master/grade_school_math/data/test.jsonl"
     python3 - <<PYG
@@ -848,6 +878,36 @@ run_one() {  # $1 questions file, $2 out file, $3 tag
 if [ -n "$RQSRC" ]; then
   run_one /root/work/dolphinq.jsonl /root/work/${RRUN}_out_0.jsonl ${RRUN}0
   hf upload $R /root/work/${RRUN}_out_0.jsonl pooler_distill/chatsft/rollouts/${RRUN}_dolphin.jsonl >/dev/null 2>&1   # full replies, the log shows 900 chars
+  if [ "$RQSRC" = "dolphinh" ]; then
+    OAI_KEY=$(cat /root/.oai 2>/dev/null) python3 - <<'PYJ'
+import json, os, glob, urllib.request, time
+from concurrent.futures import ThreadPoolExecutor
+src = open("/root/work/online_loop.py").read(); i = src.index("REASON_SYS = "); j = src.index('"""', src.index('"""', i) + 3) + 3
+ns = {}; exec(src[i:j], ns); SYS = ns["REASON_SYS"]
+ref = {json.loads(l)["q"].strip(): json.loads(l)["ref"] for l in open("/root/work/dolphin_heldout100.jsonl") if l.strip()}
+rows = [json.loads(l) for l in open(sorted(glob.glob("/root/work/*_out_0.jsonl"), key=os.path.getmtime)[-1]) if l.strip()]
+key = os.environ.get("OAI_KEY", "")
+def judge(r):
+    t = r["text"]; reply = t.split("</think>")[-1].strip() if "</think>" in t else ""
+    if not reply: return 0, "unfinished"
+    body = {"model": "gpt-5-nano", "max_completion_tokens": 2000, "messages": [{"role": "system", "content": SYS},
+            {"role": "user", "content": f"QUESTION:\n{r['q'][:2000]}\n\nREFERENCE ANSWER:\n{ref.get(r['q'].strip(), '')[:3000]}\n\nASSISTANT ANSWER:\n{reply[:3000]}"}]}
+    for _ in range(3):
+        try:
+            d = json.load(urllib.request.urlopen(urllib.request.Request("https://api.openai.com/v1/chat/completions", data=json.dumps(body).encode(), headers={"Authorization": "Bearer " + key, "Content-Type": "application/json"}), timeout=180))
+            c = d["choices"][0]["message"].get("content") or ""; v = json.loads(c[c.find("{"): c.rfind("}") + 1])
+            return int(all(bool(v.get(k)) for k in ("solves_it", "follows_the_request", "language_english", "clean"))), v
+        except Exception as e: time.sleep(3); err = type(e).__name__
+    return 0, {"error": err}
+with ThreadPoolExecutor(max_workers=8) as ex: res = list(ex.map(judge, rows))
+ok = sum(a for a, _ in res); th = sorted(len(r["text"].split("</think>")[0].split()) for r in rows); errs = sum(1 for _, v in res if isinstance(v, dict) and "error" in v)
+print(f"DOLPHIN_ACC {100*ok/max(len(rows),1):.1f}% ({ok}/{len(rows)})  judge errors {errs}  think median {th[len(th)//2] if th else 0} words")
+with open("/root/work/" + os.path.basename(sorted(glob.glob("/root/work/*_out_0.jsonl"), key=os.path.getmtime)[-1]).replace("_out_0", "_judged"), "w") as o:
+    for r, (a, v) in zip(rows, res): o.write(json.dumps({"q": r["q"], "pass": a, "why": v, "text": r["text"]}, ensure_ascii=False) + "\n")
+PYJ
+    hf upload $R /root/work/${RRUN}_judged.jsonl pooler_distill/chatsft/rollouts/${RRUN}_judged.jsonl >/dev/null 2>&1
+    echo "REEVAL_DONE $RRUN $(date -u)"; exit 0
+  fi
   if [ "$RQSRC" = "gsm" ]; then
     python3 - <<'PYA'
 import json, re

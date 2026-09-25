@@ -63,6 +63,8 @@ ap.add_argument("--pg-norm", default="mean", choices=["mean", "const"], help="ho
 ap.add_argument("--guard-steps", type=int, default=10, help="search steps per guard window (baseline = the first window). 10 steps = 120 rollouts was noisy enough to trip on hard stretches; 20 halves that")
 ap.add_argument("--guard-halve", type=int, default=1, help="1: a rollback also halves both learning rates. 0: weights only")
 ap.add_argument("--guard-pass", type=float, default=0.5, help="the guard trips only when, besides the unfinished or search-count rise, the window's pass rate has fallen to this fraction of the baseline pass rate (one hard question in a window is not a collapse)")
+ap.add_argument("--rft", type=int, default=0, help="1: rejection-sampling fine-tuning instead of the policy gradient on reasoning steps: of the G samples the teacher passes, the one with the shortest thinking is trained on as plain SFT; none passing falls back to --wheels. No advantage, no std, no length pressure.")
+ap.add_argument("--rft-replay", type=float, default=0.5, help="in --rft mode, one verified search trace (from --replay) is trained on every step at this weight, so the search side is rehearsed while the reasoning side learns")
 ap.add_argument("--reason-verify", default="judge", choices=["judge", "numeric"], help="numeric: the reasoning reward is exact agreement of the final number with the reference (GSM8K-style), no teacher; judge: the teacher model's four boxes")
 ap.add_argument("--kl", type=float, default=0.0, help=">0: GRPO's anchor to the reference policy, the base with the adapters disabled (k3 estimator per policy token, this coefficient). g7 and g8 had no anchor at all: the reasoning reward favours longer thinking, and with nothing holding the policy near the base that length leaked into the search side within 200 steps on all layers")
 ap.add_argument("--reason-every", type=int, default=0, help=">0: a reasoning step every N steps and a search step otherwise (3 search : 1 reasoning at 4); overrides --search-every")
@@ -206,7 +208,7 @@ if A.gradckpt:
     print("[init] gradient checkpointing ON for the policy-gradient pass", flush=True)
 nT = sum(p.numel() for p in model.parameters() if p.requires_grad) / 1e6
 nP = sum(p.numel() for p in pooler_params) / 1e6
-print(f"[cfg] G={A.g} reason_verify={A.reason_verify} kl={A.kl} reason_every={A.reason_every} dolphin_on={A.dolphin_on} pool_order={A.pool_order}+{A.pool_offset} pg_norm={A.pg_norm}/{A.pg_norm_len} adv_std={A.adv_std} search_lr={A.search_lr} search_temp={A.search_temp} search_gen={A.search_gen} accum={A.accum} steps={A.steps} budget={A.budget} rw={A.rw} maxd={A.maxd} chunk={A.chunk} temp={A.temp} gen={A.gen} maxs={A.maxs} maxm={A.maxm} samepage={A.samepage} maxsrch={A.maxsrch} phantom={A.phantom}x{A.phantom_scale} "
+print(f"[cfg] G={A.g} rft={A.rft}/{A.rft_replay} reason_verify={A.reason_verify} kl={A.kl} reason_every={A.reason_every} dolphin_on={A.dolphin_on} pool_order={A.pool_order}+{A.pool_offset} pg_norm={A.pg_norm}/{A.pg_norm_len} adv_std={A.adv_std} search_lr={A.search_lr} search_temp={A.search_temp} search_gen={A.search_gen} accum={A.accum} steps={A.steps} budget={A.budget} rw={A.rw} maxd={A.maxd} chunk={A.chunk} temp={A.temp} gen={A.gen} maxs={A.maxs} maxm={A.maxm} samepage={A.samepage} maxsrch={A.maxsrch} phantom={A.phantom}x{A.phantom_scale} "
       f"lr={A.lr} pooler_lr={A.pooler_lr} pooler={A.pooler}(r={A.pooler_rank}) trainable lora={nT:.1f}M pooler={nP:.2f}M", flush=True)
 # ---- environment: verbatim grpo_ep_more serve() ----
 WAPI = "https://en.wikipedia.org/w/api.php"
@@ -1167,7 +1169,19 @@ for step in range(state["step"] + 1, A.steps + 1) if reason else []:
     mu = sum(rw) / max(len(rw), 1)
     sd = (sum((x - mu) ** 2 for x in rw) / max(len(rw), 1)) ** 0.5
     losses = []; wheel = 0.0
-    if sd > 1e-6:
+    if A.rft and not searching:
+        # rejection sampling: the passing sample with the shortest thinking becomes a plain SFT record
+        model.train()
+        good = [r for r, x in zip(rolls, rw) if x >= 1.0 and "</think>" in r["text"]]
+        if good:
+            best = min(good, key=lambda r: len(r["text"].split("</think>")[0]))
+            th, rp = best["text"].split("</think>", 1)
+            losses.append(guarded(plain_backward, {"q": qtext, "thinking": th.replace("<think>", "").strip(), "reply": rp.strip()}, 1.0 / A.accum)); clear()
+        elif A.wheels:
+            wheel = guarded(plain_backward, {"q": qtext, "thinking": prob.get("thinking", ""), "reply": ref}, 1.0 / A.accum); clear()
+        if rep and A.rft_replay > 0:
+            losses.append(guarded(replay_backward, rep[ri % len(rep)], A.rft_replay / A.accum)); ri += 1; clear()
+    elif sd > 1e-6:
         model.train()
         for r, x in zip(rolls, rw):
             losses.append(guarded(pg_backward, r, (x - mu) / (sd if A.adv_std else 1.0) / (len(rolls) * A.accum))); clear()
