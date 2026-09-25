@@ -80,12 +80,12 @@ PSKIP=
 # The raw GitHub copy this box fetches can lag and hand a control run an OLDER version of this file (04:48 on 09-22 it
 # relaunched the online loop under the previous mode while the newer run was merging a checkpoint on the same card).
 # Every edit bumps BOXG_SERIAL; a run that sees a lower serial than one already executed stops here.
-BOXG_SERIAL=2026092510
+BOXG_SERIAL=2026092511
 if [ -f /root/.boxg_serial ] && [ "$(cat /root/.boxg_serial)" -gt "$BOXG_SERIAL" ] 2>/dev/null; then echo "BOXG_STALE $BOXG_SERIAL < $(cat /root/.boxg_serial)"; exit 0; fi
 echo $BOXG_SERIAL > /root/.boxg_serial
 AUDIT=1           # 2026-09-25: one-off, runs beside the evaluation on the CPU
-MODE=reeval       # 2026-09-25 04:00: the reasoning baseline before g11: s4_hf on the first 100 GSM8K test problems, exact match (~30 min)
-RRUN=s4gsm; RMODEL=s4_hf; RKIND=dir; RQSRC=gsm; RQN=100; RTEMP=0.6; RGEN=4000
+MODE=reeval       # 2026-09-25 08:20: the reasoning yardstick before g12: s4_hf on the fixed Dolphin held-out hundred, judged on the box (s4 GSM8K: 64%)
+RRUN=s4dol; RMODEL=s4_hf; RKIND=dir; RQSRC=dolphinh; RQN=100; RTEMP=0.6; RGEN=7000
 ORUN=g12          # 2026-09-25: the reasoning line. Rejection-sampling fine-tuning on Dolphin (v1 minus a held-out hundred): 12 samples,
                   # the teacher's rubric, the shortest passing one trained as SFT, a verified search trace rehearsed every step. No policy
                   # gradient, so none of its length pressure. Yardsticks at every freeze: the Dolphin held-out (target 85%) and the search held-out (40%).
