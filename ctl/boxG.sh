@@ -80,7 +80,7 @@ PSKIP=
 # The raw GitHub copy this box fetches can lag and hand a control run an OLDER version of this file (04:48 on 09-22 it
 # relaunched the online loop under the previous mode while the newer run was merging a checkpoint on the same card).
 # Every edit bumps BOXG_SERIAL; a run that sees a lower serial than one already executed stops here.
-BOXG_SERIAL=2026092515
+BOXG_SERIAL=2026092516
 if [ -f /root/.boxg_serial ] && [ "$(cat /root/.boxg_serial)" -gt "$BOXG_SERIAL" ] 2>/dev/null; then echo "BOXG_STALE $BOXG_SERIAL < $(cat /root/.boxg_serial)"; exit 0; fi
 echo $BOXG_SERIAL > /root/.boxg_serial
 MODE=online       # 2026-09-25 11:00: g12 (Dolphin RFT from g10's search result). Baselines of s4: Dolphin held-out 56%, GSM8K 64%, search held-out 38%
@@ -132,8 +132,8 @@ OSEARCHWHEELS=0   # 2026-09-20: off again, as in the search GRPO; the layer limi
 OPGNORM=mean      # 2026-09-24: pool3's normalisation
 OADVSTD=1
 OREASONSTUB=0
-OJUDGEAPI=openai
-OJUDGEMODEL=gpt-5-nano
+OJUDGEAPI=deepseek  # 2026-09-25: the OpenAI credit is exhausted (HTTP 429 credit_balance_exhausted); deepseek-flash agreed 11/12 with the hand grades
+OJUDGEMODEL=
 OMAXSRCH=7
 OJUDGE=0
 OREPLAYN=0
@@ -370,6 +370,28 @@ done
 LM
 chmod +x /root/logmirror2.sh; pgrep -f "logmirror[2].sh" >/dev/null || setsid nohup bash /root/logmirror2.sh >> /proc/1/fd/1 2>&1 < /dev/null &
 # ---- the teacher judge's reachability, every control run (one tiny call; the status and the error text, never the key) ----
+if [ -s /root/.dsk ]; then
+  python3 - <<'DD'
+import json, urllib.request, urllib.error
+key = open("/root/.dsk").read().strip()
+body = {"model": "deepseek-flash", "max_tokens": 20, "temperature": 0, "messages": [{"role": "user", "content": "Reply with the word ok."}]}
+try:
+    d = json.load(urllib.request.urlopen(urllib.request.Request("https://api.deepseek.com/chat/completions", data=json.dumps(body).encode(),
+        headers={"Authorization": "Bearer " + key, "Content-Type": "application/json"}), timeout=60))
+    print("DSK_DIAG ok", d.get("model"))
+except urllib.error.HTTPError as e:
+    print("DSK_DIAG http", e.code, e.read().decode()[:300].replace("\n", " "))
+except Exception as e:
+    print("DSK_DIAG fail", type(e).__name__, str(e)[:200])
+DD
+else echo "DSK_DIAG no /root/.dsk on this box"; fi
+if [ ! -f /root/.rejudge_s4dol ] && [ -s /root/work/s4dol_out_0.jsonl ] && [ -s /root/.dsk ]; then
+  touch /root/.rejudge_s4dol
+  ( cd /root/work && mkdir -p /root/rj && cp /root/work/s4dol_out_0.jsonl /root/rj/s4dsk_out_0.jsonl
+    sed -n "/^  if \[ \"\$RQSRC\" = \"dolphinh\" \]; then/,/^PYJ$/p" /root/ctl_cmd.sh | sed '1d' | sed 's#/root/work/\*_out_0.jsonl#/root/rj/*_out_0.jsonl#g; s#"/root/work/" + os.path.basename#"/root/rj/" + os.path.basename#' > /root/rj/judge.sh
+    bash /root/rj/judge.sh 2>&1 | sed 's/^DOLPHIN_ACC/DOLPHIN_ACC_REJUDGE s4 deepseek:/'
+    export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); hf upload baya1116/hypernet-sp-distill /root/rj/s4dsk_judged.jsonl pooler_distill/chatsft/rollouts/s4dsk_judged.jsonl >/dev/null 2>&1 ) &
+fi
 if [ -s /root/.oai ]; then
   python3 - <<'OD'
 import json, urllib.request, urllib.error
@@ -764,6 +786,8 @@ FZ
   if [ ! -f /root/.restart_${ORUN}_wheelfix ] && grep -q "max(rw) <= 0.0" /root/work/online_loop.py; then pkill -f "online_loop.p[y]"; sleep 8; pkill -9 -f "online_loop.p[y]" 2>/dev/null; touch /root/.restart_${ORUN}_wheelfix; echo "ONLINE_RESTART $ORUN wheel trigger $(date -u)"; fi
   # once (2026-09-20): the search side back to the search GRPO's conditions: its own optimizer at 1e-5, temp 0.9, gen 1500, corpus questions, mean/std normalisation
   if [ ! -f /root/.restart_${ORUN}_pool3 ] && grep -q "search-lr" /root/work/online_loop.py; then pkill -f "online_loop.p[y]"; sleep 8; pkill -9 -f "online_loop.p[y]" 2>/dev/null; touch /root/.restart_${ORUN}_pool3; echo "ONLINE_RESTART $ORUN pool3 conditions $(date -u)"; fi
+  # once (2026-09-25): the judge is DeepSeek now
+  if [ ! -f /root/.restart_${ORUN}_dsk ]; then pkill -f "online_loop.p[y]"; sleep 8; pkill -9 -f "online_loop.p[y]" 2>/dev/null; touch /root/.restart_${ORUN}_dsk; echo "ONLINE_RESTART $ORUN judge deepseek $(date -u)"; fi
   # once (2026-09-25): g12 with the 3000-token cap and the judge-failure skip
   if [ ! -f /root/.restart_${ORUN}_cap3k ] && grep -q "judge calls failed" /root/work/online_loop.py; then pkill -f "online_loop.p[y]"; sleep 8; pkill -9 -f "online_loop.p[y]" 2>/dev/null; touch /root/.restart_${ORUN}_cap3k; echo "ONLINE_RESTART $ORUN cap 3000 $(date -u)"; fi
   # once (2026-09-24): KL 0.2 and the Dolphin record off; the rollback count is forgotten
@@ -1014,22 +1038,25 @@ if [ -n "$RQSRC" ]; then
   else run_one /root/work/dolphinq.jsonl /root/work/${RRUN}_out_0.jsonl ${RRUN}0; fi
   hf upload $R /root/work/${RRUN}_out_0.jsonl pooler_distill/chatsft/rollouts/${RRUN}_dolphin.jsonl >/dev/null 2>&1   # full replies, the log shows 900 chars
   if [ "$RQSRC" = "dolphinh" ]; then
-    OAI_KEY=$(cat /root/.oai 2>/dev/null) python3 - <<'PYJ'
+    OAI_KEY=$(cat /root/.oai 2>/dev/null) DSK_KEY=$(cat /root/.dsk 2>/dev/null) JUDGE_API=${RJUDGE:-deepseek} python3 - <<'PYJ'
 import json, os, glob, urllib.request, time
 from concurrent.futures import ThreadPoolExecutor
 src = open("/root/work/online_loop.py").read(); i = src.index("REASON_SYS = "); j = src.index('"""', src.index('"""', i) + 3) + 3
 ns = {}; exec(src[i:j], ns); SYS = ns["REASON_SYS"]
 ref = {json.loads(l)["q"].strip(): json.loads(l)["ref"] for l in open("/root/work/dolphin_heldout100.jsonl") if l.strip()}
 rows = [json.loads(l) for l in open(sorted(glob.glob("/root/work/*_out_0.jsonl"), key=os.path.getmtime)[-1]) if l.strip()]
-key = os.environ.get("OAI_KEY", "")
+OAI = os.environ.get("JUDGE_API") == "openai"
+key = os.environ.get("OAI_KEY" if OAI else "DSK_KEY", "")
+URL = "https://api.openai.com/v1/chat/completions" if OAI else "https://api.deepseek.com/chat/completions"
 def judge(r):
     t = r["text"]; reply = t.split("</think>")[-1].strip() if "</think>" in t else ""
     if not reply: return 0, "unfinished"
-    body = {"model": "gpt-5-nano", "max_completion_tokens": 2000, "messages": [{"role": "system", "content": SYS},
+    body = {"model": "gpt-5-nano" if OAI else "deepseek-flash", "messages": [{"role": "system", "content": SYS},
             {"role": "user", "content": f"QUESTION:\n{r['q'][:2000]}\n\nREFERENCE ANSWER:\n{ref.get(r['q'].strip(), '')[:3000]}\n\nASSISTANT ANSWER:\n{reply[:3000]}"}]}
     for _ in range(3):
         try:
-            d = json.load(urllib.request.urlopen(urllib.request.Request("https://api.openai.com/v1/chat/completions", data=json.dumps(body).encode(), headers={"Authorization": "Bearer " + key, "Content-Type": "application/json"}), timeout=180))
+            body.update({"max_completion_tokens": 2000} if OAI else {"max_tokens": 2000, "temperature": 0})
+            d = json.load(urllib.request.urlopen(urllib.request.Request(URL, data=json.dumps(body).encode(), headers={"Authorization": "Bearer " + key, "Content-Type": "application/json"}), timeout=180))
             c = d["choices"][0]["message"].get("content") or ""; v = json.loads(c[c.find("{"): c.rfind("}") + 1])
             return int(all(bool(v.get(k)) for k in ("solves_it", "follows_the_request", "language_english", "clean"))), v
         except Exception as e: time.sleep(3); err = type(e).__name__
