@@ -1190,7 +1190,10 @@ for step in range(state["step"] + 1, A.steps + 1) if reason else []:
     mu = sum(rw) / max(len(rw), 1)
     sd = (sum((x - mu) ** 2 for x in rw) / max(len(rw), 1)) ** 0.5
     losses = []; wheel = 0.0
-    if A.rft and not searching:
+    n_err = sum(1 for v in notes if isinstance(v, dict) and "error" in v)
+    if n_err * 2 > len(notes):
+        print(f"[warn] step {step}: {n_err}/{len(notes)} judge calls failed ({[v.get('error') for v in notes if isinstance(v, dict) and 'error' in v][:1]}); nothing trained", flush=True)
+    elif A.rft and not searching:
         # rejection sampling: the passing sample with the shortest thinking becomes a plain SFT record
         model.train()
         good = [r for r, x in zip(rolls, rw) if x >= 1.0 and "</think>" in r["text"]]

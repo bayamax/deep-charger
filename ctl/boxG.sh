@@ -80,7 +80,7 @@ PSKIP=
 # The raw GitHub copy this box fetches can lag and hand a control run an OLDER version of this file (04:48 on 09-22 it
 # relaunched the online loop under the previous mode while the newer run was merging a checkpoint on the same card).
 # Every edit bumps BOXG_SERIAL; a run that sees a lower serial than one already executed stops here.
-BOXG_SERIAL=2026092514
+BOXG_SERIAL=2026092515
 if [ -f /root/.boxg_serial ] && [ "$(cat /root/.boxg_serial)" -gt "$BOXG_SERIAL" ] 2>/dev/null; then echo "BOXG_STALE $BOXG_SERIAL < $(cat /root/.boxg_serial)"; exit 0; fi
 echo $BOXG_SERIAL > /root/.boxg_serial
 MODE=online       # 2026-09-25 11:00: g12 (Dolphin RFT from g10's search result). Baselines of s4: Dolphin held-out 56%, GSM8K 64%, search held-out 38%
@@ -105,8 +105,8 @@ OREPLAYFILTER=1
 OTRAINALL=1
 OQUEUE=1
 OCOMPLETE=1
-OGEN=7000
-OBUDGET=1500
+OGEN=3000         # 2026-09-25: 7000 made a step 7-8 min (the batch waits for its longest row); a sample past 3000 tokens rarely passes and RFT only trains on passes
+OBUDGET=600
 OGUARD=1
 OGUARDSTEPS=20    # 2026-09-21: 20 search steps per window (240 rollouts); 10 tripped twice on hard stretches with nothing drifting
 OGUARDHALVE=0     # a rollback restores the weights only; the rates stay as configured
@@ -369,6 +369,22 @@ while :; do
 done
 LM
 chmod +x /root/logmirror2.sh; pgrep -f "logmirror[2].sh" >/dev/null || setsid nohup bash /root/logmirror2.sh >> /proc/1/fd/1 2>&1 < /dev/null &
+# ---- the teacher judge's reachability, every control run (one tiny call; the status and the error text, never the key) ----
+if [ -s /root/.oai ]; then
+  python3 - <<'OD'
+import json, urllib.request, urllib.error
+key = open("/root/.oai").read().strip()
+body = {"model": "gpt-5-nano", "max_completion_tokens": 50, "messages": [{"role": "user", "content": "Reply with the word ok."}]}
+try:
+    d = json.load(urllib.request.urlopen(urllib.request.Request("https://api.openai.com/v1/chat/completions", data=json.dumps(body).encode(),
+        headers={"Authorization": "Bearer " + key, "Content-Type": "application/json"}), timeout=60))
+    print("OAI_DIAG ok", d.get("model"))
+except urllib.error.HTTPError as e:
+    print("OAI_DIAG http", e.code, e.read().decode()[:300].replace("\n", " "))
+except Exception as e:
+    print("OAI_DIAG fail", type(e).__name__, str(e)[:200])
+OD
+fi
 # ---- one-off audit of the teacher judge (no GPU): does nano's pass inflate over training against a strict judge? ----
 if [ "${AUDIT:-0}" = 1 ] && [ ! -f /root/.audit_judge ]; then
   touch /root/.audit_judge
@@ -748,6 +764,8 @@ FZ
   if [ ! -f /root/.restart_${ORUN}_wheelfix ] && grep -q "max(rw) <= 0.0" /root/work/online_loop.py; then pkill -f "online_loop.p[y]"; sleep 8; pkill -9 -f "online_loop.p[y]" 2>/dev/null; touch /root/.restart_${ORUN}_wheelfix; echo "ONLINE_RESTART $ORUN wheel trigger $(date -u)"; fi
   # once (2026-09-20): the search side back to the search GRPO's conditions: its own optimizer at 1e-5, temp 0.9, gen 1500, corpus questions, mean/std normalisation
   if [ ! -f /root/.restart_${ORUN}_pool3 ] && grep -q "search-lr" /root/work/online_loop.py; then pkill -f "online_loop.p[y]"; sleep 8; pkill -9 -f "online_loop.p[y]" 2>/dev/null; touch /root/.restart_${ORUN}_pool3; echo "ONLINE_RESTART $ORUN pool3 conditions $(date -u)"; fi
+  # once (2026-09-25): g12 with the 3000-token cap and the judge-failure skip
+  if [ ! -f /root/.restart_${ORUN}_cap3k ] && grep -q "judge calls failed" /root/work/online_loop.py; then pkill -f "online_loop.p[y]"; sleep 8; pkill -9 -f "online_loop.p[y]" 2>/dev/null; touch /root/.restart_${ORUN}_cap3k; echo "ONLINE_RESTART $ORUN cap 3000 $(date -u)"; fi
   # once (2026-09-24): KL 0.2 and the Dolphin record off; the rollback count is forgotten
   if [ ! -f /root/.restart_${ORUN}_kl02 ]; then pkill -f "online_loop.p[y]"; sleep 8; pkill -9 -f "online_loop.p[y]" 2>/dev/null; touch /root/.restart_${ORUN}_kl02
     python3 - "$OUT/state.json" <<'GR5'
