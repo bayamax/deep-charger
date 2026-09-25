@@ -63,6 +63,8 @@ ap.add_argument("--pg-norm", default="mean", choices=["mean", "const"], help="ho
 ap.add_argument("--guard-steps", type=int, default=10, help="search steps per guard window (baseline = the first window). 10 steps = 120 rollouts was noisy enough to trip on hard stretches; 20 halves that")
 ap.add_argument("--guard-halve", type=int, default=1, help="1: a rollback also halves both learning rates. 0: weights only")
 ap.add_argument("--guard-pass", type=float, default=0.5, help="the guard trips only when, besides the unfinished or search-count rise, the window's pass rate has fallen to this fraction of the baseline pass rate (one hard question in a window is not a collapse)")
+ap.add_argument("--eval-file", default="", help="evaluation only: generate one reply per question in this jsonl ({\"q\": ...}) with the batched rollout, --b questions at a time, write {q, text, ns} to --eval-out and exit")
+ap.add_argument("--eval-out", default="")
 ap.add_argument("--rft", type=int, default=0, help="1: rejection-sampling fine-tuning instead of the policy gradient on reasoning steps: of the G samples the teacher passes, the one with the shortest thinking is trained on as plain SFT; none passing falls back to --wheels. No advantage, no std, no length pressure.")
 ap.add_argument("--rft-replay", type=float, default=0.5, help="in --rft mode, one verified search trace (from --replay) is trained on every step at this weight, so the search side is rehearsed while the reasoning side learns")
 ap.add_argument("--reason-verify", default="judge", choices=["judge", "numeric"], help="numeric: the reasoning reward is exact agreement of the final number with the reference (GSM8K-style), no teacher; judge: the teacher model's four boxes")
@@ -1039,6 +1041,25 @@ def reload_good():
             for g in opt_s.param_groups: g["lr"] = g["lr"] / 2
     return len(missing.unexpected_keys)
 
+if A.eval_file:
+    # the batched rollout that training uses, so a 100-question evaluation costs minutes instead of hours
+    evq = [json.loads(l) for l in open(A.eval_file) if l.strip()]
+    done_q = set()
+    if os.path.exists(A.eval_out):
+        done_q = set(json.loads(l)["q"] for l in open(A.eval_out) if l.strip())
+    todo = [r for r in evq if r["q"] not in done_q]
+    print(f"[eval] {len(evq)} questions, {len(todo)} to go, {A.b} at a time, gen {A.gen}, temp {A.temp}", flush=True)
+    with open(A.eval_out, "a") as fo:
+        for k in range(0, len(todo), A.b):
+            chunk = todo[k:k + A.b]
+            try: outs = rollout_batch([r["q"] for r in chunk], len(chunk))
+            except Exception as e:
+                print(f"[eval] batch {k} failed: {type(e).__name__}: {str(e)[:120]}", flush=True); clear(); continue
+            for r, o in zip(chunk, outs):
+                fo.write(json.dumps({"q": r["q"], "text": o["text"], "ns": o["ns"]}, ensure_ascii=False) + "\n")
+            fo.flush(); clear()
+            print(f"[eval] {min(k + A.b, len(todo))}/{len(todo)} ({(time.time()-t0)/60:.0f} min)", flush=True)
+    print("EVAL_DONE", flush=True); sys.exit(0)
 for step in range(state["step"] + 1, A.steps + 1) if not reason else []:
     item = pool[(step - 1) % len(pool)]
     if (step - 1) % A.accum == 0: opt.zero_grad(set_to_none=True)
