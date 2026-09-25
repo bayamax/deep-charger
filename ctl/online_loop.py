@@ -63,6 +63,7 @@ ap.add_argument("--pg-norm", default="mean", choices=["mean", "const"], help="ho
 ap.add_argument("--guard-steps", type=int, default=10, help="search steps per guard window (baseline = the first window). 10 steps = 120 rollouts was noisy enough to trip on hard stretches; 20 halves that")
 ap.add_argument("--guard-halve", type=int, default=1, help="1: a rollback also halves both learning rates. 0: weights only")
 ap.add_argument("--guard-pass", type=float, default=0.5, help="the guard trips only when, besides the unfinished or search-count rise, the window's pass rate has fallen to this fraction of the baseline pass rate (one hard question in a window is not a collapse)")
+ap.add_argument("--reason-verify", default="judge", choices=["judge", "numeric"], help="numeric: the reasoning reward is exact agreement of the final number with the reference (GSM8K-style), no teacher; judge: the teacher model's four boxes")
 ap.add_argument("--kl", type=float, default=0.0, help=">0: GRPO's anchor to the reference policy, the base with the adapters disabled (k3 estimator per policy token, this coefficient). g7 and g8 had no anchor at all: the reasoning reward favours longer thinking, and with nothing holding the policy near the base that length leaked into the search side within 200 steps on all layers")
 ap.add_argument("--reason-every", type=int, default=0, help=">0: a reasoning step every N steps and a search step otherwise (3 search : 1 reasoning at 4); overrides --search-every")
 ap.add_argument("--dolphin-on", default="all", choices=["all", "reason"], help="reason: the Dolphin SFT record rides only on reasoning steps, so the search steps carry search signal alone")
@@ -205,7 +206,7 @@ if A.gradckpt:
     print("[init] gradient checkpointing ON for the policy-gradient pass", flush=True)
 nT = sum(p.numel() for p in model.parameters() if p.requires_grad) / 1e6
 nP = sum(p.numel() for p in pooler_params) / 1e6
-print(f"[cfg] G={A.g} kl={A.kl} reason_every={A.reason_every} dolphin_on={A.dolphin_on} pool_order={A.pool_order}+{A.pool_offset} pg_norm={A.pg_norm}/{A.pg_norm_len} adv_std={A.adv_std} search_lr={A.search_lr} search_temp={A.search_temp} search_gen={A.search_gen} accum={A.accum} steps={A.steps} budget={A.budget} rw={A.rw} maxd={A.maxd} chunk={A.chunk} temp={A.temp} gen={A.gen} maxs={A.maxs} maxm={A.maxm} samepage={A.samepage} maxsrch={A.maxsrch} phantom={A.phantom}x{A.phantom_scale} "
+print(f"[cfg] G={A.g} reason_verify={A.reason_verify} kl={A.kl} reason_every={A.reason_every} dolphin_on={A.dolphin_on} pool_order={A.pool_order}+{A.pool_offset} pg_norm={A.pg_norm}/{A.pg_norm_len} adv_std={A.adv_std} search_lr={A.search_lr} search_temp={A.search_temp} search_gen={A.search_gen} accum={A.accum} steps={A.steps} budget={A.budget} rw={A.rw} maxd={A.maxd} chunk={A.chunk} temp={A.temp} gen={A.gen} maxs={A.maxs} maxm={A.maxm} samepage={A.samepage} maxsrch={A.maxsrch} phantom={A.phantom}x{A.phantom_scale} "
       f"lr={A.lr} pooler_lr={A.pooler_lr} pooler={A.pooler}(r={A.pooler_rank}) trainable lora={nT:.1f}M pooler={nP:.2f}M", flush=True)
 # ---- environment: verbatim grpo_ep_more serve() ----
 WAPI = "https://en.wikipedia.org/w/api.php"
@@ -937,6 +938,24 @@ def judge_reason(q, ref, text):
     return (1.0 if all(bool(v.get(k)) for k in ("solves_it", "follows_the_request", "language_english", "clean")) else 0.0), v
 
 
+NUM_RE = re.compile(r"-?\d[\d,]*(?:\.\d+)?")
+def final_number(text):
+    """the answer a reply commits to: \\boxed{...} first, then '####', then the last number in the reply"""
+    m = re.findall(r"\\boxed\{([^{}]*)\}", text)
+    cand = m[-1] if m else (text.split("####")[-1] if "####" in text else text)
+    nums = NUM_RE.findall(cand)
+    if not nums: return None
+    try: return float(nums[-1].replace(",", ""))
+    except ValueError: return None
+def verify_numeric(ref, text):
+    """verifiable reasoning reward: 1.0 when the reply's final number equals the reference number"""
+    reply = text.split("</think>")[-1].strip() if "</think>" in text else ""
+    if not reply: return 0.0, {"unfinished": True}
+    g = final_number(ref); a = final_number(reply)
+    ok = g is not None and a is not None and abs(a - g) <= 1e-6 * max(1.0, abs(g))
+    return (1.0 if ok else 0.0), {"solves_it": int(ok), "answer": a, "gold": g}
+
+
 def judge_ok(v):
     if v.get("skip"): return True
     return ("error" not in v) and all(bool(v.get(x)) for x in ("commits_to_answer", "matches_reference", "language_english", "clean")) and not v.get("unsupported_claims") and float(v.get("natural") or 0) >= 4
@@ -1136,6 +1155,7 @@ for step in range(state["step"] + 1, A.steps + 1) if reason else []:
     for r in rolls: r.setdefault("q", qtext)
     rw, notes = [], []
     score = ((lambda x: score_search(x, item["gold"])) if searching
+             else (lambda x: verify_numeric(ref, x["text"])) if A.reason_verify == "numeric"
              else (lambda x: judge_reason(qtext, ref, x["text"])))
     with ThreadPoolExecutor(max_workers=min(8, len(rolls))) as ex:
         for r, (sc, v) in zip(rolls, ex.map(score, rolls)):
