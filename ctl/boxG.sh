@@ -80,9 +80,10 @@ PSKIP=
 # The raw GitHub copy this box fetches can lag and hand a control run an OLDER version of this file (04:48 on 09-22 it
 # relaunched the online loop under the previous mode while the newer run was merging a checkpoint on the same card).
 # Every edit bumps BOXG_SERIAL; a run that sees a lower serial than one already executed stops here.
-BOXG_SERIAL=2026092506
+BOXG_SERIAL=2026092507
 if [ -f /root/.boxg_serial ] && [ "$(cat /root/.boxg_serial)" -gt "$BOXG_SERIAL" ] 2>/dev/null; then echo "BOXG_STALE $BOXG_SERIAL < $(cat /root/.boxg_serial)"; exit 0; fi
 echo $BOXG_SERIAL > /root/.boxg_serial
+AUDIT=1           # 2026-09-25: one-off, runs beside the evaluation on the CPU
 MODE=reeval       # 2026-09-25 04:00: the reasoning baseline before g11: s4_hf on the first 100 GSM8K test problems, exact match (~30 min)
 RRUN=s4gsm; RMODEL=s4_hf; RKIND=dir; RQSRC=gsm; RQN=100; RTEMP=0.6; RGEN=4000
 ORUN=g12          # 2026-09-25: the reasoning line. Rejection-sampling fine-tuning on Dolphin (v1 minus a held-out hundred): 12 samples,
@@ -350,6 +351,69 @@ SPD
 chmod +x /root/status_pub.sh
 setsid nohup bash /root/status_pub.sh >> /proc/1/fd/1 2>&1 < /dev/null &
 
+# ---- one-off audit of the teacher judge (no GPU): does nano's pass inflate over training against a strict judge? ----
+if [ "${AUDIT:-0}" = 1 ] && [ ! -f /root/.audit_judge ]; then
+  touch /root/.audit_judge
+  ( export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); R=baya1116/hypernet-sp-distill
+    for run in g7 g8 g9; do hf download $R --include "pooler_distill/chatsft/online/$run/rollouts.jsonl" --local-dir /root/hfdl >/dev/null 2>&1; done
+    OAI_KEY=$(cat /root/.oai 2>/dev/null) python3 - <<'PYAUD'
+import json, os, re, random, urllib.request, time
+from concurrent.futures import ThreadPoolExecutor
+INFO = re.compile(r"<information>.*?</information>\n?", re.S)
+def L(t): return len(INFO.sub("", t.split("</think>")[0]).split())
+key = os.environ.get("OAI_KEY", "")
+STRICT = ("You are a strict grader. Judge ONLY whether the assistant's FINAL answer is correct and complete relative to the reference answer. "
+          "Ignore length, explanations, tone and formatting entirely. If the assistant never commits to a final answer, or the final answer differs from the reference "
+          "in substance, it is incorrect. Reply with JSON only: {\"final_answer_correct\": true/false, \"commits_to_an_answer\": true/false}")
+def strict(q, ref, text):
+    reply = text.split("</think>")[-1].strip() if "</think>" in text else ""
+    if not reply: return {"final_answer_correct": False, "commits_to_an_answer": False, "unfinished": True}
+    body = {"model": "gpt-5-mini", "max_completion_tokens": 1500, "messages": [{"role": "system", "content": STRICT},
+            {"role": "user", "content": f"QUESTION:\n{q[:2000]}\n\nREFERENCE ANSWER:\n{ref[:3000]}\n\nASSISTANT ANSWER:\n{reply[:3000]}"}]}
+    for _ in range(3):
+        try:
+            d = json.load(urllib.request.urlopen(urllib.request.Request("https://api.openai.com/v1/chat/completions", data=json.dumps(body).encode(), headers={"Authorization": "Bearer " + key, "Content-Type": "application/json"}), timeout=180))
+            c = d["choices"][0]["message"].get("content") or ""; return json.loads(c[c.find("{"): c.rfind("}") + 1])
+        except Exception as e: time.sleep(3); err = type(e).__name__
+    return {"error": err}
+# the reference answers: dolphin_v2 (the training problems of g7-g9)
+ref = {}
+for l in open("/root/hfdl/pooler_distill/chatsft/dolphin_v2.jsonl"):
+    try: r = json.loads(l); ref[r["q"].strip()] = r["reply"]
+    except Exception: pass
+rows = []
+for run, early, late in (("g7", 80, 500), ("g8", 60, 140), ("g9", 60, 140)):
+    for l in open(f"/root/hfdl/pooler_distill/chatsft/online/{run}/rollouts.jsonl"):
+        try: r = json.loads(l)
+        except Exception: continue
+        if r.get("kind") != "reason" or r["q"].strip() not in ref: continue
+        ph = "early" if r["step"] <= early else ("late" if r["step"] >= late else None)
+        if ph: rows.append({"run": run, "phase": ph, "step": r["step"], "q": r["q"], "text": r["text"], "nano": int(r["reward"] >= 1.0), "think": L(r["text"])})
+random.Random(0).shuffle(rows)
+sample = []
+for ph in ("early", "late"):
+    for nano in (1, 0):
+        sample += [r for r in rows if r["phase"] == ph and r["nano"] == nano][:70]
+with ThreadPoolExecutor(max_workers=8) as ex: res = list(ex.map(lambda r: strict(r["q"], ref[r["q"].strip()], r["text"]), sample))
+for r, v in zip(sample, res): r["strict"] = v; r.pop("text", None)
+def summ(ph, nano):
+    g = [r for r in sample if r["phase"] == ph and r["nano"] == nano and "error" not in r["strict"]]
+    if not g: return "n/a"
+    sc = sum(1 for r in g if r["strict"].get("final_answer_correct")); th = sorted(r["think"] for r in g)
+    return f"strict-correct {100*sc/len(g):.0f}% of {len(g)}, think median {th[len(th)//2]}"
+print("JUDGE_AUDIT")
+for ph in ("early", "late"):
+    print(f"  {ph}: nano-pass -> {summ(ph, 1)} | nano-fail -> {summ(ph, 0)}")
+# nano pass rate by thinking length within the late phase (all late rows, no API)
+late = [r for r in rows if r["phase"] == "late"]; late.sort(key=lambda r: r["think"]); q = len(late) // 4
+for k in range(4):
+    g = late[k*q:(k+1)*q]
+    if g: print(f"  late, thinking quartile {k+1} (median {sorted(r['think'] for r in g)[len(g)//2]} words): nano pass {100*sum(r['nano'] for r in g)/len(g):.0f}%")
+json.dump({"sample": sample}, open("/root/work/judge_audit.json", "w"))
+PYAUD
+    hf upload $R /root/work/judge_audit.json pooler_distill/chatsft/audit/judge_audit.json >/dev/null 2>&1; echo "AUDIT_DONE $(date -u)"
+  ) >> /proc/1/fd/1 2>&1 &
+fi
 if [ "$MODE" = "sft" ]; then
   # Reproduce, under quantization and in the compressed context, the traces that scored. This is
   # not matching bf16 - it is the quantized system learning the behaviour that worked, which is how
