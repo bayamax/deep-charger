@@ -85,9 +85,9 @@ if [ -f /root/.boxg_serial ] && [ "$(cat /root/.boxg_serial)" -gt "$BOXG_SERIAL"
 echo $BOXG_SERIAL > /root/.boxg_serial
 MODE=reeval       # 2026-09-25 03:45: g10's exact step-400 snapshot on the held-out (s4 38.0%, g7 step 470 40.2%); the run itself ended at 400
 RRUN=g10e400; RMODEL=g10_step400; RKIND=merge; RLAYERS=20-27; RTEMP=0.6; RGEN=4000; RN=34; RSHARDS=3
-ORUN=g10          # 2026-09-24: the diagnostic. Search side ONLY, from s4_hf, under the search GRPO's own recipe (layers 20-27, pooler adapter,
-                  # 1e-5, temp 0.9, gen 1500, mean/std, corpus questions from pool3's 201st, no KL). If this climbs like pool3 did, the joint
-                  # runs failed because of the reasoning side; if it does not, the conversational base itself is the problem.
+ORUN=g11          # 2026-09-25: can the reasoning side be GROWN at all? Reasoning only, from s4_hf, on GSM8K with a checkable reward
+                  # (final number == reference), no teacher, no wheels, no Dolphin, no KL. Search is not trained here; its held-out is measured
+                  # at the freezes to see whether growing reasoning costs it (the coexistence question), before any MoE decision.
 OSEED=            # 2026-09-20: g7 starts clean from s4_hf. g6 never carried g5's weights (its seed download left no checkpoint) and after the
                   # layer change ran with layers 0-19 of the stock model; both are now caught at launch (ONLINE_SEED_ABORT, ONLINE_ABORT)
 OMODEL=s4_hf
@@ -97,13 +97,13 @@ ODMIN=0           # 2026-09-24: the Dolphin SFT record off. Its references think
 ODOLPHIN=dolphin_v2.jsonl
 OLR=1e-5          # 2026-09-23: the reasoning side at the search side's rate; every higher rate leaked its style into the search side
 OACCUM=1          # 2026-09-20: two optimizers now, one step each
-OLAYERS=20-27     # 2026-09-24: pool3's range
+OLAYERS=all       # 2026-09-25: full capacity for the reasoning side
 OREPLAY=replay_v1.jsonl
 OREPLAYFILTER=1
 OTRAINALL=1
 OQUEUE=1
 OCOMPLETE=1
-OGEN=7000
+OGEN=4000         # 2026-09-25: grade-school problems finish well inside this
 OBUDGET=1500
 OGUARD=1
 OGUARDSTEPS=20    # 2026-09-21: 20 search steps per window (240 rollouts); 10 tripped twice on hard stretches with nothing drifting
@@ -117,9 +117,11 @@ OREASON=dolphin_v2.jsonl
 OREASONG=12
 OSEARCHEVERY=1    # 2026-09-24: every step is a search step
 OKL=0             # 2026-09-24: off, as in pool3
-OREASONEVERY=0    # 2026-09-24: no reasoning steps at all
+OREASONEVERY=1    # 2026-09-25: every step is a reasoning step
+OREASONSRC=gsm8k  # the reasoning problems (see the build above the launch)
+OREASONVERIFY=numeric
 ODOLPHINON=reason # the Dolphin SFT record only on reasoning steps
-OWHEELS=1
+OWHEELS=0         # 2026-09-25: no reference to fall back on; a GSM8K group that scores zero is simply skipped
 OWTALK=0.5
 OSEARCHDEMO=
 OSEARCHWHEELS=0   # 2026-09-20: off again, as in the search GRPO; the layer limit is the fix, not a crutch
