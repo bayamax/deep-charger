@@ -80,7 +80,7 @@ PSKIP=
 # The raw GitHub copy this box fetches can lag and hand a control run an OLDER version of this file (04:48 on 09-22 it
 # relaunched the online loop under the previous mode while the newer run was merging a checkpoint on the same card).
 # Every edit bumps BOXG_SERIAL; a run that sees a lower serial than one already executed stops here.
-BOXG_SERIAL=2026092516
+BOXG_SERIAL=2026092517
 if [ -f /root/.boxg_serial ] && [ "$(cat /root/.boxg_serial)" -gt "$BOXG_SERIAL" ] 2>/dev/null; then echo "BOXG_STALE $BOXG_SERIAL < $(cat /root/.boxg_serial)"; exit 0; fi
 echo $BOXG_SERIAL > /root/.boxg_serial
 MODE=online       # 2026-09-25 11:00: g12 (Dolphin RFT from g10's search result). Baselines of s4: Dolphin held-out 56%, GSM8K 64%, search held-out 38%
@@ -132,8 +132,8 @@ OSEARCHWHEELS=0   # 2026-09-20: off again, as in the search GRPO; the layer limi
 OPGNORM=mean      # 2026-09-24: pool3's normalisation
 OADVSTD=1
 OREASONSTUB=0
-OJUDGEAPI=deepseek  # 2026-09-25: the OpenAI credit is exhausted (HTTP 429 credit_balance_exhausted); deepseek-flash agreed 11/12 with the hand grades
-OJUDGEMODEL=
+OJUDGEAPI=openai    # 2026-09-25: back to nano once the OpenAI credit was topped up (it had run out at g12 step 7; DeepSeek bridged it)
+OJUDGEMODEL=gpt-5-nano
 OMAXSRCH=7
 OJUDGE=0
 OREPLAYN=0
@@ -786,6 +786,8 @@ FZ
   if [ ! -f /root/.restart_${ORUN}_wheelfix ] && grep -q "max(rw) <= 0.0" /root/work/online_loop.py; then pkill -f "online_loop.p[y]"; sleep 8; pkill -9 -f "online_loop.p[y]" 2>/dev/null; touch /root/.restart_${ORUN}_wheelfix; echo "ONLINE_RESTART $ORUN wheel trigger $(date -u)"; fi
   # once (2026-09-20): the search side back to the search GRPO's conditions: its own optimizer at 1e-5, temp 0.9, gen 1500, corpus questions, mean/std normalisation
   if [ ! -f /root/.restart_${ORUN}_pool3 ] && grep -q "search-lr" /root/work/online_loop.py; then pkill -f "online_loop.p[y]"; sleep 8; pkill -9 -f "online_loop.p[y]" 2>/dev/null; touch /root/.restart_${ORUN}_pool3; echo "ONLINE_RESTART $ORUN pool3 conditions $(date -u)"; fi
+  # once (2026-09-25): the judge is nano again
+  if [ ! -f /root/.restart_${ORUN}_nano ] && [ -f /root/.restart_${ORUN}_dsk ]; then pkill -f "online_loop.p[y]"; sleep 8; pkill -9 -f "online_loop.p[y]" 2>/dev/null; touch /root/.restart_${ORUN}_nano; echo "ONLINE_RESTART $ORUN judge nano $(date -u)"; fi
   # once (2026-09-25): the judge is DeepSeek now
   if [ ! -f /root/.restart_${ORUN}_dsk ]; then pkill -f "online_loop.p[y]"; sleep 8; pkill -9 -f "online_loop.p[y]" 2>/dev/null; touch /root/.restart_${ORUN}_dsk; echo "ONLINE_RESTART $ORUN judge deepseek $(date -u)"; fi
   # once (2026-09-25): g12 with the 3000-token cap and the judge-failure skip
@@ -1038,7 +1040,7 @@ if [ -n "$RQSRC" ]; then
   else run_one /root/work/dolphinq.jsonl /root/work/${RRUN}_out_0.jsonl ${RRUN}0; fi
   hf upload $R /root/work/${RRUN}_out_0.jsonl pooler_distill/chatsft/rollouts/${RRUN}_dolphin.jsonl >/dev/null 2>&1   # full replies, the log shows 900 chars
   if [ "$RQSRC" = "dolphinh" ]; then
-    OAI_KEY=$(cat /root/.oai 2>/dev/null) DSK_KEY=$(cat /root/.dsk 2>/dev/null) JUDGE_API=${RJUDGE:-deepseek} python3 - <<'PYJ'
+    OAI_KEY=$(cat /root/.oai 2>/dev/null) DSK_KEY=$(cat /root/.dsk 2>/dev/null) JUDGE_API=${RJUDGE:-openai} python3 - <<'PYJ'
 import json, os, glob, urllib.request, time
 from concurrent.futures import ThreadPoolExecutor
 src = open("/root/work/online_loop.py").read(); i = src.index("REASON_SYS = "); j = src.index('"""', src.index('"""', i) + 3) + 3
