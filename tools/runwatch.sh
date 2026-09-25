@@ -47,3 +47,19 @@ runfull() {
 score() {
   _vlog "$@" 12000 | grep '^SCORE' | awk '/through step/{n=NR} {a[NR]=$0} END{for(i=n;i<=NR;i++) print substr(a[i],7)}'
 }
+
+# The box also mirrors its own logs to the (public) hub every ten minutes, so these work without the Vast key.
+HUBLOG=https://huggingface.co/baya1116/hypernet-sp-distill/resolve/main/pooler_distill/chatsft/audit/boxlog.txt
+
+# hub      the last step lines, events and evaluation progress, from the hub mirror
+hub() {
+  curl -sSL "$HUBLOG" > /tmp/boxlog.txt || { echo "hub mirror not reachable"; return 1; }
+  head -1 /tmp/boxlog.txt
+  grep -E '^\[step|^ONLINE_|^REEVAL_|^DOLPHIN_ACC|^GSM_ACC|^\[warn\]' /tmp/boxlog.txt | awk '!seen[$0]++' | tail -${1:-12} | cut -c1-150
+  sed -n '/^--- eval progress ---/,/^--- processes ---/p' /tmp/boxlog.txt | grep -v '^---' | head -2
+}
+
+# hubscore the score table from the hub mirror (same table as score)
+hubscore() {
+  curl -sSL "$HUBLOG" | grep '^SCORE' | awk '/through step/{n=NR} {a[NR]=$0} END{for(i=n;i<=NR;i++) print substr(a[i],7)}'
+}
