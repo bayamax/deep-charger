@@ -80,7 +80,7 @@ PSKIP=
 # The raw GitHub copy this box fetches can lag and hand a control run an OLDER version of this file (04:48 on 09-22 it
 # relaunched the online loop under the previous mode while the newer run was merging a checkpoint on the same card).
 # Every edit bumps BOXG_SERIAL; a run that sees a lower serial than one already executed stops here.
-BOXG_SERIAL=2026092509
+BOXG_SERIAL=2026092510
 if [ -f /root/.boxg_serial ] && [ "$(cat /root/.boxg_serial)" -gt "$BOXG_SERIAL" ] 2>/dev/null; then echo "BOXG_STALE $BOXG_SERIAL < $(cat /root/.boxg_serial)"; exit 0; fi
 echo $BOXG_SERIAL > /root/.boxg_serial
 AUDIT=1           # 2026-09-25: one-off, runs beside the evaluation on the CPU
@@ -91,7 +91,10 @@ ORUN=g12          # 2026-09-25: the reasoning line. Rejection-sampling fine-tuni
                   # gradient, so none of its length pressure. Yardsticks at every freeze: the Dolphin held-out (target 85%) and the search held-out (40%).
 OSEED=            # 2026-09-20: g7 starts clean from s4_hf. g6 never carried g5's weights (its seed download left no checkpoint) and after the
                   # layer change ran with layers 0-19 of the stock model; both are now caught at launch (ONLINE_SEED_ABORT, ONLINE_ABORT)
-OMODEL=s4_hf
+OMODEL=g10m_hf    # 2026-09-25: the search-RL result (g10 step 400, held-out 43.1%) merged into s4_hf: the base the reasoning line starts from
+OMERGEFROM=g10_step400
+OMERGEBASE=s4_hf
+OMERGELAYERS=20-27
 OB=8
 ODRATIO=1
 ODMIN=0           # 2026-09-24: the Dolphin SFT record off. Its references think ~245 words against the model's ~110, a length pressure of its own; the KL anchor now does the retention
@@ -565,6 +568,17 @@ if [ "$MODE" = "online" ]; then
   R=baya1116/hypernet-sp-distill
   OHF=/root/hfdl/pooler_distill/chatsft/$OMODEL
   for try in 1 2 3 4 5 6; do hf download $R --include "pooler_distill/chatsft/${OMODEL}/*" --local-dir /root/hfdl >/dev/null 2>&1; [ -s $OHF/model.safetensors ] && break; sleep 30; done
+  if [ ! -s $OHF/model.safetensors ] && [ -n "${OMERGEFROM:-}" ]; then
+    # OMERGEFROM=<run_stepN>: fold that frozen LoRA run into its base and publish the result as the new base $OMODEL
+    MB=/root/hfdl/pooler_distill/chatsft/${OMERGEBASE:-s4_hf}
+    [ -s $MB/model.safetensors ] || hf download $R --include "pooler_distill/chatsft/${OMERGEBASE:-s4_hf}/*" --local-dir /root/hfdl >/dev/null 2>&1
+    for try in 1 2 3 4 5 6; do hf download $R --include "pooler_distill/chatsft/online/$OMERGEFROM/latest.safetensors" --local-dir /root/hfdl >/dev/null 2>&1; [ -s /root/hfdl/pooler_distill/chatsft/online/$OMERGEFROM/latest.safetensors ] && break; sleep 20; done
+    cd /root/work && SP_BASE=$MB SP_NOSYS=1 SP_EPISODIC=1 OMP_NUM_THREADS=1 python3 /root/work/build_merged.py /root/hfdl/pooler_distill/chatsft/online/$OMERGEFROM/latest.safetensors $OHF $OHF/pooler.safetensors 16 ${OMERGELAYERS:-20-27} 2>&1 | grep -E "^\[merge\]|MERGE_DONE|Error|assert" | tail -3
+    if [ -s $OHF/model.safetensors ]; then
+      ( export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); hf upload $R $OHF pooler_distill/chatsft/$OMODEL >/dev/null 2>&1 && echo "ONLINE_BASE_PUBLISHED $OMODEL (from $OMERGEFROM on ${OMERGEBASE:-s4_hf}) $(date -u)" ) &
+    else echo "ONLINE_ABORT: merge of $OMERGEFROM into $OMODEL failed"; exit 0; fi
+    rm -f /root/hfdl/pooler_distill/chatsft/online/$OMERGEFROM/latest.safetensors
+  fi
   [ -s $OHF/model.safetensors ] || { echo "ONLINE_ABORT: $OMODEL not on the hub"; exit 0; }
   for f in pooler_distill/chatsft/${ODOLPHIN:-dolphin_v1.jsonl} pooler_distill/chatsft/${OREASON:-dolphin_v2.jsonl} pooler_distill/chatsft/${OREPLAY:-replay_v1.jsonl} pooler_distill/selfq_0.jsonl pooler_distill/selfq_1.jsonl pooler_distill/selfq_2.jsonl; do
     [ -s /root/hfdl/$f ] || for try in 1 2 3; do hf download $R --include "$f" --local-dir /root/hfdl >/dev/null 2>&1; [ -s /root/hfdl/$f ] && break; sleep 10; done
@@ -815,7 +829,7 @@ GR
   if ! pgrep -f "online_loop.p[y]" >/dev/null; then
     cd /root/work && DSK_KEY=$(cat /root/.dsk 2>/dev/null) OAI_KEY=$(cat /root/.oai 2>/dev/null) PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True setsid nohup python3 /root/work/online_loop.py $OHF $OUT \
       --questions $QFILE --dolphin /root/work/dolphin_v1.jsonl --heldout /root/work/eval300.jsonl \
-      --b $OB --steps $OSTEPS --temp $OTEMP --lr $OLR --dolphin-ratio ${ODRATIO:-2} --dolphin-min ${ODMIN:-2} --accum ${OACCUM:-1} --replay $REPLAYF --replay-per-step ${OREPLAYN:-2} --rollout-every ${OROLLEVERY:-1} --train-all ${OTRAINALL:-0} --queue ${OQUEUE:-0} --complete-only ${OCOMPLETE:-0} --gen ${OGEN:-1500} --budget ${OBUDGET:-900} --guard ${OGUARD:-0} --maxsrch ${OMAXSRCH:-0} --judge ${OJUDGE:-1} ${OREASON:+--reason $REASONF --reason-verify ${OREASONVERIFY:-judge} --rft ${ORFT:-0} --rft-replay ${ORFTREPLAY:-0.5} --reason-g ${OREASONG:-8} --reason-stub ${OREASONSTUB:-0} --judge-api ${OJUDGEAPI:-deepseek} --judge-model ${OJUDGEMODEL:-} --search-every ${OSEARCHEVERY:-0} --reason-every ${OREASONEVERY:-0} --kl ${OKL:-0} --dolphin-on ${ODOLPHINON:-all} --w-talk ${OWTALK:-0.5} --wheels ${OWHEELS:-0} --search-wheels ${OSEARCHWHEELS:-0} --pg-norm ${OPGNORM:-mean} --pg-norm-len 1024 --adv-std ${OADVSTD:-1} --search-lr ${OSEARCHLR:-0} --guard-pass ${OGUARDPASS:-0.5} --guard-steps ${OGUARDSTEPS:-10} --guard-halve ${OGUARDHALVE:-1} --pool-order ${OPOOLORDER:-loop} --pool-offset ${OPOOLOFFSET:-0} --search-temp ${OSEARCHTEMP:-0} --search-gen ${OSEARCHGEN:-0} ${OSEARCHDEMO:+--search-demo /root/hfdl/$OSEARCHDEMO}} --pooler ${OPOOLER:-none} --pooler-rank ${OPOOLERRANK:-8} --pooler-lr ${OPOOLERLR:-1e-5} --lora-rank 16 --lora-layers ${OLAYERS:-all} --gradckpt 1 --save-every 5 --stop eos \
+      --b $OB --steps $OSTEPS --temp $OTEMP --lr $OLR --dolphin-ratio ${ODRATIO:-2} --dolphin-min ${ODMIN:-2} --accum ${OACCUM:-1} --replay $REPLAYF --replay-per-step ${OREPLAYN:-2} --rollout-every ${OROLLEVERY:-1} --train-all ${OTRAINALL:-0} --queue ${OQUEUE:-0} --complete-only ${OCOMPLETE:-0} --gen ${OGEN:-1500} --budget ${OBUDGET:-900} --guard ${OGUARD:-0} --maxsrch ${OMAXSRCH:-0} --judge ${OJUDGE:-1} ${OREASON:+--reason $REASONF --reason-verify ${OREASONVERIFY:-judge} --rft ${ORFT:-0} --rft-replay ${ORFTREPLAY:-0.5} --reason-g ${OREASONG:-8} --reason-stub ${OREASONSTUB:-0} --judge-api ${OJUDGEAPI:-deepseek} --judge-model ${OJUDGEMODEL:-} --search-every ${OSEARCHEVERY:-0} --reason-every ${OREASONEVERY:-0} --kl ${OKL:-0} --dolphin-on ${ODOLPHINON:-all} --w-talk ${OWTALK:-0.5} --wheels ${OWHEELS:-0} --search-wheels ${OSEARCHWHEELS:-0} --pg-norm ${OPGNORM:-mean} --pg-norm-len 1024 --adv-std ${OADVSTD:-1} --search-lr ${OSEARCHLR:-0} --guard-pass ${OGUARDPASS:-0.5} --guard-steps ${OGUARDSTEPS:-10} --guard-halve ${OGUARDHALVE:-1} --pool-order ${OPOOLORDER:-loop} --pool-offset ${OPOOLOFFSET:-0} --search-temp ${OSEARCHTEMP:-0} --search-gen ${OSEARCHGEN:-0} ${OSEARCHDEMO:+--search-demo /root/hfdl/$OSEARCHDEMO}} --pooler ${OPOOLER:-none} --pooler-rank ${OPOOLERRANK:-8} --pooler-lr ${OPOOLERLR:-1e-5} $([ -s $OHF/pooler.safetensors ] && echo --pooler-init $OHF/pooler.safetensors) --lora-rank 16 --lora-layers ${OLAYERS:-all} --gradckpt 1 --save-every 5 --stop eos \
       >> /root/online_$ORUN.log 2>&1 < /dev/null &
   fi
   # once: in reasoning mode the empty search loop printed the end marker at launch, and the keeper
