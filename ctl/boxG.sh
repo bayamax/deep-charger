@@ -80,7 +80,7 @@ PSKIP=
 # The raw GitHub copy this box fetches can lag and hand a control run an OLDER version of this file (04:48 on 09-22 it
 # relaunched the online loop under the previous mode while the newer run was merging a checkpoint on the same card).
 # Every edit bumps BOXG_SERIAL; a run that sees a lower serial than one already executed stops here.
-BOXG_SERIAL=2026092508
+BOXG_SERIAL=2026092509
 if [ -f /root/.boxg_serial ] && [ "$(cat /root/.boxg_serial)" -gt "$BOXG_SERIAL" ] 2>/dev/null; then echo "BOXG_STALE $BOXG_SERIAL < $(cat /root/.boxg_serial)"; exit 0; fi
 echo $BOXG_SERIAL > /root/.boxg_serial
 AUDIT=1           # 2026-09-25: one-off, runs beside the evaluation on the CPU
@@ -1068,7 +1068,8 @@ for f in sorted(glob.glob("/root/work/" + "s4prod" + "_out_*.jsonl")):
 PYT
 echo "REEVAL_DONE $RRUN $(date -u)"
 RKB
-  chmod +x /root/reevalkeep.sh; setsid nohup bash -c 'bash /root/reevalkeep.sh 2>&1 | tee -a /root/reeval.log' >> /proc/1/fd/1 2>&1 < /dev/null &
+  # the keeper must not inherit the lock descriptor: it held it for the whole evaluation and every later control run skipped (the s4gsm baseline never launched)
+  chmod +x /root/reevalkeep.sh; setsid nohup bash -c 'bash /root/reevalkeep.sh 2>&1 | tee -a /root/reeval.log' >> /proc/1/fd/1 2>&1 < /dev/null 9>&- &
   sleep 5; echo "REEVAL_LAUNCH_DONE $RRUN model=$RHF $(date -u)"; exit 0
 fi
 
