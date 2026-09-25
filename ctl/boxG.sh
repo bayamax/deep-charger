@@ -80,10 +80,11 @@ PSKIP=
 # The raw GitHub copy this box fetches can lag and hand a control run an OLDER version of this file (04:48 on 09-22 it
 # relaunched the online loop under the previous mode while the newer run was merging a checkpoint on the same card).
 # Every edit bumps BOXG_SERIAL; a run that sees a lower serial than one already executed stops here.
-BOXG_SERIAL=2026092500
+BOXG_SERIAL=2026092503
 if [ -f /root/.boxg_serial ] && [ "$(cat /root/.boxg_serial)" -gt "$BOXG_SERIAL" ] 2>/dev/null; then echo "BOXG_STALE $BOXG_SERIAL < $(cat /root/.boxg_serial)"; exit 0; fi
 echo $BOXG_SERIAL > /root/.boxg_serial
-MODE=online       # 2026-09-22 20:58: back to g7 after the step-600 held-out check (37.3%; 470 40.2%, 120 35.3%, s4 38.0%)
+MODE=reeval       # 2026-09-25 03:45: g10's exact step-400 snapshot on the held-out (s4 38.0%, g7 step 470 40.2%); the run itself ended at 400
+RRUN=g10e400; RMODEL=g10_step400; RKIND=merge; RLAYERS=20-27; RTEMP=0.6; RGEN=4000; RN=34; RSHARDS=3
 ORUN=g10          # 2026-09-24: the diagnostic. Search side ONLY, from s4_hf, under the search GRPO's own recipe (layers 20-27, pooler adapter,
                   # 1e-5, temp 0.9, gen 1500, mean/std, corpus questions from pool3's 201st, no KL). If this climbs like pool3 did, the joint
                   # runs failed because of the reasoning side; if it does not, the conversational base itself is the problem.
