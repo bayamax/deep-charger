@@ -820,6 +820,16 @@ for r in rows[:${RQN:-12}]:
 print("[dolphin questions]", min(len(rows), ${RQN:-12}))
 PYD
   fi
+  if [ "${RQSRC:-}" = "gsm" ]; then
+    [ -s /root/work/gsm8k_test.raw ] || curl -sSL --retry 3 -o /root/work/gsm8k_test.raw "https://raw.githubusercontent.com/openai/grade-school-math/master/grade_school_math/data/test.jsonl"
+    python3 - <<PYG
+import json
+rows = [json.loads(l) for l in open("/root/work/gsm8k_test.raw") if l.strip()][:${RQN:-100}]
+with open("/root/work/dolphinq.jsonl", "w") as o:
+    for r in rows: o.write(json.dumps({"q": r["question"].strip(), "gold": r["answer"].split("####")[-1].strip()}, ensure_ascii=False) + "\n")
+print("[gsm questions]", len(rows))
+PYG
+  fi
   [ -s /root/hfdl/pooler_distill/chat_eval60.jsonl ] || hf download $R --include "pooler_distill/chat_eval60.jsonl" --local-dir /root/hfdl 2>&1 | tail -1
   cat > /root/reevalkeep.sh <<RK
 #!/bin/bash
@@ -836,6 +846,28 @@ run_one() {  # $1 questions file, $2 out file, $3 tag
 if [ -n "$RQSRC" ]; then
   run_one /root/work/dolphinq.jsonl /root/work/${RRUN}_out_0.jsonl ${RRUN}0
   hf upload $R /root/work/${RRUN}_out_0.jsonl pooler_distill/chatsft/rollouts/${RRUN}_dolphin.jsonl >/dev/null 2>&1   # full replies, the log shows 900 chars
+  if [ "$RQSRC" = "gsm" ]; then
+    python3 - <<'PYA'
+import json, re
+NUM = re.compile(r"-?\d[\d,]*(?:\.\d+)?")
+def fin(t):
+    m = re.findall(r"\\boxed\{([^{}]*)\}", t); c = m[-1] if m else (t.split("####")[-1] if "####" in t else t)
+    n = NUM.findall(c)
+    try: return float(n[-1].replace(",", "")) if n else None
+    except ValueError: return None
+gold = {}
+for l in open("/root/work/dolphinq.jsonl"):
+    r = json.loads(l); gold[r["q"].strip()] = float(r["gold"].replace(",", ""))
+rows = [json.loads(l) for l in open(sorted(__import__("glob").glob("/root/work/*_out_0.jsonl"), key=__import__("os").path.getmtime)[-1]) if l.strip()]
+ok = fin_n = 0; th = []
+for r in rows:
+    t = r["text"]; reply = t.split("</think>")[-1] if "</think>" in t else ""
+    g = gold.get(r["q"].strip()); a = fin(reply) if reply else None
+    ok += int(g is not None and a is not None and abs(a - g) <= 1e-6 * max(1.0, abs(g))); fin_n += bool(reply); th.append(len(t.split("</think>")[0].split()))
+th.sort(); print(f"GSM_ACC {100*ok/max(len(rows),1):.1f}% ({ok}/{len(rows)})  finished {100*fin_n/max(len(rows),1):.0f}%  think median {th[len(th)//2] if th else 0} words")
+PYA
+    echo "REEVAL_DONE $RRUN $(date -u)"; exit 0
+  fi
   python3 - <<'PYT'
 import json
 import glob
