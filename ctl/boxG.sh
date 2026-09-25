@@ -85,9 +85,9 @@ if [ -f /root/.boxg_serial ] && [ "$(cat /root/.boxg_serial)" -gt "$BOXG_SERIAL"
 echo $BOXG_SERIAL > /root/.boxg_serial
 MODE=reeval       # 2026-09-25 04:00: the reasoning baseline before g11: s4_hf on the first 100 GSM8K test problems, exact match (~30 min)
 RRUN=s4gsm; RMODEL=s4_hf; RKIND=dir; RQSRC=gsm; RQN=100; RTEMP=0.6; RGEN=4000
-ORUN=g11          # 2026-09-25: can the reasoning side be GROWN at all? Reasoning only, from s4_hf, on GSM8K with a checkable reward
-                  # (final number == reference), no teacher, no wheels, no Dolphin, no KL. Search is not trained here; its held-out is measured
-                  # at the freezes to see whether growing reasoning costs it (the coexistence question), before any MoE decision.
+ORUN=g12          # 2026-09-25: the reasoning line. Rejection-sampling fine-tuning on Dolphin (v1 minus a held-out hundred): 12 samples,
+                  # the teacher's rubric, the shortest passing one trained as SFT, a verified search trace rehearsed every step. No policy
+                  # gradient, so none of its length pressure. Yardsticks at every freeze: the Dolphin held-out (target 85%) and the search held-out (40%).
 OSEED=            # 2026-09-20: g7 starts clean from s4_hf. g6 never carried g5's weights (its seed download left no checkpoint) and after the
                   # layer change ran with layers 0-19 of the stock model; both are now caught at launch (ONLINE_SEED_ABORT, ONLINE_ABORT)
 OMODEL=s4_hf
@@ -103,7 +103,7 @@ OREPLAYFILTER=1
 OTRAINALL=1
 OQUEUE=1
 OCOMPLETE=1
-OGEN=4000         # 2026-09-25: grade-school problems finish well inside this
+OGEN=7000
 OBUDGET=1500
 OGUARD=1
 OGUARDSTEPS=20    # 2026-09-21: 20 search steps per window (240 rollouts); 10 tripped twice on hard stretches with nothing drifting
@@ -118,10 +118,12 @@ OREASONG=12
 OSEARCHEVERY=1    # 2026-09-24: every step is a search step
 OKL=0             # 2026-09-24: off, as in pool3
 OREASONEVERY=1    # 2026-09-25: every step is a reasoning step
-OREASONSRC=gsm8k  # the reasoning problems (see the build above the launch)
-OREASONVERIFY=numeric
+OREASONSRC=dolphin_rft
+OREASONVERIFY=judge
+ORFT=1
+ORFTREPLAY=0.5
 ODOLPHINON=reason # the Dolphin SFT record only on reasoning steps
-OWHEELS=0         # 2026-09-25: no reference to fall back on; a GSM8K group that scores zero is simply skipped
+OWHEELS=1         # a problem none of the twelve pass: the R1 reference is trained on instead
 OWTALK=0.5
 OSEARCHDEMO=
 OSEARCHWHEELS=0   # 2026-09-20: off again, as in the search GRPO; the layer limit is the fix, not a crutch
@@ -137,7 +139,7 @@ OROLLEVERY=1
 OQFILE=           # 2026-09-20: empty; the search questions come from the corpus pool the search GRPO trained on (OPOOL3Q)
 OPOOL3Q=1         # search questions = corpus q/gold pairs with a gold of at most 6 words, held-out removed, exactly as grpo_pool did
 ORESUME=0
-OSTEPS=400
+OSTEPS=600
 OSEARCHLR=1e-5    # 2026-09-20: the search side steps its own Adam at the search GRPO's rate; --lr is the reasoning side's
 OSEARCHTEMP=0.9   # 2026-09-24: pool3's temperature; the guard watches the zero-search rate
 OPOOLORDER=pool3  # 2026-09-21: the search questions continue pool3's own sequence from its 201st question (step 162 of g7 = pool index 200)
@@ -843,7 +845,19 @@ print("[dolphin questions]", min(len(rows), ${RQN:-12}))
 PYD
   fi
   if [ "${RQSRC:-}" = "dolphinh" ]; then
-    [ -s /root/work/dolphin_heldout100.jsonl ] || { echo "REEVAL_ABORT $RRUN: no dolphin_heldout100.jsonl (an online launch with OREASONSRC=dolphin_rft builds it)"; exit 0; }
+    if [ ! -s /root/work/dolphin_heldout100.jsonl ]; then
+      for f in dolphin_v1.jsonl dolphin_v2.jsonl; do [ -s /root/hfdl/pooler_distill/chatsft/$f ] || hf download $R --include "pooler_distill/chatsft/$f" --local-dir /root/hfdl >/dev/null 2>&1; done
+      python3 - <<'PD2'
+import json, random
+v1 = [json.loads(l) for l in open("/root/hfdl/pooler_distill/chatsft/dolphin_v1.jsonl") if l.strip()]
+v1 = [r for r in v1 if r.get("q") and r.get("reply")]
+v2q = set((json.loads(l).get("q") or "").strip() for l in open("/root/hfdl/pooler_distill/chatsft/dolphin_v2.jsonl") if l.strip())
+cand = [r for r in v1 if r["q"].strip() not in v2q]; random.Random(0).shuffle(cand)
+with open("/root/work/dolphin_heldout100.jsonl", "w") as o:
+    for r in cand[:100]: o.write(json.dumps({"q": r["q"], "ref": r["reply"]}, ensure_ascii=False) + "\n")
+print("[dolphin held-out] built, 100 problems")
+PD2
+    fi
     python3 - <<'PYH2'
 import json
 rows = [json.loads(l) for l in open("/root/work/dolphin_heldout100.jsonl") if l.strip()]
