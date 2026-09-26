@@ -80,7 +80,7 @@ PSKIP=
 # The raw GitHub copy this box fetches can lag and hand a control run an OLDER version of this file (04:48 on 09-22 it
 # relaunched the online loop under the previous mode while the newer run was merging a checkpoint on the same card).
 # Every edit bumps BOXG_SERIAL; a run that sees a lower serial than one already executed stops here.
-BOXG_SERIAL=2026092623
+BOXG_SERIAL=2026092624
 if [ -f /root/.boxg_serial ] && [ "$(cat /root/.boxg_serial)" -gt "$BOXG_SERIAL" ] 2>/dev/null; then echo "BOXG_STALE $BOXG_SERIAL < $(cat /root/.boxg_serial)"; exit 0; fi
 echo $BOXG_SERIAL > /root/.boxg_serial
 MODE=reeval       # 2026-09-26: g14 quantized at load, untrained (the baseline for the trained 4-bit q14)
@@ -197,6 +197,18 @@ WK
   chmod +x /root/wikikeep.sh
   setsid nohup bash -c 'bash /root/wikikeep.sh 2>&1 | tee -a /root/wiki.log' >> /proc/1/fd/1 2>&1 < /dev/null 9>&- &
   echo "WIKI_LAUNCHED $(date -u)"
+fi
+
+# one-shot: the lexical index the evaluation built on the box goes to the hub beside the store; the title-only index it replaces comes down
+if [ -s /root/wiki_store/lex.sqlite ] && [ ! -f /root/.lex_uploaded ]; then
+  export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null)
+  if hf upload baya1116/hypernet-sp-distill /root/wiki_store/lex.sqlite localsearch/wiki_en_20231101/lex.sqlite >/dev/null 2>&1; then
+    touch /root/.lex_uploaded; echo "LEX_UPLOADED $(du -h /root/wiki_store/lex.sqlite | cut -f1) $(date -u)"
+    python3 - <<'PYD' 2>/dev/null
+from huggingface_hub import HfApi
+HfApi().delete_file("localsearch/wiki_en_20231101/titles.sqlite", "baya1116/hypernet-sp-distill"); print("titles.sqlite removed from the hub")
+PYD
+  fi
 fi
 
 # The status command is the same whatever mode this file is in, so it is installed once,
