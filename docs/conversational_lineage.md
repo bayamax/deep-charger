@@ -490,21 +490,30 @@ The 37 that neither solves say where the target lives. The held-out hundred is 6
 code, 13 general; the maths sits at 72–77%, the code (Erlang, Lisp, Rust, Swift, SQL, R) at
 23–30%, the general (image prompts, articles, explanations) at 7–23%. An 85% on the whole set
 needs the code and general parts near 80%, which is a different question from whether the
-maths can be sharpened. Whether a 1.5B model has that at all is being measured directly: the
-untouched R1 distill and the step-200 student, before any of our training, on the same hundred
-under the same settings. If the untouched model is well above 56%, our training has lost
-something recoverable; if it is not, the target is outside this model and the router-and-two-
-models design is the next step, not another recipe.
+maths can be sharpened. Whether a 1.5B model has that at all was then measured directly, the
+untouched R1 distill and the step-200 student on the same hundred under the same settings:
+
+| | untouched distill | step-200 student | s4 | g14 step 835 |
+|---|---|---|---|---|
+| Dolphin held-out | 56% (1 unfinished) | 46% (12 unfinished) | 56% | 53% |
+| maths / code / general | 45 / 6 / 5 | 40 / 4 / 2 | 47 / 8 / 1 | 44 / 6 / 3 |
+| thinking, median words | 701 | 366 | 153 | 576 |
+
+The untouched model is at 56%: our training lost nothing. (The step-200 student's 46% is the
+old stop rule leaving twelve replies unfinished, which the chat SFT repaired.) The four models
+together solve 68 of the hundred and 32 by none. The reasoning target is therefore outside this
+model, not something to recover: 85% on this mix is thirty points above what the 1.5B distill
+does on its own, most of them in code and general tasks it does not do at any weight. The
+coexistence question, on the other hand, is answered by g14: a single model at 48% search and
+base-level reasoning. What 85% needs is a larger reasoning model, and the router-and-two-models
+design is then a 1.5B search model beside a 7B reasoning model, not two of the same size.
 
 ## Next, in order
 
-1. Read the untouched distill and the step-200 student on the Dolphin held-out; decide from that
-   whether the reasoning target is a recovery problem or a capacity problem.
-2. If recovery: find which of the chat SFT, the search GRPO, and the distillation lost it, by the
-   same held-out on each stage, and train the reasoning side by distillation or SFT only — never
-   by policy gradient next to the search side.
-3. If capacity: a task router in front of the search model and a reasoning model, each kept
-   under the conditions that made it.
-4. The search trace pool for any further replay comes from g10's verified rollouts, not the 630
+1. The untouched 7B distill on the same hundred (a 24 GB card for two hours), to know what a
+   larger reasoning model buys on this mix before committing to it.
+2. If it is worth it: a task router in front of the 1.5B search model (g14 lineage) and the 7B
+   reasoning model, each kept under the conditions that made it.
+3. The search trace pool for any further replay comes from g10's verified rollouts, not the 630
    traces again.
-5. Only then the 4-bit packing of the chosen checkpoint (`packmlx.py`) and the app.
+4. Only then the 4-bit packing of the chosen checkpoint (`packmlx.py`) and the app.
