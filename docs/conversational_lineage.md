@@ -432,13 +432,79 @@ record per step, temperature 0.6, a 7000-token cap, the R1 reference when all tw
 fail. One optimizer steps per loop step. The constant-length normalisation stays in the code as
 a flag, off. The guard runs inside the GRPO loop as the safety net.
 
+## g7–g10: the reasoning side loses the search side however it is held
+
+g7 ran g6's plan from s4: the search side under the search GRPO's own conditions, the reasoning
+side on the same adapter at 2e-5. On the held-out it went 35.3% at step 120, 40.2% at 470, 37.3%
+at 600 (s4: 38.0%) — level, not up — while the training-time search pass rate sagged over the
+later hundreds of steps. g8 moved everything to all-layer LoRA at 1e-5, three search steps per
+reasoning step, the Dolphin record only on reasoning steps, and a KL anchor to the base policy
+(k3 with the adapters off, 0.04); g9 raised the anchor to 0.2 and dropped the Dolphin record.
+Each of them drifted the same way: the thinking got longer, then the search pass rate fell, and
+the guard's healthy copy was the only thing worth keeping. Layer set, rate, KL weight, and the
+Dolphin record were each varied on their own; none of them changed the direction.
+
+g10 is the control: the search side alone, from s4, under the search GRPO's recipe (layers
+20–27, the pooler's rank-8 adapter, 1e-5, temperature 0.9, 1500-token cap, corpus questions,
+mean and std normalisation). It is stable and it climbs: 43.1% on the held-out at step 400
+against s4's 38.0%. Its step 400 folded into s4 is `chatsft/g10m_hf`, the base of every run
+since. So the search GRPO is not the fragile part; anything that trains the reasoning side by
+policy gradient alongside it is.
+
+## g12–g14: growing the reasoning side without policy gradient
+
+The reasoning side's own ceiling under RL was the first thing to measure. On the training
+problems the twelve samples pass at least once about 65% of the time; rejection-sampling
+fine-tuning or GRPO can only sharpen inside that set, and the held-out hundred (dolphin_v1
+minus v2, seed 0, never trained on) sat at 56% for s4 under the nano judge (58% under
+DeepSeek). The judge itself was audited before it was trusted for this: on the same replies it
+agreed with a strict gpt-5-mini reading 91–96% of the time, so the score is not the judge's
+noise.
+
+g12 was rejection-sampling fine-tuning on the Dolphin problems from g10m_hf: the shortest
+passing sample of twelve as plain SFT, a search trace replayed at weight 0.5 each step, and the
+R1 reference as the fallback when all twelve failed. The fallback is what moved it: the R1
+references are long (median 718 words of thinking) and the student took on their length —
+174 to 612 words by step 116 with 28% of samples unfinished — without taking on their
+correctness. g13 limited the fallback to short references and was stopped for the same reason.
+
+g14 dropped the rollouts and distilled directly: the R1 thinking and reply of every dolphin_v1
+record outside the held-out hundred, eight records a step, all-layer LoRA r16 at 5e-5, the
+search trace replay kept at 0.5, one epoch (835 steps). The distillation loss fell 0.62 → 0.52
+and the replay loss 0.79 → 0.55, the latter's drop coming after the 630 traces had been seen
+once, so that side is partly memorised. On the held-out, measured with a repetition-loop
+breaker that closes the thinking and answers when the generation starts repeating:
+
+| | s4 | g10 step 400 | g14 step 400 | g14 step 835 |
+|---|---|---|---|---|
+| search held-out (eval300 subset, 102) | 38.0% | 43.1% | – | 48.0% |
+| Dolphin held-out (100, nano) | 56% | – | 52% (22 unfinished) | 53% (4 unfinished) |
+| thinking, median words | 153 | – | 900 | 576 |
+
+The search side did not pay for the replay's memorisation: 48% is the best number the held-out
+has given (the three shards read 59/38/47%, so the noise is about ±5 points). The reasoning side
+did not gain: per problem, s4 and g14 both solve 46, s4 alone 10, g14 alone 7, neither 37. The
+distillation changed the length of the thinking and not the set of problems the model can do.
+
+The 37 that neither solves say where the target lives. The held-out hundred is 61 maths, 26
+code, 13 general; the maths sits at 72–77%, the code (Erlang, Lisp, Rust, Swift, SQL, R) at
+23–30%, the general (image prompts, articles, explanations) at 7–23%. An 85% on the whole set
+needs the code and general parts near 80%, which is a different question from whether the
+maths can be sharpened. Whether a 1.5B model has that at all is being measured directly: the
+untouched R1 distill and the step-200 student, before any of our training, on the same hundred
+under the same settings. If the untouched model is well above 56%, our training has lost
+something recoverable; if it is not, the target is outside this model and the router-and-two-
+models design is the next step, not another recipe.
+
 ## Next, in order
 
-1. Failure-case data for the search side: prefixes whose searches never reached the gold, with the
-   teacher writing an honest "I couldn't confirm this" reply, so the model stops inventing an
-   answer when the page was not found (130 of 300 held-out rollouts today).
-2. Quote base and fine-tuned models only from paired runs under the same stop rule; the old-rule history stays as it is.
-3. The no-search side: fix the sampling settings first (0.6 or lower, repetition control) and
-   measure with the flash judge; then rejection sampling on the student's own replies against
-   that judge, not more teacher pairs.
-4. Only then the 4-bit packing of the chosen checkpoint (`packmlx.py`) and the app.
+1. Read the untouched distill and the step-200 student on the Dolphin held-out; decide from that
+   whether the reasoning target is a recovery problem or a capacity problem.
+2. If recovery: find which of the chat SFT, the search GRPO, and the distillation lost it, by the
+   same held-out on each stage, and train the reasoning side by distillation or SFT only — never
+   by policy gradient next to the search side.
+3. If capacity: a task router in front of the search model and a reasoning model, each kept
+   under the conditions that made it.
+4. The search trace pool for any further replay comes from g10's verified rollouts, not the 630
+   traces again.
+5. Only then the 4-bit packing of the chosen checkpoint (`packmlx.py`) and the app.
