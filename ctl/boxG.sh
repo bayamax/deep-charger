@@ -80,11 +80,11 @@ PSKIP=
 # The raw GitHub copy this box fetches can lag and hand a control run an OLDER version of this file (04:48 on 09-22 it
 # relaunched the online loop under the previous mode while the newer run was merging a checkpoint on the same card).
 # Every edit bumps BOXG_SERIAL; a run that sees a lower serial than one already executed stops here.
-BOXG_SERIAL=2026092606
+BOXG_SERIAL=2026092607
 if [ -f /root/.boxg_serial ] && [ "$(cat /root/.boxg_serial)" -gt "$BOXG_SERIAL" ] 2>/dev/null; then echo "BOXG_STALE $BOXG_SERIAL < $(cat /root/.boxg_serial)"; exit 0; fi
 echo $BOXG_SERIAL > /root/.boxg_serial
-MODE=reeval       # 2026-09-26: g14 at the end of its epoch on the search held-out (s4 38.0%, g10 43.1%)
-RRUN=g14e835; RMODEL=g14; RKIND=merge; RBASE=g10m_hf; RLAYERS=all; RTEMP=0.6; RGEN=4000; RN=34; RSHARDS=3
+MODE=reeval       # 2026-09-26: the stock R1 distill on the Dolphin held-out, same settings as g14d835 (53%)
+RRUN=stockd; RMODEL=stock; RKIND=stock; RQSRC=dolphinh; RQN=100; RTEMP=0.6; RGEN=7000; RLOOP=answer
 ORUN=g14          # 2026-09-26: distillation. The R1 thinking and answer of dolphin_v1 (minus the held-out hundred) as plain SFT, 8 records a step,
                   # one verified search trace at half weight beside them; no rollouts, no judge. Length is allowed to grow (up to ~1000 tokens is
                   # fine by the user); the yardsticks are the Dolphin held-out (85%) and the search held-out (40%) at 400 and at the epoch's end.
@@ -954,6 +954,11 @@ if [ "$MODE" = "reeval" ]; then
     echo "[merge] $SRC (step $(python3 -c "import json;print(json.load(open('/root/online_$RMODEL/state.json'))['step'])" 2>/dev/null || echo ?)) onto ${RBASE:-s4_hf}, lora r16 layers ${RLAYERS:-20-27}"
     cd /root/work && SP_BASE=$MB SP_NOSYS=1 SP_EPISODIC=1 OMP_NUM_THREADS=1 python3 /root/work/build_merged.py $SRC $RHF $RCKPT 16 ${RLAYERS:-20-27} 2>&1 | grep -E "^\[merge\]|MERGE_DONE|Error|assert|unexpected" | tail -4
     [ -s $RHF/model.safetensors ] || { echo "REEVAL_ABORT $RRUN: merge of online/$RMODEL failed"; exit 0; }
+  elif [ "${RKIND:-adapter}" = "stock" ]; then
+    # the untouched R1 distill the whole lineage started from: the reasoning ceiling before any of our training
+    RHF=/root/base_distill; RCKPT=/root/pooler200.safetensors
+    [ -s $RHF/model.safetensors ] || for try in 1 2 3 4 5 6; do hf download deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B --local-dir $RHF >/dev/null 2>&1; [ -s $RHF/model.safetensors ] && break; sleep 20; done
+    [ -s $RHF/model.safetensors ] || { echo "REEVAL_ABORT $RRUN: stock model download failed"; exit 0; }
   elif [ "$RMODEL" = "base" ]; then RHF=/root/eval_hf200; elif [ "${RKIND:-adapter}" = "dir" ]; then
     RHF=/root/hfdl/pooler_distill/chatsft/$RMODEL   # a merged model directory published by the training box
     for try in $(seq 1 60); do   # it may still be uploading: poll for up to an hour
