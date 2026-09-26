@@ -65,6 +65,7 @@ ap.add_argument("--guard-halve", type=int, default=1, help="1: a rollback also h
 ap.add_argument("--guard-pass", type=float, default=0.5, help="the guard trips only when, besides the unfinished or search-count rise, the window's pass rate has fallen to this fraction of the baseline pass rate (one hard question in a window is not a collapse)")
 ap.add_argument("--eval-file", default="", help="evaluation only: generate one reply per question in this jsonl ({\"q\": ...}) with the batched rollout, --b questions at a time, write {q, text, ns} to --eval-out and exit")
 ap.add_argument("--eval-out", default="")
+ap.add_argument("--loop-break", default="", choices=["", "stop", "answer"], help="a thinking span whose last 256 tokens are under 25%% distinct is a repetition loop (g14 step 400: 22 of 100 held-out replies never finished, tail repetition 0.84). stop: end the row there; answer: close the thinking and let it answer")
 ap.add_argument("--rft", type=int, default=0, help="1: rejection-sampling fine-tuning instead of the policy gradient on reasoning steps: of the G samples the teacher passes, the one with the shortest thinking is trained on as plain SFT; none passing falls back to --wheels. No advantage, no std, no length pressure.")
 ap.add_argument("--sft-only", type=int, default=0, help=">0: pure distillation, no rollouts and no judge: each step trains this many reasoning records (their R1 thinking and reply) as plain SFT, plus one verified search trace at --rft-replay weight")
 ap.add_argument("--wheel-max-think", type=int, default=0, help=">0: the R1 reference is trained on only when its thinking is at most this many words (the dolphin_v1 references run 718 words at the median; g12 took on their length: thinking 174 -> 612 words and 28%% unfinished by step 116)")
@@ -511,6 +512,11 @@ def rollout_batch(question, B):
         if len(gen) >= 8 and len(set(gen[-8:])) == 1:
             st["dead"] = True; return True
         txt = tok.decode(gen)
+        if A.loop_break and st["n_model"] % 64 == 0 and len(gen) >= 256 and "</think>" not in txt and len(set(gen[-256:])) < 64:
+            st["loops"] = st.get("loops", 0) + 1
+            if A.loop_break == "stop" or st["loops"] > 1:
+                st["dead"] = True; return True
+            inject(st, "\n</think>\n\n"); return True
         si = txt.rfind("<search>")
         mclose = CLOSE_RE.search(txt, si) if si >= 0 else None
         if mclose and txt.count("<search>") > st["ns_"]:
