@@ -90,6 +90,11 @@ class LocalSearch:
         self.bits = np.memmap(os.path.join(store_path, "emb.bin"), dtype=np.uint8, mode="r").reshape(-1, DIM // 8)
         assert self.bits.shape[0] == self.st.n_docs, f"index {self.bits.shape[0]} vs store {self.st.n_docs}"
         self.gpu = None
+        self.pq = None
+        if os.path.exists(os.path.join(store_path, "pq_codes.npy")):   # product-quantized index, preferred when built
+            from pq import PQIndex
+            self.pq = PQIndex(store_path, gpu=os.environ.get("SP_LOCAL_GPU", "0") == "1")
+            assert self.pq.n == self.st.n_docs, f"pq index {self.pq.n} vs store {self.st.n_docs}"
         if os.environ.get("SP_LOCAL_GPU", "0") == "1":   # on the training box the whole index sits on the card (300 MB)
             import torch
             global UNPACK_T
@@ -103,6 +108,8 @@ class LocalSearch:
         """Asymmetric scoring: the float query against each article's signs. On shard 0 of the dump this finds the
         page Wikipedia's search returned 73% of the time within 96 candidates; binary-against-binary Hamming
         found it 23% of the time, so the query is never binarised."""
+        if self.pq is not None:
+            return self.pq.top(qv, k)
         if self.gpu is not None:
             import torch
             q = torch.from_numpy(qv.astype(np.float32)).to(self.gpu.device)

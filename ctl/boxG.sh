@@ -80,7 +80,7 @@ PSKIP=
 # The raw GitHub copy this box fetches can lag and hand a control run an OLDER version of this file (04:48 on 09-22 it
 # relaunched the online loop under the previous mode while the newer run was merging a checkpoint on the same card).
 # Every edit bumps BOXG_SERIAL; a run that sees a lower serial than one already executed stops here.
-BOXG_SERIAL=2026092616
+BOXG_SERIAL=2026092617
 if [ -f /root/.boxg_serial ] && [ "$(cat /root/.boxg_serial)" -gt "$BOXG_SERIAL" ] 2>/dev/null; then echo "BOXG_STALE $BOXG_SERIAL < $(cat /root/.boxg_serial)"; exit 0; fi
 echo $BOXG_SERIAL > /root/.boxg_serial
 MODE=quant        # 2026-09-26: g14 (step 835) packed for the app by self-trace fine-tuning under quantization, then published and measured
@@ -161,7 +161,7 @@ for f in pool_eval.py q4.py qat.py dwq.py poolerfit.py jointfit.py checkmlx.py p
 done
 cp /root/work/web_search.py /root/work/runtime/web_search.py 2>/dev/null
 mkdir -p /root/work/localsearch
-for f in build_store.py store.py embed.py search.py; do
+for f in build_store.py store.py embed.py search.py pq.py; do
   for try in 1 2 3; do curl -sS -o /root/work/localsearch/$f "$RAW/localsearch/$f?nocache=$(date +%s)" && python3 -m py_compile /root/work/localsearch/$f && break; sleep 5; done
 done
 echo "fetched: pool_eval $(wc -l < /root/work/pool_eval.py) lines, q4 $(wc -l < /root/work/q4.py) lines"
