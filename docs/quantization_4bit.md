@@ -184,3 +184,26 @@ without recovering the answer is what that looks like from outside.
 The historical lineage adapted the model *while it was quantized*, against the task rather than
 against a float teacher. s1 is the cheap end of that: its own scored traces instead of new
 rollouts. GRPO under fake quantization, at roughly ten minutes a step, remains the expensive end.
+
+## The chat-era model (g14, 2026-09-26)
+
+The same recipe on the model the app now ships: g14 step 835 folded into g10m_hf, the grid's scales and
+biases trained by the ce objective on 2126 of the lineage's own traces in the chat-era format (1496
+scored search-GRPO rollouts of g10 and the 630 replay traces, held-out questions removed), 1500 steps
+at 2e-6 on a 12 GB card (decoder layers checkpointed, the grid's backward in slabs). Validation loss
+0.913 -> 0.665. Packed to `chatsft/g14_mlx4` (MLX_CHECK_OK), 1.0 GB plus the pooler.
+
+Search held-out (eval300 subset, 34 x 3, temperature 0.6, 4000 tokens, EOS stop), each arm 102 rollouts:
+
+| arm | correct | grounded | searches | shards |
+|---|---|---|---|---|
+| bf16 | 48.0% | 71% | 3.5 | 58.8 / 38.2 / 47.1 |
+| 4-bit, untrained | 39.2% | 59% | 3.6 | 44.1 / 32.4 / 41.2 |
+| 4-bit, self-trace fine-tuned (q14, shipped) | 41.2% | 69% | 6.7 | 35.3 / 38.2 / 50.0 |
+
+The four-bit loss is about nine points here, as it was on the old lineage; the training brought grounding
+back to the float model's level (59% -> 69%) and correctness up two points, within this instrument's noise
+(about +-5 on 102 rollouts), while the model searches almost twice as often. The trace pool is the likely
+limit: 2126 traces against 1431 on the old lineage but in a longer format, one pass, validation still
+falling at step 1400. More steps, a second pass over fresh g14 rollouts, or 8-bit for the embedding table
+and lm_head (the two largest-error tensors) are the next things to measure, each an 80-minute arm.

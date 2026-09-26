@@ -58,9 +58,30 @@ search returns the same page.
 | asymmetric 64 + BM25 64 + titles | + lexical overlap + BM25 | 57-59% | 69-71% | 38-44% | 53-60% |
 
 The float embedding's own recall at 128 is 78% on B, and the union of the two channels reaches 79%, so the
-remaining loss is in the ranking, not the candidates. These numbers will fall on the whole dump (forty
-times the distractors); the measurement that matters is the model on the search held-out with the local
-search in place of Wikipedia, against its 48.0% with the API.
+remaining loss is in the ranking, not the candidates.
+
+## Measured on the whole dump: the model on the search held-out
+
+The measurement that matters is the model itself, searching the local store instead of Wikipedia, on the
+same held-out and protocol as every number in `conversational_lineage.md` (eval300 subset, 34 x 3,
+temperature 0.6, 4000 tokens). g14 (bf16), 2026-09-26:
+
+| search | correct | grounded | searches per rollout | shards |
+|---|---|---|---|---|
+| Wikipedia API | 48.0% | 71% | 3.5 | 58.8 / 38.2 / 47.1 |
+| local store (this) | **48.0%** | 67% | 3.7 | 47.1 / 52.9 / 44.1 |
+
+Paired on the 51 distinct questions: both right 13, Wikipedia only 9, local only 10, neither 19. The
+local search is worth the same as the API to this model, on this set, and it needs no network.
+
+## What is not yet shown
+
+The memory figure below is an estimate for a native implementation. The Python prototype (onnxruntime,
+numpy, SQLite) sits at 1.0 GB resident on shard 0 after a few queries, most of it the runtime and the
+re-embedding of ~130 candidates; the index itself is 7 MB there and 307 MB on the whole dump. The 0.5 GB
+budget depends on the Swift port: the int8 model, the index memory-mapped, and re-embedding in batches.
+Query latency in the prototype is 2-4 s on four CPU cores, dominated by the re-embedding; on the box's
+GPU it is well under a second.
 
 ## Budget
 
