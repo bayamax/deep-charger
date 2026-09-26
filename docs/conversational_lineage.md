@@ -493,11 +493,12 @@ needs the code and general parts near 80%, which is a different question from wh
 maths can be sharpened. Whether a 1.5B model has that at all was then measured directly, the
 untouched R1 distill and the step-200 student on the same hundred under the same settings:
 
-| | untouched distill | step-200 student | s4 | g14 step 835 |
-|---|---|---|---|---|
-| Dolphin held-out | 56% (1 unfinished) | 46% (12 unfinished) | 56% | 53% |
-| maths / code / general | 45 / 6 / 5 | 40 / 4 / 2 | 47 / 8 / 1 | 44 / 6 / 3 |
-| thinking, median words | 701 | 366 | 153 | 576 |
+| | untouched distill | step-200 student | s4 | g10 step 400 | g14 step 835 |
+|---|---|---|---|---|---|
+| Dolphin held-out | 56% (1 unfinished) | 46% (12 unfinished) | 56% | 55% | 53% |
+| maths / code / general | 45 / 6 / 5 | 40 / 4 / 2 | 47 / 8 / 1 | 44 / 9 / 2 | 44 / 6 / 3 |
+| thinking, median words | 701 | 366 | 153 | 149 | 576 |
+| search held-out | – | – | 38.0% | 43.1% | 48.0% |
 
 The untouched model is at 56%: our training lost nothing. (The step-200 student's 46% is the
 old stop rule leaving twelve replies unfinished, which the chat SFT repaired.) The four models
