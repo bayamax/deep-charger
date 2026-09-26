@@ -66,6 +66,7 @@ ap.add_argument("--guard-pass", type=float, default=0.5, help="the guard trips o
 ap.add_argument("--eval-file", default="", help="evaluation only: generate one reply per question in this jsonl ({\"q\": ...}) with the batched rollout, --b questions at a time, write {q, text, ns} to --eval-out and exit")
 ap.add_argument("--eval-out", default="")
 ap.add_argument("--rft", type=int, default=0, help="1: rejection-sampling fine-tuning instead of the policy gradient on reasoning steps: of the G samples the teacher passes, the one with the shortest thinking is trained on as plain SFT; none passing falls back to --wheels. No advantage, no std, no length pressure.")
+ap.add_argument("--sft-only", type=int, default=0, help=">0: pure distillation, no rollouts and no judge: each step trains this many reasoning records (their R1 thinking and reply) as plain SFT, plus one verified search trace at --rft-replay weight")
 ap.add_argument("--wheel-max-think", type=int, default=0, help=">0: the R1 reference is trained on only when its thinking is at most this many words (the dolphin_v1 references run 718 words at the median; g12 took on their length: thinking 174 -> 612 words and 28%% unfinished by step 116)")
 ap.add_argument("--rft-replay", type=float, default=0.5, help="in --rft mode, one verified search trace (from --replay) is trained on every step at this weight, so the search side is rehearsed while the reasoning side learns")
 ap.add_argument("--reason-verify", default="judge", choices=["judge", "numeric"], help="numeric: the reasoning reward is exact agreement of the final number with the reference (GSM8K-style), no teacher; judge: the teacher model's four boxes")
@@ -211,7 +212,7 @@ if A.gradckpt:
     print("[init] gradient checkpointing ON for the policy-gradient pass", flush=True)
 nT = sum(p.numel() for p in model.parameters() if p.requires_grad) / 1e6
 nP = sum(p.numel() for p in pooler_params) / 1e6
-print(f"[cfg] G={A.g} rft={A.rft}/{A.rft_replay} wheel_max_think={A.wheel_max_think} reason_verify={A.reason_verify} kl={A.kl} reason_every={A.reason_every} dolphin_on={A.dolphin_on} pool_order={A.pool_order}+{A.pool_offset} pg_norm={A.pg_norm}/{A.pg_norm_len} adv_std={A.adv_std} search_lr={A.search_lr} search_temp={A.search_temp} search_gen={A.search_gen} accum={A.accum} steps={A.steps} budget={A.budget} rw={A.rw} maxd={A.maxd} chunk={A.chunk} temp={A.temp} gen={A.gen} maxs={A.maxs} maxm={A.maxm} samepage={A.samepage} maxsrch={A.maxsrch} phantom={A.phantom}x{A.phantom_scale} "
+print(f"[cfg] G={A.g} sft_only={A.sft_only} rft={A.rft}/{A.rft_replay} wheel_max_think={A.wheel_max_think} reason_verify={A.reason_verify} kl={A.kl} reason_every={A.reason_every} dolphin_on={A.dolphin_on} pool_order={A.pool_order}+{A.pool_offset} pg_norm={A.pg_norm}/{A.pg_norm_len} adv_std={A.adv_std} search_lr={A.search_lr} search_temp={A.search_temp} search_gen={A.search_gen} accum={A.accum} steps={A.steps} budget={A.budget} rw={A.rw} maxd={A.maxd} chunk={A.chunk} temp={A.temp} gen={A.gen} maxs={A.maxs} maxm={A.maxm} samepage={A.samepage} maxsrch={A.maxsrch} phantom={A.phantom}x{A.phantom_scale} "
       f"lr={A.lr} pooler_lr={A.pooler_lr} pooler={A.pooler}(r={A.pooler_rank}) trainable lora={nT:.1f}M pooler={nP:.2f}M", flush=True)
 # ---- environment: verbatim grpo_ep_more serve() ----
 WAPI = "https://en.wikipedia.org/w/api.php"
@@ -1162,6 +1163,21 @@ if not reason: print("ONLINE_LOOP_DONE", flush=True)
 # group whose samples all score alike carries no signal; when they all score zero the model cannot
 # do the problem at all, so with --wheels the teacher's own answer is trained on instead.
 for step in range(state["step"] + 1, A.steps + 1) if reason else []:
+    if A.sft_only:
+        # distillation: the teacher's own thinking and answer, no sampling. The search trace keeps the other side rehearsed.
+        opt.zero_grad(set_to_none=True); model.train(); dl = []
+        for k in range(A.sft_only):
+            pr_ = reason[((step - 1) * A.sft_only + k) % len(reason)]
+            dl.append(guarded(plain_backward, {"q": pr_["q"], "thinking": pr_.get("thinking", ""), "reply": pr_["ref"]}, 1.0 / A.sft_only)); clear()
+        rl_ = guarded(replay_backward, rep[ri % len(rep)], A.rft_replay) if (rep and A.rft_replay > 0) else 0.0; ri += 1; clear()
+        opt.step(); opt.zero_grad(set_to_none=True); clear()
+        line = (f"[step {step}] sft {A.sft_only} records ce={sum(dl)/max(len(dl),1):.3f} replay_ce={rl_:.3f} | epoch {((step) * A.sft_only) / len(reason):.2f} | {(time.time()-t0)/60:.0f} min")
+        print(line, flush=True); log.write(line + "\n"); log.flush()
+        if step % A.save_every == 0 or step == A.steps:
+            save_ckpt(LATEST); json.dump({"step": step, "cum": cum, "di": di, "ri": ri, "qi": qi}, open(STATE_F, "w")); save_opt()
+            if step % 200 == 0:
+                import shutil; shutil.copyfile(LATEST, os.path.join(A.outdir, f"step{step}.safetensors")); shutil.copyfile(STATE_F, os.path.join(A.outdir, f"step{step}.json"))
+        continue
     searching = (step % A.reason_every != 0) if A.reason_every else (bool(A.search_every) and step % A.search_every == 0)
     if searching:
         item = pool_item(step); qtext, ref = item["q"], None
