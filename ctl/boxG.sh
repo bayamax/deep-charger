@@ -80,11 +80,11 @@ PSKIP=
 # The raw GitHub copy this box fetches can lag and hand a control run an OLDER version of this file (04:48 on 09-22 it
 # relaunched the online loop under the previous mode while the newer run was merging a checkpoint on the same card).
 # Every edit bumps BOXG_SERIAL; a run that sees a lower serial than one already executed stops here.
-BOXG_SERIAL=2026092624
+BOXG_SERIAL=2026092625
 if [ -f /root/.boxg_serial ] && [ "$(cat /root/.boxg_serial)" -gt "$BOXG_SERIAL" ] 2>/dev/null; then echo "BOXG_STALE $BOXG_SERIAL < $(cat /root/.boxg_serial)"; exit 0; fi
 echo $BOXG_SERIAL > /root/.boxg_serial
-MODE=reeval       # 2026-09-26: g14 quantized at load, untrained (the baseline for the trained 4-bit q14)
-RRUN=g14q4; RMODEL=g14m_hf; RKIND=dir; RQ4=1; RTEMP=0.6; RGEN=4000; RN=34; RSHARDS=3
+MODE=quant        # 2026-09-26 night: a second 4-bit arm of g14 - the same recipe for 4000 steps (q14's validation was still falling at 1400; q14 41.2%, untrained 39.2%, bf16 48.0%)
+QRUN=q14b; QSRC=g14; QBASE=g10m_hf; QLAYERS=all; QSTEPS=4000; QTAG=b
 ORUN=g14          # 2026-09-26: distillation. The R1 thinking and answer of dolphin_v1 (minus the held-out hundred) as plain SFT, 8 records a step,
                   # one verified search trace at half weight beside them; no rollouts, no judge. Length is allowed to grow (up to ~1000 tokens is
                   # fine by the user); the yardsticks are the Dolphin held-out (85%) and the search held-out (40%) at 400 and at the epoch's end.
@@ -653,7 +653,7 @@ if [ "$MODE" = "quant" ]; then
   # 4-bit grid's scales and biases learn the lineage's own verified traces in the compressed context; codes and
   # pooler stay. QSRC is an online run folded into QBASE first; the traces are the search GRPO's scored rollouts
   # plus the replay pool, both in the chat-era format, held-out questions removed.
-  QRUN=${QRUN:-q14}; QSRC=${QSRC:-g14}; QBASE=${QBASE:-g10m_hf}; QLAYERS=${QLAYERS:-all}
+  QRUN=${QRUN:-q14}; QSRC=${QSRC:-g14}; QBASE=${QBASE:-g10m_hf}; QLAYERS=${QLAYERS:-all}; QTAG=${QTAG:-}   # QTAG names a second arm's hub directories
   export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); R=baya1116/hypernet-sp-distill
   if pgrep -f "quantkee[p].sh" >/dev/null && grep -q "^QRUN=$QRUN;" /root/quantkeep.sh 2>/dev/null; then echo "QUANT_SKIP: $QRUN is already running"; exit 0; fi
   pkill -f "onlinekee[p].sh"; pkill -f "reevalkee[p].sh"; pkill -f "quantkee[p].sh"; pkill -f "online_loop.p[y]"; pkill -f "pool_eval.p[y]"; pkill -f "jointfit.p[y]"; sleep 8
@@ -727,7 +727,7 @@ PYQ
   fi
   cat > /root/quantkeep.sh <<QKP
 #!/bin/bash
-QRUN=$QRUN; HF=$HF; HFM=$HFM; PCK=$PCK; MLX=$MLX; R=$R; QSRC=$QSRC; QTEMP=${QTEMP:-0.6}; QGEN=${QGEN:-4000}; QN=${QN:-34}
+QRUN=$QRUN; HF=$HF; HFM=$HFM; PCK=$PCK; MLX=$MLX; R=$R; QSRC=$QSRC; QTAG=$QTAG; QTEMP=${QTEMP:-0.6}; QGEN=${QGEN:-4000}; QN=${QN:-34}
 export HF_TOKEN=$HF_TOKEN
 QKP
   cat >> /root/quantkeep.sh <<'QKP2'
@@ -741,12 +741,12 @@ fi
 if grep -q MLX_CHECK_OK /root/checkmlx_$QRUN.txt; then
   cp $PCK $MLX/pooler.safetensors
   echo "[$QRUN] packed ($(du -shL $MLX | cut -f1)), uploading the app directory and the merged bf16 model"
-  for try in 1 2 3; do hf upload $R $MLX pooler_distill/chatsft/${QSRC}_mlx4 >/dev/null 2>&1 && break; sleep 30; done
-  cp $PCK $HFM/pooler.safetensors
-  for try in 1 2 3; do hf upload $R $HFM pooler_distill/chatsft/${QSRC}m_hf >/dev/null 2>&1 && break; sleep 30; done
-  hf upload $R /root/sft/$QRUN.pt pooler_distill/chatsft/${QSRC}_mlx4_params.pt >/dev/null 2>&1
+  for try in 1 2 3; do hf upload $R $MLX pooler_distill/chatsft/${QSRC}_mlx4$QTAG >/dev/null 2>&1 && break; sleep 30; done
+  if [ -z "$QTAG" ]; then cp $PCK $HFM/pooler.safetensors
+    for try in 1 2 3; do hf upload $R $HFM pooler_distill/chatsft/${QSRC}m_hf >/dev/null 2>&1 && break; sleep 30; done; fi
+  hf upload $R /root/sft/$QRUN.pt pooler_distill/chatsft/${QSRC}_mlx4${QTAG}_params.pt >/dev/null 2>&1
   hf upload $R /root/sft_$QRUN.log pooler_distill/chatsft/logs/sft_$QRUN.log >/dev/null 2>&1
-  echo "QUANT_UPLOADED $QRUN -> ${QSRC}_mlx4 and ${QSRC}m_hf $(date -u)"
+  echo "QUANT_UPLOADED $QRUN -> ${QSRC}_mlx4$QTAG $(date -u)"
 else
   echo "QUANT_PACK_FAILED $QRUN - not uploading"
 fi
