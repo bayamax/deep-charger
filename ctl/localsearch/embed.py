@@ -22,6 +22,7 @@ ap.add_argument("--store", required=True); ap.add_argument("--model", required=T
 ap.add_argument("--backend", default="onnx", choices=["onnx", "torch"])
 ap.add_argument("--batch", type=int, default=64); ap.add_argument("--maxlen", type=int, default=160)
 ap.add_argument("--threads", type=int, default=0); ap.add_argument("--limit", type=int, default=0)
+ap.add_argument("--float16-out", type=int, default=1, help="1: also keep the float16 vectors (emb_f16.bin, 768 B an article) for building other indexes offline")
 A = ap.parse_args()
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -72,14 +73,21 @@ def pack(v):
     return np.packbits((v > 0).astype(np.uint8), axis=1)   # 384 bits -> 48 bytes, dimension order
 
 
+F16 = os.path.join(A.store, "emb_f16.bin")
+if A.float16_out and os.path.exists(F16) and os.path.getsize(F16) // (DIM * 2) != done:
+    done = min(done, os.path.getsize(F16) // (DIM * 2))   # resume from whichever file is shorter
+    open(EMB, "r+b").truncate(done * DIM // 8); open(F16, "r+b").truncate(done * DIM * 2)
 t0 = time.time(); n = done
+f16 = open(F16, "ab") if A.float16_out else None
 with open(EMB, "ab") as f:
     batch = []
     for i in range(done, total):
         title, body = st.doc(i)
         batch.append(f"{title}. {body[:800]}")
         if len(batch) == A.batch or i == total - 1:
-            f.write(pack(encode(batch)).tobytes()); n += len(batch); batch = []
+            v = encode(batch); f.write(pack(v).tobytes()); n += len(batch); batch = []
+            if f16 is not None:
+                f16.write(v.astype(np.float16).tobytes())
             if (n // A.batch) % 50 == 0:
                 rate = (n - done) / max(time.time() - t0, 1e-6)
                 print(f"[embed] {n}/{total}  {rate:.0f} articles/s  eta {(total - n) / max(rate, 1e-6) / 60:.0f} min", flush=True)
