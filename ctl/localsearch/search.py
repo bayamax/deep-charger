@@ -29,19 +29,35 @@ W_TITLE, W_BODY, W_BM25 = 0.4, 0.2, 0.2   # ranking weights from the shard-0 gri
 
 
 class Embedder:
+    """bge-small: CLS-pooled, normalised. onnxruntime on the CPU (the device path); torch when it is not installed
+    (the training box), on the GPU when there is one."""
+
     def __init__(self, model_dir, threads=0, maxlen=160):
         from tokenizers import Tokenizer
-        import onnxruntime as ort
         self.tok = Tokenizer.from_file(os.path.join(model_dir, "tokenizer.json"))
         self.tok.enable_truncation(maxlen); self.tok.enable_padding(length=None)
-        so = ort.SessionOptions()
-        if threads:
-            so.intra_op_num_threads = threads
-        self.sess = ort.InferenceSession(os.path.join(model_dir, "model.onnx"), so, providers=["CPUExecutionProvider"])
-        self.names = [i.name for i in self.sess.get_inputs()]
+        self.torch = None
+        try:
+            import onnxruntime as ort
+            so = ort.SessionOptions()
+            if threads:
+                so.intra_op_num_threads = threads
+            self.sess = ort.InferenceSession(os.path.join(model_dir, "model.onnx"), so, providers=["CPUExecutionProvider"])
+            self.names = [i.name for i in self.sess.get_inputs()]
+        except ImportError:
+            import torch
+            from transformers import AutoModel
+            self.torch = torch
+            self.dev = "cuda" if torch.cuda.is_available() else "cpu"
+            self.model = AutoModel.from_pretrained(model_dir, torch_dtype=torch.float16 if self.dev == "cuda" else torch.float32).to(self.dev).eval()
 
     def __call__(self, texts):
         enc = self.tok.encode_batch(texts)
+        if self.torch is not None:
+            with self.torch.no_grad():
+                ids = self.torch.tensor([e.ids for e in enc], device=self.dev); am = self.torch.tensor([e.attention_mask for e in enc], device=self.dev)
+                out = self.model(input_ids=ids, attention_mask=am).last_hidden_state[:, 0, :].float()
+                return self.torch.nn.functional.normalize(out, dim=1).cpu().numpy()
         ids = np.array([e.ids for e in enc], dtype=np.int64); am = np.array([e.attention_mask for e in enc], dtype=np.int64)
         feed = {"input_ids": ids, "attention_mask": am}
         if "token_type_ids" in self.names:
