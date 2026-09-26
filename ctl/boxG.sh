@@ -80,7 +80,7 @@ PSKIP=
 # The raw GitHub copy this box fetches can lag and hand a control run an OLDER version of this file (04:48 on 09-22 it
 # relaunched the online loop under the previous mode while the newer run was merging a checkpoint on the same card).
 # Every edit bumps BOXG_SERIAL; a run that sees a lower serial than one already executed stops here.
-BOXG_SERIAL=2026092609
+BOXG_SERIAL=2026092610
 if [ -f /root/.boxg_serial ] && [ "$(cat /root/.boxg_serial)" -gt "$BOXG_SERIAL" ] 2>/dev/null; then echo "BOXG_STALE $BOXG_SERIAL < $(cat /root/.boxg_serial)"; exit 0; fi
 echo $BOXG_SERIAL > /root/.boxg_serial
 MODE=reeval       # 2026-09-26: g10's step 400 (search 43.1%) on the Dolphin held-out, to complete the table (untouched 56%, s4 56%, g14 53%)
@@ -160,7 +160,44 @@ for f in pool_eval.py q4.py qat.py dwq.py poolerfit.py jointfit.py checkmlx.py p
   for try in 1 2 3; do curl -sS -o /root/work/$f "$RAW/$f?nocache=$(date +%s)" && python3 -m py_compile /root/work/$f && break; sleep 5; done
 done
 cp /root/work/web_search.py /root/work/runtime/web_search.py 2>/dev/null
+mkdir -p /root/work/localsearch
+for f in build_store.py store.py embed.py search.py; do
+  for try in 1 2 3; do curl -sS -o /root/work/localsearch/$f "$RAW/localsearch/$f?nocache=$(date +%s)" && python3 -m py_compile /root/work/localsearch/$f && break; sleep 5; done
+done
 echo "fetched: pool_eval $(wc -l < /root/work/pool_eval.py) lines, q4 $(wc -l < /root/work/q4.py) lines"
+
+# The local search's corpus is a side job: it needs the CPU and the disk for its first hours and the card only
+# briefly at the end, so it runs beside whatever mode is active. WIKI=1 starts it once; it resumes shard by shard.
+WIKI=${WIKI:-1}
+if [ "$WIKI" = 1 ] && ! pgrep -f "wikikee[p].sh" >/dev/null && ! grep -q WIKI_DONE /root/wiki.log 2>/dev/null; then
+  cat > /root/wikikeep.sh <<'WK'
+#!/bin/bash
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); R=baya1116/hypernet-sp-distill
+ST=/root/wiki_store; mkdir -p $ST /root/wikidl
+pip list 2>/dev/null | grep -qi zstandard || pip install -q zstandard pyarrow onnxruntime >/dev/null 2>&1
+for i in $(seq -f %05g 0 40); do
+  f=20231101.en/train-$i-of-00041.parquet
+  grep -q "\"$f\"" $ST/meta.json 2>/dev/null && continue
+  for try in 1 2 3 4 5; do hf download wikimedia/wikipedia --repo-type dataset --include "$f" --local-dir /root/wikidl >/dev/null 2>&1; [ -s /root/wikidl/$f ] && break; sleep 30; done
+  [ -s /root/wikidl/$f ] || { echo "WIKI_ABORT shard $i download failed $(date -u)"; exit 0; }
+  (cd /root/wikidl && python3 /root/work/localsearch/build_store.py --out $ST "$f" 2>&1 | grep "^\[store\]")
+  rm -f /root/wikidl/$f
+done
+[ -s /root/bge-small/model.safetensors ] || for try in 1 2 3; do hf download BAAI/bge-small-en-v1.5 --local-dir /root/bge-small >/dev/null 2>&1 && break; sleep 30; done
+n=$(python3 -c "import json;print(json.load(open('$ST/meta.json'))['n_docs'])")
+until [ "$(( $(stat -c %s $ST/emb.bin 2>/dev/null || echo 0) / 48 ))" -ge "$n" ]; do
+  PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python3 /root/work/localsearch/embed.py --store $ST --model /root/bge-small --backend torch --batch 256 2>&1 | grep -E "EMBED_DONE|Error|error" | tail -2
+  sleep 60
+done
+python3 -c "import sys; sys.path.insert(0,'/root/work/localsearch'); from search import build_title_index; print(build_title_index('$ST'))"
+echo "[wiki] store $(du -sh $ST | cut -f1): $(ls -la $ST | awk 'NR>1{print $9"="$5}' | tr '\n' ' ')"
+for try in 1 2 3; do hf upload $R $ST localsearch/wiki_en_20231101 >/dev/null 2>&1 && break; sleep 60; done
+echo "WIKI_DONE $n articles $(date -u)"
+WK
+  chmod +x /root/wikikeep.sh
+  setsid nohup bash -c 'bash /root/wikikeep.sh 2>&1 | tee -a /root/wiki.log' >> /proc/1/fd/1 2>&1 < /dev/null 9>&- &
+  echo "WIKI_LAUNCHED $(date -u)"
+fi
 
 # The status command is the same whatever mode this file is in, so it is installed once,
 # before the modes - a probe that forgets to reinstall it would otherwise report a stale table.
@@ -364,6 +401,7 @@ while :; do
   { echo "=== boxlog $(date -u) ==="; echo "--- ctl.log (tail) ---"; tail -n 300 /root/ctl.log 2>/dev/null | cut -c1-300
     echo "--- reeval.log (tail) ---"; tail -n 120 /root/reeval.log 2>/dev/null | cut -c1-300
     echo "--- quant.log (tail) ---"; tail -n 30 /root/quant.log 2>/dev/null | cut -c1-300
+    echo "--- wiki.log (tail) ---"; tail -n 8 /root/wiki.log 2>/dev/null | cut -c1-300
     for f in /root/sft_q*.log; do [ -s "$f" ] && { echo "--- $f (tail) ---"; grep -E "^step [0-9]+ |val" "$f" | tail -n 6 | cut -c1-200; }; done
     for f in $(ls -t /root/online_*.log 2>/dev/null | head -1); do echo "--- $f (tail) ---"; tail -n 60 "$f" | cut -c1-300; done
     echo "--- gpu ---"; nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv,noheader 2>/dev/null; df -h /root | tail -1

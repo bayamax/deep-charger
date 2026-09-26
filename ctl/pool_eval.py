@@ -79,7 +79,7 @@ NOTICE = "(no searches left - answer from what you have read)"
 NOMORE = "(no more of this page - search again or answer)"
 EXHAUSTED = "(this page is used up - search a different query or answer)"
 cache = {}
-CACHE_F = "/root/work/pool_eval_cache.jsonl"
+CACHE_F = "/root/work/pool_eval_cache_local.jsonl" if os.environ.get("SP_LOCAL_STORE") else "/root/work/pool_eval_cache.jsonl"   # local pages are not Wikipedia pages
 if os.path.exists(CACHE_F):
     for line in open(CACHE_F):
         try:
@@ -125,6 +125,17 @@ def fetch(kw):
                     return f"{t}: {p['extract'][:40000]}"
             return f"{t}: {pages[t]}"
     return ""
+
+
+if os.environ.get("SP_LOCAL_STORE"):
+    # the on-device search instead of Wikipedia's: the same "Title: text" the loop serves, from the local store
+    sys.path.insert(0, "/root/work/localsearch")
+    from search import LocalSearch as _LocalSearch  # noqa: E402
+    _LS = _LocalSearch(os.environ["SP_LOCAL_STORE"], os.environ.get("SP_LOCAL_MODEL", "/root/bge-small"))
+    print(f"[search] local store {os.environ['SP_LOCAL_STORE']} ({_LS.st.n_docs} articles)", flush=True)
+
+    def fetch(kw):
+        return _LS.fetch(kw)
 
 
 def get_page(kw):
