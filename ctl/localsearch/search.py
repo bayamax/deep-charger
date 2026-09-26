@@ -67,6 +67,22 @@ WORD = re.compile(r"[A-Za-z0-9]+")
 STOP = set("the a an of in on at to for by with and or is was were are be been who what which when where how why did does do year".split())
 
 
+def build_idf(store, n=40000):
+    """Document frequencies over the titles and first 300 characters of a sample of articles: the weights of the
+    lexical part of the ranking. Built once beside the index (~1 MB)."""
+    import math, pickle
+    path = os.path.join(store.path, "idf.pkl")
+    if os.path.exists(path):
+        return pickle.load(open(path, "rb"))
+    import collections
+    df = collections.Counter(); step = max(1, store.n_docs // n); cnt = 0
+    for i in range(0, store.n_docs, step):
+        t, b = store.doc(i); df.update(set(w.lower() for w in WORD.findall(t + " " + b[:300]))); cnt += 1
+    idf = {w: math.log((cnt + 1) / (c + 1)) + 1 for w, c in df.items() if c > 1}
+    pickle.dump((idf, math.log(cnt + 1) + 1), open(path, "wb"))
+    return idf, math.log(cnt + 1) + 1
+
+
 class LocalSearch:
     def __init__(self, store_path, model_dir, threads=0, coarse=128, title_k=24, rerank=128):
         self.st = Store(store_path)
@@ -80,6 +96,7 @@ class LocalSearch:
             self.gpu = torch.from_numpy(np.ascontiguousarray(self.bits)).cuda()
             UNPACK_T = torch.from_numpy(UNPACK).cuda()
         self.con = sqlite3.connect("file:" + build_title_index(store_path) + "?mode=ro", uri=True)
+        self.idf, self.idf_max = build_idf(self.st)
         self.coarse, self.title_k, self.rerank = coarse, title_k, rerank
 
     def _coarse_top(self, qv, k):
@@ -126,11 +143,17 @@ class LocalSearch:
         dv = self.emb([f"{t}. {b[:800]}" for t, b in docs])
         sims = dv @ qv
         ql = " " + re.sub(r"[^a-z0-9 ]", " ", query.lower()) + " "
+        qw = [w.lower() for w in WORD.findall(query) if w.lower() not in STOP and len(w) > 1]
+        W = sum(self.idf.get(w, self.idf_max) for w in qw) or 1.0
         scored = []
         for (t, b), s, i in zip(docs, sims, cands):
             tl = " " + re.sub(r"[^a-z0-9 ]", " ", t.lower()).strip() + " "
-            bonus = 0.08 if (len(tl.strip()) > 2 and tl in ql) else 0.0   # the query names the article
-            scored.append((float(s) + bonus, i, t, b))
+            full = 0.1 if (len(tl.strip()) > 2 and tl in ql) else 0.0   # the query names the article
+            tw = set(w.lower() for w in WORD.findall(t)); bw = set(w.lower() for w in WORD.findall(b[:600]))
+            ft = sum(self.idf.get(w, self.idf_max) for w in qw if w in tw) / W        # query terms in the title
+            fb = sum(self.idf.get(w, self.idf_max) for w in qw if w in tw or w in bw) / W   # ... or in the opening
+            # cosine plus the lexical overlap the model's keyword queries were shaped by (weights from the shard-0 grid)
+            scored.append((float(s) + 0.4 * ft + 0.2 * fb + full, i, t, b))
         scored.sort(key=lambda x: -x[0])
         return scored[:k]
 
