@@ -24,6 +24,9 @@ from store import Store  # noqa: E402
 DIM = 384
 QUERY_PREFIX = "Represent this sentence for searching relevant passages: "
 POP = np.array([bin(i).count("1") for i in range(256)], dtype=np.uint8)
+POP_T = None
+ONE, TWO, FOUR, FIFTYSIX = (np.uint64(x) for x in (1, 2, 4, 56))
+M1, M2, M4, H01 = (np.uint64(x) for x in (0x5555555555555555, 0x3333333333333333, 0x0f0f0f0f0f0f0f0f, 0x0101010101010101))
 
 
 class Embedder:
@@ -72,12 +75,29 @@ class LocalSearch:
         self.emb = Embedder(model_dir, threads)
         self.bits = np.memmap(os.path.join(store_path, "emb.bin"), dtype=np.uint8, mode="r").reshape(-1, DIM // 8)
         assert self.bits.shape[0] == self.st.n_docs, f"index {self.bits.shape[0]} vs store {self.st.n_docs}"
+        self.bits64 = self.bits.view(np.uint64)
+        self.gpu = None
+        if os.environ.get("SP_LOCAL_GPU", "0") == "1":   # on the training box the whole index sits on the card (300 MB)
+            import torch
+            global POP_T
+            self.gpu = torch.from_numpy(np.ascontiguousarray(self.bits)).cuda()
+            POP_T = torch.from_numpy(POP.astype(np.int16)).cuda()
         self.con = sqlite3.connect("file:" + build_title_index(store_path) + "?mode=ro", uri=True)
         self.coarse, self.title_k, self.rerank = coarse, title_k, rerank
 
     def _hamming_top(self, qv, k):
         qb = np.packbits((qv > 0).astype(np.uint8))
-        d = POP[np.bitwise_xor(self.bits, qb)].sum(axis=1, dtype=np.uint16)   # one pass over the index
+        if self.gpu is not None:
+            import torch
+            d = POP_T[torch.bitwise_xor(self.gpu, torch.from_numpy(qb).to(self.gpu.device))].sum(1, dtype=torch.int16)
+            idx = torch.topk(d, k, largest=False).indices.cpu().numpy()
+            return idx
+        # one pass over the index: XOR as 64-bit words, SWAR popcount, 200k articles a chunk to stay in cache
+        q64 = qb.view(np.uint64); d = np.empty(self.bits.shape[0], dtype=np.uint16); CH = 200_000
+        for s in range(0, self.bits.shape[0], CH):
+            x = np.bitwise_xor(self.bits64[s:s + CH], q64)
+            x = x - ((x >> ONE) & M1); x = (x & M2) + ((x >> TWO) & M2); x = (x + (x >> FOUR)) & M4
+            d[s:s + CH] = ((x * H01) >> FIFTYSIX).sum(axis=1)
         idx = np.argpartition(d, k)[:k]
         return idx[np.argsort(d[idx])]
 
