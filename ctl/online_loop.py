@@ -66,6 +66,7 @@ ap.add_argument("--guard-pass", type=float, default=0.5, help="the guard trips o
 ap.add_argument("--eval-file", default="", help="evaluation only: generate one reply per question in this jsonl ({\"q\": ...}) with the batched rollout, --b questions at a time, write {q, text, ns} to --eval-out and exit")
 ap.add_argument("--eval-out", default="")
 ap.add_argument("--rft", type=int, default=0, help="1: rejection-sampling fine-tuning instead of the policy gradient on reasoning steps: of the G samples the teacher passes, the one with the shortest thinking is trained on as plain SFT; none passing falls back to --wheels. No advantage, no std, no length pressure.")
+ap.add_argument("--wheel-max-think", type=int, default=0, help=">0: the R1 reference is trained on only when its thinking is at most this many words (the dolphin_v1 references run 718 words at the median; g12 took on their length: thinking 174 -> 612 words and 28%% unfinished by step 116)")
 ap.add_argument("--rft-replay", type=float, default=0.5, help="in --rft mode, one verified search trace (from --replay) is trained on every step at this weight, so the search side is rehearsed while the reasoning side learns")
 ap.add_argument("--reason-verify", default="judge", choices=["judge", "numeric"], help="numeric: the reasoning reward is exact agreement of the final number with the reference (GSM8K-style), no teacher; judge: the teacher model's four boxes")
 ap.add_argument("--kl", type=float, default=0.0, help=">0: GRPO's anchor to the reference policy, the base with the adapters disabled (k3 estimator per policy token, this coefficient). g7 and g8 had no anchor at all: the reasoning reward favours longer thinking, and with nothing holding the policy near the base that length leaked into the search side within 200 steps on all layers")
@@ -210,7 +211,7 @@ if A.gradckpt:
     print("[init] gradient checkpointing ON for the policy-gradient pass", flush=True)
 nT = sum(p.numel() for p in model.parameters() if p.requires_grad) / 1e6
 nP = sum(p.numel() for p in pooler_params) / 1e6
-print(f"[cfg] G={A.g} rft={A.rft}/{A.rft_replay} reason_verify={A.reason_verify} kl={A.kl} reason_every={A.reason_every} dolphin_on={A.dolphin_on} pool_order={A.pool_order}+{A.pool_offset} pg_norm={A.pg_norm}/{A.pg_norm_len} adv_std={A.adv_std} search_lr={A.search_lr} search_temp={A.search_temp} search_gen={A.search_gen} accum={A.accum} steps={A.steps} budget={A.budget} rw={A.rw} maxd={A.maxd} chunk={A.chunk} temp={A.temp} gen={A.gen} maxs={A.maxs} maxm={A.maxm} samepage={A.samepage} maxsrch={A.maxsrch} phantom={A.phantom}x{A.phantom_scale} "
+print(f"[cfg] G={A.g} rft={A.rft}/{A.rft_replay} wheel_max_think={A.wheel_max_think} reason_verify={A.reason_verify} kl={A.kl} reason_every={A.reason_every} dolphin_on={A.dolphin_on} pool_order={A.pool_order}+{A.pool_offset} pg_norm={A.pg_norm}/{A.pg_norm_len} adv_std={A.adv_std} search_lr={A.search_lr} search_temp={A.search_temp} search_gen={A.search_gen} accum={A.accum} steps={A.steps} budget={A.budget} rw={A.rw} maxd={A.maxd} chunk={A.chunk} temp={A.temp} gen={A.gen} maxs={A.maxs} maxm={A.maxm} samepage={A.samepage} maxsrch={A.maxsrch} phantom={A.phantom}x{A.phantom_scale} "
       f"lr={A.lr} pooler_lr={A.pooler_lr} pooler={A.pooler}(r={A.pooler_rank}) trainable lora={nT:.1f}M pooler={nP:.2f}M", flush=True)
 # ---- environment: verbatim grpo_ep_more serve() ----
 WAPI = "https://en.wikipedia.org/w/api.php"
@@ -1201,7 +1202,7 @@ for step in range(state["step"] + 1, A.steps + 1) if reason else []:
             best = min(good, key=lambda r: len(r["text"].split("</think>")[0]))
             th, rp = best["text"].split("</think>", 1)
             losses.append(guarded(plain_backward, {"q": qtext, "thinking": th.replace("<think>", "").strip(), "reply": rp.strip()}, 1.0 / A.accum)); clear()
-        elif A.wheels:
+        elif A.wheels and (not A.wheel_max_think or len(prob.get("thinking", "").split()) <= A.wheel_max_think):
             wheel = guarded(plain_backward, {"q": qtext, "thinking": prob.get("thinking", ""), "reply": ref}, 1.0 / A.accum); clear()
         if rep and A.rft_replay > 0:
             losses.append(guarded(replay_backward, rep[ri % len(rep)], A.rft_replay / A.accum)); ri += 1; clear()

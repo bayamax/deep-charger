@@ -80,13 +80,12 @@ PSKIP=
 # The raw GitHub copy this box fetches can lag and hand a control run an OLDER version of this file (04:48 on 09-22 it
 # relaunched the online loop under the previous mode while the newer run was merging a checkpoint on the same card).
 # Every edit bumps BOXG_SERIAL; a run that sees a lower serial than one already executed stops here.
-BOXG_SERIAL=2026092518
+BOXG_SERIAL=2026092600
 if [ -f /root/.boxg_serial ] && [ "$(cat /root/.boxg_serial)" -gt "$BOXG_SERIAL" ] 2>/dev/null; then echo "BOXG_STALE $BOXG_SERIAL < $(cat /root/.boxg_serial)"; exit 0; fi
 echo $BOXG_SERIAL > /root/.boxg_serial
 MODE=online       # 2026-09-25 11:00: g12 (Dolphin RFT from g10's search result). Baselines of s4: Dolphin held-out 56%, GSM8K 64%, search held-out 38%
-ORUN=g12          # 2026-09-25: the reasoning line. Rejection-sampling fine-tuning on Dolphin (v1 minus a held-out hundred): 12 samples,
-                  # the teacher's rubric, the shortest passing one trained as SFT, a verified search trace rehearsed every step. No policy
-                  # gradient, so none of its length pressure. Yardsticks at every freeze: the Dolphin held-out (target 85%) and the search held-out (40%).
+ORUN=g13          # 2026-09-26: g12 again from g10m_hf, with the R1 fallback only for references that think <= 350 words. g12 drifted on the
+                  # long ones (reasoning thinking 174 -> 612 words, unfinished 8% -> 28%, pass 56% -> 32% by step 116) and was stopped there.
 OSEED=            # 2026-09-20: g7 starts clean from s4_hf. g6 never carried g5's weights (its seed download left no checkpoint) and after the
                   # layer change ran with layers 0-19 of the stock model; both are now caught at launch (ONLINE_SEED_ABORT, ONLINE_ABORT)
 OMODEL=g10m_hf    # 2026-09-25: the search-RL result (g10 step 400, held-out 43.1%) merged into s4_hf: the base the reasoning line starts from
@@ -124,6 +123,7 @@ OREASONSRC=dolphin_rft
 OREASONVERIFY=judge
 ORFT=1
 ORFTREPLAY=0.5
+OWHEELMAX=350
 ODOLPHINON=reason # the Dolphin SFT record only on reasoning steps
 OWHEELS=1         # a problem none of the twelve pass: the R1 reference is trained on instead
 OWTALK=0.5
@@ -874,7 +874,7 @@ GR
   if ! pgrep -f "online_loop.p[y]" >/dev/null; then
     cd /root/work && DSK_KEY=$(cat /root/.dsk 2>/dev/null) OAI_KEY=$(cat /root/.oai 2>/dev/null) PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True setsid nohup python3 /root/work/online_loop.py $OHF $OUT \
       --questions $QFILE --dolphin /root/work/dolphin_v1.jsonl --heldout /root/work/eval300.jsonl \
-      --b $OB --steps $OSTEPS --temp $OTEMP --lr $OLR --dolphin-ratio ${ODRATIO:-2} --dolphin-min ${ODMIN:-2} --accum ${OACCUM:-1} --replay $REPLAYF --replay-per-step ${OREPLAYN:-2} --rollout-every ${OROLLEVERY:-1} --train-all ${OTRAINALL:-0} --queue ${OQUEUE:-0} --complete-only ${OCOMPLETE:-0} --gen ${OGEN:-1500} --budget ${OBUDGET:-900} --guard ${OGUARD:-0} --maxsrch ${OMAXSRCH:-0} --judge ${OJUDGE:-1} ${OREASON:+--reason $REASONF --reason-verify ${OREASONVERIFY:-judge} --rft ${ORFT:-0} --rft-replay ${ORFTREPLAY:-0.5} --reason-g ${OREASONG:-8} --reason-stub ${OREASONSTUB:-0} --judge-api ${OJUDGEAPI:-deepseek} --judge-model ${OJUDGEMODEL:-} --search-every ${OSEARCHEVERY:-0} --reason-every ${OREASONEVERY:-0} --kl ${OKL:-0} --dolphin-on ${ODOLPHINON:-all} --w-talk ${OWTALK:-0.5} --wheels ${OWHEELS:-0} --search-wheels ${OSEARCHWHEELS:-0} --pg-norm ${OPGNORM:-mean} --pg-norm-len 1024 --adv-std ${OADVSTD:-1} --search-lr ${OSEARCHLR:-0} --guard-pass ${OGUARDPASS:-0.5} --guard-steps ${OGUARDSTEPS:-10} --guard-halve ${OGUARDHALVE:-1} --pool-order ${OPOOLORDER:-loop} --pool-offset ${OPOOLOFFSET:-0} --search-temp ${OSEARCHTEMP:-0} --search-gen ${OSEARCHGEN:-0} ${OSEARCHDEMO:+--search-demo /root/hfdl/$OSEARCHDEMO}} --pooler ${OPOOLER:-none} --pooler-rank ${OPOOLERRANK:-8} --pooler-lr ${OPOOLERLR:-1e-5} $([ -s $OHF/pooler.safetensors ] && echo --pooler-init $OHF/pooler.safetensors) --lora-rank 16 --lora-layers ${OLAYERS:-all} --gradckpt 1 --save-every 5 --stop eos \
+      --b $OB --steps $OSTEPS --temp $OTEMP --lr $OLR --dolphin-ratio ${ODRATIO:-2} --dolphin-min ${ODMIN:-2} --accum ${OACCUM:-1} --replay $REPLAYF --replay-per-step ${OREPLAYN:-2} --rollout-every ${OROLLEVERY:-1} --train-all ${OTRAINALL:-0} --queue ${OQUEUE:-0} --complete-only ${OCOMPLETE:-0} --gen ${OGEN:-1500} --budget ${OBUDGET:-900} --guard ${OGUARD:-0} --maxsrch ${OMAXSRCH:-0} --judge ${OJUDGE:-1} ${OREASON:+--reason $REASONF --reason-verify ${OREASONVERIFY:-judge} --rft ${ORFT:-0} --rft-replay ${ORFTREPLAY:-0.5} --wheel-max-think ${OWHEELMAX:-0} --reason-g ${OREASONG:-8} --reason-stub ${OREASONSTUB:-0} --judge-api ${OJUDGEAPI:-deepseek} --judge-model ${OJUDGEMODEL:-} --search-every ${OSEARCHEVERY:-0} --reason-every ${OREASONEVERY:-0} --kl ${OKL:-0} --dolphin-on ${ODOLPHINON:-all} --w-talk ${OWTALK:-0.5} --wheels ${OWHEELS:-0} --search-wheels ${OSEARCHWHEELS:-0} --pg-norm ${OPGNORM:-mean} --pg-norm-len 1024 --adv-std ${OADVSTD:-1} --search-lr ${OSEARCHLR:-0} --guard-pass ${OGUARDPASS:-0.5} --guard-steps ${OGUARDSTEPS:-10} --guard-halve ${OGUARDHALVE:-1} --pool-order ${OPOOLORDER:-loop} --pool-offset ${OPOOLOFFSET:-0} --search-temp ${OSEARCHTEMP:-0} --search-gen ${OSEARCHGEN:-0} ${OSEARCHDEMO:+--search-demo /root/hfdl/$OSEARCHDEMO}} --pooler ${OPOOLER:-none} --pooler-rank ${OPOOLERRANK:-8} --pooler-lr ${OPOOLERLR:-1e-5} $([ -s $OHF/pooler.safetensors ] && echo --pooler-init $OHF/pooler.safetensors) --lora-rank 16 --lora-layers ${OLAYERS:-all} --gradckpt 1 --save-every 5 --stop eos \
       >> /root/online_$ORUN.log 2>&1 < /dev/null &
   fi
   # once: in reasoning mode the empty search loop printed the end marker at launch, and the keeper
