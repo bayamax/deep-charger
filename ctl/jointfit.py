@@ -92,8 +92,15 @@ class Dequant(torch.autograd.Function):
     @staticmethod
     def backward(ctx, g):
         (codes,) = ctx.saved_tensors
-        g = g.reshape(codes.shape).float()
-        return None, (g * codes.float()).sum(-1, keepdim=True), g.sum(-1, keepdim=True), None
+        g = g.reshape(codes.shape)
+        # a group at a time in slabs: the embedding table's gradient in float is 0.9 GB, and three of them at once
+        # was the 12 GB card's last straw
+        gs = torch.empty(codes.shape[0], 1, device=g.device, dtype=torch.float32); gb = torch.empty_like(gs)
+        CH = 65536
+        for s0 in range(0, codes.shape[0], CH):
+            gg = g[s0:s0 + CH].float()
+            gs[s0:s0 + CH] = (gg * codes[s0:s0 + CH].float()).sum(-1, keepdim=True); gb[s0:s0 + CH] = gg.sum(-1, keepdim=True)
+        return None, gs, gb, None
 
 
 class QTensor:
@@ -125,6 +132,15 @@ for name, mod in q4.quantizable(model):
     mod.forward = fwd
     mod.weight.data = torch.empty(0, device=DEV, dtype=qt.dtype)
 qp = [t for q in QS.values() for t in (q.scales, q.biases)]
+if A.objective == "ce" and DEV == "cuda":
+    # recompute each decoder layer in the backward pass instead of keeping its dequantized weights and activations:
+    # the block is ~1300 tokens and the card has 12 GB
+    import torch.utils.checkpoint as _ckp
+    for _lyr in BODY.layers:
+        def _wrapped(*a, _f=_lyr.forward, **kw):
+            return _ckp.checkpoint(_f, *a, use_reentrant=False, **kw)
+        _lyr.forward = _wrapped
+    print("[joint] decoder layers checkpointed", flush=True)
 pp = list(pooler.parameters())
 print(f"[joint] {len(QS)} quantized tensors ({sum(p.numel() for p in qp)/1e6:.1f}M scale/bias) + "
       f"pooler ({sum(p.numel() for p in pp)/1e6:.2f}M)", flush=True)
