@@ -97,14 +97,16 @@ class Dequant(torch.autograd.Function):
 
 
 class QTensor:
-    def __init__(self, name, w):
+    def __init__(self, name, w, keep_orig=True):
         self.name, self.shape, self.dtype = name, tuple(w.shape), w.dtype
         f = q4.clipped_affine_params if A.clip_search else q4.affine_params
         q, s, b = f(w.detach().float(), A.group, A.bits)
         self.codes = q.to(torch.uint8)
         self.scales = s.to(DEV).float().requires_grad_(True)
         self.biases = b.to(DEV).float().requires_grad_(True)
-        self.orig = w.detach().clone()
+        # the bf16 original is the teacher's weight; the ce objective has no teacher, and only the eviction
+        # schedule still reads the bf16 embedding table, so on a 12 GB card the other 197 copies are not kept
+        self.orig = w.detach().clone() if keep_orig else None
 
     def weight(self):
         return Dequant.apply(self.codes, self.scales, self.biases, self.dtype).reshape(self.shape)
@@ -112,7 +114,7 @@ class QTensor:
 
 QS = {}
 for name, mod in q4.quantizable(model):
-    qt = QTensor(name, mod.weight.data)
+    qt = QTensor(name, mod.weight.data, keep_orig=(A.objective != "ce" or isinstance(mod, nn.Embedding)))
     QS[name] = qt
     if isinstance(mod, nn.Embedding):
         def fwd(x, _m=mod, _q=qt):
