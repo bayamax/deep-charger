@@ -1,0 +1,77 @@
+# The local search: Wikipedia on the device instead of Wikipedia's API
+
+The model searches by writing `<search>query</search>`, and the harness answers with `Title: text` served
+256 tokens at a time. Until now that text came from the Wikipedia API (its search picks the page, its
+extract is the text). `ctl/localsearch/` replaces the API with a store on the device, within 5 GB of
+disk and 0.5 GB of memory, so the app searches without a network. This records what the model actually
+reads, how the store is built, what the search does, and what it measured on the first shard of the dump.
+
+## What the model reads
+
+Of the 4848 rollouts of the search GRPO (g10), 3 asked for `<more>`. The model reads the first 256 tokens
+of a page and either answers or searches again; the median served text per grounded rollout is 1247
+characters. So the store keeps the opening of every article (1500 characters, cut at a sentence end) and
+nothing else: that is the whole of what the search ever showed the model.
+
+## The store (`build_store.py`, `store.py`)
+
+The `wikimedia/wikipedia` 20231101.en dump, 41 parquet files, processed one at a time and deleted after
+(the box has 18 GB free). 6,396,307 articles after dropping stubs under 80 characters. Each article is
+`title\ntext`; 256 articles make one zstd frame appended to `docs.bin`; `blocks.idx` holds the frame
+offsets. Reading an article is one frame (a few hundred KB) decompressed, cached. `titles.txt` holds the
+titles in order. The store is about 2.1 GB.
+
+## The index (`embed.py`, `search.py`)
+
+**Vectors.** bge-small-en-v1.5 (33M parameters, 384 dimensions) over `title. opening text`, cut to 160
+tokens. Only the sign of each dimension is stored: 48 bytes an article, 307 MB for the dump, memory-mapped.
+The query stays float and is scored against the signs (asymmetric); binarising the query too was tried
+first and finds the right page a third as often (recall at 96 candidates 23% against 73% on shard 0). The
+float vectors are kept on the box (`emb_f16.bin`, 4.9 GB) but never shipped: the ranking re-embeds its
+few dozen candidates from the stored text instead, at a fraction of a second, which saves 2.4 GB of int8
+vectors. Product quantization at the same 48 bytes was implemented (`pq.py`) and measured no better than
+the signs (71% against 75% at 128), so it stays an option, off.
+
+**Words.** SQLite FTS5 over each article's title and first 300 characters, contentless (the text lives in
+the store), about 1.8 GB. The model's queries are keyword lists - it learned them against Wikipedia's own
+lexical search - and BM25 over this much text alone finds Wikipedia's page first 48% of the time on shard 0,
+against 29% for the vectors alone.
+
+**Search.** 64 candidates from each channel, interleaved, plus 16 title-only matches; each candidate's
+opening is re-embedded and scored by cosine against the query, plus the IDF-weighted share of the query's
+terms found in the title (0.4) and in the opening (0.2), plus 0.1 when the query contains the title, plus
+0.2 times its normalised BM25. The best page is served as `Title: text`. `fetch(kw)` has the same shape as
+the Wikipedia call, and `pool_eval.py` / `online_loop.py` switch to it with `SP_LOCAL_STORE`.
+
+## Measured on shard 0 (156,075 articles, the oldest pages)
+
+Two test sets built from what exists: (A) 131 corpus questions whose gold answer is an article title in
+the shard, scored by whether the gold string appears in the served text; (B) 192 queries the model itself
+wrote during g10, paired with the page Wikipedia's search returned for them, scored by whether the local
+search returns the same page.
+
+| candidates | ranking | B top-1 | B top-3 | A top-1 | A top-3 |
+|---|---|---|---|---|---|
+| binary Hamming 96 + titles | cosine + title bonus | 52% | 60% | 39% | 50% |
+| asymmetric 128 + titles | cosine + title bonus | 52% | 60% | 37% | 52% |
+| asymmetric 128 + titles | + lexical overlap | 58% | 70% | 41% | 56% |
+| asymmetric 64 + BM25 64 + titles | + lexical overlap + BM25 | 57-59% | 69-71% | 38-44% | 53-60% |
+
+The float embedding's own recall at 128 is 78% on B, and the union of the two channels reaches 79%, so the
+remaining loss is in the ranking, not the candidates. These numbers will fall on the whole dump (forty
+times the distractors); the measurement that matters is the model on the search held-out with the local
+search in place of Wikipedia, against its 48.0% with the API.
+
+## Budget
+
+| | disk | memory at query time |
+|---|---|---|
+| store (docs.bin, blocks.idx, titles.txt) | 2.1 GB | one frame cache, ~10 MB |
+| sign index (emb.bin) | 0.3 GB | mapped, 0.3 GB when fully touched |
+| lexical index (lex.sqlite) | 1.8 GB | SQLite page cache, tens of MB |
+| bge-small (ONNX fp32 / int8) | 0.13 / 0.03 GB | 0.13 / 0.05 GB |
+| total | ~4.3 GB | ~0.45 GB |
+
+A query costs one pass over the sign index (0.7 s in numpy on 4 cores, milliseconds with SIMD or a GPU),
+one FTS5 query (~80 ms), and the re-embedding of ~130 candidates (the largest cost on a CPU; on the phone
+the int8 model at ~3 ms a candidate).
