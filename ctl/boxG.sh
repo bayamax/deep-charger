@@ -80,7 +80,7 @@ PSKIP=
 # The raw GitHub copy this box fetches can lag and hand a control run an OLDER version of this file (04:48 on 09-22 it
 # relaunched the online loop under the previous mode while the newer run was merging a checkpoint on the same card).
 # Every edit bumps BOXG_SERIAL; a run that sees a lower serial than one already executed stops here.
-BOXG_SERIAL=2026092625
+BOXG_SERIAL=2026092626
 if [ -f /root/.boxg_serial ] && [ "$(cat /root/.boxg_serial)" -gt "$BOXG_SERIAL" ] 2>/dev/null; then echo "BOXG_STALE $BOXG_SERIAL < $(cat /root/.boxg_serial)"; exit 0; fi
 echo $BOXG_SERIAL > /root/.boxg_serial
 MODE=quant        # 2026-09-26 night: a second 4-bit arm of g14 - the same recipe for 4000 steps (q14's validation was still falling at 1400; q14 41.2%, untrained 39.2%, bf16 48.0%)
@@ -716,24 +716,37 @@ PYQ
     rm -f $LOG
     cd /root/work && SP_BASE=$HFM PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python3 /root/work/jointfit.py \
       --ckpt $PCK --data $QDATA --objective ce --out-hf $HF --out-mlx $MLX --out-pooler /root/pooler_sft_$QRUN.safetensors \
-      --state /root/sft/$QRUN.pt --log $LOG --clip-search 0 --lr-q ${QLRQ:-2e-6} --lr-p 0 --val 8 --val-every 2 --selftest 3 2>&1 | tail -8
+      --state /root/sft/$QRUN.pt --log $LOG --clip-search 0 --lr-q ${QLRQ:-2e-6} --lr-p ${QLRP:-0} --val 8 --val-every 2 --selftest 3 2>&1 | tail -8
     grep -q "^step 3 " $LOG 2>/dev/null || { echo "QUANT_ABORT $QRUN: selftest failed"; exit 0; }
     rm -f $LOG
     cd /root/work && SP_BASE=$HFM PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True setsid nohup python3 /root/work/jointfit.py \
       --ckpt $PCK --data $QDATA --objective ce --out-hf $HF --out-mlx $MLX --out-pooler /root/pooler_sft_$QRUN.safetensors \
-      --state /root/sft/$QRUN.pt --log $LOG --clip-search 0 --lr-q ${QLRQ:-2e-6} --lr-p 0 --steps ${QSTEPS:-1500} --val 24 --val-every ${QVAL:-50} \
+      --state /root/sft/$QRUN.pt --log $LOG --clip-search 0 --lr-q ${QLRQ:-2e-6} --lr-p ${QLRP:-0} --steps ${QSTEPS:-1500} --val 24 --val-every ${QVAL:-50} \
       >> /root/sft_run_$QRUN.log 2>&1 < /dev/null &
     sleep 20
   fi
   cat > /root/quantkeep.sh <<QKP
 #!/bin/bash
-QRUN=$QRUN; HF=$HF; HFM=$HFM; PCK=$PCK; MLX=$MLX; R=$R; QSRC=$QSRC; QTAG=$QTAG; QTEMP=${QTEMP:-0.6}; QGEN=${QGEN:-4000}; QN=${QN:-34}
+QRUN=$QRUN; HF=$HF; HFM=$HFM; PCK=$PCK; MLX=$MLX; R=$R; QSRC=$QSRC; QTAG=$QTAG; QLRP=${QLRP:-0}; QTEMP=${QTEMP:-0.6}; QGEN=${QGEN:-4000}; QN=${QN:-34}
 export HF_TOKEN=$HF_TOKEN
 QKP
   cat >> /root/quantkeep.sh <<'QKP2'
 until [ -s $HF/model.safetensors ] && grep -q JOINTFIT_DONE /root/sft_run_$QRUN.log 2>/dev/null; do sleep 60; done
 pkill -f "jointfit.p[y]"; sleep 10
 echo "[$QRUN] jointfit done: $(grep -E '^step [0-9]+ ' /root/sft_$QRUN.log | tail -1 | cut -c1-120)"
+if [ "$QLRP" != "0" ]; then
+  # the pooler trained too: the evaluation and the app directory take the trained tensors over the run's input pooler
+  python3 - "$PCK" /root/pooler_sft_$QRUN.safetensors /root/pooler_eval_$QRUN.safetensors <<'PYP'
+import sys
+from safetensors.torch import load_file, save_file
+base, trained, out = sys.argv[1:4]
+d = load_file(base); t = load_file(trained); n = 0
+for k, v in t.items():
+    if k in d and d[k].shape == v.shape: d[k] = v.to(d[k].dtype); n += 1
+save_file({k: v.contiguous() for k, v in d.items()}, out); print(f"[pooler] {n} of {len(d)} tensors taken from the trained pooler")
+PYP
+  PCK=/root/pooler_eval_$QRUN.safetensors
+fi
 if [ ! -s $MLX/model.safetensors ] || ! grep -q MLX_CHECK_OK /root/checkmlx_$QRUN.txt 2>/dev/null; then
   cd /root/work && python3 /root/work/packmlx.py --base $HFM --hf $HF --state /root/sft/$QRUN.pt --out $MLX 2>&1 | tail -3
   python3 /root/work/checkmlx.py $MLX $HF 2>&1 | tail -4 | tee /root/checkmlx_$QRUN.txt
