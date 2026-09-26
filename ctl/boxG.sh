@@ -80,11 +80,11 @@ PSKIP=
 # The raw GitHub copy this box fetches can lag and hand a control run an OLDER version of this file (04:48 on 09-22 it
 # relaunched the online loop under the previous mode while the newer run was merging a checkpoint on the same card).
 # Every edit bumps BOXG_SERIAL; a run that sees a lower serial than one already executed stops here.
-BOXG_SERIAL=2026092608
+BOXG_SERIAL=2026092609
 if [ -f /root/.boxg_serial ] && [ "$(cat /root/.boxg_serial)" -gt "$BOXG_SERIAL" ] 2>/dev/null; then echo "BOXG_STALE $BOXG_SERIAL < $(cat /root/.boxg_serial)"; exit 0; fi
 echo $BOXG_SERIAL > /root/.boxg_serial
-MODE=reeval       # 2026-09-26: the stock R1 distill on the Dolphin held-out, same settings as g14d835 (53%)
-RRUN=stockd; RMODEL=stock; RKIND=stock; RQSRC=dolphinh; RQN=100; RTEMP=0.6; RGEN=7000; RLOOP=answer; RB=24   # 24 questions a batch: the card has 12 GB, one process at 12 took 6.5 GB
+MODE=reeval       # 2026-09-26: the step-200 student (before the chat SFT) on the Dolphin held-out, same settings
+RRUN=based; RMODEL=base; RQSRC=dolphinh; RQN=100; RTEMP=0.6; RGEN=7000; RLOOP=answer; RB=24
 ORUN=g14          # 2026-09-26: distillation. The R1 thinking and answer of dolphin_v1 (minus the held-out hundred) as plain SFT, 8 records a step,
                   # one verified search trace at half weight beside them; no rollouts, no judge. Length is allowed to grow (up to ~1000 tokens is
                   # fine by the user); the yardsticks are the Dolphin held-out (85%) and the search held-out (40%) at 400 and at the epoch's end.
