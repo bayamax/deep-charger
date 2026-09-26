@@ -25,7 +25,7 @@ DIM = 384
 QUERY_PREFIX = "Represent this sentence for searching relevant passages: "
 UNPACK = (np.unpackbits(np.arange(256, dtype=np.uint8)[:, None], axis=1).astype(np.int8) * 2 - 1)   # byte -> 8 signs
 UNPACK_T = None
-W_TITLE, W_BODY, W_BM25 = 0.4, 0.2, 0.0   # ranking weights (the shard-0 grid; W_BM25 pending)
+W_TITLE, W_BODY, W_BM25 = 0.4, 0.2, 0.2   # ranking weights from the shard-0 grid (top-1 57-59%, top-3 ~71% against Wikipedia's page)
 
 
 class Embedder:
@@ -183,9 +183,16 @@ class LocalSearch:
         scored.sort(key=lambda x: -x[0])
         return scored[:k]
 
-    def fetch(self, kw, k=1):
+    def fetch(self, kw, k=None, chars=None):
+        """What the rollout loop serves for a query. One page by default, as Wikipedia's search gave; SP_LOCAL_K pages
+        of SP_LOCAL_CHARS characters each is the variant where the second-best page rides in the same first block."""
+        k = k or int(os.environ.get("SP_LOCAL_K", "1")); chars = chars or int(os.environ.get("SP_LOCAL_CHARS", "0"))
         hits = self.search(kw, k)
-        return "\n\n".join(f"{t}: {b}" for _, _, t, b in hits) if hits else ""
+        if not hits:
+            return ""
+        if k == 1 or not chars:
+            return "\n\n".join(f"{t}: {b}" for _, _, t, b in hits)
+        return "\n\n".join(f"{t}: {b[:chars]}" for _, _, t, b in hits)
 
 
 if __name__ == "__main__":
