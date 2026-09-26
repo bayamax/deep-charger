@@ -80,7 +80,7 @@ PSKIP=
 # The raw GitHub copy this box fetches can lag and hand a control run an OLDER version of this file (04:48 on 09-22 it
 # relaunched the online loop under the previous mode while the newer run was merging a checkpoint on the same card).
 # Every edit bumps BOXG_SERIAL; a run that sees a lower serial than one already executed stops here.
-BOXG_SERIAL=2026092603
+BOXG_SERIAL=2026092604
 if [ -f /root/.boxg_serial ] && [ "$(cat /root/.boxg_serial)" -gt "$BOXG_SERIAL" ] 2>/dev/null; then echo "BOXG_STALE $BOXG_SERIAL < $(cat /root/.boxg_serial)"; exit 0; fi
 echo $BOXG_SERIAL > /root/.boxg_serial
 MODE=online       # 2026-09-26: g14 resumes after the step-400 Dolphin check
@@ -1021,7 +1021,7 @@ PYG
   [ -s /root/hfdl/pooler_distill/chat_eval60.jsonl ] || hf download $R --include "pooler_distill/chat_eval60.jsonl" --local-dir /root/hfdl 2>&1 | tail -1
   cat > /root/reevalkeep.sh <<RK
 #!/bin/bash
-RRUN=$RRUN; RHF=$RHF; R=$R; RCKPT=$RCKPT; RQSRC=${RQSRC:-}; RHINT=${RHINT:-}; RFAST=${RFAST:-1}; RB=${RB:-12}; RSHARDS=${RSHARDS:-3}; RTEMP=${RTEMP:-0.9}; RCAP=${RCAP:-600}; RGEN=${RGEN:-1500}; RN=${RN:-999}
+RRUN=$RRUN; RHF=$RHF; R=$R; RCKPT=$RCKPT; RQSRC=${RQSRC:-}; RHINT=${RHINT:-}; RFAST=${RFAST:-1}; RB=${RB:-12}; RLOOP=${RLOOP:-}; RBUDGET=${RBUDGET:-2400}; RSHARDS=${RSHARDS:-3}; RTEMP=${RTEMP:-0.9}; RCAP=${RCAP:-600}; RGEN=${RGEN:-1500}; RN=${RN:-999}
 RK
   cat >> /root/reevalkeep.sh <<'RKB'
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null)
@@ -1034,7 +1034,7 @@ run_one() {  # $1 questions file, $2 out file, $3 tag
 run_fast() {  # $1 questions, $2 out: the training loop's batched rollout, RB questions at a time (the one-at-a-time evaluator took ~2 h per 100)
   cd /root/work && OMP_NUM_THREADS=1 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python3 /root/work/online_loop.py $RHF /root/evalrun_$RRUN \
     --questions /root/work/selfq_all.jsonl --dolphin /root/work/dolphin_v1.jsonl --heldout /root/work/eval300.jsonl --pooler-init $RCKPT \
-    --b $RB --gen $RGEN --budget 3000 --temp $RTEMP --maxsrch 7 --pooler none --lora-rank 16 --lora-layers 20-27 --stop eos \
+    --b $RB --gen $RGEN --budget ${RBUDGET:-2400} --temp $RTEMP --maxsrch 7 --pooler none --lora-rank 16 --lora-layers 20-27 --stop eos ${RLOOP:+--loop-break $RLOOP} \
     --eval-file "$1" --eval-out "$2" > /root/${RRUN}_fast.log 2>&1
   grep -q EVAL_DONE /root/${RRUN}_fast.log || { echo "REEVAL_ABORT $RRUN (fast): $(grep -E 'Error|error' /root/${RRUN}_fast.log | tail -1 | cut -c1-160)"; exit 1; }
 }
