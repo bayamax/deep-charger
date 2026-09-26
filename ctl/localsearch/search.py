@@ -3,7 +3,7 @@
 
 Three stages, all cheap enough for a phone next to the 1.5B model:
   1. candidates by meaning: the query's bge vector, binarised, against every article's 48 bytes
-     (XOR + popcount over the memory-mapped index); the --coarse best are kept.
+     (the float query against every article's 48 bytes of signs, memory-mapped); the --coarse best are kept.
   2. candidates by name: the title index (SQLite FTS5 over titles.txt) for queries that name the thing.
   3. ranking: the candidates' opening text is re-embedded in float and scored by cosine against the
      float query vector, with a bonus when the query contains the title. The float vectors of the whole
@@ -23,10 +23,8 @@ from store import Store  # noqa: E402
 
 DIM = 384
 QUERY_PREFIX = "Represent this sentence for searching relevant passages: "
-POP = np.array([bin(i).count("1") for i in range(256)], dtype=np.uint8)
-POP_T = None
-ONE, TWO, FOUR, FIFTYSIX = (np.uint64(x) for x in (1, 2, 4, 56))
-M1, M2, M4, H01 = (np.uint64(x) for x in (0x5555555555555555, 0x3333333333333333, 0x0f0f0f0f0f0f0f0f, 0x0101010101010101))
+UNPACK = (np.unpackbits(np.arange(256, dtype=np.uint8)[:, None], axis=1).astype(np.int8) * 2 - 1)   # byte -> 8 signs
+UNPACK_T = None
 
 
 class Embedder:
@@ -70,36 +68,39 @@ STOP = set("the a an of in on at to for by with and or is was were are be been w
 
 
 class LocalSearch:
-    def __init__(self, store_path, model_dir, threads=0, coarse=96, title_k=24, rerank=48):
+    def __init__(self, store_path, model_dir, threads=0, coarse=128, title_k=24, rerank=128):
         self.st = Store(store_path)
         self.emb = Embedder(model_dir, threads)
         self.bits = np.memmap(os.path.join(store_path, "emb.bin"), dtype=np.uint8, mode="r").reshape(-1, DIM // 8)
         assert self.bits.shape[0] == self.st.n_docs, f"index {self.bits.shape[0]} vs store {self.st.n_docs}"
-        self.bits64 = self.bits.view(np.uint64)
         self.gpu = None
         if os.environ.get("SP_LOCAL_GPU", "0") == "1":   # on the training box the whole index sits on the card (300 MB)
             import torch
-            global POP_T
+            global UNPACK_T
             self.gpu = torch.from_numpy(np.ascontiguousarray(self.bits)).cuda()
-            POP_T = torch.from_numpy(POP.astype(np.int16)).cuda()
+            UNPACK_T = torch.from_numpy(UNPACK).cuda()
         self.con = sqlite3.connect("file:" + build_title_index(store_path) + "?mode=ro", uri=True)
         self.coarse, self.title_k, self.rerank = coarse, title_k, rerank
 
-    def _hamming_top(self, qv, k):
-        qb = np.packbits((qv > 0).astype(np.uint8))
+    def _coarse_top(self, qv, k):
+        """Asymmetric scoring: the float query against each article's signs. On shard 0 of the dump this finds the
+        page Wikipedia's search returned 73% of the time within 96 candidates; binary-against-binary Hamming
+        found it 23% of the time, so the query is never binarised."""
         if self.gpu is not None:
             import torch
-            d = POP_T[torch.bitwise_xor(self.gpu, torch.from_numpy(qb).to(self.gpu.device))].sum(1, dtype=torch.int16)
-            idx = torch.topk(d, k, largest=False).indices.cpu().numpy()
-            return idx
-        # one pass over the index: XOR as 64-bit words, SWAR popcount, 200k articles a chunk to stay in cache
-        q64 = qb.view(np.uint64); d = np.empty(self.bits.shape[0], dtype=np.uint16); CH = 200_000
-        for s in range(0, self.bits.shape[0], CH):
-            x = np.bitwise_xor(self.bits64[s:s + CH], q64)
-            x = x - ((x >> ONE) & M1); x = (x & M2) + ((x >> TWO) & M2); x = (x + (x >> FOUR)) & M4
-            d[s:s + CH] = ((x * H01) >> FIFTYSIX).sum(axis=1)
-        idx = np.argpartition(d, k)[:k]
-        return idx[np.argsort(d[idx])]
+            q = torch.from_numpy(qv.astype(np.float32)).to(self.gpu.device)
+            sc = torch.empty(self.gpu.shape[0], device=self.gpu.device)
+            CH = 1_000_000
+            for s0 in range(0, self.gpu.shape[0], CH):
+                pm = UNPACK_T[self.gpu[s0:s0 + CH].long()].reshape(-1, DIM)      # ±1 as int8
+                sc[s0:s0 + CH] = pm.float() @ q
+            return torch.topk(sc, k).indices.cpu().numpy()
+        sc = np.empty(self.bits.shape[0], dtype=np.float32); CH = 100_000; q = qv.astype(np.float32)
+        for s0 in range(0, self.bits.shape[0], CH):
+            pm = UNPACK[self.bits[s0:s0 + CH]].reshape(-1, DIM)                    # ±1 as int8, one chunk at a time
+            sc[s0:s0 + CH] = pm @ q
+        idx = np.argpartition(-sc, k)[:k]
+        return idx[np.argsort(-sc[idx])]
 
     def _title_hits(self, query, k):
         words = [w for w in WORD.findall(query) if w.lower() not in STOP and len(w) > 1]
@@ -119,7 +120,7 @@ class LocalSearch:
 
     def search(self, query, k=3):
         qv = self.emb([QUERY_PREFIX + query])[0]
-        cands = list(self._hamming_top(qv, self.coarse)[:self.rerank]) + self._title_hits(query, self.title_k)
+        cands = list(self._coarse_top(qv, self.coarse)[:self.rerank]) + self._title_hits(query, self.title_k)
         cands = list(dict.fromkeys(int(c) for c in cands))
         docs = [self.st.doc(i) for i in cands]
         dv = self.emb([f"{t}. {b[:800]}" for t, b in docs])

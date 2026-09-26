@@ -80,7 +80,7 @@ PSKIP=
 # The raw GitHub copy this box fetches can lag and hand a control run an OLDER version of this file (04:48 on 09-22 it
 # relaunched the online loop under the previous mode while the newer run was merging a checkpoint on the same card).
 # Every edit bumps BOXG_SERIAL; a run that sees a lower serial than one already executed stops here.
-BOXG_SERIAL=2026092614
+BOXG_SERIAL=2026092615
 if [ -f /root/.boxg_serial ] && [ "$(cat /root/.boxg_serial)" -gt "$BOXG_SERIAL" ] 2>/dev/null; then echo "BOXG_STALE $BOXG_SERIAL < $(cat /root/.boxg_serial)"; exit 0; fi
 echo $BOXG_SERIAL > /root/.boxg_serial
 MODE=quant        # 2026-09-26: g14 (step 835) packed for the app by self-trace fine-tuning under quantization, then published and measured
@@ -412,7 +412,12 @@ while :; do
   sleep 600
 done
 LM
-chmod +x /root/logmirror3.sh; pgrep -f "logmirror[3].sh" >/dev/null || setsid nohup bash /root/logmirror3.sh >> /proc/1/fd/1 2>&1 < /dev/null &
+chmod +x /root/logmirror3.sh
+# restart the mirror when its script changed (a running copy keeps the old sections and process list)
+if ! pgrep -f "logmirror[3].sh" >/dev/null || [ "$(md5sum < /root/logmirror3.sh)" != "$(cat /root/.logmirror3.md5 2>/dev/null)" ]; then
+  pkill -f "logmirror[3].sh" 2>/dev/null; sleep 1; md5sum < /root/logmirror3.sh > /root/.logmirror3.md5
+  setsid nohup bash /root/logmirror3.sh >> /proc/1/fd/1 2>&1 < /dev/null &
+fi
 # ---- the teacher judge's reachability, every control run (one tiny call; the status and the error text, never the key) ----
 if [ -s /root/.dsk ]; then
   python3 - <<'DD'

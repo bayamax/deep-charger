@@ -95,7 +95,7 @@ class Dequant(torch.autograd.Function):
         g = g.reshape(codes.shape)
         # a group at a time in slabs: the embedding table's gradient in float is 0.9 GB, and three of them at once
         # was the 12 GB card's last straw
-        gs = torch.empty(codes.shape[0], 1, device=g.device, dtype=torch.float32); gb = torch.empty_like(gs)
+        gs = torch.empty(codes.shape[:-1] + (1,), device=g.device, dtype=torch.float32); gb = torch.empty_like(gs)
         CH = 65536
         for s0 in range(0, codes.shape[0], CH):
             gg = g[s0:s0 + CH].float()
