@@ -83,8 +83,8 @@ PSKIP=
 BOXG_SERIAL=2026092609
 if [ -f /root/.boxg_serial ] && [ "$(cat /root/.boxg_serial)" -gt "$BOXG_SERIAL" ] 2>/dev/null; then echo "BOXG_STALE $BOXG_SERIAL < $(cat /root/.boxg_serial)"; exit 0; fi
 echo $BOXG_SERIAL > /root/.boxg_serial
-MODE=reeval       # 2026-09-26: the step-200 student (before the chat SFT) on the Dolphin held-out, same settings
-RRUN=based; RMODEL=base; RQSRC=dolphinh; RQN=100; RTEMP=0.6; RGEN=7000; RLOOP=answer; RB=24
+MODE=reeval       # 2026-09-26: g10's step 400 (search 43.1%) on the Dolphin held-out, to complete the table (untouched 56%, s4 56%, g14 53%)
+RRUN=g10d400; RMODEL=g10m_hf; RKIND=dir; RQSRC=dolphinh; RQN=100; RTEMP=0.6; RGEN=7000; RLOOP=answer; RB=24
 ORUN=g14          # 2026-09-26: distillation. The R1 thinking and answer of dolphin_v1 (minus the held-out hundred) as plain SFT, 8 records a step,
                   # one verified search trace at half weight beside them; no rollouts, no judge. Length is allowed to grow (up to ~1000 tokens is
                   # fine by the user); the yardsticks are the Dolphin held-out (85%) and the search held-out (40%) at 400 and at the epoch's end.
@@ -966,6 +966,7 @@ if [ "$MODE" = "reeval" ]; then
       [ -s $RHF/model.safetensors ] && [ -s $RHF/config.json ] && break; sleep 60
     done
     [ -s $RHF/model.safetensors ] || { echo "REEVAL_ABORT $RRUN: $RMODEL not on the hub"; exit 0; }
+    [ -s $RHF/pooler.safetensors ] && RCKPT=$RHF/pooler.safetensors   # the directory carries its own trained pooler
   else
     RHF=/root/reeval_hf_$RMODEL
     if [ ! -s $RHF/model.safetensors ]; then
