@@ -25,6 +25,7 @@ DIM = 384
 QUERY_PREFIX = "Represent this sentence for searching relevant passages: "
 UNPACK = (np.unpackbits(np.arange(256, dtype=np.uint8)[:, None], axis=1).astype(np.int8) * 2 - 1)   # byte -> 8 signs
 UNPACK_T = None
+W_TITLE, W_BODY, W_BM25 = 0.4, 0.2, 0.0   # ranking weights (the shard-0 grid; W_BM25 pending)
 
 
 class Embedder:
@@ -49,19 +50,31 @@ class Embedder:
         return out / np.linalg.norm(out, axis=1, keepdims=True).clip(1e-6)
 
 
-def build_title_index(store_path):
-    """SQLite FTS5 over the titles, rowid = article id + 1. Built once; ~2% of the text store."""
-    db = os.path.join(store_path, "titles.sqlite")
+def build_lex_index(store_path):
+    """SQLite FTS5 over each article's title and first 300 characters, contentless (the text lives in the store),
+    rowid = article id + 1. The model's queries are keyword lists shaped by Wikipedia's own lexical search, and on
+    shard 0 of the dump BM25 over this much text finds Wikipedia's page first 48% of the time against 29% for
+    the embedding alone; the two channels together cover 79% within 128 candidates, the float embedding's own
+    ceiling. About 1.8 GB for the whole dump. Built once."""
+    db = os.path.join(store_path, "lex.sqlite")
     if os.path.exists(db):
         return db
+    from store import Store
+    st = Store(store_path)
     con = sqlite3.connect(db + ".tmp")
-    con.execute("CREATE VIRTUAL TABLE t USING fts5(title, tokenize='unicode61 remove_diacritics 2')")
-    with open(os.path.join(store_path, "titles.txt"), encoding="utf-8") as f:
-        con.executemany("INSERT INTO t(rowid, title) VALUES (?, ?)", ((i + 1, ln.rstrip("\n")) for i, ln in enumerate(f)))
+    con.execute("CREATE VIRTUAL TABLE d USING fts5(title, body, tokenize='unicode61 remove_diacritics 2', content='')")
+    def rows():
+        for i in range(st.n_docs):
+            t, b = st.doc(i)
+            yield (i + 1, t, b[:300])
+    con.executemany("INSERT INTO d(rowid, title, body) VALUES (?, ?, ?)", rows())
+    con.execute("INSERT INTO d(d) VALUES('optimize')")
     con.commit(); con.close()
     os.rename(db + ".tmp", db)
     return db
 
+
+build_title_index = build_lex_index   # the name the box's corpus job calls at the end of its build
 
 WORD = re.compile(r"[A-Za-z0-9]+")
 STOP = set("the a an of in on at to for by with and or is was were are be been who what which when where how why did does do year".split())
@@ -84,14 +97,14 @@ def build_idf(store, n=40000):
 
 
 class LocalSearch:
-    def __init__(self, store_path, model_dir, threads=0, coarse=128, title_k=24, rerank=128):
+    def __init__(self, store_path, model_dir, threads=0, coarse=64, lex_k=64, title_k=16, rerank=128):
         self.st = Store(store_path)
         self.emb = Embedder(model_dir, threads)
         self.bits = np.memmap(os.path.join(store_path, "emb.bin"), dtype=np.uint8, mode="r").reshape(-1, DIM // 8)
         assert self.bits.shape[0] == self.st.n_docs, f"index {self.bits.shape[0]} vs store {self.st.n_docs}"
         self.gpu = None
         self.pq = None
-        if os.path.exists(os.path.join(store_path, "pq_codes.npy")):   # product-quantized index, preferred when built
+        if os.environ.get("SP_LOCAL_PQ", "0") == "1" and os.path.exists(os.path.join(store_path, "pq_codes.npy")):   # no better than the sign bits on shard 0; kept as an option
             from pq import PQIndex
             self.pq = PQIndex(store_path, gpu=os.environ.get("SP_LOCAL_GPU", "0") == "1")
             assert self.pq.n == self.st.n_docs, f"pq index {self.pq.n} vs store {self.st.n_docs}"
@@ -100,9 +113,9 @@ class LocalSearch:
             global UNPACK_T
             self.gpu = torch.from_numpy(np.ascontiguousarray(self.bits)).cuda()
             UNPACK_T = torch.from_numpy(UNPACK).cuda()
-        self.con = sqlite3.connect("file:" + build_title_index(store_path) + "?mode=ro", uri=True)
+        self.con = sqlite3.connect("file:" + build_lex_index(store_path) + "?mode=ro", uri=True)
         self.idf, self.idf_max = build_idf(self.st)
-        self.coarse, self.title_k, self.rerank = coarse, title_k, rerank
+        self.coarse, self.lex_k, self.title_k, self.rerank = coarse, lex_k, title_k, rerank
 
     def _coarse_top(self, qv, k):
         """Asymmetric scoring: the float query against each article's signs. On shard 0 of the dump this finds the
@@ -126,26 +139,32 @@ class LocalSearch:
         idx = np.argpartition(-sc, k)[:k]
         return idx[np.argsort(-sc[idx])]
 
-    def _title_hits(self, query, k):
-        words = [w for w in WORD.findall(query) if w.lower() not in STOP and len(w) > 1]
+    @staticmethod
+    def _terms(query):
+        return [w for w in WORD.findall(query) if w.lower() not in STOP and len(w) > 1]
+
+    def _lex_hits(self, query, k, column=None):
+        """BM25 over title (x3) and opening text; with column='title', over the title alone. Returns
+        [(article id, bm25)] best first (FTS5's bm25 is negative, more negative = better)."""
+        words = self._terms(query)
         if not words:
             return []
-        out = []
-        # every term, then any term, ranked by FTS5's bm25 - the exact name comes first when it exists
-        for q in (" AND ".join(f'"{w}"' for w in words), " OR ".join(f'"{w}"' for w in words)):
-            try:
-                rows = self.con.execute("SELECT rowid FROM t WHERE t MATCH ? ORDER BY bm25(t) LIMIT ?", (q, k)).fetchall()
-            except sqlite3.OperationalError:
-                rows = []
-            out += [r[0] - 1 for r in rows]
-            if len(out) >= k:
-                break
-        return list(dict.fromkeys(out))[:k]
+        q = " OR ".join(f'"{w}"' for w in words)
+        if column:
+            q = f"{column}: ({q})"
+        try:
+            return [(r[0] - 1, -r[1]) for r in self.con.execute(
+                "SELECT rowid, bm25(d, 3.0, 1.0) FROM d WHERE d MATCH ? ORDER BY bm25(d, 3.0, 1.0) LIMIT ?", (q, k)).fetchall()]
+        except sqlite3.OperationalError:
+            return []
 
     def search(self, query, k=3):
         qv = self.emb([QUERY_PREFIX + query])[0]
-        cands = list(self._coarse_top(qv, self.coarse)[:self.rerank]) + self._title_hits(query, self.title_k)
-        cands = list(dict.fromkeys(int(c) for c in cands))
+        lex = self._lex_hits(query, self.lex_k); bm = {i: s for i, s in lex}; bmax = max(bm.values(), default=1.0) or 1.0
+        emb_c = [int(c) for c in self._coarse_top(qv, self.coarse)]
+        cands = [x for pair in zip(emb_c, [i for i, _ in lex] + [None] * len(emb_c)) for x in pair if x is not None]   # interleaved
+        cands += [i for i, _ in self._lex_hits(query, self.title_k, column="title")]
+        cands = list(dict.fromkeys(cands))[:self.rerank]
         docs = [self.st.doc(i) for i in cands]
         dv = self.emb([f"{t}. {b[:800]}" for t, b in docs])
         sims = dv @ qv
@@ -160,7 +179,7 @@ class LocalSearch:
             ft = sum(self.idf.get(w, self.idf_max) for w in qw if w in tw) / W        # query terms in the title
             fb = sum(self.idf.get(w, self.idf_max) for w in qw if w in tw or w in bw) / W   # ... or in the opening
             # cosine plus the lexical overlap the model's keyword queries were shaped by (weights from the shard-0 grid)
-            scored.append((float(s) + 0.4 * ft + 0.2 * fb + full, i, t, b))
+            scored.append((float(s) + W_TITLE * ft + W_BODY * fb + full + W_BM25 * bm.get(i, 0.0) / bmax, i, t, b))
         scored.sort(key=lambda x: -x[0])
         return scored[:k]
 
