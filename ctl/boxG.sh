@@ -363,6 +363,8 @@ export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); R=baya1116/h
 while :; do
   { echo "=== boxlog $(date -u) ==="; echo "--- ctl.log (tail) ---"; tail -n 300 /root/ctl.log 2>/dev/null | cut -c1-300
     echo "--- reeval.log (tail) ---"; tail -n 120 /root/reeval.log 2>/dev/null | cut -c1-300
+    echo "--- quant.log (tail) ---"; tail -n 30 /root/quant.log 2>/dev/null | cut -c1-300
+    for f in /root/sft_q*.log; do [ -s "$f" ] && { echo "--- $f (tail) ---"; grep -E "^step [0-9]+ |val" "$f" | tail -n 6 | cut -c1-200; }; done
     for f in $(ls -t /root/online_*.log 2>/dev/null | head -1); do echo "--- $f (tail) ---"; tail -n 60 "$f" | cut -c1-300; done
     echo "--- gpu ---"; nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv,noheader 2>/dev/null; df -h /root | tail -1
     [ -x /usr/local/bin/s ] && /usr/local/bin/s 20 2>/dev/null | sed 's/^/SCORE /'
@@ -589,6 +591,128 @@ if [ "$MODE" = "pack" ]; then
   hf upload $R /root/sft_run_$SRUN.log $D/logs/sft_run_$SRUN.log >/dev/null 2>&1
   for i in 0 1 2; do hf upload $R /root/work/${SRUN}_out_$i.jsonl $D/rollouts/${SRUN}_$i.jsonl >/dev/null 2>&1; done
   echo "PACK_DONE $SRUN $(date -u)"
+  exit 0
+fi
+if [ "$MODE" = "quant" ]; then
+  # The chat-era model packed for the app, by the one quantization that worked (docs/quantization_4bit.md): the
+  # 4-bit grid's scales and biases learn the lineage's own verified traces in the compressed context; codes and
+  # pooler stay. QSRC is an online run folded into QBASE first; the traces are the search GRPO's scored rollouts
+  # plus the replay pool, both in the chat-era format, held-out questions removed.
+  QRUN=${QRUN:-q14}; QSRC=${QSRC:-g14}; QBASE=${QBASE:-g10m_hf}; QLAYERS=${QLAYERS:-all}
+  export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); R=baya1116/hypernet-sp-distill
+  if pgrep -f "quantkee[p].sh" >/dev/null && grep -q "^QRUN=$QRUN;" /root/quantkeep.sh 2>/dev/null; then echo "QUANT_SKIP: $QRUN is already running"; exit 0; fi
+  pkill -f "onlinekee[p].sh"; pkill -f "reevalkee[p].sh"; pkill -f "quantkee[p].sh"; pkill -f "online_loop.p[y]"; pkill -f "pool_eval.p[y]"; pkill -f "jointfit.p[y]"; sleep 8
+  pkill -9 -f "online_loop.p[y]" 2>/dev/null; pkill -9 -f "pool_eval.p[y]" 2>/dev/null; sleep 2
+  MB=/root/hfdl/pooler_distill/chatsft/$QBASE; HFM=/root/reeval_hf_${QSRC}m; PCK=/root/reeval_${QSRC}m_pooler.safetensors
+  if [ ! -s $HFM/model.safetensors ] || [ ! -s $PCK ]; then
+    [ -s $MB/model.safetensors ] || hf download $R --include "pooler_distill/chatsft/$QBASE/*" --local-dir /root/hfdl >/dev/null 2>&1
+    SRC=/root/online_$QSRC/latest.safetensors
+    if [ ! -s $SRC ]; then
+      for try in 1 2 3 4 5 6; do hf download $R --include "pooler_distill/chatsft/online/$QSRC/latest.safetensors" --local-dir /root/hfdl >/dev/null 2>&1; [ -s /root/hfdl/pooler_distill/chatsft/online/$QSRC/latest.safetensors ] && break; sleep 20; done
+      SRC=/root/hfdl/pooler_distill/chatsft/online/$QSRC/latest.safetensors
+    fi
+    [ -s $SRC ] || { echo "QUANT_ABORT $QRUN: online/$QSRC checkpoint not found"; exit 0; }
+    rm -rf $HFM
+    cd /root/work && SP_BASE=$MB SP_NOSYS=1 SP_EPISODIC=1 OMP_NUM_THREADS=1 python3 /root/work/build_merged.py $SRC $HFM $PCK 16 $QLAYERS 2>&1 | grep -E "^\[merge\]|MERGE_DONE|Error|assert|unexpected" | tail -4
+    [ -s $HFM/model.safetensors ] || { echo "QUANT_ABORT $QRUN: merge of online/$QSRC failed"; exit 0; }
+  fi
+  QDATA=/root/work/qcal_$QRUN.jsonl
+  [ -s /root/online_g10/rollouts.jsonl ] || hf download $R --include "pooler_distill/chatsft/online/g10/rollouts.jsonl" --local-dir /root/hfdl >/dev/null 2>&1
+  python3 - "$QDATA" "$HFM" <<'PYQ'
+import json, re, random, sys
+from transformers import AutoTokenizer
+out, base = sys.argv[1], sys.argv[2]
+tok = AutoTokenizer.from_pretrained(base)
+held = set()
+for line in open("/root/work/eval300.jsonl"):
+    try: held.add((json.loads(line).get("q") or "").strip())
+    except Exception: pass
+degen = re.compile(r"begin_of_thought|end_of_thought|\b(\w+(?:\W+\w+){0,3})\b(?:\W+\1\b){4,}")
+def head(q): return tok.apply_chat_template([{"role": "user", "content": q}], add_generation_prompt=True, tokenize=False) + "<think>\n"
+rows, src = [], "/root/online_g10/rollouts.jsonl"
+import os
+if not os.path.exists(src): src = "/root/hfdl/pooler_distill/chatsft/online/g10/rollouts.jsonl"
+n_g = n_r = 0
+for line in open(src):
+    try: d = json.loads(line)
+    except Exception: continue
+    w = d.get("why") if isinstance(d.get("why"), dict) else {}
+    if not (w.get("correct") and w.get("grounded") and w.get("clean") and not w.get("unfinished")): continue
+    q, t = (d.get("q") or "").strip(), d.get("text") or ""
+    if not q or not t or q in held or degen.search(t) or "</think>" not in t: continue
+    rows.append({"text": head(q) + t}); n_g += 1
+for f in ("/root/work/replay_clean.jsonl", "/root/hfdl/pooler_distill/chatsft/replay_v1.jsonl"):
+    if os.path.exists(f):
+        for line in open(f):
+            try: d = json.loads(line)
+            except Exception: continue
+            q, t = (d.get("q") or "").strip(), d.get("text") or ""
+            if not q or not t or q in held or degen.search(t) or "</think>" not in t: continue
+            rows.append({"text": head(q) + t}); n_r += 1
+        break
+random.Random(0).shuffle(rows)
+with open(out, "w") as o:
+    for r in rows: o.write(json.dumps(r, ensure_ascii=False) + "\n")
+print(f"[quant data] {len(rows)} traces: {n_g} scored search-GRPO rollouts + {n_r} replay traces; held-out questions excluded")
+PYQ
+  [ -s $QDATA ] || { echo "QUANT_ABORT $QRUN: no calibration traces"; exit 0; }
+  HF=/root/sft_hf_$QRUN; LOG=/root/sft_$QRUN.log; MLX=/root/sft_mlx4_$QRUN
+  if [ ! -s $HF/model.safetensors ]; then
+    rm -f $LOG
+    cd /root/work && SP_BASE=$HFM PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python3 /root/work/jointfit.py \
+      --ckpt $PCK --data $QDATA --objective ce --out-hf $HF --out-mlx $MLX --out-pooler /root/pooler_sft_$QRUN.safetensors \
+      --state /root/sft/$QRUN.pt --log $LOG --clip-search 0 --lr-q ${QLRQ:-2e-6} --lr-p 0 --val 8 --val-every 2 --selftest 3 2>&1 | tail -8
+    grep -q "^step 3 " $LOG 2>/dev/null || { echo "QUANT_ABORT $QRUN: selftest failed"; exit 0; }
+    rm -f $LOG
+    cd /root/work && SP_BASE=$HFM PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True setsid nohup python3 /root/work/jointfit.py \
+      --ckpt $PCK --data $QDATA --objective ce --out-hf $HF --out-mlx $MLX --out-pooler /root/pooler_sft_$QRUN.safetensors \
+      --state /root/sft/$QRUN.pt --log $LOG --clip-search 0 --lr-q ${QLRQ:-2e-6} --lr-p 0 --steps ${QSTEPS:-1500} --val 24 --val-every ${QVAL:-50} \
+      >> /root/sft_run_$QRUN.log 2>&1 < /dev/null &
+    sleep 20
+  fi
+  cat > /root/quantkeep.sh <<QKP
+#!/bin/bash
+QRUN=$QRUN; HF=$HF; HFM=$HFM; PCK=$PCK; MLX=$MLX; R=$R; QSRC=$QSRC; QTEMP=${QTEMP:-0.6}; QGEN=${QGEN:-4000}; QN=${QN:-34}
+export HF_TOKEN=$HF_TOKEN
+QKP
+  cat >> /root/quantkeep.sh <<'QKP2'
+until [ -s $HF/model.safetensors ] && grep -q JOINTFIT_DONE /root/sft_run_$QRUN.log 2>/dev/null; do sleep 60; done
+pkill -f "jointfit.p[y]"; sleep 10
+echo "[$QRUN] jointfit done: $(grep -E '^step [0-9]+ ' /root/sft_$QRUN.log | tail -1 | cut -c1-120)"
+if [ ! -s $MLX/model.safetensors ] || ! grep -q MLX_CHECK_OK /root/checkmlx_$QRUN.txt 2>/dev/null; then
+  cd /root/work && python3 /root/work/packmlx.py --base $HFM --hf $HF --state /root/sft/$QRUN.pt --out $MLX 2>&1 | tail -3
+  python3 /root/work/checkmlx.py $MLX $HF 2>&1 | tail -4 | tee /root/checkmlx_$QRUN.txt
+fi
+if grep -q MLX_CHECK_OK /root/checkmlx_$QRUN.txt; then
+  cp $PCK $MLX/pooler.safetensors
+  echo "[$QRUN] packed ($(du -shL $MLX | cut -f1)), uploading the app directory and the merged bf16 model"
+  for try in 1 2 3; do hf upload $R $MLX pooler_distill/chatsft/${QSRC}_mlx4 >/dev/null 2>&1 && break; sleep 30; done
+  cp $PCK $HFM/pooler.safetensors
+  for try in 1 2 3; do hf upload $R $HFM pooler_distill/chatsft/${QSRC}m_hf >/dev/null 2>&1 && break; sleep 30; done
+  hf upload $R /root/sft/$QRUN.pt pooler_distill/chatsft/${QSRC}_mlx4_params.pt >/dev/null 2>&1
+  hf upload $R /root/sft_$QRUN.log pooler_distill/chatsft/logs/sft_$QRUN.log >/dev/null 2>&1
+  echo "QUANT_UPLOADED $QRUN -> ${QSRC}_mlx4 and ${QSRC}m_hf $(date -u)"
+else
+  echo "QUANT_PACK_FAILED $QRUN - not uploading"
+fi
+# the packed model on the search held-out, same protocol as the bf16 measurement (temperature 0.6, 4000 tokens, 34 x 3)
+for i in 0 1 2; do
+  [ -s /root/work/${QRUN}_out_$i.jsonl ] && [ "$(wc -l < /root/work/${QRUN}_out_$i.jsonl)" -ge "$QN" ] && continue
+  cd /root/work && SP_BASE=$HF SP_RANK=16 SP_NOSYS=1 SP_EPISODIC=1 OMP_NUM_THREADS=1 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python3 /root/work/pool_eval.py \
+    $PCK /root/work/ev_$i.jsonl /root/work/${QRUN}_out_$i.jsonl --n $QN --rw 768 --maxd 384 --samepage 1 --decode plain --temp $QTEMP --gen $QGEN --stop eos --replycap 600 --tag "[$QRUN$i]" >> /root/${QRUN}_$i.log 2>&1
+  hf upload $R /root/work/${QRUN}_out_$i.jsonl pooler_distill/chatsft/rollouts/${QRUN}_$i.jsonl >/dev/null 2>&1
+  echo "[$QRUN] shard $i $(tail -1 /root/${QRUN}_$i.log | cut -c1-120)"
+done
+python3 - "$QRUN" <<'PYS'
+import json, sys, glob
+rows = [json.loads(l) for f in sorted(glob.glob(f"/root/work/{sys.argv[1]}_out_*.jsonl")) for l in open(f) if l.strip()]
+n = len(rows); c = sum(1 for r in rows if r.get("correct")); g = sum(1 for r in rows if r.get("grounded")); s = sum(float(r.get("ns", 0) or 0) for r in rows)
+print(f"QUANT_EVAL_DONE {sys.argv[1]}: correct {100*c/max(n,1):.1f}%  grounded {100*g/max(n,1):.0f}%  searches {s/max(n,1):.1f}  ({n} rollouts)")
+PYS
+QKP2
+  chmod +x /root/quantkeep.sh
+  setsid nohup bash -c 'bash /root/quantkeep.sh 2>&1 | tee -a /root/quant.log' >> /proc/1/fd/1 2>&1 < /dev/null &
+  sleep 30; tail -2 /root/sft_run_$QRUN.log 2>/dev/null | cut -c1-160; echo "QUANT_LAUNCH_DONE $QRUN $(date -u)"
   exit 0
 fi
 if [ "$MODE" = "publish3" ]; then
