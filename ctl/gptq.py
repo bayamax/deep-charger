@@ -138,11 +138,21 @@ def gptq_linear(W, H):
     return Q, codes, scales, biases
 
 
-def rtn(W):
-    q, s_, b_ = q4.affine_params(W, A.group, A.bits)
-    rows = W.shape[0]
-    deq = (q * s_ + b_).reshape(W.shape)
-    return deq, q.reshape(rows, -1).to(torch.uint8), s_.reshape(rows, -1), b_.reshape(rows, -1)
+def gptq_rows(W, H, chunk=16384):
+    """gptq_linear over row chunks: the rows are independent given H, and the 152k-row lm_head in float is 0.9 GB a copy."""
+    if W.shape[0] <= chunk:
+        return gptq_linear(W, H.clone())
+    parts = [gptq_linear(W[r0:r0 + chunk], H.clone()) for r0 in range(0, W.shape[0], chunk)]
+    return tuple(torch.cat([p[i] for p in parts]) for i in range(4))
+
+
+def rtn(W, chunk=16384):
+    outs = []
+    for r0 in range(0, W.shape[0], chunk):
+        w = W[r0:r0 + chunk]
+        q, s_, b_ = q4.affine_params(w, A.group, A.bits)
+        outs.append(((q * s_ + b_).reshape(w.shape), q.reshape(w.shape[0], -1).to(torch.uint8), s_.reshape(w.shape[0], -1), b_.reshape(w.shape[0], -1)))
+    return tuple(torch.cat([o[i] for o in outs]) for i in range(4))
 
 
 PACK = {}      # name -> (codes uint8 cpu, scales, biases)
@@ -171,7 +181,8 @@ with torch.no_grad():
                 if leaf in SKIP:
                     continue
                 H = Hs[n] / max(cnt[n], 1)
-                Q, codes, s_, b_ = gptq_linear(m.weight.data.float(), H)
+                Q, codes, s_, b_ = gptq_rows(m.weight.data.float(), H)
+                del H
                 m.weight.data = Q.to(m.weight.dtype)
                 PACK[f"model.layers.{li}.{n}.weight"] = (codes.cpu(), s_.cpu(), b_.cpu())
         del Hs
@@ -188,14 +199,18 @@ with torch.no_grad():
         for s0 in range(0, X.shape[0], A.batch):
             x = BODY.norm(X[s0:s0 + A.batch]).reshape(-1, HEAD.in_features).float()
             Hh += x.t() @ x; n_tok += x.shape[0]
-        Q, codes, s_, b_ = gptq_linear(HEAD.weight.data.float(), Hh / n_tok)
+        del X; torch.cuda.empty_cache()
+        Q, codes, s_, b_ = gptq_rows(HEAD.weight.data.float(), Hh / n_tok)
         HEAD.weight.data = Q.to(HEAD.weight.dtype); PACK["lm_head.weight"] = (codes.cpu(), s_.cpu(), b_.cpu())
+        del Q; torch.cuda.empty_cache()
         print(f"[gptq] lm_head done", flush=True)
+    else:
+        del X
     if "embed_tokens" not in SKIP:
         E = BODY.embed_tokens
         Q, codes, s_, b_ = rtn(E.weight.data.float())
         E.weight.data = Q.to(E.weight.dtype); PACK["model.embed_tokens.weight"] = (codes.cpu(), s_.cpu(), b_.cpu())
-    del X
+        del Q; torch.cuda.empty_cache()
 
 # ---- the two directories -------------------------------------------------------------------------------------
 os.makedirs(A.out_hf, exist_ok=True); os.makedirs(A.out_mlx, exist_ok=True)
