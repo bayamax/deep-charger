@@ -228,3 +228,25 @@ app's combination is the best number this held-out has given), and a pooler trai
 the fft one is not. The 4-bit arm that matters is therefore one trained and measured with g14's own
 pooler: q14d (the q14b recipe, 4000 steps) is that arm; the untrained 4-bit with the same pooler is its
 baseline, and the target is within four points of 52.0%.
+
+### GPTQ onto the same grid (2026-09-27)
+
+Every arm above started from round-to-nearest codes and moved only the scales and biases. `ctl/gptq.py`
+chooses the codes instead: one input column at a time, each column's rounding error pushed onto the
+columns not yet quantized, weighted by the inverse Hessian of the layer's inputs over 128 windows of
+1024 tokens of the lineage's own traces, layer after layer, the embedding table to nearest. Same grid,
+same file; five minutes on the 3060. All arms below with g14's own pooler, 102 rollouts:
+
+| arm | correct | grounded | searches | shards |
+|---|---|---|---|---|
+| bf16 | 52.0% | 67% | 4.3 | 50.0 / 58.8 / 47.1 |
+| 4-bit nearest, grid trained (q14d) | 42.2% | 72% | 8.5 | 55.9 / 32.4 / 38.2 |
+| 4-bit nearest, embed_tokens + lm_head in float | 45.1% | 66% | 4.7 | 41.2 / 50.0 / 44.1 |
+| 6-bit nearest (too large to ship) | 50.0% | 69% | 3.2 | 52.9 / 52.9 / 44.1 |
+| **4-bit GPTQ (gq14, `chatsft/g14_mlx4g`)** | **48.0%** | 72% | 3.7 | 47.1 / 47.1 / 50.0 |
+
+The loss is the 4-bit precision of the 28 layers' projections, spread out (sparing the two largest-error
+tensors buys three points, 6-bit buys eight), and GPTQ recovers six of the ten points without changing
+the grid or the size, with the searching back to the float model's rate. 48.0 is the four-point line
+exactly; it is being measured at 300 rollouts, and the grid's own training (the ce objective, codes
+kept) is being stacked on top of it.
