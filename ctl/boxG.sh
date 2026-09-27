@@ -80,7 +80,7 @@ PSKIP=
 # The raw GitHub copy this box fetches can lag and hand a control run an OLDER version of this file (04:48 on 09-22 it
 # relaunched the online loop under the previous mode while the newer run was merging a checkpoint on the same card).
 # Every edit bumps BOXG_SERIAL; a run that sees a lower serial than one already executed stops here.
-BOXG_SERIAL=2026092628
+BOXG_SERIAL=2026092629
 if [ -f /root/.boxg_serial ] && [ "$(cat /root/.boxg_serial)" -gt "$BOXG_SERIAL" ] 2>/dev/null; then echo "BOXG_STALE $BOXG_SERIAL < $(cat /root/.boxg_serial)"; exit 0; fi
 echo $BOXG_SERIAL > /root/.boxg_serial
 MODE=quant        # 2026-09-26 night: a second 4-bit arm of g14 - the same recipe for 4000 steps (q14's validation was still falling at 1400; q14 41.2%, untrained 39.2%, bf16 48.0%)
@@ -1167,7 +1167,9 @@ if [ "$MODE" = "reeval" ]; then
     # a quant arm's dequantized directory on the box (RMODEL = its QRUN), with its pooler: the way a screened arm gets more shards
     RHF=/root/sft_hf_$RMODEL; RCKPT=/root/reeval_g14m_pooler.safetensors
     [ -s /root/pooler_eval_$RMODEL.safetensors ] && RCKPT=/root/pooler_eval_$RMODEL.safetensors
-    [ -s $RHF/model.safetensors ] || { echo "REEVAL_ABORT $RRUN: $RHF is not on the box"; exit 0; }
+    # the directory is removed to make room for later arms; its state file rebuilds it
+    [ -s $RHF/model.safetensors ] || { cd /root/work && python3 /root/work/dequant_state.py --base /root/reeval_hf_g14m --state /root/sft/$RMODEL.pt --out $RHF 2>&1 | tail -2; }
+    [ -s $RHF/model.safetensors ] || { echo "REEVAL_ABORT $RRUN: $RHF is not on the box and could not be rebuilt"; exit 0; }
   elif [ "${RKIND:-adapter}" = "stock" ]; then
     # the untouched R1 distill the whole lineage started from: the reasoning ceiling before any of our training
     RHF=/root/base_distill; RCKPT=/root/pooler200.safetensors
