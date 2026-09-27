@@ -80,7 +80,7 @@ PSKIP=
 # The raw GitHub copy this box fetches can lag and hand a control run an OLDER version of this file (04:48 on 09-22 it
 # relaunched the online loop under the previous mode while the newer run was merging a checkpoint on the same card).
 # Every edit bumps BOXG_SERIAL; a run that sees a lower serial than one already executed stops here.
-BOXG_SERIAL=2026092645
+BOXG_SERIAL=2026092646
 if [ -f /root/.boxg_serial ] && [ "$(cat /root/.boxg_serial)" -gt "$BOXG_SERIAL" ] 2>/dev/null; then echo "BOXG_STALE $BOXG_SERIAL < $(cat /root/.boxg_serial)"; exit 0; fi
 echo $BOXG_SERIAL > /root/.boxg_serial
 MODE=quant        # 2026-09-27: GPTQ's codes kept, the grid's scales and biases trained on the lineage's traces on top (gq14 48.0% on 102, bf16 52.0%)
@@ -666,7 +666,7 @@ if [ "$MODE" = "quant" ]; then
   pkill -f "onlinekee[p].sh"; pkill -f "reevalkee[p].sh"; pkill -f "quantkee[p].sh"; pkill -f "online_loop.p[y]"; pkill -f "pool_eval.p[y]"; pkill -f "jointfit.p[y]"; sleep 8
   pkill -9 -f "online_loop.p[y]" 2>/dev/null; pkill -9 -f "pool_eval.p[y]" 2>/dev/null; sleep 2
   # room for the run's outputs (a dequantized directory is 3.5 GB): earlier arms' directories are on the hub packed
-  rm -rf /root/evalrun_* /root/wikidl /root/hfdl/pooler_distill/chatsft/online/*/latest.safetensors /root/.cache/pip /root/.cache/huggingface/hub/datasets--wikimedia--wikipedia /root/hfdl/pooler_distill/chatsft/s4_hf /root/reeval_hf_g10m /root/base_distill
+  rm -rf /root/evalrun_* /root/wikidl /root/hfdl/pooler_distill/chatsft/online/*/latest.safetensors /root/.cache/pip /root/.cache/huggingface/hub/datasets--wikimedia--wikipedia /root/hfdl/pooler_distill/chatsft/s4_hf /root/reeval_hf_g10m /root/base_distill /root/online_g8 /root/online_g9 /root/online_g7 /root/gptq_mlx4_* 
   for d in /root/sft_hf_q* /root/sft_mlx4_q*; do [ -d "$d" ] && [ "$d" != "$HF" ] && grep -q "QUANT_UPLOADED $(basename $d | sed 's/sft_hf_//; s/sft_mlx4_//') " /root/quant.log 2>/dev/null && rm -rf "$d"; done
   du -sh /root/* /root/hfdl/pooler_distill/chatsft/* 2>/dev/null | sort -h | tail -12 | tr '\n' ' '; echo
   echo "[disk] $(df -h /root | awk 'NR==2{print $4" free"}')"
@@ -686,8 +686,9 @@ if [ "$MODE" = "quant" ]; then
   QCODES=${QCODES:-}   # a gptq.py state: the grid's training starts from GPTQ's codes instead of round-to-nearest
   if [ -n "$QCODES" ] && [ ! -s "$QCODES" ]; then
     [ -s /root/work/qcal_q14.jsonl ] || { echo "QUANT_ABORT $QRUN: no calibration traces for the GPTQ state"; exit 0; }
-    cd /root/work && PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python3 /root/work/gptq.py --base $HFM --data /root/work/qcal_q14.jsonl --out-hf /root/gptq_hf_tmp --out-mlx /root/gptq_mlx4_tmp --state $QCODES > /root/gptq_state.log 2>&1
-    rm -rf /root/gptq_hf_tmp /root/gptq_mlx4_tmp
+    rm -f $QCODES
+    cd /root/work && PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python3 /root/work/gptq.py --base $HFM --data /root/work/qcal_q14.jsonl --out-hf /root/gptq_hf_tmp --out-mlx /root/gptq_mlx4_tmp --state $QCODES --no-dirs 1 > /root/gptq_state.log 2>&1
+    python3 -c "import torch,sys; torch.load(sys.argv[1], map_location='cpu')" $QCODES 2>/dev/null || rm -f $QCODES   # a state cut short by the disk is not a state
     [ -s "$QCODES" ] || { echo "QUANT_ABORT $QRUN: the GPTQ state was not made: $(grep -E 'Error' /root/gptq_state.log | tail -1 | cut -c1-160)"; exit 0; }
     echo "[quant] GPTQ state made: $QCODES"
   fi

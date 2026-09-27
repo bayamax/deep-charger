@@ -36,6 +36,7 @@ ap.add_argument("--block", type=int, default=128); ap.add_argument("--damp", typ
 ap.add_argument("--batch", type=int, default=8); ap.add_argument("--seed", type=int, default=0)
 ap.add_argument("--skip", default="", help="comma-separated leaf modules left in float (e.g. embed_tokens,lm_head)")
 ap.add_argument("--state", default="", help="also save {name: (codes, scales, biases)} here, for jointfit --codes-from and packmlx --codes-from")
+ap.add_argument("--no-dirs", type=int, default=0, help="1: write only the state (the directories are 4.7 GB the disk may not have)")
 A = ap.parse_args()
 random.seed(A.seed); torch.manual_seed(A.seed)
 DEV = "cuda"
@@ -213,7 +214,12 @@ with torch.no_grad():
         E.weight.data = Q.to(E.weight.dtype); PACK["model.embed_tokens.weight"] = (codes.cpu(), s_.cpu(), b_.cpu())
         del Q; torch.cuda.empty_cache()
 
-# ---- the two directories -------------------------------------------------------------------------------------
+# ---- the state first (small), then the two directories --------------------------------------------------------
+if A.state:
+    torch.save({"q": {k: (c, s_, b_) for k, (c, s_, b_) in PACK.items()}, "group": A.group, "bits": A.bits}, A.state)
+    print(f"[out] {A.state}: codes of {len(PACK)} tensors", flush=True)
+if A.no_dirs:
+    print("GPTQ_DONE", flush=True); sys.exit(0)
 os.makedirs(A.out_hf, exist_ok=True); os.makedirs(A.out_mlx, exist_ok=True)
 sd = {k: v.detach().cpu().contiguous() for k, v in model.state_dict().items()}
 save_file(sd, os.path.join(A.out_hf, "model.safetensors"), metadata={"format": "pt"})
@@ -242,7 +248,4 @@ cfg["quantization"] = cfg["quantization_config"] = {"group_size": A.group, "bits
 cfg["torch_dtype"] = "float16"
 json.dump(cfg, open(os.path.join(A.out_mlx, "config.json"), "w"), indent=2)
 print(f"[out] {A.out_mlx}: packed", flush=True)
-if A.state:
-    torch.save({"q": {k: (c, s_, b_) for k, (c, s_, b_) in PACK.items()}, "group": A.group, "bits": A.bits}, A.state)
-    print(f"[out] {A.state}: codes of {len(PACK)} tensors", flush=True)
 print("GPTQ_DONE", flush=True)
