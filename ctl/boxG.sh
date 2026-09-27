@@ -80,7 +80,7 @@ PSKIP=
 # The raw GitHub copy this box fetches can lag and hand a control run an OLDER version of this file (04:48 on 09-22 it
 # relaunched the online loop under the previous mode while the newer run was merging a checkpoint on the same card).
 # Every edit bumps BOXG_SERIAL; a run that sees a lower serial than one already executed stops here.
-BOXG_SERIAL=2026092627
+BOXG_SERIAL=2026092628
 if [ -f /root/.boxg_serial ] && [ "$(cat /root/.boxg_serial)" -gt "$BOXG_SERIAL" ] 2>/dev/null; then echo "BOXG_STALE $BOXG_SERIAL < $(cat /root/.boxg_serial)"; exit 0; fi
 echo $BOXG_SERIAL > /root/.boxg_serial
 MODE=quant        # 2026-09-26 night: a second 4-bit arm of g14 - the same recipe for 4000 steps (q14's validation was still falling at 1400; q14 41.2%, untrained 39.2%, bf16 48.0%)
@@ -658,7 +658,7 @@ if [ "$MODE" = "quant" ]; then
   HF=/root/sft_hf_$QRUN; LOG=/root/sft_$QRUN.log; MLX=/root/sft_mlx4_$QRUN
   # a keeper for this run is left alone while its training runs or its model directory exists; a keeper waiting on a
   # training that died (the disk filled up as q14b wrote its directory) is replaced
-  if pgrep -f "quantkee[p].sh" >/dev/null && grep -q "^QRUN=$QRUN;" /root/quantkeep.sh 2>/dev/null && { pgrep -f "jointfit.p[y]" >/dev/null || [ -s $HF/model.safetensors ]; }; then echo "QUANT_SKIP: $QRUN is already running"; exit 0; fi
+  if pgrep -f "quantkee[p].sh" >/dev/null && grep -q "^QRUN=$QRUN;" /root/quantkeep.sh 2>/dev/null && grep -q "QSHARDS=" /root/quantkeep.sh && { pgrep -f "jointfit.p[y]" >/dev/null || [ -s $HF/model.safetensors ]; }; then echo "QUANT_SKIP: $QRUN is already running"; exit 0; fi
   pkill -f "onlinekee[p].sh"; pkill -f "reevalkee[p].sh"; pkill -f "quantkee[p].sh"; pkill -f "online_loop.p[y]"; pkill -f "pool_eval.p[y]"; pkill -f "jointfit.p[y]"; sleep 8
   pkill -9 -f "online_loop.p[y]" 2>/dev/null; pkill -9 -f "pool_eval.p[y]" 2>/dev/null; sleep 2
   # room for the run's outputs (a dequantized directory is 3.5 GB): earlier arms' directories are on the hub packed
@@ -737,7 +737,7 @@ PYQ
   fi
   cat > /root/quantkeep.sh <<QKP
 #!/bin/bash
-QRUN=$QRUN; HF=$HF; HFM=$HFM; PCK=$PCK; MLX=$MLX; R=$R; QSRC=$QSRC; QTAG=$QTAG; QLRP=${QLRP:-0}; QTEMP=${QTEMP:-0.6}; QGEN=${QGEN:-4000}; QN=${QN:-34}
+QRUN=$QRUN; HF=$HF; HFM=$HFM; PCK=$PCK; MLX=$MLX; R=$R; QSRC=$QSRC; QTAG=$QTAG; QLRP=${QLRP:-0}; QTEMP=${QTEMP:-0.6}; QGEN=${QGEN:-4000}; QN=${QN:-34}; QSHARDS=${QSHARDS:-1}
 export HF_TOKEN=$HF_TOKEN
 QKP
   cat >> /root/quantkeep.sh <<'QKP2'
@@ -773,8 +773,10 @@ if grep -q MLX_CHECK_OK /root/checkmlx_$QRUN.txt; then
 else
   echo "QUANT_PACK_FAILED $QRUN - not uploading"
 fi
-# the packed model on the search held-out, same protocol as the bf16 measurement (temperature 0.6, 4000 tokens, 34 x 3)
-for i in 0 1 2; do
+# the packed model on the search held-out, same protocol as the bf16 measurement (temperature 0.6, 4000 tokens); the first
+# shard (34 rollouts, the same 17 questions for every arm) is the screen, and a promising arm gets the other shards
+# through the reeval mode (RKIND=sftdir), then RN=100 for the one that ships
+for i in $(seq 0 $((QSHARDS - 1))); do
   [ -s /root/work/${QRUN}_out_$i.jsonl ] && [ "$(wc -l < /root/work/${QRUN}_out_$i.jsonl)" -ge "$QN" ] && continue
   cd /root/work && SP_BASE=$HF SP_RANK=16 SP_NOSYS=1 SP_EPISODIC=1 OMP_NUM_THREADS=1 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python3 /root/work/pool_eval.py \
     $PCK /root/work/ev_$i.jsonl /root/work/${QRUN}_out_$i.jsonl --n $QN --rw 768 --maxd 384 --samepage 1 --decode plain --temp $QTEMP --gen $QGEN --stop eos --replycap 600 --tag "[$QRUN$i]" >> /root/${QRUN}_$i.log 2>&1
@@ -785,7 +787,7 @@ python3 - "$QRUN" <<'PYS'
 import json, sys, glob
 rows = [json.loads(l) for f in sorted(glob.glob(f"/root/work/{sys.argv[1]}_out_*.jsonl")) for l in open(f) if l.strip()]
 n = len(rows); c = sum(1 for r in rows if r.get("correct")); g = sum(1 for r in rows if r.get("grounded")); s = sum(float(r.get("ns", 0) or 0) for r in rows)
-print(f"QUANT_EVAL_DONE {sys.argv[1]}: correct {100*c/max(n,1):.1f}%  grounded {100*g/max(n,1):.0f}%  searches {s/max(n,1):.1f}  ({n} rollouts)")
+print(f"QUANT_EVAL_DONE {sys.argv[1]}: correct {100*c/max(n,1):.1f}%  grounded {100*g/max(n,1):.0f}%  searches {s/max(n,1):.1f}  ({n} rollouts, shard 0 of the held-out = the screen)")
 PYS
 QKP2
   chmod +x /root/quantkeep.sh
@@ -1161,6 +1163,11 @@ if [ "$MODE" = "reeval" ]; then
     echo "[merge] $SRC (step $(python3 -c "import json;print(json.load(open('/root/online_$RMODEL/state.json'))['step'])" 2>/dev/null || echo ?)) onto ${RBASE:-s4_hf}, lora r16 layers ${RLAYERS:-20-27}"
     cd /root/work && SP_BASE=$MB SP_NOSYS=1 SP_EPISODIC=1 OMP_NUM_THREADS=1 python3 /root/work/build_merged.py $SRC $RHF $RCKPT 16 ${RLAYERS:-20-27} 2>&1 | grep -E "^\[merge\]|MERGE_DONE|Error|assert|unexpected" | tail -4
     [ -s $RHF/model.safetensors ] || { echo "REEVAL_ABORT $RRUN: merge of online/$RMODEL failed"; exit 0; }
+  elif [ "${RKIND:-adapter}" = "sftdir" ]; then
+    # a quant arm's dequantized directory on the box (RMODEL = its QRUN), with its pooler: the way a screened arm gets more shards
+    RHF=/root/sft_hf_$RMODEL; RCKPT=/root/reeval_g14m_pooler.safetensors
+    [ -s /root/pooler_eval_$RMODEL.safetensors ] && RCKPT=/root/pooler_eval_$RMODEL.safetensors
+    [ -s $RHF/model.safetensors ] || { echo "REEVAL_ABORT $RRUN: $RHF is not on the box"; exit 0; }
   elif [ "${RKIND:-adapter}" = "stock" ]; then
     # the untouched R1 distill the whole lineage started from: the reasoning ceiling before any of our training
     RHF=/root/base_distill; RCKPT=/root/pooler200.safetensors
