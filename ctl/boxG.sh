@@ -80,11 +80,11 @@ PSKIP=
 # The raw GitHub copy this box fetches can lag and hand a control run an OLDER version of this file (04:48 on 09-22 it
 # relaunched the online loop under the previous mode while the newer run was merging a checkpoint on the same card).
 # Every edit bumps BOXG_SERIAL; a run that sees a lower serial than one already executed stops here.
-BOXG_SERIAL=2026092632
+BOXG_SERIAL=2026092633
 if [ -f /root/.boxg_serial ] && [ "$(cat /root/.boxg_serial)" -gt "$BOXG_SERIAL" ] 2>/dev/null; then echo "BOXG_STALE $BOXG_SERIAL < $(cat /root/.boxg_serial)"; exit 0; fi
 echo $BOXG_SERIAL > /root/.boxg_serial
-MODE=reeval       # 2026-09-27: g14 bf16 with its own (merged, bare-key) pooler on held-out shard 0 - the first measurement that restores it (fft pooler: 58.8%)
-RRUN=g14p; RMODEL=g14m_hf; RKIND=dir; RTEMP=0.6; RGEN=4000; RN=34; RSHARDS=1
+MODE=quant        # 2026-09-27: q14c measured again with its own trained pooler (the first pass used the fft pooler: 50.0% on shard 0) and packed (the disk was full)
+QRUN=q14c; QSRC=g14; QBASE=g10m_hf; QLAYERS=all; QSTEPS=3000; QLRP=1e-5; QTAG=c; QREDO=1
 ORUN=g14          # 2026-09-26: distillation. The R1 thinking and answer of dolphin_v1 (minus the held-out hundred) as plain SFT, 8 records a step,
                   # one verified search trace at half weight beside them; no rollouts, no judge. Length is allowed to grow (up to ~1000 tokens is
                   # fine by the user); the yardsticks are the Dolphin held-out (85%) and the search held-out (40%) at 400 and at the epoch's end.
@@ -656,6 +656,9 @@ if [ "$MODE" = "quant" ]; then
   QRUN=${QRUN:-q14}; QSRC=${QSRC:-g14}; QBASE=${QBASE:-g10m_hf}; QLAYERS=${QLAYERS:-all}; QTAG=${QTAG:-}   # QTAG names a second arm's hub directories
   export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); R=baya1116/hypernet-sp-distill
   HF=/root/sft_hf_$QRUN; LOG=/root/sft_$QRUN.log; MLX=/root/sft_mlx4_$QRUN
+  if [ "${QREDO:-0}" = 1 ] && [ ! -f /root/.qredo_$QRUN ]; then   # once: measure again with the current evaluator (and its pooler loading)
+    pkill -f "quantkee[p].sh"; pkill -f "pool_eval.p[y]"; sleep 5; rm -f /root/work/${QRUN}_out_*.jsonl /root/checkmlx_$QRUN.txt; touch /root/.qredo_$QRUN; echo "[quant] $QRUN: evaluation reset"
+  fi
   # a keeper for this run is left alone while its training runs or its model directory exists; a keeper waiting on a
   # training that died (the disk filled up as q14b wrote its directory) is replaced
   if pgrep -f "quantkee[p].sh" >/dev/null && grep -q "^QRUN=$QRUN;" /root/quantkeep.sh 2>/dev/null && grep -q "QSHARDS=" /root/quantkeep.sh && { pgrep -f "jointfit.p[y]" >/dev/null || [ -s $HF/model.safetensors ]; }; then echo "QUANT_SKIP: $QRUN is already running"; exit 0; fi
@@ -783,7 +786,7 @@ for i in $(seq 0 $((QSHARDS - 1))); do
   cd /root/work && SP_BASE=$HF SP_RANK=16 SP_NOSYS=1 SP_EPISODIC=1 OMP_NUM_THREADS=1 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python3 /root/work/pool_eval.py \
     $PCK /root/work/ev_$i.jsonl /root/work/${QRUN}_out_$i.jsonl --n $QN --rw 768 --maxd 384 --samepage 1 --decode plain --temp $QTEMP --gen $QGEN --stop eos --replycap 600 --tag "[$QRUN$i]" >> /root/${QRUN}_$i.log 2>&1
   hf upload $R /root/work/${QRUN}_out_$i.jsonl pooler_distill/chatsft/rollouts/${QRUN}_$i.jsonl >/dev/null 2>&1
-  echo "[$QRUN] shard $i $(tail -1 /root/${QRUN}_$i.log | cut -c1-120)"
+  echo "[$QRUN] shard $i $(tail -1 /root/${QRUN}_$i.log | cut -c1-120) | $(grep -h -m1 "pooler restored\|WARNING: no pooler" /root/${QRUN}_$i.log)"
 done
 python3 - "$QRUN" <<'PYS'
 import json, sys, glob
@@ -1256,6 +1259,7 @@ run_one() {  # $1 questions file, $2 out file, $3 tag
   [ -s "$2" ] && [ "$(wc -l < "$2")" -ge "$want" ] && return 0
   cd /root/work && env ${RLOCAL:+SP_LOCAL_STORE=/root/wiki_store SP_LOCAL_MODEL=/root/bge-small SP_LOCAL_GPU=1 SP_LOCAL_K=${RLOCALK:-1} SP_LOCAL_CHARS=${RLOCALCHARS:-0}} SP_BASE=$RHF SP_RANK=16 SP_NOSYS=1 SP_EPISODIC=1 OMP_NUM_THREADS=1 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python3 /root/work/pool_eval.py     $RCKPT "$1" "$2" --n $RN --rw 768 --maxd 384 --samepage 1 --decode plain --temp $RTEMP --gen $RGEN --stop eos --replycap $RCAP ${RQ4:+--q4 $RQ4 --q4skip "${RQ4SKIP:-}"} --tag "[$3]" >> /root/${RRUN}_$3.log 2>&1
   [ -s "$2" ] && [ "$(wc -l < "$2")" -ge "$want" ] || { echo "REEVAL_ABORT $RRUN at $3: $(tail -1 /root/${RRUN}_$3.log | cut -c1-100)"; exit 1; }
+  echo "[$RRUN] $3: $(grep -h -m1 "pooler restored\|WARNING: no pooler" /root/${RRUN}_$3.log)"
 }
 run_fast() {  # $1 questions, $2 out: the training loop's batched rollout, RB questions at a time (the one-at-a-time evaluator took ~2 h per 100)
   cd /root/work && OMP_NUM_THREADS=1 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python3 /root/work/online_loop.py $RHF /root/evalrun_$RRUN \
