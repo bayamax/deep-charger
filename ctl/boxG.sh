@@ -80,7 +80,7 @@ PSKIP=
 # The raw GitHub copy this box fetches can lag and hand a control run an OLDER version of this file (04:48 on 09-22 it
 # relaunched the online loop under the previous mode while the newer run was merging a checkpoint on the same card).
 # Every edit bumps BOXG_SERIAL; a run that sees a lower serial than one already executed stops here.
-BOXG_SERIAL=2026092630
+BOXG_SERIAL=2026092631
 if [ -f /root/.boxg_serial ] && [ "$(cat /root/.boxg_serial)" -gt "$BOXG_SERIAL" ] 2>/dev/null; then echo "BOXG_STALE $BOXG_SERIAL < $(cat /root/.boxg_serial)"; exit 0; fi
 echo $BOXG_SERIAL > /root/.boxg_serial
 MODE=quant        # 2026-09-27: the pooler arm - grid and pooler trained together on the same traces (q14 41.2%, untrained 39.2%, bf16 48.0%; target within 4 of bf16)
@@ -662,8 +662,9 @@ if [ "$MODE" = "quant" ]; then
   pkill -f "onlinekee[p].sh"; pkill -f "reevalkee[p].sh"; pkill -f "quantkee[p].sh"; pkill -f "online_loop.p[y]"; pkill -f "pool_eval.p[y]"; pkill -f "jointfit.p[y]"; sleep 8
   pkill -9 -f "online_loop.p[y]" 2>/dev/null; pkill -9 -f "pool_eval.p[y]" 2>/dev/null; sleep 2
   # room for the run's outputs (a dequantized directory is 3.5 GB): earlier arms' directories are on the hub packed
-  rm -rf /root/evalrun_* /root/wikidl /root/hfdl/pooler_distill/chatsft/online/*/latest.safetensors
-  for d in /root/sft_hf_q*; do [ -d "$d" ] && [ "$d" != "$HF" ] && grep -q "QUANT_UPLOADED $(basename $d | sed 's/sft_hf_//') " /root/quant.log 2>/dev/null && rm -rf "$d"; done
+  rm -rf /root/evalrun_* /root/wikidl /root/hfdl/pooler_distill/chatsft/online/*/latest.safetensors /root/.cache/pip /root/.cache/huggingface/hub/datasets--wikimedia--wikipedia /root/hfdl/pooler_distill/chatsft/s4_hf /root/reeval_hf_g10m /root/base_distill
+  for d in /root/sft_hf_q* /root/sft_mlx4_q*; do [ -d "$d" ] && [ "$d" != "$HF" ] && grep -q "QUANT_UPLOADED $(basename $d | sed 's/sft_hf_//; s/sft_mlx4_//') " /root/quant.log 2>/dev/null && rm -rf "$d"; done
+  du -sh /root/* /root/hfdl/pooler_distill/chatsft/* 2>/dev/null | sort -h | tail -12 | tr '\n' ' '; echo
   echo "[disk] $(df -h /root | awk 'NR==2{print $4" free"}')"
   MB=/root/hfdl/pooler_distill/chatsft/$QBASE; HFM=/root/reeval_hf_${QSRC}m; PCK=/root/reeval_${QSRC}m_pooler.safetensors
   if [ ! -s $HFM/model.safetensors ] || [ ! -s $PCK ]; then
@@ -752,6 +753,7 @@ from safetensors.torch import load_file, save_file
 base, trained, out = sys.argv[1:4]
 d = load_file(base); t = load_file(trained); n = 0
 for k, v in t.items():
+    k = k[len("pooler."):] if k.startswith("pooler.") else k   # jointfit writes prefixed keys, the merged pooler is bare
     if k in d and d[k].shape == v.shape: d[k] = v.to(d[k].dtype); n += 1
 save_file({k: v.contiguous() for k, v in d.items()}, out); print(f"[pooler] {n} of {len(d)} tensors taken from the trained pooler")
 PYP
@@ -1133,7 +1135,8 @@ if [ "$MODE" = "reeval" ]; then
   R=baya1116/hypernet-sp-distill
   # the disk hit 97% after the corpus build (its float vectors, 4.9 GB, are not shipped); everything removed here is on the hub or rebuilt
   if [ "$(df -BG /root | awk 'NR==2{print $4}' | tr -d G)" -lt 8 ]; then
-    rm -rf /root/wiki_store/emb_f16.bin /root/wiki_store/pq_codes.npy /root/wikidl /root/base_distill /root/reeval_hf_g14_step400m /root/evalrun_* /root/hfdl/pooler_distill/chatsft/online/*/latest.safetensors
+    rm -rf /root/wiki_store/emb_f16.bin /root/wiki_store/pq_codes.npy /root/wikidl /root/base_distill /root/reeval_hf_g14_step400m /root/evalrun_* /root/hfdl/pooler_distill/chatsft/online/*/latest.safetensors /root/.cache/pip /root/.cache/huggingface/hub/datasets--wikimedia--wikipedia /root/hfdl/pooler_distill/chatsft/s4_hf /root/reeval_hf_g10m
+    for d in /root/sft_hf_q* /root/sft_mlx4_q*; do [ -d "$d" ] && grep -q "QUANT_UPLOADED $(basename $d | sed 's/sft_hf_//; s/sft_mlx4_//') " /root/quant.log 2>/dev/null && rm -rf "$d"; done
     echo "[disk] cleaned: $(df -h /root | awk 'NR==2{print $4" free"}')"
   fi
   RCKPT=${RCKPT:-/root/pooler200.safetensors}

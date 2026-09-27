@@ -53,10 +53,14 @@ from transformers import DynamicCache  # noqa: E402
 sd = load_file(A.ckpt)
 pl = {k[len("pooler."):]: v for k, v in sd.items() if k.startswith("pooler.")}
 md = {k: v for k, v in sd.items() if not k.startswith("pooler.")}
+if not pl and md and not any(k.startswith(("model.", "lm_head", "base_model")) for k in md):
+    pl, md = md, {}   # a pooler-only file with bare keys (build_merged.py and the published directories write these)
 r = model.load_state_dict(md, strict=False)
 print(f"[load] {A.ckpt}: {len(md)} tensors, {len(r.unexpected_keys)} unexpected", flush=True)
 if pl:
     pooler.load_sd(pl); print(f"[load] pooler restored ({len(pl)} tensors)", flush=True)
+else:
+    print("[load] WARNING: no pooler tensors in the checkpoint - the harness's fft_out/pooler.pt stays in use", flush=True)
 model.eval()
 if A.q4:
     # What ships is the 4-bit conversion of these weights, so measure that and not the bf16 parent.

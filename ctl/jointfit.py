@@ -72,8 +72,12 @@ for p in model.parameters():
 
 sd = load_file(A.ckpt)
 pl = {k[len("pooler."):]: v for k, v in sd.items() if k.startswith("pooler.")}
+if not pl and not any(k.startswith(("model.", "lm_head", "base_model")) for k in sd):
+    pl = dict(sd)   # a pooler-only file with bare keys (build_merged.py writes these)
 if pl:
     print(f"[pooler] restored {pooler.load_sd(pl)} tensors", flush=True)
+else:
+    print("[pooler] WARNING: no pooler tensors in --ckpt - the harness's fft_out/pooler.pt stays in use", flush=True)
 POOL_REF = {k: v.detach().clone() for k, v in pooler.A.items()}
 pooler.make_trainable()
 POOL_TRAIN = dict(pooler.A)
