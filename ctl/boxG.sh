@@ -80,7 +80,7 @@ PSKIP=
 # The raw GitHub copy this box fetches can lag and hand a control run an OLDER version of this file (04:48 on 09-22 it
 # relaunched the online loop under the previous mode while the newer run was merging a checkpoint on the same card).
 # Every edit bumps BOXG_SERIAL; a run that sees a lower serial than one already executed stops here.
-BOXG_SERIAL=2026092637
+BOXG_SERIAL=2026092638
 if [ -f /root/.boxg_serial ] && [ "$(cat /root/.boxg_serial)" -gt "$BOXG_SERIAL" ] 2>/dev/null; then echo "BOXG_STALE $BOXG_SERIAL < $(cat /root/.boxg_serial)"; exit 0; fi
 echo $BOXG_SERIAL > /root/.boxg_serial
 MODE=reeval       # 2026-09-27: where the 4-bit loss lives - g14 quantized at load with embed_tokens and lm_head left in float (q14d: 42.2% on 102, bf16 52.0%, both with g14's pooler)
@@ -156,7 +156,7 @@ OSEARCHGEN=1500   # and capped as it capped them; the reasoning side keeps OGEN
 OTEMP=0.6
 SHARDS=3
 RAW="https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl"
-for f in pool_eval.py q4.py qat.py dwq.py poolerfit.py jointfit.py checkmlx.py packmlx.py dequant_state.py sft_lora.py selfgen_gpu.py build_merged.py web_search.py grpo_pool.py online_loop.py; do
+for f in pool_eval.py q4.py qat.py dwq.py poolerfit.py jointfit.py checkmlx.py packmlx.py dequant_state.py gptq.py sft_lora.py selfgen_gpu.py build_merged.py web_search.py grpo_pool.py online_loop.py; do
   for try in 1 2 3; do curl -sS -o /root/work/$f "$RAW/$f?nocache=$(date +%s)" && python3 -m py_compile /root/work/$f && break; sleep 5; done
 done
 cp /root/work/web_search.py /root/work/runtime/web_search.py 2>/dev/null
@@ -419,7 +419,7 @@ while :; do
     echo "--- gpu ---"; nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv,noheader 2>/dev/null; df -h /root | tail -1
     [ -x /usr/local/bin/s ] && /usr/local/bin/s 20 2>/dev/null | sed 's/^/SCORE /'
     echo "--- eval progress ---"; for f in $(ls -t /root/work/*_out_*.jsonl 2>/dev/null | head -3); do echo "$f $(wc -l < $f) lines, last write $(date -u -r $f +%H:%M)"; done
-    echo "--- processes ---"; pgrep -fa "online_loop.p[y]|pool_eval.p[y]|reevalkee[p].sh|build_merged.p[y]|jointfit.p[y]|quantkee[p].sh|wikikee[p].sh|build_store.p[y]|embed.p[y]|hf downloa[d]|hf uploa[d]" | cut -c1-120; } > /root/boxlog.txt 2>&1
+    echo "--- processes ---"; pgrep -fa "online_loop.p[y]|pool_eval.p[y]|reevalkee[p].sh|build_merged.p[y]|jointfit.p[y]|quantkee[p].sh|gptqkee[p].sh|gptq.p[y]|wikikee[p].sh|build_store.p[y]|embed.p[y]|hf downloa[d]|hf uploa[d]" | cut -c1-120; } > /root/boxlog.txt 2>&1
   hf upload $R /root/boxlog.txt pooler_distill/chatsft/audit/boxlog.txt >/dev/null 2>&1
   sleep 600
 done
@@ -798,6 +798,60 @@ QKP2
   chmod +x /root/quantkeep.sh
   setsid nohup bash -c 'bash /root/quantkeep.sh 2>&1 | tee -a /root/quant.log' >> /proc/1/fd/1 2>&1 < /dev/null &
   sleep 30; tail -2 /root/sft_run_$QRUN.log 2>/dev/null | cut -c1-160; echo "QUANT_LAUNCH_DONE $QRUN $(date -u)"
+  exit 0
+fi
+if [ "$MODE" = "gptq" ]; then
+  # GPTQ onto the app's grid (gptq.py): codes chosen to preserve each layer's outputs on the lineage's own traces,
+  # instead of round-to-nearest. Packed, checked, published as ${GSRC}_mlx4${GTAG}, measured with the model's own pooler.
+  GRUN=${GRUN:-gq14}; GSRC=${GSRC:-g14}; GTAG=${GTAG:-g}; GSKIP=${GSKIP:-}
+  export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); R=baya1116/hypernet-sp-distill
+  HF=/root/gptq_hf_$GRUN; MLX=/root/gptq_mlx4_$GRUN; HFM=/root/reeval_hf_${GSRC}m; PCK=/root/reeval_${GSRC}m_pooler.safetensors
+  if pgrep -f "gptqkee[p].sh" >/dev/null && grep -q "^GRUN=$GRUN;" /root/gptqkeep.sh 2>/dev/null; then echo "GPTQ_SKIP: $GRUN is already running"; exit 0; fi
+  pkill -f "onlinekee[p].sh"; pkill -f "reevalkee[p].sh"; pkill -f "quantkee[p].sh"; pkill -f "gptqkee[p].sh"; pkill -f "online_loop.p[y]"; pkill -f "pool_eval.p[y]"; pkill -f "jointfit.p[y]"; sleep 8
+  pkill -9 -f "pool_eval.p[y]" 2>/dev/null; sleep 2
+  rm -rf /root/evalrun_* /root/wikidl /root/.cache/pip
+  for d in /root/sft_hf_q* /root/sft_mlx4_q*; do [ -d "$d" ] && grep -q "QUANT_UPLOADED $(basename $d | sed 's/sft_hf_//; s/sft_mlx4_//') " /root/quant.log 2>/dev/null && rm -rf "$d"; done
+  echo "[disk] $(df -h /root | awk 'NR==2{print $4" free"}')"
+  [ -s $HFM/model.safetensors ] && [ -s $PCK ] || { echo "GPTQ_ABORT $GRUN: $HFM or its pooler is missing (run the quant mode once for $GSRC)"; exit 0; }
+  QDATA=/root/work/qcal_q14.jsonl; [ -s $QDATA ] || { echo "GPTQ_ABORT $GRUN: no calibration traces at $QDATA"; exit 0; }
+  cat > /root/gptqkeep.sh <<GK
+#!/bin/bash
+GRUN=$GRUN; GSRC=$GSRC; GTAG=$GTAG; GSKIP=$GSKIP; HF=$HF; MLX=$MLX; HFM=$HFM; PCK=$PCK; R=$R; QDATA=$QDATA; GN=${GN:-34}; GSHARDS=${GSHARDS:-3}
+export HF_TOKEN=$HF_TOKEN
+GK
+  cat >> /root/gptqkeep.sh <<'GK2'
+if [ ! -s $HF/model.safetensors ]; then
+  rm -rf $HF $MLX
+  cd /root/work && PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python3 /root/work/gptq.py --base $HFM --data $QDATA --out-hf $HF --out-mlx $MLX ${GSKIP:+--skip $GSKIP} > /root/gptq_$GRUN.log 2>&1
+  grep -q GPTQ_DONE /root/gptq_$GRUN.log || { echo "GPTQ_ABORT $GRUN: $(grep -E 'Error|error' /root/gptq_$GRUN.log | tail -1 | cut -c1-200)"; exit 0; }
+  echo "[$GRUN] $(grep -E '^\[gptq\] (layer 27|lm_head)' /root/gptq_$GRUN.log | tail -1)"
+fi
+python3 /root/work/checkmlx.py $MLX $HF 2>&1 | tail -3 | tee /root/checkmlx_$GRUN.txt
+if grep -q MLX_CHECK_OK /root/checkmlx_$GRUN.txt; then
+  cp $PCK $MLX/pooler.safetensors
+  for try in 1 2 3; do hf upload $R $MLX pooler_distill/chatsft/${GSRC}_mlx4$GTAG >/dev/null 2>&1 && break; sleep 30; done
+  hf upload $R /root/gptq_$GRUN.log pooler_distill/chatsft/logs/gptq_$GRUN.log >/dev/null 2>&1
+  echo "GPTQ_UPLOADED $GRUN -> ${GSRC}_mlx4$GTAG $(date -u)"
+else
+  echo "GPTQ_PACK_FAILED $GRUN - not uploading"
+fi
+for i in $(seq 0 $((GSHARDS - 1))); do
+  [ -s /root/work/${GRUN}_out_$i.jsonl ] && [ "$(wc -l < /root/work/${GRUN}_out_$i.jsonl)" -ge "$GN" ] && continue
+  cd /root/work && SP_BASE=$HF SP_RANK=16 SP_NOSYS=1 SP_EPISODIC=1 OMP_NUM_THREADS=1 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python3 /root/work/pool_eval.py \
+    $PCK /root/work/ev_$i.jsonl /root/work/${GRUN}_out_$i.jsonl --n $GN --rw 768 --maxd 384 --samepage 1 --decode plain --temp 0.6 --gen 4000 --stop eos --replycap 600 --tag "[$GRUN$i]" >> /root/${GRUN}_$i.log 2>&1
+  hf upload $R /root/work/${GRUN}_out_$i.jsonl pooler_distill/chatsft/rollouts/${GRUN}_$i.jsonl >/dev/null 2>&1
+  echo "[$GRUN] shard $i $(tail -1 /root/${GRUN}_$i.log | cut -c1-120) | $(grep -h -m1 "pooler restored\|WARNING: no pooler" /root/${GRUN}_$i.log)"
+done
+python3 - "$GRUN" <<'PYS'
+import json, sys, glob
+rows = [json.loads(l) for f in sorted(glob.glob(f"/root/work/{sys.argv[1]}_out_*.jsonl")) for l in open(f) if l.strip()]
+n = len(rows); c = sum(1 for r in rows if r.get("correct")); g = sum(1 for r in rows if r.get("grounded")); s = sum(float(r.get("ns", 0) or 0) for r in rows)
+print(f"GPTQ_EVAL_DONE {sys.argv[1]}: correct {100*c/max(n,1):.1f}%  grounded {100*g/max(n,1):.0f}%  searches {s/max(n,1):.1f}  ({n} rollouts)")
+PYS
+GK2
+  chmod +x /root/gptqkeep.sh
+  setsid nohup bash -c 'bash /root/gptqkeep.sh 2>&1 | tee -a /root/quant.log' >> /proc/1/fd/1 2>&1 < /dev/null &
+  sleep 20; echo "GPTQ_LAUNCH_DONE $GRUN $(date -u)"
   exit 0
 fi
 if [ "$MODE" = "publish3" ]; then
