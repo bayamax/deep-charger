@@ -80,11 +80,11 @@ PSKIP=
 # The raw GitHub copy this box fetches can lag and hand a control run an OLDER version of this file (04:48 on 09-22 it
 # relaunched the online loop under the previous mode while the newer run was merging a checkpoint on the same card).
 # Every edit bumps BOXG_SERIAL; a run that sees a lower serial than one already executed stops here.
-BOXG_SERIAL=2026092642
+BOXG_SERIAL=2026092643
 if [ -f /root/.boxg_serial ] && [ "$(cat /root/.boxg_serial)" -gt "$BOXG_SERIAL" ] 2>/dev/null; then echo "BOXG_STALE $BOXG_SERIAL < $(cat /root/.boxg_serial)"; exit 0; fi
 echo $BOXG_SERIAL > /root/.boxg_serial
-MODE=gptq         # 2026-09-27: GPTQ of g14 onto the 4-bit grid (round-to-nearest loses ~10 points with or without the trained scales; embed/lm_head in float only buys 3)
-GRUN=gq14; GSRC=g14; GTAG=g
+MODE=reeval       # 2026-09-27: GPTQ 4-bit (gq14) measured 48.0% on 102 (bf16 52.0) - 100 x 3 to pin it to +-3
+RRUN=gq14; RMODEL=gq14; RKIND=gptqdir; RTEMP=0.6; RGEN=4000; RN=100; RSHARDS=3
 ORUN=g14          # 2026-09-26: distillation. The R1 thinking and answer of dolphin_v1 (minus the held-out hundred) as plain SFT, 8 records a step,
                   # one verified search trace at half weight beside them; no rollouts, no judge. Length is allowed to grow (up to ~1000 tokens is
                   # fine by the user); the yardsticks are the Dolphin held-out (85%) and the search held-out (40%) at 400 and at the epoch's end.
@@ -1231,6 +1231,10 @@ if [ "$MODE" = "reeval" ]; then
     # the directory is removed to make room for later arms; its state file rebuilds it
     [ -s $RHF/model.safetensors ] || { cd /root/work && python3 /root/work/dequant_state.py --base /root/reeval_hf_g14m --state /root/sft/$RMODEL.pt --out $RHF 2>&1 | tail -2; }
     [ -s $RHF/model.safetensors ] || { echo "REEVAL_ABORT $RRUN: $RHF is not on the box and could not be rebuilt"; exit 0; }
+  elif [ "${RKIND:-adapter}" = "gptqdir" ]; then
+    # a GPTQ run's dequantized directory on the box (RMODEL = its GRUN), with g14's pooler
+    RHF=/root/gptq_hf_$RMODEL; RCKPT=/root/reeval_g14m_pooler.safetensors
+    [ -s $RHF/model.safetensors ] || { echo "REEVAL_ABORT $RRUN: $RHF is not on the box"; exit 0; }
   elif [ "${RKIND:-adapter}" = "stock" ]; then
     # the untouched R1 distill the whole lineage started from: the reasoning ceiling before any of our training
     RHF=/root/base_distill; RCKPT=/root/pooler200.safetensors
