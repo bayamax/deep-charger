@@ -80,7 +80,7 @@ PSKIP=
 # The raw GitHub copy this box fetches can lag and hand a control run an OLDER version of this file (04:48 on 09-22 it
 # relaunched the online loop under the previous mode while the newer run was merging a checkpoint on the same card).
 # Every edit bumps BOXG_SERIAL; a run that sees a lower serial than one already executed stops here.
-BOXG_SERIAL=2026092646
+BOXG_SERIAL=2026092647
 if [ -f /root/.boxg_serial ] && [ "$(cat /root/.boxg_serial)" -gt "$BOXG_SERIAL" ] 2>/dev/null; then echo "BOXG_STALE $BOXG_SERIAL < $(cat /root/.boxg_serial)"; exit 0; fi
 echo $BOXG_SERIAL > /root/.boxg_serial
 MODE=quant        # 2026-09-27: GPTQ's codes kept, the grid's scales and biases trained on the lineage's traces on top (gq14 48.0% on 102, bf16 52.0%)
@@ -684,6 +684,9 @@ if [ "$MODE" = "quant" ]; then
     [ -s $HFM/model.safetensors ] || { echo "QUANT_ABORT $QRUN: merge of online/$QSRC failed"; exit 0; }
   fi
   QCODES=${QCODES:-}   # a gptq.py state: the grid's training starts from GPTQ's codes instead of round-to-nearest
+  if [ -n "$QCODES" ] && [ -s "$QCODES" ] && ! python3 -c "import torch,sys; torch.load(sys.argv[1], map_location='cpu')" $QCODES 2>/dev/null; then
+    echo "[quant] $QCODES is not readable (cut short by the disk) - made again"; rm -f $QCODES
+  fi
   if [ -n "$QCODES" ] && [ ! -s "$QCODES" ]; then
     [ -s /root/work/qcal_q14.jsonl ] || { echo "QUANT_ABORT $QRUN: no calibration traces for the GPTQ state"; exit 0; }
     rm -f $QCODES
