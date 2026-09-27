@@ -80,11 +80,11 @@ PSKIP=
 # The raw GitHub copy this box fetches can lag and hand a control run an OLDER version of this file (04:48 on 09-22 it
 # relaunched the online loop under the previous mode while the newer run was merging a checkpoint on the same card).
 # Every edit bumps BOXG_SERIAL; a run that sees a lower serial than one already executed stops here.
-BOXG_SERIAL=2026092636
+BOXG_SERIAL=2026092637
 if [ -f /root/.boxg_serial ] && [ "$(cat /root/.boxg_serial)" -gt "$BOXG_SERIAL" ] 2>/dev/null; then echo "BOXG_STALE $BOXG_SERIAL < $(cat /root/.boxg_serial)"; exit 0; fi
 echo $BOXG_SERIAL > /root/.boxg_serial
-MODE=reeval       # 2026-09-27: q14d (4-bit, g14's own pooler) passed its screen (shard 0: 55.9%; bf16 with the same pooler 50.0%) - the other two shards
-RRUN=q14d; RMODEL=q14d; RKIND=sftdir; RTEMP=0.6; RGEN=4000; RN=34; RSHARDS=3
+MODE=reeval       # 2026-09-27: where the 4-bit loss lives - g14 quantized at load with embed_tokens and lm_head left in float (q14d: 42.2% on 102, bf16 52.0%, both with g14's pooler)
+RRUN=g14q4s; RMODEL=g14m_hf; RKIND=dir; RQ4=1; RQ4SKIP=embed_tokens,lm_head; RTEMP=0.6; RGEN=4000; RN=34; RSHARDS=3
 ORUN=g14          # 2026-09-26: distillation. The R1 thinking and answer of dolphin_v1 (minus the held-out hundred) as plain SFT, 8 records a step,
                   # one verified search trace at half weight beside them; no rollouts, no judge. Length is allowed to grow (up to ~1000 tokens is
                   # fine by the user); the yardsticks are the Dolphin held-out (85%) and the search held-out (40%) at 400 and at the epoch's end.
@@ -1250,14 +1250,14 @@ PYG
   [ -s /root/hfdl/pooler_distill/chat_eval60.jsonl ] || hf download $R --include "pooler_distill/chat_eval60.jsonl" --local-dir /root/hfdl 2>&1 | tail -1
   cat > /root/reevalkeep.sh <<RK
 #!/bin/bash
-RRUN=$RRUN; RHF=$RHF; R=$R; RCKPT=$RCKPT; RQSRC=${RQSRC:-}; RHINT=${RHINT:-}; RFAST=${RFAST:-1}; RB=${RB:-12}; RLOOP=${RLOOP:-}; RBUDGET=${RBUDGET:-2400}; RSHARDS=${RSHARDS:-3}; RTEMP=${RTEMP:-0.9}; RCAP=${RCAP:-600}; RGEN=${RGEN:-1500}; RN=${RN:-999}; RQ4=${RQ4:-}; RQ4SKIP=${RQ4SKIP:-}; RLOCAL=${RLOCAL:-}; RLOCALK=${RLOCALK:-1}; RLOCALCHARS=${RLOCALCHARS:-0}
+RRUN=$RRUN; RHF=$RHF; R=$R; RCKPT=$RCKPT; RQSRC=${RQSRC:-}; RHINT=${RHINT:-}; RFAST=${RFAST:-1}; RB=${RB:-12}; RLOOP=${RLOOP:-}; RBUDGET=${RBUDGET:-2400}; RSHARDS=${RSHARDS:-3}; RTEMP=${RTEMP:-0.9}; RCAP=${RCAP:-600}; RGEN=${RGEN:-1500}; RN=${RN:-999}; RQ4=${RQ4:-}; RQ4SKIP=${RQ4SKIP:-}; RQ4BITS=${RQ4BITS:-4}; RLOCAL=${RLOCAL:-}; RLOCALK=${RLOCALK:-1}; RLOCALCHARS=${RLOCALCHARS:-0}
 RK
   cat >> /root/reevalkeep.sh <<'RKB'
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null)
 run_one() {  # $1 questions file, $2 out file, $3 tag
   want=$(wc -l < "$1"); [ "${RN:-999}" -lt "$want" ] && want=${RN:-999}
   [ -s "$2" ] && [ "$(wc -l < "$2")" -ge "$want" ] && return 0
-  cd /root/work && env ${RLOCAL:+SP_LOCAL_STORE=/root/wiki_store SP_LOCAL_MODEL=/root/bge-small SP_LOCAL_GPU=1 SP_LOCAL_K=${RLOCALK:-1} SP_LOCAL_CHARS=${RLOCALCHARS:-0}} SP_BASE=$RHF SP_RANK=16 SP_NOSYS=1 SP_EPISODIC=1 OMP_NUM_THREADS=1 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python3 /root/work/pool_eval.py     $RCKPT "$1" "$2" --n $RN --rw 768 --maxd 384 --samepage 1 --decode plain --temp $RTEMP --gen $RGEN --stop eos --replycap $RCAP ${RQ4:+--q4 $RQ4 --q4skip "${RQ4SKIP:-}"} --tag "[$3]" >> /root/${RRUN}_$3.log 2>&1
+  cd /root/work && env ${RLOCAL:+SP_LOCAL_STORE=/root/wiki_store SP_LOCAL_MODEL=/root/bge-small SP_LOCAL_GPU=1 SP_LOCAL_K=${RLOCALK:-1} SP_LOCAL_CHARS=${RLOCALCHARS:-0}} SP_BASE=$RHF SP_RANK=16 SP_NOSYS=1 SP_EPISODIC=1 OMP_NUM_THREADS=1 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python3 /root/work/pool_eval.py     $RCKPT "$1" "$2" --n $RN --rw 768 --maxd 384 --samepage 1 --decode plain --temp $RTEMP --gen $RGEN --stop eos --replycap $RCAP ${RQ4:+--q4 $RQ4 --q4skip "${RQ4SKIP:-}" --q4bits ${RQ4BITS:-4}} --tag "[$3]" >> /root/${RRUN}_$3.log 2>&1
   [ -s "$2" ] && [ "$(wc -l < "$2")" -ge "$want" ] || { echo "REEVAL_ABORT $RRUN at $3: $(tail -1 /root/${RRUN}_$3.log | cut -c1-100)"; exit 1; }
   echo "[$RRUN] $3: $(grep -h -m1 "pooler restored\|WARNING: no pooler" /root/${RRUN}_$3.log)"
 }
