@@ -80,11 +80,11 @@ PSKIP=
 # The raw GitHub copy this box fetches can lag and hand a control run an OLDER version of this file (04:48 on 09-22 it
 # relaunched the online loop under the previous mode while the newer run was merging a checkpoint on the same card).
 # Every edit bumps BOXG_SERIAL; a run that sees a lower serial than one already executed stops here.
-BOXG_SERIAL=2026092638
+BOXG_SERIAL=2026092639
 if [ -f /root/.boxg_serial ] && [ "$(cat /root/.boxg_serial)" -gt "$BOXG_SERIAL" ] 2>/dev/null; then echo "BOXG_STALE $BOXG_SERIAL < $(cat /root/.boxg_serial)"; exit 0; fi
 echo $BOXG_SERIAL > /root/.boxg_serial
-MODE=reeval       # 2026-09-27: where the 4-bit loss lives - g14 quantized at load with embed_tokens and lm_head left in float (q14d: 42.2% on 102, bf16 52.0%, both with g14's pooler)
-RRUN=g14q4s; RMODEL=g14m_hf; RKIND=dir; RQ4=1; RQ4SKIP=embed_tokens,lm_head; RTEMP=0.6; RGEN=4000; RN=34; RSHARDS=3
+MODE=reeval       # 2026-09-27: 6-bit everywhere, untrained, g14's pooler (4-bit untrained + trained arms lose ~10 points)
+RRUN=g14q6; RMODEL=g14m_hf; RKIND=dir; RQ4=1; RQ4BITS=6; RTEMP=0.6; RGEN=4000; RN=34; RSHARDS=3
 ORUN=g14          # 2026-09-26: distillation. The R1 thinking and answer of dolphin_v1 (minus the held-out hundred) as plain SFT, 8 records a step,
                   # one verified search trace at half weight beside them; no rollouts, no judge. Length is allowed to grow (up to ~1000 tokens is
                   # fine by the user); the yardsticks are the Dolphin held-out (85%) and the search held-out (40%) at 400 and at the epoch's end.
