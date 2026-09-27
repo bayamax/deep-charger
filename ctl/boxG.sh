@@ -80,11 +80,11 @@ PSKIP=
 # The raw GitHub copy this box fetches can lag and hand a control run an OLDER version of this file (04:48 on 09-22 it
 # relaunched the online loop under the previous mode while the newer run was merging a checkpoint on the same card).
 # Every edit bumps BOXG_SERIAL; a run that sees a lower serial than one already executed stops here.
-BOXG_SERIAL=2026092651
+BOXG_SERIAL=2026092652
 if [ -f /root/.boxg_serial ] && [ "$(cat /root/.boxg_serial)" -gt "$BOXG_SERIAL" ] 2>/dev/null; then echo "BOXG_STALE $BOXG_SERIAL < $(cat /root/.boxg_serial)"; exit 0; fi
 echo $BOXG_SERIAL > /root/.boxg_serial
-MODE=reeval       # 2026-09-27: q14g (GPTQ codes + trained grid) passed its screen (shard 0: 52.9%; bf16 50.0) - the other two shards first, the bf16 300 resumes after
-RRUN=q14g; RMODEL=q14g; RKIND=sftdir; RTEMP=0.6; RGEN=4000; RN=34; RSHARDS=3
+MODE=reeval       # 2026-09-27: q14g again on all three shards - its directory had been rebuilt with round-to-nearest codes under GPTQ-trained scales (no searches, 0%)
+RRUN=q14gx; RMODEL=q14g; RKIND=sftdir; RTEMP=0.6; RGEN=4000; RN=34; RSHARDS=3
 ORUN=g14          # 2026-09-26: distillation. The R1 thinking and answer of dolphin_v1 (minus the held-out hundred) as plain SFT, 8 records a step,
                   # one verified search trace at half weight beside them; no rollouts, no judge. Length is allowed to grow (up to ~1000 tokens is
                   # fine by the user); the yardsticks are the Dolphin held-out (85%) and the search held-out (40%) at 400 and at the epoch's end.
@@ -696,6 +696,7 @@ if [ "$MODE" = "quant" ]; then
     [ -s "$QCODES" ] || { echo "QUANT_ABORT $QRUN: the GPTQ state was not made: $(grep -E 'Error' /root/gptq_state.log | tail -1 | cut -c1-160)"; exit 0; }
     echo "[quant] GPTQ state made: $QCODES"
   fi
+  mkdir -p /root/sft; [ -n "$QCODES" ] && echo "$QCODES" > /root/sft/$QRUN.codes   # a rebuild of the directory must use the same codes
   QDATA=/root/work/qcal_$QRUN.jsonl
   [ -s /root/online_g10/rollouts.jsonl ] || hf download $R --include "pooler_distill/chatsft/online/g10/rollouts.jsonl" --local-dir /root/hfdl >/dev/null 2>&1
   python3 - "$QDATA" "$HFM" <<'PYQ'
@@ -1241,8 +1242,11 @@ if [ "$MODE" = "reeval" ]; then
     # a quant arm's dequantized directory on the box (RMODEL = its QRUN), with its pooler: the way a screened arm gets more shards
     RHF=/root/sft_hf_$RMODEL; RCKPT=/root/reeval_g14m_pooler.safetensors
     [ -s /root/pooler_eval_$RMODEL.safetensors ] && RCKPT=/root/pooler_eval_$RMODEL.safetensors
-    # the directory is removed to make room for later arms; its state file rebuilds it
-    [ -s $RHF/model.safetensors ] || { cd /root/work && python3 /root/work/dequant_state.py --base /root/reeval_hf_g14m --state /root/sft/$RMODEL.pt --out $RHF 2>&1 | tail -2; }
+    # the directory is removed to make room for later arms; its state file rebuilds it - with the run's codes when it did not round the base
+    [ "$RMODEL" = q14g ] && [ ! -f /root/sft/q14g.codes ] && echo /root/gptq_state_gq14.pt > /root/sft/q14g.codes
+    RCODES=$(cat /root/sft/$RMODEL.codes 2>/dev/null)
+    if [ -n "$RCODES" ] && [ -s $RHF/model.safetensors ] && [ ! -f $RHF/.codes_ok ]; then echo "[reeval] $RHF was rebuilt without its codes - rebuilt again"; rm -rf $RHF; fi
+    [ -s $RHF/model.safetensors ] || { cd /root/work && python3 /root/work/dequant_state.py --base /root/reeval_hf_g14m --state /root/sft/$RMODEL.pt --out $RHF ${RCODES:+--codes-from $RCODES} 2>&1 | tail -2; [ -n "$RCODES" ] && [ -s $RHF/model.safetensors ] && touch $RHF/.codes_ok; }
     [ -s $RHF/model.safetensors ] || { echo "REEVAL_ABORT $RRUN: $RHF is not on the box and could not be rebuilt"; exit 0; }
   elif [ "${RKIND:-adapter}" = "gptqdir" ]; then
     # a GPTQ run's dequantized directory on the box (RMODEL = its GRUN), with g14's pooler
