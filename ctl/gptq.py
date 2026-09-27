@@ -35,6 +35,7 @@ ap.add_argument("--group", type=int, default=64); ap.add_argument("--bits", type
 ap.add_argument("--block", type=int, default=128); ap.add_argument("--damp", type=float, default=0.01)
 ap.add_argument("--batch", type=int, default=8); ap.add_argument("--seed", type=int, default=0)
 ap.add_argument("--skip", default="", help="comma-separated leaf modules left in float (e.g. embed_tokens,lm_head)")
+ap.add_argument("--state", default="", help="also save {name: (codes, scales, biases)} here, for jointfit --codes-from and packmlx --codes-from")
 A = ap.parse_args()
 random.seed(A.seed); torch.manual_seed(A.seed)
 DEV = "cuda"
@@ -241,4 +242,7 @@ cfg["quantization"] = cfg["quantization_config"] = {"group_size": A.group, "bits
 cfg["torch_dtype"] = "float16"
 json.dump(cfg, open(os.path.join(A.out_mlx, "config.json"), "w"), indent=2)
 print(f"[out] {A.out_mlx}: packed", flush=True)
+if A.state:
+    torch.save({"q": {k: (c, s_, b_) for k, (c, s_, b_) in PACK.items()}, "group": A.group, "bits": A.bits}, A.state)
+    print(f"[out] {A.state}: codes of {len(PACK)} tensors", flush=True)
 print("GPTQ_DONE", flush=True)

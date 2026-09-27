@@ -20,6 +20,7 @@ ap = argparse.ArgumentParser()
 ap.add_argument("--base", default="/root/eval_hf200"); ap.add_argument("--hf", required=True)
 ap.add_argument("--state", required=True); ap.add_argument("--out", required=True)
 ap.add_argument("--group", type=int, default=64); ap.add_argument("--bits", type=int, default=4)
+ap.add_argument("--codes-from", default="", help="a gptq.py state: the run started from these codes, not from rounding the base")
 A = ap.parse_args()
 
 
@@ -31,6 +32,7 @@ DEV = "cuda" if torch.cuda.is_available() else "cpu"
 base = load_file(os.path.join(A.base, "model.safetensors"))
 sd = load_file(os.path.join(A.hf, "model.safetensors"))
 st = torch.load(A.state, map_location="cpu")
+CODES = torch.load(A.codes_from, map_location="cpu")["q"] if A.codes_from else None
 print(f"[pack] state from step {st.get('step')} val {st.get('val'):.4f}: {len(st['q'])} quantized tensors")
 mx, quant = {}, set()
 shifts = torch.arange(0, 32, A.bits, dtype=torch.int64)
@@ -42,8 +44,11 @@ with torch.no_grad():
         w = base[k].float().to(DEV)
         # the run computed its codes on the card; do the same, then settle any element that a
         # rounding tie put one step away from the measured value
-        q, _, _ = q4.affine_params(w, A.group, A.bits)
         rows = w.shape[0]
+        if CODES is not None and k in CODES:
+            q = CODES[k][0].reshape(rows, -1, A.group).float().to(DEV)
+        else:
+            q, _, _ = q4.affine_params(w, A.group, A.bits)
         # the run rounded the trained parameters to fp16 before writing the measured directory
         s_ = s_.to(DEV).to(torch.float16).float().reshape(rows, -1)
         b_ = b_.to(DEV).to(torch.float16).float().reshape(rows, -1)

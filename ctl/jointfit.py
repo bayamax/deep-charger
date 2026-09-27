@@ -38,6 +38,7 @@ ap.add_argument("--group", type=int, default=64); ap.add_argument("--bits", type
 ap.add_argument("--clip-search", type=int, default=1); ap.add_argument("--policy-only", type=int, default=1)
 ap.add_argument("--gen", type=int, default=1500); ap.add_argument("--seed", type=int, default=0)
 ap.add_argument("--selftest", type=int, default=0)
+ap.add_argument("--codes-from", default="", help="a gptq.py state: start from its codes, scales and biases instead of rounding the base to nearest")
 ap.add_argument("--objective", default="kl", choices=["kl", "ce"],
                 help="kl: match the bf16 system's logits; ce: reproduce the trace's own tokens (use with traces that scored)")
 A = ap.parse_args()
@@ -107,11 +108,23 @@ class Dequant(torch.autograd.Function):
         return None, gs, gb, None
 
 
+CODES = torch.load(A.codes_from, map_location="cpu")["q"] if A.codes_from else None
+
+
+def _plain(n):
+    return n.replace("base_model.model.", "").replace(".base_layer", "") + ".weight"
+
+
 class QTensor:
     def __init__(self, name, w, keep_orig=True):
         self.name, self.shape, self.dtype = name, tuple(w.shape), w.dtype
-        f = q4.clipped_affine_params if A.clip_search else q4.affine_params
-        q, s, b = f(w.detach().float(), A.group, A.bits)
+        if CODES is not None and _plain(name) in CODES:
+            c, s, b = CODES[_plain(name)]                          # GPTQ's codes: kept as they are, only the grid moves
+            rows = w.shape[0]
+            q = c.reshape(rows, -1, A.group).float().to(DEV); s = s.reshape(rows, -1, 1).float(); b = b.reshape(rows, -1, 1).float()
+        else:
+            f = q4.clipped_affine_params if A.clip_search else q4.affine_params
+            q, s, b = f(w.detach().float(), A.group, A.bits)
         self.codes = q.to(torch.uint8)
         self.scales = s.to(DEV).float().requires_grad_(True)
         self.biases = b.to(DEV).float().requires_grad_(True)
@@ -146,6 +159,8 @@ if A.objective == "ce" and DEV == "cuda":
         _lyr.forward = _wrapped
     print("[joint] decoder layers checkpointed", flush=True)
 pp = list(pooler.parameters())
+if CODES is not None:
+    print(f"[joint] codes from {A.codes_from}: {sum(1 for n in QS if _plain(n) in CODES)} of {len(QS)} tensors", flush=True)
 print(f"[joint] {len(QS)} quantized tensors ({sum(p.numel() for p in qp)/1e6:.1f}M scale/bias) + "
       f"pooler ({sum(p.numel() for p in pp)/1e6:.2f}M)", flush=True)
 if DEV == "cuda":

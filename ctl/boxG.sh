@@ -80,7 +80,7 @@ PSKIP=
 # The raw GitHub copy this box fetches can lag and hand a control run an OLDER version of this file (04:48 on 09-22 it
 # relaunched the online loop under the previous mode while the newer run was merging a checkpoint on the same card).
 # Every edit bumps BOXG_SERIAL; a run that sees a lower serial than one already executed stops here.
-BOXG_SERIAL=2026092643
+BOXG_SERIAL=2026092644
 if [ -f /root/.boxg_serial ] && [ "$(cat /root/.boxg_serial)" -gt "$BOXG_SERIAL" ] 2>/dev/null; then echo "BOXG_STALE $BOXG_SERIAL < $(cat /root/.boxg_serial)"; exit 0; fi
 echo $BOXG_SERIAL > /root/.boxg_serial
 MODE=reeval       # 2026-09-27: GPTQ 4-bit (gq14) measured 48.0% on 102 (bf16 52.0) - 100 x 3 to pin it to +-3
@@ -683,6 +683,14 @@ if [ "$MODE" = "quant" ]; then
     cd /root/work && SP_BASE=$MB SP_NOSYS=1 SP_EPISODIC=1 OMP_NUM_THREADS=1 python3 /root/work/build_merged.py $SRC $HFM $PCK 16 $QLAYERS 2>&1 | grep -E "^\[merge\]|MERGE_DONE|Error|assert|unexpected" | tail -4
     [ -s $HFM/model.safetensors ] || { echo "QUANT_ABORT $QRUN: merge of online/$QSRC failed"; exit 0; }
   fi
+  QCODES=${QCODES:-}   # a gptq.py state: the grid's training starts from GPTQ's codes instead of round-to-nearest
+  if [ -n "$QCODES" ] && [ ! -s "$QCODES" ]; then
+    [ -s /root/work/qcal_q14.jsonl ] || { echo "QUANT_ABORT $QRUN: no calibration traces for the GPTQ state"; exit 0; }
+    cd /root/work && PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python3 /root/work/gptq.py --base $HFM --data /root/work/qcal_q14.jsonl --out-hf /root/gptq_hf_tmp --out-mlx /root/gptq_mlx4_tmp --state $QCODES > /root/gptq_state.log 2>&1
+    rm -rf /root/gptq_hf_tmp /root/gptq_mlx4_tmp
+    [ -s "$QCODES" ] || { echo "QUANT_ABORT $QRUN: the GPTQ state was not made: $(grep -E 'Error' /root/gptq_state.log | tail -1 | cut -c1-160)"; exit 0; }
+    echo "[quant] GPTQ state made: $QCODES"
+  fi
   QDATA=/root/work/qcal_$QRUN.jsonl
   [ -s /root/online_g10/rollouts.jsonl ] || hf download $R --include "pooler_distill/chatsft/online/g10/rollouts.jsonl" --local-dir /root/hfdl >/dev/null 2>&1
   python3 - "$QDATA" "$HFM" <<'PYQ'
@@ -731,18 +739,18 @@ PYQ
     rm -f $LOG
     cd /root/work && SP_BASE=$HFM PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python3 /root/work/jointfit.py \
       --ckpt $PCK --data $QDATA --objective ce --out-hf $HF --out-mlx $MLX --out-pooler /root/pooler_sft_$QRUN.safetensors \
-      --state /root/sft/$QRUN.pt --log $LOG --clip-search 0 --lr-q ${QLRQ:-2e-6} --lr-p ${QLRP:-0} --val 8 --val-every 2 --selftest 3 2>&1 | tail -8
+      --state /root/sft/$QRUN.pt --log $LOG --clip-search 0 --lr-q ${QLRQ:-2e-6} --lr-p ${QLRP:-0} ${QCODES:+--codes-from $QCODES} --val 8 --val-every 2 --selftest 3 2>&1 | tail -8
     grep -q "^step 3 " $LOG 2>/dev/null || { echo "QUANT_ABORT $QRUN: selftest failed"; exit 0; }
     rm -f $LOG
     cd /root/work && SP_BASE=$HFM PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True setsid nohup python3 /root/work/jointfit.py \
       --ckpt $PCK --data $QDATA --objective ce --out-hf $HF --out-mlx $MLX --out-pooler /root/pooler_sft_$QRUN.safetensors \
-      --state /root/sft/$QRUN.pt --log $LOG --clip-search 0 --lr-q ${QLRQ:-2e-6} --lr-p ${QLRP:-0} --steps ${QSTEPS:-1500} --val 24 --val-every ${QVAL:-50} \
+      --state /root/sft/$QRUN.pt --log $LOG --clip-search 0 --lr-q ${QLRQ:-2e-6} --lr-p ${QLRP:-0} ${QCODES:+--codes-from $QCODES} --steps ${QSTEPS:-1500} --val 24 --val-every ${QVAL:-50} \
       >> /root/sft_run_$QRUN.log 2>&1 < /dev/null &
     sleep 20
   fi
   cat > /root/quantkeep.sh <<QKP
 #!/bin/bash
-QRUN=$QRUN; HF=$HF; HFM=$HFM; PCK=$PCK; MLX=$MLX; R=$R; QSRC=$QSRC; QTAG=$QTAG; QLRP=${QLRP:-0}; QTEMP=${QTEMP:-0.6}; QGEN=${QGEN:-4000}; QN=${QN:-34}; QSHARDS=${QSHARDS:-1}
+QRUN=$QRUN; HF=$HF; HFM=$HFM; PCK=$PCK; MLX=$MLX; R=$R; QSRC=$QSRC; QTAG=$QTAG; QLRP=${QLRP:-0}; QCODES=$QCODES; QTEMP=${QTEMP:-0.6}; QGEN=${QGEN:-4000}; QN=${QN:-34}; QSHARDS=${QSHARDS:-1}
 export HF_TOKEN=$HF_TOKEN
 QKP
   cat >> /root/quantkeep.sh <<'QKP2'
@@ -764,7 +772,7 @@ PYP
   PCK=/root/pooler_eval_$QRUN.safetensors
 fi
 if [ ! -s $MLX/model.safetensors ] || ! grep -q MLX_CHECK_OK /root/checkmlx_$QRUN.txt 2>/dev/null; then
-  cd /root/work && python3 /root/work/packmlx.py --base $HFM --hf $HF --state /root/sft/$QRUN.pt --out $MLX 2>&1 | tail -3
+  cd /root/work && python3 /root/work/packmlx.py --base $HFM --hf $HF --state /root/sft/$QRUN.pt --out $MLX ${QCODES:+--codes-from $QCODES} 2>&1 | tail -3
   python3 /root/work/checkmlx.py $MLX $HF 2>&1 | tail -4 | tee /root/checkmlx_$QRUN.txt
 fi
 if grep -q MLX_CHECK_OK /root/checkmlx_$QRUN.txt; then
@@ -823,7 +831,7 @@ GK
   cat >> /root/gptqkeep.sh <<'GK2'
 if [ ! -s $HF/model.safetensors ]; then
   rm -rf $HF $MLX
-  cd /root/work && PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python3 /root/work/gptq.py --base $HFM --data $QDATA --out-hf $HF --out-mlx $MLX ${GSKIP:+--skip $GSKIP} > /root/gptq_$GRUN.log 2>&1
+  cd /root/work && PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python3 /root/work/gptq.py --base $HFM --data $QDATA --out-hf $HF --out-mlx $MLX --state /root/gptq_state_$GRUN.pt ${GSKIP:+--skip $GSKIP} > /root/gptq_$GRUN.log 2>&1
   grep -q GPTQ_DONE /root/gptq_$GRUN.log || { echo "GPTQ_ABORT $GRUN: $(grep -E 'Error|error' /root/gptq_$GRUN.log | tail -1 | cut -c1-200)"; exit 0; }
   echo "[$GRUN] $(grep -E '^\[gptq\] (layer 27|lm_head)' /root/gptq_$GRUN.log | tail -1)"
 fi
