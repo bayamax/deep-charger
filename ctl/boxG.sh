@@ -80,7 +80,7 @@ PSKIP=
 # The raw GitHub copy this box fetches can lag and hand a control run an OLDER version of this file (04:48 on 09-22 it
 # relaunched the online loop under the previous mode while the newer run was merging a checkpoint on the same card).
 # Every edit bumps BOXG_SERIAL; a run that sees a lower serial than one already executed stops here.
-BOXG_SERIAL=2026092626
+BOXG_SERIAL=2026092627
 if [ -f /root/.boxg_serial ] && [ "$(cat /root/.boxg_serial)" -gt "$BOXG_SERIAL" ] 2>/dev/null; then echo "BOXG_STALE $BOXG_SERIAL < $(cat /root/.boxg_serial)"; exit 0; fi
 echo $BOXG_SERIAL > /root/.boxg_serial
 MODE=quant        # 2026-09-26 night: a second 4-bit arm of g14 - the same recipe for 4000 steps (q14's validation was still falling at 1400; q14 41.2%, untrained 39.2%, bf16 48.0%)
@@ -156,7 +156,7 @@ OSEARCHGEN=1500   # and capped as it capped them; the reasoning side keeps OGEN
 OTEMP=0.6
 SHARDS=3
 RAW="https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl"
-for f in pool_eval.py q4.py qat.py dwq.py poolerfit.py jointfit.py checkmlx.py packmlx.py sft_lora.py selfgen_gpu.py build_merged.py web_search.py grpo_pool.py online_loop.py; do
+for f in pool_eval.py q4.py qat.py dwq.py poolerfit.py jointfit.py checkmlx.py packmlx.py dequant_state.py sft_lora.py selfgen_gpu.py build_merged.py web_search.py grpo_pool.py online_loop.py; do
   for try in 1 2 3; do curl -sS -o /root/work/$f "$RAW/$f?nocache=$(date +%s)" && python3 -m py_compile /root/work/$f && break; sleep 5; done
 done
 cp /root/work/web_search.py /root/work/runtime/web_search.py 2>/dev/null
@@ -655,9 +655,16 @@ if [ "$MODE" = "quant" ]; then
   # plus the replay pool, both in the chat-era format, held-out questions removed.
   QRUN=${QRUN:-q14}; QSRC=${QSRC:-g14}; QBASE=${QBASE:-g10m_hf}; QLAYERS=${QLAYERS:-all}; QTAG=${QTAG:-}   # QTAG names a second arm's hub directories
   export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); R=baya1116/hypernet-sp-distill
-  if pgrep -f "quantkee[p].sh" >/dev/null && grep -q "^QRUN=$QRUN;" /root/quantkeep.sh 2>/dev/null; then echo "QUANT_SKIP: $QRUN is already running"; exit 0; fi
+  HF=/root/sft_hf_$QRUN; LOG=/root/sft_$QRUN.log; MLX=/root/sft_mlx4_$QRUN
+  # a keeper for this run is left alone while its training runs or its model directory exists; a keeper waiting on a
+  # training that died (the disk filled up as q14b wrote its directory) is replaced
+  if pgrep -f "quantkee[p].sh" >/dev/null && grep -q "^QRUN=$QRUN;" /root/quantkeep.sh 2>/dev/null && { pgrep -f "jointfit.p[y]" >/dev/null || [ -s $HF/model.safetensors ]; }; then echo "QUANT_SKIP: $QRUN is already running"; exit 0; fi
   pkill -f "onlinekee[p].sh"; pkill -f "reevalkee[p].sh"; pkill -f "quantkee[p].sh"; pkill -f "online_loop.p[y]"; pkill -f "pool_eval.p[y]"; pkill -f "jointfit.p[y]"; sleep 8
   pkill -9 -f "online_loop.p[y]" 2>/dev/null; pkill -9 -f "pool_eval.p[y]" 2>/dev/null; sleep 2
+  # room for the run's outputs (a dequantized directory is 3.5 GB): earlier arms' directories are on the hub packed
+  rm -rf /root/evalrun_* /root/wikidl /root/hfdl/pooler_distill/chatsft/online/*/latest.safetensors
+  for d in /root/sft_hf_q*; do [ -d "$d" ] && [ "$d" != "$HF" ] && grep -q "QUANT_UPLOADED $(basename $d | sed 's/sft_hf_//') " /root/quant.log 2>/dev/null && rm -rf "$d"; done
+  echo "[disk] $(df -h /root | awk 'NR==2{print $4" free"}')"
   MB=/root/hfdl/pooler_distill/chatsft/$QBASE; HFM=/root/reeval_hf_${QSRC}m; PCK=/root/reeval_${QSRC}m_pooler.safetensors
   if [ ! -s $HFM/model.safetensors ] || [ ! -s $PCK ]; then
     [ -s $MB/model.safetensors ] || hf download $R --include "pooler_distill/chatsft/$QBASE/*" --local-dir /root/hfdl >/dev/null 2>&1
@@ -711,7 +718,10 @@ with open(out, "w") as o:
 print(f"[quant data] {len(rows)} traces: {n_g} scored search-GRPO rollouts + {n_r} replay traces; held-out questions excluded")
 PYQ
   [ -s $QDATA ] || { echo "QUANT_ABORT $QRUN: no calibration traces"; exit 0; }
-  HF=/root/sft_hf_$QRUN; LOG=/root/sft_$QRUN.log; MLX=/root/sft_mlx4_$QRUN
+  if [ ! -s $HF/model.safetensors ] && [ -s /root/sft/$QRUN.pt ] && grep -q "^step ${QSTEPS:-1500} " $LOG 2>/dev/null; then
+    # the training finished but its directory was never written: rebuild it from the state
+    cd /root/work && python3 /root/work/dequant_state.py --base $HFM --state /root/sft/$QRUN.pt --out $HF 2>&1 | tail -3 | tee -a /root/sft_run_$QRUN.log
+  fi
   if [ ! -s $HF/model.safetensors ]; then
     rm -f $LOG
     cd /root/work && SP_BASE=$HFM PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python3 /root/work/jointfit.py \
