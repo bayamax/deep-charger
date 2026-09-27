@@ -207,3 +207,24 @@ back to the float model's level (59% -> 69%) and correctness up two points, with
 limit: 2126 traces against 1431 on the old lineage but in a longer format, one pass, validation still
 falling at step 1400. More steps, a second pass over fresh g14 rollouts, or 8-bit for the embedding table
 and lm_head (the two largest-error tensors) are the next things to measure, each an 80-minute arm.
+
+### The pooler that was never loaded (2026-09-27)
+
+`pool_eval.py` and `jointfit.py` restored a pooler only from `pooler.`-prefixed keys; `build_merged.py` and
+the published directories write bare keys. So every held-out number above, and every quant arm, ran with
+the harness's own `fft_out/pooler.pt`, never with the GRPO-trained pooler the app ships. Both loaders now
+take bare keys and say which pooler they restored. The first measurements with g14's own pooler:
+
+| arm | pooler | correct | grounded | searches | rollouts |
+|---|---|---|---|---|---|
+| bf16 | fft | 48.0% | 71% | 3.5 | 102 (58.8 / 38.2 / 47.1) |
+| bf16 | **g14's own** | **52.0%** | 67% | 4.3 | 102 (50.0 / 58.8 / 47.1) |
+| 4-bit q14b (4000 steps, fft) | fft | 47.1% | 68% | 10.5 | 34 (shard 0) |
+| 4-bit q14c (grid + pooler trained from fft) | fft | 50.0% | 76% | 1.9 | 34 (shard 0) |
+| 4-bit q14c | its trained pooler | 41.2% | 65% | 14.6 | 34 (shard 0) |
+
+The trained pooler is worth about four points to the float model (within the instrument's noise, but the
+app's combination is the best number this held-out has given), and a pooler trained inside jointfit from
+the fft one is not. The 4-bit arm that matters is therefore one trained and measured with g14's own
+pooler: q14d (the q14b recipe, 4000 steps) is that arm; the untrained 4-bit with the same pooler is its
+baseline, and the target is within four points of 52.0%.
