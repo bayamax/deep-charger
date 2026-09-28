@@ -198,3 +198,20 @@ BM25; grid and a listwise linear fit): 62.2% → 63-65% top-1 on the 400 test qu
 features reaches it more often than about 64%. Pulling the query's sentence forward in the served text was
 also measured and dropped: in only 3 of the 300 local rollouts did the page carry the answer beyond the
 block the model read.
+
+## The link graph as a stand-in for whole-article search (2026-09-28, measured and dropped)
+
+Wikipedia's search reaches the answer's own page because that page's body mentions the question's
+subject; in Wikipedia that mention is nearly always a link. `links_build.py` streamed the page,
+linktarget and pagelinks dumps (20260901, 10 GB) into an inlink index over the store: 489M links
+between store articles, 462M kept at 4,000 inlinks per target, 1.85 GB as int32. A link channel in
+`search.py` (`SP_LOCAL_LINKS`): the titles the query names, their inlink sources, intersected with a
+wide lexical hit list, put ahead of the candidates.
+
+On the 400 test queries the channel fires for 234; Wikipedia's page is reachable *only* through it for
+48 (12%) and an answer-bearing page sits in its top 32 for 136. The ranking then chose none of them: the
+same page as Wikipedia 40.2% (unchanged), answer-bearing top-1 62.2 / 61.9%. As a ranking feature
+("links to a page the query names") it hurts at any weight (11 of 64 candidates carry it per query;
+answer@1 60.2% at 0.1, 55.6% at 0.2), and the grid on 1,200 training queries sets it to zero. The gap to
+Wikipedia's search is not which pages are reachable but which of the reachable ones is chosen, and that
+choice is not a function of the features a lexical-plus-cosine ranker sees. The index is not shipped.
