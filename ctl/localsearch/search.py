@@ -25,7 +25,7 @@ DIM = 384
 QUERY_PREFIX = "Represent this sentence for searching relevant passages: "
 UNPACK = (np.unpackbits(np.arange(256, dtype=np.uint8)[:, None], axis=1).astype(np.int8) * 2 - 1)   # byte -> 8 signs
 UNPACK_T = None
-W_TITLE, W_BODY, W_BM25 = 0.4, 0.2, 0.2   # ranking weights from the shard-0 grid (top-1 57-59%, top-3 ~71% against Wikipedia's page)
+W_TITLE, W_BODY, W_BM25, W_FULL = 0.2, 0.4, 0.0, 0.2   # ranking weights from the whole-dump grid (200 of the model's queries: top-1 49%, top-3 52%)
 
 
 class Embedder:
@@ -222,7 +222,7 @@ class LocalSearch:
         scored = []
         for (t, b), s, i in zip(docs, sims, cands):
             tl = " " + re.sub(r"[^a-z0-9 ]", " ", t.lower()).strip() + " "
-            full = 0.1 if (len(tl.strip()) > 2 and tl in ql) else 0.0   # the query names the article
+            full = W_FULL if (len(tl.strip()) > 2 and tl in ql) else 0.0   # the query names the article
             tw = set(w.lower() for w in WORD.findall(t)); bw = set(w.lower() for w in WORD.findall(b[:600]))
             ft = sum(self.idf.get(w, self.idf_max) for w in qw if w in tw) / W        # query terms in the title
             fb = sum(self.idf.get(w, self.idf_max) for w in qw if w in tw or w in bw) / W   # ... or in the opening
