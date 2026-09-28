@@ -215,3 +215,11 @@ same page as Wikipedia 40.2% (unchanged), answer-bearing top-1 62.2 / 61.9%. As 
 answer@1 60.2% at 0.1, 55.6% at 0.2), and the grid on 1,200 training queries sets it to zero. The gap to
 Wikipedia's search is not which pages are reachable but which of the reachable ones is chosen, and that
 choice is not a function of the features a lexical-plus-cosine ranker sees. The index is not shipped.
+
+**A cross-encoder over the top 16** (MiniLM-L6 ms-marco, 23 MB int8 on the device): as shipped, answer-bearing
+top-1 64.7% / top-3 73.7% against 62.2 / 72.2 for the search alone (399 test queries; inside the noise, the
+same as the earlier same-page reading). Fine-tuned pointwise on the lineage's 14,366 (query, page)
+pairs labelled helped / did not help (the rollouts' verdicts and the answer-in-text proxy, plus mined
+confusers): 53.4 / 65.7, worse than no reranking. The proxy labels do not carry the distinction the
+reranking needs; the reward table (the frozen model's own verdict on each candidate page, `rew1`) is the
+remaining source of labels for it.
