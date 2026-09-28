@@ -1,17 +1,17 @@
 # Release: the search-and-reason model, 2026-09-28
 
 One 1.5B model (DeepSeek-R1-Distill-Qwen-1.5B lineage) that reasons, chats, and searches when it needs to,
-with the pooler that compresses what it has read. Three directories, all the same model:
+with the pooler that compresses what it has read. Two directories, the same model:
 
 | directory | what | size | search held-out (same 300 rollouts) |
 |---|---|---|---|
 | `g14-bf16/` | the merged 16-bit weights + `pooler.safetensors` | 3.5 GB + 0.3 GB | 45.3% |
-| `g14-4bit-gptq/` | MLX affine 4-bit, group 64, codes chosen by GPTQ on the model's own traces + pooler | 1.0 GB + 0.3 GB | 45.0% |
-| `g14-4bit-gptq-trained/` | the same codes, the grid's scales and biases then trained on the model's own traces + pooler | 1.0 GB + 0.3 GB | 48.0% on 102; 300 pending |
+| `g14-4bit-gptq/` | MLX affine 4-bit, group 64, codes chosen by GPTQ on the model's own traces + pooler - **the one the app ships** | 1.0 GB + 0.3 GB | 45.0% |
 
 Held-out: eval300 subset, temperature 0.6, 4000 tokens, the model's own pooler, Wikipedia search.
 The 4-bit GPTQ directory is indistinguishable from the 16-bit weights on it (paired difference
--0.3 +- 2.9 over 150 questions); round-to-nearest 4-bit lost about ten points. Reasoning (Dolphin-R1
+-0.3 +- 2.9 over 150 questions); round-to-nearest 4-bit lost about ten points. Other 4-bit arms
+(`pooler_distill/chatsft/g14_mlx4*`) are experiments, not releases, until they are measured the same way. Reasoning (Dolphin-R1
 held-out, 100): 53%, the level of the untouched distill (56%).
 
 Lineage: chat SFT (s4) -> search GRPO on the pooler-equipped student (g10, layers 20-27, 400 steps)

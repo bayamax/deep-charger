@@ -80,7 +80,7 @@ PSKIP=
 # The raw GitHub copy this box fetches can lag and hand a control run an OLDER version of this file (04:48 on 09-22 it
 # relaunched the online loop under the previous mode while the newer run was merging a checkpoint on the same card).
 # Every edit bumps BOXG_SERIAL; a run that sees a lower serial than one already executed stops here.
-BOXG_SERIAL=2026092656
+BOXG_SERIAL=2026092657
 if [ -f /root/.boxg_serial ] && [ "$(cat /root/.boxg_serial)" -gt "$BOXG_SERIAL" ] 2>/dev/null; then echo "BOXG_STALE $BOXG_SERIAL < $(cat /root/.boxg_serial)"; exit 0; fi
 echo $BOXG_SERIAL > /root/.boxg_serial
 MODE=reeval       # 2026-09-28: q14gx (GPTQ codes + trained grid) at 300 rollouts, paired with the bf16 300
@@ -238,7 +238,7 @@ IK
 fi
 
 # one-shot: the released directories, copied on the hub under release/ with a README (RELEASE_SERIAL bumps to redo)
-RELEASE_SERIAL=1
+RELEASE_SERIAL=2
 if [ "$(cat /root/.release_serial 2>/dev/null)" != "$RELEASE_SERIAL" ] && ! pgrep -f "releasekee[p].sh" >/dev/null; then
   curl -sS -o /root/release_README.md "$RAW/release/README.md?nocache=$(date +%s)"
   cat > /root/releasekeep.sh <<'RK'
@@ -254,7 +254,12 @@ copy() {  # $1 hub source dir, $2 release name
 }
 copy pooler_distill/chatsft/g14m_hf g14-bf16
 copy pooler_distill/chatsft/g14_mlx4g g14-4bit-gptq
-copy pooler_distill/chatsft/g14_mlx4gt g14-4bit-gptq-trained
+python3 - <<'PYR' 2>/dev/null
+from huggingface_hub import HfApi
+api = HfApi(); fs = [f for f in api.list_repo_files("baya1116/hypernet-sp-distill") if f.startswith("release/g14-4bit-gptq-trained/")]
+for f in fs: api.delete_file(f, "baya1116/hypernet-sp-distill")
+print(f"[release] {len(fs)} files of the unmeasured arm removed from release/")
+PYR
 hf upload $R /root/release_README.md release/README.md >/dev/null 2>&1 && echo "[release] README"
 rm -rf $W; echo "RELEASE_DONE $(date -u)"
 RK
