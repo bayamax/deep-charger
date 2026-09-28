@@ -146,3 +146,42 @@ against 4.6. Within the noise, with a hint of two or three points: the model rea
 answer more often through the local search and answers right slightly less often. Serving the two best pages
 (700 characters each) in the first block read 48.0% at 102 rollouts (50.0 / 58.8 / 35.3), the same as one page at 102
 and no signal either way; it was not extended. The retriever below is the next attempt.
+
+## Where the answers are lost (2026-09-28, the 300-rollout pairing read again)
+
+The same 300 rollouts, split by where the question's answer string sat in what the model was served:
+
+| | in a title | in the first 300 chars | later in the block | nowhere |
+|---|---|---|---|---|
+| Wikipedia API | 35 rollouts, 89% right | 120, 71% | 28, 57% | 117, 3% |
+| local store | 12, 83% | 144, 65% | 43, 44% | 101, 4% |
+
+The local search reaches a text carrying the answer more often (199 rollouts against 183), but Wikipedia's
+search three times as often lands on the page *titled* with the answer, and the answer it serves sits
+earlier. Wikipedia searches the whole article, so the answer entity's own page (which mentions the
+question's subject somewhere in its body) is reachable; the store indexes only each page's opening, so the
+local search returns the subject's page and the answer is a mention inside it, which the model turns into a
+right answer less often (65% against 71% when it is in the first 300 characters, 44% against 57% later).
+That, not coverage, is the 2.7 points.
+
+## A retriever of our own (2026-09-28)
+
+bge-small fine-tuned (`train_retriever.py`) on every search event of every online run on the hub: 10,630
+distinct (query, page served) pairs over 1,113 questions, labelled by whether the rollouts that read the
+page were right or the served text carried the answer. 5,250 positive pairs (1,840 pages, 1,071
+questions); negatives are the pages the model reached for the same question that did not help (3,863
+pairs) and what the current search ranks near the right page (`train_negs.json`). The 400 test queries
+and their 42 questions are out of training; the held-out is untouched. Two epochs, 330 steps, 108 s on
+the 3060, in-batch accuracy 0.84.
+
+`test_retriever.py` scores two things on the 400 test queries: the same page as Wikipedia, and whether the
+page served carries the answer (the API's page carries it 53.4% of the time on these).
+
+| ranking model (the index unchanged) | same page top-1 / top-3 | carries the answer top-1 / top-3 |
+|---|---|---|
+| bge-small as shipped | 40.2 / 47.5 | 62.2 / 72.2 |
+| fine-tuned, ranking only | 39.0 / 47.5 | 60.2 / 72.2 |
+
+Swapping the ranking model alone changes nothing: the ranking is three lexical features and one cosine,
+and the candidates come from the old index. Whether the trained model finds better candidates is the
+re-embedding of the dump, running.
