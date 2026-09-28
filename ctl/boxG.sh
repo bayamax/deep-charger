@@ -80,7 +80,7 @@ PSKIP=
 # The raw GitHub copy this box fetches can lag and hand a control run an OLDER version of this file (04:48 on 09-22 it
 # relaunched the online loop under the previous mode while the newer run was merging a checkpoint on the same card).
 # Every edit bumps BOXG_SERIAL; a run that sees a lower serial than one already executed stops here.
-BOXG_SERIAL=2026092657
+BOXG_SERIAL=2026092658
 if [ -f /root/.boxg_serial ] && [ "$(cat /root/.boxg_serial)" -gt "$BOXG_SERIAL" ] 2>/dev/null; then echo "BOXG_STALE $BOXG_SERIAL < $(cat /root/.boxg_serial)"; exit 0; fi
 echo $BOXG_SERIAL > /root/.boxg_serial
 MODE=reeval       # 2026-09-28: q14gx (GPTQ codes + trained grid) at 300 rollouts, paired with the bf16 300
@@ -238,22 +238,27 @@ IK
 fi
 
 # one-shot: the released directories, copied on the hub under release/ with a README (RELEASE_SERIAL bumps to redo)
-RELEASE_SERIAL=2
+RELEASE_SERIAL=3
 if [ "$(cat /root/.release_serial 2>/dev/null)" != "$RELEASE_SERIAL" ] && ! pgrep -f "releasekee[p].sh" >/dev/null; then
   curl -sS -o /root/release_README.md "$RAW/release/README.md?nocache=$(date +%s)"
   cat > /root/releasekeep.sh <<'RK'
 #!/bin/bash
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); R=baya1116/hypernet-sp-distill; W=/root/release_stage; mkdir -p $W
-copy() {  # $1 hub source dir, $2 release name
+# room: the merged 16-bit model exists twice on the box, and g14's training directory is on the hub
+if [ -d /root/hfdl/pooler_distill/chatsft/g14m_hf ] && [ ! -L /root/hfdl/pooler_distill/chatsft/g14m_hf ] && [ -s /root/reeval_hf_g14m/model.safetensors ]; then
+  rm -rf /root/hfdl/pooler_distill/chatsft/g14m_hf && ln -s /root/reeval_hf_g14m /root/hfdl/pooler_distill/chatsft/g14m_hf; fi
+rm -rf /root/online_g14 /root/release_stage/dl; echo "[release] $(df -h /root | awk 'NR==2{print $4" free"}')"
+copy() {  # $1 hub source dir, $2 release name, $3 a local copy of it when there is one
   rm -rf $W/$2; mkdir -p $W/$2
-  for try in 1 2 3; do hf download $R --include "$1/*" --local-dir $W/dl >/dev/null 2>&1 && break; sleep 30; done
-  cp -r $W/dl/$1/. $W/$2/ && [ -s $W/$2/model.safetensors ] || { echo "RELEASE_ABORT $2: $1 did not download"; return 1; }
+  if [ -n "$3" ] && [ -s $3/model.safetensors ]; then cp -r $3/. $W/$2/
+  else for try in 1 2 3; do hf download $R --include "$1/*" --local-dir $W/dl >/dev/null 2>&1 && break; sleep 30; done; cp -r $W/dl/$1/. $W/$2/ 2>/dev/null; fi
+  [ -s $W/$2/model.safetensors ] || { echo "RELEASE_ABORT $2: $1 did not download"; return 1; }
   [ -s $W/$2/pooler.safetensors ] || cp /root/reeval_g14m_pooler.safetensors $W/$2/pooler.safetensors
   for try in 1 2 3; do hf upload $R $W/$2 release/$2 >/dev/null 2>&1 && break; sleep 30; done
   echo "[release] $2 <- $1 ($(du -sh $W/$2 | cut -f1))"; rm -rf $W/$2 $W/dl/$1
 }
-copy pooler_distill/chatsft/g14m_hf g14-bf16
-copy pooler_distill/chatsft/g14_mlx4g g14-4bit-gptq
+copy pooler_distill/chatsft/g14m_hf g14-bf16 /root/reeval_hf_g14m
+copy pooler_distill/chatsft/g14_mlx4g g14-4bit-gptq /root/gptq_mlx4_gq14
 python3 - <<'PYR' 2>/dev/null
 from huggingface_hub import HfApi
 api = HfApi(); fs = [f for f in api.list_repo_files("baya1116/hypernet-sp-distill") if f.startswith("release/g14-4bit-gptq-trained/")]
