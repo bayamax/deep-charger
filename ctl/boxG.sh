@@ -80,7 +80,7 @@ PSKIP=
 # The raw GitHub copy this box fetches can lag and hand a control run an OLDER version of this file (04:48 on 09-22 it
 # relaunched the online loop under the previous mode while the newer run was merging a checkpoint on the same card).
 # Every edit bumps BOXG_SERIAL; a run that sees a lower serial than one already executed stops here.
-BOXG_SERIAL=2026092655
+BOXG_SERIAL=2026092656
 if [ -f /root/.boxg_serial ] && [ "$(cat /root/.boxg_serial)" -gt "$BOXG_SERIAL" ] 2>/dev/null; then echo "BOXG_STALE $BOXG_SERIAL < $(cat /root/.boxg_serial)"; exit 0; fi
 echo $BOXG_SERIAL > /root/.boxg_serial
 MODE=reeval       # 2026-09-28: q14gx (GPTQ codes + trained grid) at 300 rollouts, paired with the bf16 300
@@ -235,6 +235,32 @@ IK
   chmod +x /root/ivfkeep.sh
   setsid nohup bash -c 'bash /root/ivfkeep.sh 2>&1 | tee -a /root/ivf.log' >> /proc/1/fd/1 2>&1 < /dev/null 9>&- &
   echo "IVF_LAUNCHED $(date -u)"
+fi
+
+# one-shot: the released directories, copied on the hub under release/ with a README (RELEASE_SERIAL bumps to redo)
+RELEASE_SERIAL=1
+if [ "$(cat /root/.release_serial 2>/dev/null)" != "$RELEASE_SERIAL" ] && ! pgrep -f "releasekee[p].sh" >/dev/null; then
+  curl -sS -o /root/release_README.md "$RAW/release/README.md?nocache=$(date +%s)"
+  cat > /root/releasekeep.sh <<'RK'
+#!/bin/bash
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); R=baya1116/hypernet-sp-distill; W=/root/release_stage; mkdir -p $W
+copy() {  # $1 hub source dir, $2 release name
+  rm -rf $W/$2; mkdir -p $W/$2
+  for try in 1 2 3; do hf download $R --include "$1/*" --local-dir $W/dl >/dev/null 2>&1 && break; sleep 30; done
+  cp -r $W/dl/$1/. $W/$2/ && [ -s $W/$2/model.safetensors ] || { echo "RELEASE_ABORT $2: $1 did not download"; return 1; }
+  [ -s $W/$2/pooler.safetensors ] || cp /root/reeval_g14m_pooler.safetensors $W/$2/pooler.safetensors
+  for try in 1 2 3; do hf upload $R $W/$2 release/$2 >/dev/null 2>&1 && break; sleep 30; done
+  echo "[release] $2 <- $1 ($(du -sh $W/$2 | cut -f1))"; rm -rf $W/$2 $W/dl/$1
+}
+copy pooler_distill/chatsft/g14m_hf g14-bf16
+copy pooler_distill/chatsft/g14_mlx4g g14-4bit-gptq
+copy pooler_distill/chatsft/g14_mlx4gt g14-4bit-gptq-trained
+hf upload $R /root/release_README.md release/README.md >/dev/null 2>&1 && echo "[release] README"
+rm -rf $W; echo "RELEASE_DONE $(date -u)"
+RK
+  chmod +x /root/releasekeep.sh; echo $RELEASE_SERIAL > /root/.release_serial
+  setsid nohup bash -c 'bash /root/releasekeep.sh 2>&1 | tee -a /root/release.log' >> /proc/1/fd/1 2>&1 < /dev/null 9>&- &
+  echo "RELEASE_LAUNCHED $(date -u)"
 fi
 
 # The status command is the same whatever mode this file is in, so it is installed once,
@@ -441,6 +467,7 @@ while :; do
     echo "--- quant.log (tail) ---"; tail -n 30 /root/quant.log 2>/dev/null | cut -c1-300
     echo "--- wiki.log (tail) ---"; tail -n 8 /root/wiki.log 2>/dev/null | cut -c1-300
     echo "--- ivf.log (tail) ---"; tail -n 8 /root/ivf.log 2>/dev/null | cut -c1-300
+    echo "--- release.log (tail) ---"; tail -n 6 /root/release.log 2>/dev/null | cut -c1-200
     for f in /root/gptq_*.log; do [ -s "$f" ] && { echo "--- $f (tail) ---"; grep -E "^\[gptq\]|^\[out\]|GPTQ_DONE|Error" "$f" | tail -n 4 | cut -c1-200; }; done
     f=$(ls -t /root/q14*_q14*[0-9].log /root/g14*_g14*[0-9].log /root/gq14*_gq14*[0-9].log 2>/dev/null | head -1); [ -s "$f" ] && { echo "--- $f (tail) ---"; tail -n 8 "$f" | cut -c1-220; }
     for f in /root/sft_q*.log; do [ -s "$f" ] && { echo "--- $f (tail) ---"; grep -E "^step [0-9]+ |val" "$f" | tail -n 6 | cut -c1-200; }; done
