@@ -139,5 +139,10 @@ The GPTQ 4-bit model (`release/g14-4bit-gptq`) on the search held-out, 102 rollo
 | Wikipedia API | 48.0% | 72% | 3.7 | 47.1 / 47.1 / 50.0 |
 | local, device layout (IVF, int8 embedder, lean ranking) | **48.0%** | 71% | 2.2 | 50.0 / 47.1 / 47.1 |
 
-Same answers, fewer searches, and 20 s a rollout against 35-50 s with the API. The 300-rollout pairing
-follows.
+Same answers, fewer searches, and 20 s a rollout against 35-50 s with the API. At 300 rollouts, paired on
+the same 150 questions: local 42.3% (43.0 / 39.0 / 45.0) against the API's 45.0% (50.0 / 46.0 / 39.0),
+-2.7 +- 4.1 (better on 36 questions, worse on 45, equal on 69); grounded 67% against 63%, searches 3.2
+against 4.6. Within the noise, with a hint of two or three points: the model reaches a page with the
+answer more often through the local search and answers right slightly less often. Two things to try
+before calling it equal: serving the two best pages in the first block, and a retriever trained on the
+3,914 (query, Wikipedia's page) pairs the lineage produced.
