@@ -129,6 +129,14 @@ class LocalSearch:
         self.bits = np.memmap(os.path.join(store_path, "emb.bin"), dtype=np.uint8, mode="r").reshape(-1, DIM // 8)
         assert self.bits.shape[0] == self.st.n_docs, f"index {self.bits.shape[0]} vs store {self.st.n_docs}"
         self.maxlen_doc = int(os.environ.get("SP_LOCAL_DOCLEN", "96"))
+        # the link channel: pages whose body links to a page the query names (Wikipedia's search reaches the
+        # answer's own page through its body; the store holds openings only, the inlinks stand in for the body)
+        self.links = None
+        lp = os.environ.get("SP_LOCAL_LINKS", store_path)
+        if os.path.exists(os.path.join(lp, "inlinks.bin")) and os.environ.get("SP_LOCAL_NOLINKS", "0") != "1":
+            self.link_off = np.load(os.path.join(lp, "inlinks_offsets.npy"), mmap_mode="r")
+            self.links = np.memmap(os.path.join(lp, "inlinks.bin"), dtype=np.int32, mode="r")
+            self.link_k = int(os.environ.get("SP_LOCAL_LINKK", "16")); self.link_lex = int(os.environ.get("SP_LOCAL_LINKLEX", "400"))
         self.gpu = None
         self.pq = None
         self.ivf = None
@@ -210,12 +218,38 @@ class LocalSearch:
                 seen.add(i); res.append((i, sc))
         return res[:k]
 
+    def _link_hits(self, query, k):
+        """Pages that link to a page the query names, and whose opening matches the query too: the title hits
+        whose title sits in the query, their inlink sources, intersected with a wide lexical hit list."""
+        if self.links is None:
+            return []
+        ql = " " + re.sub(r"[^a-z0-9 ]", " ", query.lower()) + " "
+        named = []
+        for i, _ in self._lex_hits(query, self.title_k * 2, column="title"):
+            t = self.st.title(i) if hasattr(self.st, "title") else self.st.doc(i)[0]
+            tl = " " + re.sub(r"[^a-z0-9 ]", " ", t.lower()).strip() + " "
+            if len(tl.strip()) > 2 and tl in ql:
+                named.append(i)
+        if not named:
+            return []
+        src = set()
+        for i in named[:4]:
+            a, b = int(self.link_off[i]), int(self.link_off[i + 1])
+            src.update(int(x) for x in np.asarray(self.links[a:b]))
+        if not src:
+            return []
+        wide = self._lex_hits(query, self.link_lex)
+        out = [i for i, _ in wide if i in src and i not in named]
+        return out[:k]
+
     def search(self, query, k=3):
         qv = self.emb([QUERY_PREFIX + query])[0]
         lex = self._lex_hits(query, self.lex_k); bm = {i: s for i, s in lex}; bmax = max(bm.values(), default=1.0) or 1.0
         emb_c = [int(c) for c in self._coarse_top(qv, self.coarse)]
         cands = [x for pair in zip(emb_c, [i for i, _ in lex] + [None] * len(emb_c)) for x in pair if x is not None]   # interleaved
         cands += [i for i, _ in self._lex_hits(query, self.title_k, column="title")]
+        if self.links is not None:
+            cands = self._link_hits(query, self.link_k) + cands   # ahead of the cut: they are few and Wikipedia's search would have reached them
         cands = list(dict.fromkeys(cands))[:self.rerank]
         docs = [self.st.doc(i) for i in cands]
         dv = self.emb_rank([f"{t}. {b[:400]}" for t, b in docs], maxlen=self.maxlen_doc)
