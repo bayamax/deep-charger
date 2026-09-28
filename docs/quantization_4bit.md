@@ -250,3 +250,19 @@ tensors buys three points, 6-bit buys eight), and GPTQ recovers six of the ten p
 the grid or the size, with the searching back to the float model's rate. 48.0 is the four-point line
 exactly; it is being measured at 300 rollouts, and the grid's own training (the ce objective, codes
 kept) is being stacked on top of it.
+
+### At 300 rollouts, paired (2026-09-28)
+
+The 102-rollout numbers above carry about +-5; the bf16's 52.0 was a high draw. Both arms on the same
+150 held-out questions, two rollouts each (100 x 3 shards), g14's own pooler, temperature 0.6:
+
+| arm | correct | grounded | searches | shards (100 each) |
+|---|---|---|---|---|
+| bf16 | 45.3% | 63% | 4.5 | 48.0 / 48.0 / 40.0 |
+| 4-bit GPTQ (gq14, `chatsft/g14_mlx4g`) | 45.0% | 63% | 4.6 | 50.0 / 46.0 / 39.0 |
+
+Paired per question: -0.3 +- 2.9 (standard error); GPTQ better on 28 questions, worse on 27, equal on
+95. At this precision the GPTQ 4-bit is indistinguishable from the float model - well inside the
+four-point target, which round-to-nearest with trained scales (42.2 on 102) was ten points outside.
+The GPTQ codes with the grid trained on top (q14gx, `chatsft/g14_mlx4gt`) read 48.0 on 102 and are
+being measured at 300 for the same pairing.
