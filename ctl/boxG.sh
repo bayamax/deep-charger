@@ -165,8 +165,8 @@ for f in build_store.py store.py embed.py search.py pq.py ivf.py memcheck.py tra
   for try in 1 2 3; do curl -sS -o /root/work/localsearch/$f "$RAW/localsearch/$f?nocache=$(date +%s)" && python3 -m py_compile /root/work/localsearch/$f && break; sleep 5; done
 done
 mkdir -p /root/work/localsearch/data   # the retriever's pairs; a missing file must not leave a 404 body behind
-for f in train_pairs.json train_negs.json test_queries.json; do
-  for try in 1 2 3; do curl -sSf -o /root/work/localsearch/data/$f "$RAW/localsearch/data/$f?nocache=$(date +%s)" && python3 -c "import json,sys; json.load(open('/root/work/localsearch/data/$f'))" && break; rm -f /root/work/localsearch/data/$f; sleep 5; done
+for f in train_pairs.json train_negs.json test_queries.json reward_force.json reward_questions.jsonl; do
+  for try in 1 2 3; do curl -sSf -o /root/work/localsearch/data/$f "$RAW/localsearch/data/$f?nocache=$(date +%s)" && python3 -c "import json,sys; f='/root/work/localsearch/data/$f'; json.load(open(f)) if f.endswith('.json') else [json.loads(l) for l in open(f) if l.strip()]" && break; rm -f /root/work/localsearch/data/$f; sleep 5; done
 done
 echo "fetched: pool_eval $(wc -l < /root/work/pool_eval.py) lines, q4 $(wc -l < /root/work/q4.py) lines"
 
@@ -1477,14 +1477,14 @@ PYG
   [ -s /root/hfdl/pooler_distill/chat_eval60.jsonl ] || hf download $R --include "pooler_distill/chat_eval60.jsonl" --local-dir /root/hfdl 2>&1 | tail -1
   cat > /root/reevalkeep.sh <<RK
 #!/bin/bash
-RRUN=$RRUN; RHF=$RHF; R=$R; RCKPT=$RCKPT; RQSRC=${RQSRC:-}; RHINT=${RHINT:-}; RFAST=${RFAST:-1}; RB=${RB:-12}; RLOOP=${RLOOP:-}; RBUDGET=${RBUDGET:-2400}; RSHARDS=${RSHARDS:-3}; RTEMP=${RTEMP:-0.9}; RCAP=${RCAP:-600}; RGEN=${RGEN:-1500}; RN=${RN:-999}; RQ4=${RQ4:-}; RQ4SKIP=${RQ4SKIP:-}; RQ4BITS=${RQ4BITS:-4}; RLOCAL=${RLOCAL:-}; RLOCALK=${RLOCALK:-1}; RLOCALCHARS=${RLOCALCHARS:-0}; RLOCALSTORE=${RLOCALSTORE:-/root/wiki_store}; RLOCALMODEL=${RLOCALMODEL:-/root/bge-small}
+RRUN=$RRUN; RHF=$RHF; R=$R; RCKPT=$RCKPT; RQSRC=${RQSRC:-}; RHINT=${RHINT:-}; RFAST=${RFAST:-1}; RB=${RB:-12}; RLOOP=${RLOOP:-}; RBUDGET=${RBUDGET:-2400}; RSHARDS=${RSHARDS:-3}; RTEMP=${RTEMP:-0.9}; RCAP=${RCAP:-600}; RGEN=${RGEN:-1500}; RN=${RN:-999}; RQ4=${RQ4:-}; RQ4SKIP=${RQ4SKIP:-}; RQ4BITS=${RQ4BITS:-4}; RLOCAL=${RLOCAL:-}; RLOCALK=${RLOCALK:-1}; RLOCALCHARS=${RLOCALCHARS:-0}; RLOCALSTORE=${RLOCALSTORE:-/root/wiki_store}; RLOCALMODEL=${RLOCALMODEL:-/root/bge-small}; RQFILE=${RQFILE:-}; RFORCE=${RFORCE:-}; RFORCEK=${RFORCEK:-5}
 RK
   cat >> /root/reevalkeep.sh <<'RKB'
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null)
 run_one() {  # $1 questions file, $2 out file, $3 tag
-  want=$(wc -l < "$1"); [ "${RN:-999}" -lt "$want" ] && want=${RN:-999}
+  want=$(wc -l < "$1"); [ "${RN:-999}" -lt "$want" ] && want=${RN:-999}; [ -n "$RFORCE" ] && want=$((want * ${RFORCEK:-5}))
   [ -s "$2" ] && [ "$(wc -l < "$2")" -ge "$want" ] && return 0
-  cd /root/work && env ${RLOCAL:+SP_LOCAL_STORE=$RLOCALSTORE SP_LOCAL_MODEL=$RLOCALMODEL SP_LOCAL_GPU=1 SP_LOCAL_K=${RLOCALK:-1} SP_LOCAL_CHARS=${RLOCALCHARS:-0}} SP_BASE=$RHF SP_RANK=16 SP_NOSYS=1 SP_EPISODIC=1 OMP_NUM_THREADS=1 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python3 /root/work/pool_eval.py     $RCKPT "$1" "$2" --n $RN --rw 768 --maxd 384 --samepage 1 --decode plain --temp $RTEMP --gen $RGEN --stop eos --replycap $RCAP ${RQ4:+--q4 $RQ4 --q4skip "${RQ4SKIP:-}" --q4bits ${RQ4BITS:-4}} --tag "[$3]" >> /root/${RRUN}_$3.log 2>&1
+  cd /root/work && env ${RLOCAL:+SP_LOCAL_STORE=$RLOCALSTORE SP_LOCAL_MODEL=$RLOCALMODEL SP_LOCAL_GPU=1 SP_LOCAL_K=${RLOCALK:-1} SP_LOCAL_CHARS=${RLOCALCHARS:-0}} SP_BASE=$RHF SP_RANK=16 SP_NOSYS=1 SP_EPISODIC=1 OMP_NUM_THREADS=1 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python3 /root/work/pool_eval.py     $RCKPT "$1" "$2" --n $RN --rw 768 --maxd 384 --samepage 1 --decode plain --temp $RTEMP --gen $RGEN --stop eos --replycap $RCAP ${RQ4:+--q4 $RQ4 --q4skip "${RQ4SKIP:-}" --q4bits ${RQ4BITS:-4}} ${RFORCE:+--force $RFORCE} --tag "[$3]" >> /root/${RRUN}_$3.log 2>&1
   [ -s "$2" ] && [ "$(wc -l < "$2")" -ge "$want" ] || { echo "REEVAL_ABORT $RRUN at $3: $(tail -1 /root/${RRUN}_$3.log | cut -c1-100)"; exit 1; }
   echo "[$RRUN] $3: $(grep -h -m1 "pooler restored\|WARNING: no pooler" /root/${RRUN}_$3.log)"
 }
@@ -1581,6 +1581,10 @@ for i in range(n):
             r["q"] = hint.strip() + " " + r["q"]; o.write(json.dumps(r, ensure_ascii=False) + "\n")
 print("[hint]", repr(hint))
 PYH
+fi
+if [ -n "$RQFILE" ]; then   # one custom question file (a reward table: RFORCE pages per question), no chat eval
+  run_one $RQFILE /root/work/${RRUN}_out_0.jsonl ${RRUN}0; hf upload $R /root/work/${RRUN}_out_0.jsonl pooler_distill/chatsft/rollouts/${RRUN}_0.jsonl >/dev/null 2>&1; echo "[$RRUN] uploaded $(tail -1 /root/${RRUN}_${RRUN}0.log | cut -c1-110)"
+  echo "REEVAL_DONE $RRUN $(date -u)"; exit 0
 fi
 for i in $(seq 0 $((${RSHARDS:-3} - 1))); do run_one /root/work/${EVP}_$i.jsonl /root/work/${RRUN}_out_$i.jsonl ${RRUN}$i; hf upload $R /root/work/${RRUN}_out_$i.jsonl pooler_distill/chatsft/rollouts/${RRUN}_$i.jsonl >/dev/null 2>&1; echo "[$RRUN] shard $i uploaded $(tail -1 /root/${RRUN}_${RRUN}$i.log | cut -c1-110)"; done
 run_one /root/hfdl/pooler_distill/chat_eval60.jsonl /root/work/${RRUN}_chat_out.jsonl ${RRUN}chat

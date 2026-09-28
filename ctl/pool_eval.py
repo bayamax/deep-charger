@@ -29,6 +29,7 @@ ap.add_argument("--q4skip", default="", help="comma-separated leaf modules to le
 ap.add_argument("--stop", default="answer", choices=["answer", "eos"], help="answer = stop once 'answer is ...' is complete (the strict lineage); eos = stop at end of sequence or --replycap tokens after </think> (the conversational lineage)")
 ap.add_argument("--replycap", type=int, default=200)
 ap.add_argument("--greedy", type=int, default=0, help="1: argmax decoding (deterministic up to hardware), for evaluator A/B checks")
+ap.add_argument("--force", default="", help="JSON {question: [local store doc ids]}: one rollout per (question, doc) with the FIRST search served that page (the reward table of a retriever trained against this frozen model); needs SP_LOCAL_STORE")
 A = ap.parse_args()
 
 os.environ.setdefault("SP_HOTPOT2", "0"); os.environ.setdefault("SP_BASE", "/root/fft_hf")
@@ -142,6 +143,11 @@ if os.environ.get("SP_LOCAL_STORE"):
         return _LS.fetch(kw)
 
 
+def forced_page(i):
+    t, b = _LS.st.doc(int(i))
+    return f"{t}: {b}"
+
+
 def get_page(kw):
     if kw in cache:
         return cache[kw]
@@ -196,8 +202,9 @@ def pick_plain(logits, gen):
 
 
 @torch.no_grad()
-def rollout(question):
-    """sp_rollout mechanics (SP + raw window, mass eviction) with the grpo_ep_more environment."""
+def rollout(question, force=None):
+    """sp_rollout mechanics (SP + raw window, mass eviction) with the grpo_ep_more environment.
+    force: a store doc id served for the first search whatever the query (see --force)."""
     q_ids = tok.encode(tok.apply_chat_template([{"role": "user", "content": question}],
                                                add_generation_prompt=True, tokenize=False) + "<think>\n")
     past = DynamicCache()
@@ -255,7 +262,7 @@ def rollout(question):
                 elif ns_ > A.maxs:
                     blk = f"\n<information>{NOTICE}</information>\n"
                 else:
-                    pg = get_page(kw)
+                    pg = forced_page(force) if (force is not None and ns_ == 1) else get_page(kw)
                     if not pg:
                         chunk, page_ids, page_off, cur_key = "(no results)", [], 0, None
                     else:
@@ -315,12 +322,16 @@ for line in open(A.questions):
     if q and (g or A.stop == "eos") and q not in {x[0] for x in qs}:
         qs.append((q, g))
 qs = qs[:A.n]
+if A.force:   # (question, gold, doc) per candidate page; the record and the done-set carry the doc
+    FORCE = json.load(open(A.force)); qs = [(q, g, d) for q, g in qs for d in FORCE.get(q, [])]
+else:
+    qs = [(q, g, None) for q, g in qs]
 done = set()
 if os.path.exists(A.out):
     for line in open(A.out):
-        try: done.add(json.loads(line)["q"])
+        try: r0 = json.loads(line); done.add((r0["q"], r0.get("force")))
         except Exception: pass
-todo = [x for x in qs if x[0] not in done]
+todo = [x for x in qs if (x[0], x[2]) not in done]
 print(f"[eval{A.tag}] {len(qs)} questions, {len(done)} done, {len(todo)} to run", flush=True)
 stat = {"n": len(done), "c": 0, "g": 0, "l": 0, "s": 0, "m": 0}
 for line in (open(A.out) if os.path.exists(A.out) else []):
@@ -331,12 +342,12 @@ for line in (open(A.out) if os.path.exists(A.out) else []):
         pass
 t0 = time.time(); k0 = stat["n"]
 with open(A.out, "a") as fh:
-    for q, g in todo:
-        txt, ans, ns_, nm, served, queries, landed, dead = rollout(q)
+    for q, g, force in todo:
+        txt, ans, ns_, nm, served, queries, landed, dead = rollout(q, force)
         correct = landed and has(ans, g)
         grounded = any(has(s, g) for s in served)
         tail_tags = landed and ("<search>" in txt.split("</think>")[-1] or "<information>" in txt.split("</think>")[-1])
-        rec = {"q": q, "gold": g, "correct": correct, "grounded": grounded, "landed": landed, "dead": dead, "tail_tags": tail_tags,
+        rec = {"q": q, "gold": g, "force": force, "correct": correct, "grounded": grounded, "landed": landed, "dead": dead, "tail_tags": tail_tags,
                "ns": ns_, "more": nm, "answer": ans, "queries": queries, "text": txt, "rw": A.rw, "maxd": A.maxd, "decode": A.decode, "samepage": A.samepage}
         fh.write(json.dumps(rec, ensure_ascii=False) + "\n"); fh.flush()
         stat["n"] += 1; stat["c"] += correct; stat["g"] += grounded; stat["l"] += landed; stat["s"] += ns_; stat["m"] += nm
