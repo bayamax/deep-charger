@@ -80,7 +80,7 @@ PSKIP=
 # The raw GitHub copy this box fetches can lag and hand a control run an OLDER version of this file (04:48 on 09-22 it
 # relaunched the online loop under the previous mode while the newer run was merging a checkpoint on the same card).
 # Every edit bumps BOXG_SERIAL; a run that sees a lower serial than one already executed stops here.
-BOXG_SERIAL=2026092667
+BOXG_SERIAL=2026092668
 if [ -f /root/.boxg_serial ] && [ "$(cat /root/.boxg_serial)" -gt "$BOXG_SERIAL" ] 2>/dev/null; then echo "BOXG_STALE $BOXG_SERIAL < $(cat /root/.boxg_serial)"; exit 0; fi
 echo $BOXG_SERIAL > /root/.boxg_serial
 MODE=reeval       # 2026-09-28: the 4-bit with the local search on the store re-embedded by the trained retriever (wiki_store_ft1)
@@ -345,9 +345,11 @@ LK
 fi
 
 # one-shot: the released directories, copied on the hub under release/ with a README (RELEASE_SERIAL bumps to redo)
-RELEASE_SERIAL=5
+RELEASE_SERIAL=6
 if [ "$(cat /root/.release_serial 2>/dev/null)" != "$RELEASE_SERIAL" ] && ! pgrep -f "releasekee[p].sh" >/dev/null; then
   curl -sS -o /root/release_README.md "$RAW/release/README.md?nocache=$(date +%s)"
+  curl -sSf -o /root/release_USAGE.md "$RAW/release/USAGE.md?nocache=$(date +%s)"; curl -sSf -o /root/release_pooler_config.json "$RAW/release/pooler_config.json?nocache=$(date +%s)"
+  curl -sSf -o /root/release_spec.md "https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/docs/iphone_agent_v2_spec.md?nocache=$(date +%s)"
   cat > /root/releasekeep.sh <<'RK'
 #!/bin/bash
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); R=baya1116/hypernet-sp-distill; W=/root/release_stage; mkdir -p $W
@@ -369,6 +371,9 @@ onhub release/g14-bf16/model.safetensors || copy pooler_distill/chatsft/g14m_hf 
 onhub release/g14-4bit-gptq/model.safetensors || copy pooler_distill/chatsft/g14_mlx4g g14-4bit-gptq /root/gptq_mlx4_gq14
 onhub release/g14-4bit-gptq-trained/model.safetensors || copy pooler_distill/chatsft/g14_mlx4gt g14-4bit-gptq-trained /root/sft_mlx4_q14g
 hf upload $R /root/release_README.md release/README.md >/dev/null 2>&1 && echo "[release] README"
+[ -s /root/release_USAGE.md ] && hf upload $R /root/release_USAGE.md release/USAGE.md >/dev/null 2>&1 && echo "[release] USAGE"
+[ -s /root/release_spec.md ] && hf upload $R /root/release_spec.md release/docs/iphone_agent_v2_spec.md >/dev/null 2>&1 && echo "[release] spec"
+for d in g14-bf16 g14-4bit-gptq g14-4bit-gptq-trained; do [ -s /root/release_pooler_config.json ] && hf upload $R /root/release_pooler_config.json release/$d/pooler_config.json >/dev/null 2>&1; done && echo "[release] pooler_config"
 rm -rf $W; echo "RELEASE_DONE $(date -u)"
 RK
   chmod +x /root/releasekeep.sh; echo $RELEASE_SERIAL > /root/.release_serial

@@ -1,5 +1,7 @@
 # Release: the search-and-reason model, 2026-09-28
 
+How to run it on a device (files, prompt, the pooler loop, sampling, the search protocol): `USAGE.md`.
+
 One 1.5B model (DeepSeek-R1-Distill-Qwen-1.5B lineage) that reasons, chats, and searches when it needs to,
 with the pooler that compresses what it has read. Three directories, the same model:
 
