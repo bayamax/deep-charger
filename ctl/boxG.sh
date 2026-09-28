@@ -161,7 +161,7 @@ for f in pool_eval.py q4.py qat.py dwq.py poolerfit.py jointfit.py checkmlx.py p
 done
 cp /root/work/web_search.py /root/work/runtime/web_search.py 2>/dev/null
 mkdir -p /root/work/localsearch
-for f in build_store.py store.py embed.py search.py pq.py ivf.py memcheck.py train_retriever.py export_onnx.py test_retriever.py; do
+for f in build_store.py store.py embed.py search.py pq.py ivf.py memcheck.py train_retriever.py export_onnx.py test_retriever.py train_ranker.py reward_prep.py; do
   for try in 1 2 3; do curl -sS -o /root/work/localsearch/$f "$RAW/localsearch/$f?nocache=$(date +%s)" && python3 -m py_compile /root/work/localsearch/$f && break; sleep 5; done
 done
 mkdir -p /root/work/localsearch/data   # the retriever's pairs; a missing file must not leave a 404 body behind
@@ -275,6 +275,30 @@ RK2
   chmod +x /root/retrkeep.sh
   setsid nohup bash -c 'bash /root/retrkeep.sh 2>&1 | tee -a /root/retr.log' >> /proc/1/fd/1 2>&1 < /dev/null 9>&- &
   echo "RETR_LAUNCHED $RETR_TAG $(date -u)"
+fi
+
+# The retriever trained on the frozen model's verdicts (the reward table rew1), once the table is complete and
+# the card is free: train, export, the ranking-only test on the 400 test queries, upload. RANKER_TAG bumps to redo.
+RANKER=${RANKER:-1}; RANKER_TAG=${RANKER_TAG:-rl1}; RANKER_ROWS=${RANKER_ROWS:-/root/work/rew1_out_0.jsonl}
+if [ "$RANKER" = 1 ] && ! pgrep -f "rankkee[p].sh" >/dev/null && ! grep -q "RANKER_JOB_DONE $RANKER_TAG" /root/ranker.log 2>/dev/null && [ -s "$RANKER_ROWS" ] && [ "$(wc -l < $RANKER_ROWS)" -ge "${RANKER_MIN:-1000}" ]; then
+  cat > /root/rankkeep.sh <<RK1
+RTAG=$RANKER_TAG; ROWS=$RANKER_ROWS
+RK1
+  cat >> /root/rankkeep.sh <<'RK2'
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); R=baya1116/hypernet-sp-distill; ST=/root/wiki_store; M=/root/bge-small
+L=/root/work/localsearch; FT=/root/bge_$RTAG
+while pgrep -f "pool_eval.py" >/dev/null; do sleep 120; done
+echo "[ranker] $RTAG start $(date -u +%H:%M) on $(wc -l < $ROWS) rows"
+python3 $L/train_ranker.py --rows $ROWS --base $M --store $ST --out $FT --epochs 4 2>&1 | grep -E "^\[ranker\]|RANKER_DONE|Error|Traceback" | tail -20
+grep -q . $FT/config.json 2>/dev/null || { echo "RANKER_ABORT $RTAG: no model written"; exit 1; }
+python3 $L/export_onnx.py $FT $FT 2>&1 | grep -E "EXPORT_DONE|Error|Traceback"
+for f in model.safetensors model_int8.onnx tokenizer.json tokenizer_config.json config.json special_tokens_map.json vocab.txt; do hf upload $R $FT/$f localsearch/bge-small-$RTAG/$f >/dev/null 2>&1; done
+SP_LOCAL_RERANK_MODEL=$FT OMP_NUM_THREADS=4 python3 $L/test_retriever.py --store $ST --model $M --tag "$RTAG-rerank-only" 2>&1 | grep -E "RETR_TEST|Error|Traceback"
+echo "RANKER_JOB_DONE $RTAG $(date -u)"
+RK2
+  chmod +x /root/rankkeep.sh
+  setsid nohup bash -c 'bash /root/rankkeep.sh 2>&1 | tee -a /root/ranker.log' >> /proc/1/fd/1 2>&1 < /dev/null 9>&- &
+  echo "RANKER_LAUNCHED $RANKER_TAG $(date -u)"
 fi
 
 # one-shot: the local search released under release/local-search/ - the store's files copied on the hub server side
@@ -564,6 +588,7 @@ while :; do
     echo "--- wiki.log (tail) ---"; tail -n 8 /root/wiki.log 2>/dev/null | cut -c1-300
     echo "--- ivf.log (tail) ---"; tail -n 8 /root/ivf.log 2>/dev/null | cut -c1-300
     echo "--- retr.log (tail) ---"; tail -n 8 /root/retr.log 2>/dev/null | cut -c1-300
+    echo "--- ranker.log (tail) ---"; tail -n 8 /root/ranker.log 2>/dev/null | cut -c1-300
     echo "--- release.log (tail) ---"; tail -n 6 /root/release.log 2>/dev/null | cut -c1-200
     for f in /root/gptq_*.log; do [ -s "$f" ] && { echo "--- $f (tail) ---"; grep -E "^\[gptq\]|^\[out\]|GPTQ_DONE|Error" "$f" | tail -n 4 | cut -c1-200; }; done
     f=$(ls -t /root/q14*_q14*[0-9].log /root/g14*_g14*[0-9].log /root/gq14*_gq14*[0-9].log 2>/dev/null | head -1); [ -s "$f" ] && { echo "--- $f (tail) ---"; tail -n 8 "$f" | cut -c1-220; }

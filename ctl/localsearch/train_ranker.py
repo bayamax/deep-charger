@@ -24,7 +24,9 @@ ap.add_argument("--device", default="auto"); ap.add_argument("--holdout", type=f
 A = ap.parse_args()
 random.seed(A.seed); torch.manual_seed(A.seed)
 dev = ("cuda" if torch.cuda.is_available() else "cpu") if A.device == "auto" else A.device
-st = Store(A.store); idf, idf_max = build_idf(st, os.path.join(A.store, "idf.pkl")) if not os.path.exists(os.path.join(A.store, "idf.pkl")) else __import__("pickle").load(open(os.path.join(A.store, "idf.pkl"), "rb"))
+import pickle
+st = Store(A.store); IDF = os.path.join(A.store, "idf.pkl")
+idf, idf_max = pickle.load(open(IDF, "rb")) if os.path.exists(IDF) else build_idf(st)
 query_of = {}
 for l in open(A.questions):
     r = json.loads(l); query_of[r["q"]] = r["query"]
