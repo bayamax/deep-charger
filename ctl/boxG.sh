@@ -277,6 +277,49 @@ RK2
   echo "RETR_LAUNCHED $RETR_TAG $(date -u)"
 fi
 
+# one-shot: the local search released under release/local-search/ - the store's files copied on the hub server side
+# (LFS copies, nothing re-uploaded), the embedder, the code, a README (LSREL_SERIAL bumps to redo)
+LSREL_SERIAL=1
+if [ "$(cat /root/.lsrel_serial 2>/dev/null)" != "$LSREL_SERIAL" ] && ! pgrep -f "lsrelkee[p].sh" >/dev/null; then
+  curl -sSf -o /root/lsrel_README.md "$RAW/release/local-search/README.md?nocache=$(date +%s)" && cat > /root/lsrelkeep.sh <<'LK'
+#!/bin/bash
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null)
+python3 - <<'PY'
+import os
+from huggingface_hub import HfApi, CommitOperationCopy, CommitOperationAdd
+R = "baya1116/hypernet-sp-distill"; api = HfApi(); have = set(api.list_repo_files(R))
+SRC = "localsearch/wiki_en_20231101"; DST = "release/local-search"
+ops = []
+for f in ("docs.bin", "blocks.idx", "titles.txt", "emb.bin", "lex.sqlite", "ivf_centroids.npy", "ivf_order.npy", "ivf_offsets.npy", "emb_ivf.bin"):
+    if f"{SRC}/{f}" in have and f"{DST}/{f}" not in have: ops.append(CommitOperationCopy(f"{SRC}/{f}", f"{DST}/{f}"))
+for f in ("model_int8.onnx", "tokenizer.json", "tokenizer_config.json", "config.json", "special_tokens_map.json", "vocab.txt"):
+    src = f"localsearch/bge-small-en-v1.5/{f}"
+    if src in have and f"{DST}/bge-small-en-v1.5/{f}" not in have:
+        if f == "model_int8.onnx": ops.append(CommitOperationCopy(src, f"{DST}/bge-small-en-v1.5/{f}"))
+        elif os.path.exists(f"/root/bge-small/{f}"): ops.append(CommitOperationAdd(f"{DST}/bge-small-en-v1.5/{f}", f"/root/bge-small/{f}"))
+for f in ("meta.json",):
+    if os.path.exists(f"/root/wiki_store/{f}"): ops.append(CommitOperationAdd(f"{DST}/{f}", f"/root/wiki_store/{f}"))
+for f in ("store.py", "search.py", "ivf.py", "embed.py", "build_store.py", "memcheck.py", "pq.py"):
+    if os.path.exists(f"/root/work/localsearch/{f}"): ops.append(CommitOperationAdd(f"{DST}/code/{f}", f"/root/work/localsearch/{f}"))
+ops.append(CommitOperationAdd(f"{DST}/README.md", "/root/lsrel_README.md"))
+print(f"[lsrel] {len(ops)} operations ({sum(isinstance(o, CommitOperationCopy) for o in ops)} server-side copies)", flush=True)
+for attempt in range(3):
+    try:
+        api.create_commit(repo_id=R, operations=ops, commit_message="release: the local search"); break
+    except Exception as e:
+        print(f"[lsrel] attempt {attempt+1} failed: {str(e)[:200]}", flush=True)
+        import time; time.sleep(60)
+else:
+    print("LSREL_ABORT"); raise SystemExit(1)
+have = set(api.list_repo_files(R)); print("[lsrel] on the hub:", sorted(f[len(DST)+1:] for f in have if f.startswith(DST + "/")))
+print("LSREL_DONE")
+PY
+LK
+  chmod +x /root/lsrelkeep.sh; echo "$LSREL_SERIAL" > /root/.lsrel_serial
+  setsid nohup bash -c 'bash /root/lsrelkeep.sh 2>&1 | tee -a /root/release.log' >> /proc/1/fd/1 2>&1 < /dev/null 9>&- &
+  echo "LSREL_LAUNCHED $(date -u)"
+fi
+
 # one-shot: the released directories, copied on the hub under release/ with a README (RELEASE_SERIAL bumps to redo)
 RELEASE_SERIAL=4
 if [ "$(cat /root/.release_serial 2>/dev/null)" != "$RELEASE_SERIAL" ] && ! pgrep -f "releasekee[p].sh" >/dev/null; then

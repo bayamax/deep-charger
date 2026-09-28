@@ -24,5 +24,6 @@ Loading: the 4-bit directories are what the app reads (`SPGenerator` with `Quant
 bits: 4)`); `pooler.safetensors` holds the pooler's 64 tensors under bare keys. The 16-bit directory is a
 plain `transformers` model directory; the same `pooler.safetensors` goes with it.
 
-Local search (no network): `localsearch/wiki_en_20231101/` (the store, the sign index and its IVF layout,
-the lexical index) with `localsearch/bge-small-en-v1.5/` (the int8 embedder); `docs/local_search.md`.
+Local search (no network): `release/local-search/` - the store, the sign index and its IVF layout, the
+lexical index, the int8 embedder and the code, with its own README and the measurements (4-bit model with
+it: 48.0% at 102 rollouts, 42.3% at 300, against the API's 48.0 / 45.0); `docs/local_search.md`.
