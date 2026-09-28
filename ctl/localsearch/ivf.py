@@ -72,21 +72,23 @@ class IVFIndex:
         self.bits = np.memmap(os.path.join(store, "emb_ivf.bin"), dtype=np.uint8, mode="r").reshape(-1, DIM // 8)
         self.n = self.bits.shape[0]; self.nprobe = nprobe
 
-    def top(self, q, k):
+    def top(self, q, k, chunk=16384):
+        """The best k articles of the probed clusters, scored a chunk at a time (a chunk's signs in float are
+        25 MB; the whole probe set would be ten times that, and the process would keep it)."""
         q = q.astype(np.float32)
         probes = np.argsort(-(self.c @ q))[:self.nprobe]
-        rows, ids = [], []
+        best_s = np.full(k, -np.inf, dtype=np.float32); best_i = np.full(k, -1, dtype=np.int64)
         for p in probes:
             a, b = int(self.offsets[p]), int(self.offsets[p + 1])
-            if b > a:
-                rows.append(np.asarray(self.bits[a:b])); ids.append(np.asarray(self.order[a:b]))
-        if not rows:
-            return np.zeros(0, dtype=np.int64)
-        rows = np.concatenate(rows); ids = np.concatenate(ids)
-        sc = signs(rows).astype(np.float32) @ q
-        kk = min(k, len(sc))
-        idx = np.argpartition(-sc, kk - 1)[:kk]
-        return ids[idx[np.argsort(-sc[idx])]].astype(np.int64)
+            for s0 in range(a, b, chunk):
+                s1 = min(s0 + chunk, b)
+                sc = (signs(np.asarray(self.bits[s0:s1])).astype(np.float32) @ q)
+                ids = np.asarray(self.order[s0:s1]).astype(np.int64)
+                cs = np.concatenate([best_s, sc]); ci = np.concatenate([best_i, ids])
+                kk = min(k, len(cs)); sel = np.argpartition(-cs, kk - 1)[:kk]
+                best_s, best_i = cs[sel], ci[sel]
+        o = np.argsort(-best_s); keep = best_i[o] >= 0
+        return best_i[o][keep]
 
 
 if __name__ == "__main__":

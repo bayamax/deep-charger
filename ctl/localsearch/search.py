@@ -52,7 +52,12 @@ class Embedder:
             self.dev = "cuda" if torch.cuda.is_available() else "cpu"
             self.model = AutoModel.from_pretrained(model_dir, torch_dtype=torch.float16 if self.dev == "cuda" else torch.float32).to(self.dev).eval()
 
-    def __call__(self, texts):
+    def __call__(self, texts, maxlen=None, batch=16):
+        if maxlen:
+            self.tok.enable_truncation(maxlen)
+        if len(texts) > batch:   # a batch at a time: a 128-text batch through onnxruntime kept ~1 GB of arena
+            out = [self(texts[i:i + batch], maxlen) for i in range(0, len(texts), batch)]
+            return np.concatenate(out)
         enc = self.tok.encode_batch(texts)
         if self.torch is not None:
             with self.torch.no_grad():
@@ -114,12 +119,12 @@ def build_idf(store, n=40000):
 
 
 class LocalSearch:
-    def __init__(self, store_path, model_dir, threads=0, coarse=64, lex_k=64, title_k=16, rerank=128):
+    def __init__(self, store_path, model_dir, threads=0, coarse=48, lex_k=48, title_k=12, rerank=64):
         self.st = Store(store_path)
         self.emb = Embedder(model_dir, threads)
         self.bits = np.memmap(os.path.join(store_path, "emb.bin"), dtype=np.uint8, mode="r").reshape(-1, DIM // 8)
         assert self.bits.shape[0] == self.st.n_docs, f"index {self.bits.shape[0]} vs store {self.st.n_docs}"
-        self.maxlen_doc = int(os.environ.get("SP_LOCAL_DOCLEN", "128"))
+        self.maxlen_doc = int(os.environ.get("SP_LOCAL_DOCLEN", "96"))
         self.gpu = None
         self.pq = None
         self.ivf = None
@@ -137,6 +142,7 @@ class LocalSearch:
             self.gpu = torch.from_numpy(np.ascontiguousarray(self.bits)).cuda()
             UNPACK_T = torch.from_numpy(UNPACK).cuda()
         self.con = sqlite3.connect("file:" + build_lex_index(store_path) + "?mode=ro", uri=True)
+        self.con.execute("PRAGMA cache_size=-4096")   # 4 MB of page cache; the rest of the index stays on disk
         self.idf, self.idf_max = build_idf(self.st)
         self.coarse, self.lex_k, self.title_k, self.rerank = coarse, lex_k, title_k, rerank
 
@@ -170,18 +176,33 @@ class LocalSearch:
 
     def _lex_hits(self, query, k, column=None):
         """BM25 over title (x3) and opening text; with column='title', over the title alone. Returns
-        [(article id, bm25)] best first (FTS5's bm25 is negative, more negative = better)."""
-        words = self._terms(query)
+        [(article id, bm25)] best first (FTS5's bm25 is negative, more negative = better).
+        FTS5 scores every matching row, so the query is shaped to match few: the two rarest terms together
+        first (1 ms on the whole dump), then any of the four rarest (100 ms); every term OR-ed took 3 s."""
+        words = list(dict.fromkeys(self._terms(query)))
         if not words:
             return []
-        q = " OR ".join(f'"{w}"' for w in words)
-        if column:
-            q = f"{column}: ({q})"
-        try:
-            return [(r[0] - 1, -r[1]) for r in self.con.execute(
-                "SELECT rowid, bm25(d, 3.0, 1.0) FROM d WHERE d MATCH ? ORDER BY bm25(d, 3.0, 1.0) LIMIT ?", (q, k)).fetchall()]
-        except sqlite3.OperationalError:
-            return []
+        words.sort(key=lambda w: -self.idf.get(w.lower(), self.idf_max))
+        shapes = []
+        if len(words) >= 2:
+            shapes.append(" AND ".join(f'"{w}"' for w in words[:2]))
+        shapes.append(" OR ".join(f'"{w}"' for w in words[:4]))
+        out = []
+        for q in shapes:
+            if column:
+                q = f"{column}: ({q})"
+            try:
+                rows = self.con.execute("SELECT rowid, bm25(d, 3.0, 1.0) FROM d WHERE d MATCH ? ORDER BY bm25(d, 3.0, 1.0) LIMIT ?", (q, k)).fetchall()
+            except sqlite3.OperationalError:
+                rows = []
+            out += [(r[0] - 1, -r[1]) for r in rows]
+            if len(out) >= k:
+                break
+        seen = set(); res = []
+        for i, sc in out:
+            if i not in seen:
+                seen.add(i); res.append((i, sc))
+        return res[:k]
 
     def search(self, query, k=3):
         qv = self.emb([QUERY_PREFIX + query])[0]
@@ -191,7 +212,7 @@ class LocalSearch:
         cands += [i for i, _ in self._lex_hits(query, self.title_k, column="title")]
         cands = list(dict.fromkeys(cands))[:self.rerank]
         docs = [self.st.doc(i) for i in cands]
-        dv = self.emb([f"{t}. {b[:600]}" for t, b in docs])
+        dv = self.emb([f"{t}. {b[:400]}" for t, b in docs], maxlen=self.maxlen_doc)
         sims = dv @ qv
         ql = " " + re.sub(r"[^a-z0-9 ]", " ", query.lower()) + " "
         qw = [w.lower() for w in WORD.findall(query) if w.lower() not in STOP and len(w) > 1]
