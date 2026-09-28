@@ -143,6 +143,6 @@ Same answers, fewer searches, and 20 s a rollout against 35-50 s with the API. A
 the same 150 questions: local 42.3% (43.0 / 39.0 / 45.0) against the API's 45.0% (50.0 / 46.0 / 39.0),
 -2.7 +- 4.1 (better on 36 questions, worse on 45, equal on 69); grounded 67% against 63%, searches 3.2
 against 4.6. Within the noise, with a hint of two or three points: the model reaches a page with the
-answer more often through the local search and answers right slightly less often. Two things to try
-before calling it equal: serving the two best pages in the first block, and a retriever trained on the
-3,914 (query, Wikipedia's page) pairs the lineage produced.
+answer more often through the local search and answers right slightly less often. Serving the two best pages
+(700 characters each) in the first block read 48.0% at 102 rollouts (50.0 / 58.8 / 35.3), the same as one page at 102
+and no signal either way; it was not extended. The retriever below is the next attempt.

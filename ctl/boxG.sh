@@ -161,8 +161,12 @@ for f in pool_eval.py q4.py qat.py dwq.py poolerfit.py jointfit.py checkmlx.py p
 done
 cp /root/work/web_search.py /root/work/runtime/web_search.py 2>/dev/null
 mkdir -p /root/work/localsearch
-for f in build_store.py store.py embed.py search.py pq.py ivf.py memcheck.py; do
+for f in build_store.py store.py embed.py search.py pq.py ivf.py memcheck.py train_retriever.py export_onnx.py test_retriever.py; do
   for try in 1 2 3; do curl -sS -o /root/work/localsearch/$f "$RAW/localsearch/$f?nocache=$(date +%s)" && python3 -m py_compile /root/work/localsearch/$f && break; sleep 5; done
+done
+mkdir -p /root/work/localsearch/data   # the retriever's pairs; a missing file must not leave a 404 body behind
+for f in train_pairs.json train_negs.json test_queries.json; do
+  for try in 1 2 3; do curl -sSf -o /root/work/localsearch/data/$f "$RAW/localsearch/data/$f?nocache=$(date +%s)" && python3 -c "import json,sys; json.load(open('/root/work/localsearch/data/$f'))" && break; rm -f /root/work/localsearch/data/$f; sleep 5; done
 done
 echo "fetched: pool_eval $(wc -l < /root/work/pool_eval.py) lines, q4 $(wc -l < /root/work/q4.py) lines"
 
