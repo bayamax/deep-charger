@@ -108,6 +108,8 @@ about 0.1 GB, search 0.3-0.4 GB: about 1.75 GB.
 
 ## 7. What to expect
 
-Search held-out (eval300 subset, 300 rollouts, this loop): 47.3% with Wikipedia's API, 42.3% with the local
-search at 4-bit (paired -2.7 +- 4.1); reasoning held-out (Dolphin-R1, 100): 53%. `release/README.md` has
+Search held-out (eval300 subset, 300 rollouts, this loop), Wikipedia's API: 47.3% for
+`g14-4bit-gptq-trained`, 45.0% for `g14-4bit-gptq`, 45.3% for the 16-bit weights. The local search,
+measured with `g14-4bit-gptq`: 42.3% (paired against the API on the same questions -2.7 +- 4.1).
+Reasoning held-out (Dolphin-R1, 100): 53%. `release/README.md` has
 the table and `docs/` in the repository the measurements.
