@@ -51,8 +51,12 @@ for ep in range(A.epochs):
         # one page per batch slot; a query whose page is also another slot's positive is not penalised for it
         docs = [p["doc"] for p in batch]
         for p in batch:
+            # hard negatives: pages the model reached for the same question that did not help, and what the current search ranks near
+            qn = [i for i in p.get("q_neg", []) if i not in gold_of[p["query"]]]
             hard = [i for i in negs.get(p["query"], []) if i not in gold_of[p["query"]]][:6]
-            docs += random.sample(hard, min(A.nneg, len(hard)))
+            picks = random.sample(qn, min(1, len(qn))) if qn else []
+            picks += random.sample(hard, min(A.nneg - len(picks), len(hard)))
+            docs += picks
         docs = list(dict.fromkeys(docs)); col = {d: j for j, d in enumerate(docs)}
         q = embed(enc([QUERY_PREFIX + p["query"] for p in batch], A.qlen))
         d = embed(enc([text(i) for i in docs], A.dlen))
