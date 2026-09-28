@@ -266,3 +266,8 @@ Paired per question: -0.3 +- 2.9 (standard error); GPTQ better on 28 questions, 
 four-point target, which round-to-nearest with trained scales (42.2 on 102) was ten points outside.
 The GPTQ codes with the grid trained on top (q14gx, `chatsft/g14_mlx4gt`) read 48.0 on 102 and are
 being measured at 300 for the same pairing.
+
+GPTQ's codes with the grid trained on top (q14gx), at the same 300: **47.3%** (44.0 / 47.0 / 51.0), grounded
+66%, searches 4.4. Paired: +2.0 +- 3.6 against bf16 (better on 38 questions, worse on 34, equal on 78),
++2.3 +- 3.1 against GPTQ alone. Both 4-bit arms are within the noise of the float model; the trained one
+is the app's file (`release/g14-4bit-gptq-trained`).
