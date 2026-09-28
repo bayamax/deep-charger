@@ -23,6 +23,8 @@ ap.add_argument("--qlen", type=int, default=48); ap.add_argument("--dlen", type=
 ap.add_argument("--device", default="auto"); ap.add_argument("--holdout", type=float, default=0.2)
 ap.add_argument("--arch", default="bi", choices=["bi", "ce"], help="bi: the bge embedder (cosine + the lexical terms); ce: a cross-encoder over (query, page), its logit alone")
 A = ap.parse_args()
+if A.arch == "ce" and A.temp == 0.05:
+    A.temp = 1.0   # a cross-encoder's logits already span several units; the cosine's 0.05 would make the softmax one-hot
 random.seed(A.seed); torch.manual_seed(A.seed)
 dev = ("cuda" if torch.cuda.is_available() else "cpu") if A.device == "auto" else A.device
 import pickle
