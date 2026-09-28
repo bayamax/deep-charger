@@ -96,3 +96,36 @@ GPU it is well under a second.
 A query costs one pass over the sign index (0.7 s in numpy on 4 cores, milliseconds with SIMD or a GPU),
 one FTS5 query (~80 ms), and the re-embedding of ~130 candidates (the largest cost on a CPU; on the phone
 the int8 model at ~3 ms a candidate).
+
+## The device layout, measured on the whole dump (2026-09-28)
+
+The first version of the search read the whole sign index per query, OR-ed every query term through
+FTS5, and re-embedded 128 candidates in one batch: 7 s and 1.7 GB resident a query on the whole dump.
+The layout that ships:
+
+- **IVF over the sign index** (`ivf.py`): 2048 centroids from k-means on the signs, the index rewritten in
+  cluster order; a query scores the centroids (3 MB) and reads its 48 best clusters, scored 16k articles at
+  a time with a running top-k. ~2% of the index is touched per query.
+- **Lexical queries shaped to match few rows**: FTS5 scores every matching row, so the two rarest query
+  terms are AND-ed first (1 ms), then the four rarest OR-ed (100 ms; recall@64 62% against 65% for all
+  terms at 550 ms). 4 MB of SQLite page cache.
+- **The int8 embedder** (33 MB against 133 MB fp32) and candidates re-embedded 16 at a time, 64 of them,
+  96 tokens each.
+
+On 200 of the model's own queries against the page Wikipedia's search returned (the whole dump, 6.4M
+articles), the channels' recall at 64 candidates: embedding IVF 43% (96 probes), lexical AND 51%, lexical
+OR-4 66%, title 48%, union 70%. Ranking then decides: the fused score (cosine + 0.2 title overlap + 0.4
+opening overlap + 0.2 when the query contains the title; weights from a grid on these queries) puts the
+page first 49% of the time, in the top three 52%. A cross-encoder rerank (MiniLM-L6, int8, 23 MB) over
+the top 32 or 64 did not improve on it (43 / 53), so the search stays a bi-encoder. The remaining gap
+between coverage (68-70%) and top-three (52%) is pages that share a name or a subject with the right one
+- Wikipedia's own choice among them is not recoverable from a title and 400 characters.
+
+| | per query (4 CPU cores, numpy) | resident |
+|---|---|---|
+| first version | 7 s | 1.7 GB |
+| device layout | 0.6 s | 0.55 GB (Python; the index reads are memory-mapped and evictable) |
+
+The end-to-end measure - the 4-bit model on the search held-out with this search in place of the API - is
+what decides whether the lower coverage costs answers; the float model with the first version scored the
+same as the API (48.0 / 48.0 on 102 rollouts).
