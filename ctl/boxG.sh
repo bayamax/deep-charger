@@ -80,7 +80,7 @@ PSKIP=
 # The raw GitHub copy this box fetches can lag and hand a control run an OLDER version of this file (04:48 on 09-22 it
 # relaunched the online loop under the previous mode while the newer run was merging a checkpoint on the same card).
 # Every edit bumps BOXG_SERIAL; a run that sees a lower serial than one already executed stops here.
-BOXG_SERIAL=2026092654
+BOXG_SERIAL=2026092655
 if [ -f /root/.boxg_serial ] && [ "$(cat /root/.boxg_serial)" -gt "$BOXG_SERIAL" ] 2>/dev/null; then echo "BOXG_STALE $BOXG_SERIAL < $(cat /root/.boxg_serial)"; exit 0; fi
 echo $BOXG_SERIAL > /root/.boxg_serial
 MODE=reeval       # 2026-09-28: q14gx (GPTQ codes + trained grid) at 300 rollouts, paired with the bf16 300
@@ -161,7 +161,7 @@ for f in pool_eval.py q4.py qat.py dwq.py poolerfit.py jointfit.py checkmlx.py p
 done
 cp /root/work/web_search.py /root/work/runtime/web_search.py 2>/dev/null
 mkdir -p /root/work/localsearch
-for f in build_store.py store.py embed.py search.py pq.py; do
+for f in build_store.py store.py embed.py search.py pq.py ivf.py memcheck.py; do
   for try in 1 2 3; do curl -sS -o /root/work/localsearch/$f "$RAW/localsearch/$f?nocache=$(date +%s)" && python3 -m py_compile /root/work/localsearch/$f && break; sleep 5; done
 done
 echo "fetched: pool_eval $(wc -l < /root/work/pool_eval.py) lines, q4 $(wc -l < /root/work/q4.py) lines"
@@ -209,6 +209,32 @@ from huggingface_hub import HfApi
 HfApi().delete_file("localsearch/wiki_en_20231101/titles.sqlite", "baya1116/hypernet-sp-distill"); print("titles.sqlite removed from the hub")
 PYD
   fi
+fi
+
+# The device layout of the local search, as a side job on the CPU: the int8 embedder, the IVF layout of the sign
+# index, the memory and time of the search as its own process on the whole store, all uploaded beside the store.
+IVF=${IVF:-1}
+if [ "$IVF" = 1 ] && ! pgrep -f "ivfkee[p].sh" >/dev/null && ! grep -q IVF_JOB_DONE /root/ivf.log 2>/dev/null && [ -s /root/wiki_store/emb.bin ]; then
+  cat > /root/ivfkeep.sh <<'IK'
+#!/bin/bash
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); R=baya1116/hypernet-sp-distill; ST=/root/wiki_store; M=/root/bge-small
+pip install -q onnxruntime onnx 2>&1 | grep -v WARNING | tail -1
+[ -s $M/model.onnx ] || cp $M/onnx/model.onnx $M/model.onnx 2>/dev/null
+[ -s $M/model_int8.onnx ] || python3 -c "
+from onnxruntime.quantization import quantize_dynamic, QuantType
+quantize_dynamic('$M/model.onnx', '$M/model_int8.onnx', weight_type=QuantType.QInt8); print('[ivf] int8 embedder written')"
+[ -s $ST/emb_ivf.bin ] && [ -s $ST/ivf_offsets.npy ] || python3 /root/work/localsearch/ivf.py --store $ST --k 2048 2>&1 | grep -E "^\[ivf\]|IVF_DONE|Error"
+[ -s $ST/lex.sqlite ] || python3 -c "import sys; sys.path.insert(0,'/root/work/localsearch'); from search import build_lex_index; build_lex_index('$ST')"
+OMP_NUM_THREADS=4 python3 /root/work/localsearch/memcheck.py --store $ST --model $M --queries /root/work/ev_0.jsonl --n 40 2>&1 | grep -E "MEMCHECK|Error"
+SP_LOCAL_NPROBE=16 OMP_NUM_THREADS=4 python3 /root/work/localsearch/memcheck.py --store $ST --model $M --queries /root/work/ev_0.jsonl --n 40 2>&1 | grep -E "MEMCHECK|Error"
+for f in ivf_centroids.npy ivf_order.npy ivf_offsets.npy emb_ivf.bin; do hf upload $R $ST/$f localsearch/wiki_en_20231101/$f >/dev/null 2>&1; done
+hf upload $R $M/model_int8.onnx localsearch/bge-small-en-v1.5/model_int8.onnx >/dev/null 2>&1
+for f in tokenizer.json tokenizer_config.json config.json special_tokens_map.json; do hf upload $R $M/$f localsearch/bge-small-en-v1.5/$f >/dev/null 2>&1; done
+echo "IVF_JOB_DONE $(date -u)"
+IK
+  chmod +x /root/ivfkeep.sh
+  setsid nohup bash -c 'bash /root/ivfkeep.sh 2>&1 | tee -a /root/ivf.log' >> /proc/1/fd/1 2>&1 < /dev/null 9>&- &
+  echo "IVF_LAUNCHED $(date -u)"
 fi
 
 # The status command is the same whatever mode this file is in, so it is installed once,
@@ -414,6 +440,7 @@ while :; do
     echo "--- reeval.log (tail) ---"; tail -n 120 /root/reeval.log 2>/dev/null | cut -c1-300
     echo "--- quant.log (tail) ---"; tail -n 30 /root/quant.log 2>/dev/null | cut -c1-300
     echo "--- wiki.log (tail) ---"; tail -n 8 /root/wiki.log 2>/dev/null | cut -c1-300
+    echo "--- ivf.log (tail) ---"; tail -n 8 /root/ivf.log 2>/dev/null | cut -c1-300
     for f in /root/gptq_*.log; do [ -s "$f" ] && { echo "--- $f (tail) ---"; grep -E "^\[gptq\]|^\[out\]|GPTQ_DONE|Error" "$f" | tail -n 4 | cut -c1-200; }; done
     f=$(ls -t /root/q14*_q14*[0-9].log /root/g14*_g14*[0-9].log /root/gq14*_gq14*[0-9].log 2>/dev/null | head -1); [ -s "$f" ] && { echo "--- $f (tail) ---"; tail -n 8 "$f" | cut -c1-220; }
     for f in /root/sft_q*.log; do [ -s "$f" ] && { echo "--- $f (tail) ---"; grep -E "^step [0-9]+ |val" "$f" | tail -n 6 | cut -c1-200; }; done
@@ -421,7 +448,7 @@ while :; do
     echo "--- gpu ---"; nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv,noheader 2>/dev/null; df -h /root | tail -1
     [ -x /usr/local/bin/s ] && /usr/local/bin/s 20 2>/dev/null | sed 's/^/SCORE /'
     echo "--- eval progress ---"; for f in $(ls -t /root/work/*_out_*.jsonl 2>/dev/null | head -3); do echo "$f $(wc -l < $f) lines, last write $(date -u -r $f +%H:%M)"; done
-    echo "--- processes ---"; pgrep -fa "online_loop.p[y]|pool_eval.p[y]|reevalkee[p].sh|build_merged.p[y]|jointfit.p[y]|quantkee[p].sh|gptqkee[p].sh|gptq.p[y]|wikikee[p].sh|build_store.p[y]|embed.p[y]|hf downloa[d]|hf uploa[d]" | cut -c1-120; } > /root/boxlog.txt 2>&1
+    echo "--- processes ---"; pgrep -fa "online_loop.p[y]|pool_eval.p[y]|reevalkee[p].sh|build_merged.p[y]|jointfit.p[y]|quantkee[p].sh|gptqkee[p].sh|gptq.p[y]|ivfkee[p].sh|ivf.p[y]|memcheck.p[y]|wikikee[p].sh|build_store.p[y]|embed.p[y]|hf downloa[d]|hf uploa[d]" | cut -c1-120; } > /root/boxlog.txt 2>&1
   hf upload $R /root/boxlog.txt pooler_distill/chatsft/audit/boxlog.txt >/dev/null 2>&1
   sleep 600
 done

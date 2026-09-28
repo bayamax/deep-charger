@@ -42,7 +42,8 @@ class Embedder:
             so = ort.SessionOptions()
             if threads:
                 so.intra_op_num_threads = threads
-            self.sess = ort.InferenceSession(os.path.join(model_dir, "model.onnx"), so, providers=["CPUExecutionProvider"])
+            f = "model_int8.onnx" if os.path.exists(os.path.join(model_dir, "model_int8.onnx")) and os.environ.get("SP_LOCAL_FP32", "0") != "1" else "model.onnx"
+            self.sess = ort.InferenceSession(os.path.join(model_dir, f), so, providers=["CPUExecutionProvider"])
             self.names = [i.name for i in self.sess.get_inputs()]
         except ImportError:
             import torch
@@ -118,8 +119,14 @@ class LocalSearch:
         self.emb = Embedder(model_dir, threads)
         self.bits = np.memmap(os.path.join(store_path, "emb.bin"), dtype=np.uint8, mode="r").reshape(-1, DIM // 8)
         assert self.bits.shape[0] == self.st.n_docs, f"index {self.bits.shape[0]} vs store {self.st.n_docs}"
+        self.maxlen_doc = int(os.environ.get("SP_LOCAL_DOCLEN", "128"))
         self.gpu = None
         self.pq = None
+        self.ivf = None
+        if os.path.exists(os.path.join(store_path, "emb_ivf.bin")) and os.environ.get("SP_LOCAL_FLAT", "0") != "1":
+            from ivf import IVFIndex   # the phone's layout: a query touches ~2% of the index
+            self.ivf = IVFIndex(store_path, nprobe=int(os.environ.get("SP_LOCAL_NPROBE", "48")))
+            assert self.ivf.n == self.st.n_docs, f"ivf index {self.ivf.n} vs store {self.st.n_docs}"
         if os.environ.get("SP_LOCAL_PQ", "0") == "1" and os.path.exists(os.path.join(store_path, "pq_codes.npy")):   # no better than the sign bits on shard 0; kept as an option
             from pq import PQIndex
             self.pq = PQIndex(store_path, gpu=os.environ.get("SP_LOCAL_GPU", "0") == "1")
@@ -137,6 +144,8 @@ class LocalSearch:
         """Asymmetric scoring: the float query against each article's signs. On shard 0 of the dump this finds the
         page Wikipedia's search returned 73% of the time within 96 candidates; binary-against-binary Hamming
         found it 23% of the time, so the query is never binarised."""
+        if self.ivf is not None:
+            return self.ivf.top(qv, k)
         if self.pq is not None:
             return self.pq.top(qv, k)
         if self.gpu is not None:
@@ -182,7 +191,7 @@ class LocalSearch:
         cands += [i for i, _ in self._lex_hits(query, self.title_k, column="title")]
         cands = list(dict.fromkeys(cands))[:self.rerank]
         docs = [self.st.doc(i) for i in cands]
-        dv = self.emb([f"{t}. {b[:800]}" for t, b in docs])
+        dv = self.emb([f"{t}. {b[:600]}" for t, b in docs])
         sims = dv @ qv
         ql = " " + re.sub(r"[^a-z0-9 ]", " ", query.lower()) + " "
         qw = [w.lower() for w in WORD.findall(query) if w.lower() not in STOP and len(w) > 1]
