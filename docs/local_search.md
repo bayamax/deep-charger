@@ -182,9 +182,13 @@ page served carries the answer (the API's page carries it 53.4% of the time on t
 | bge-small as shipped | 40.2 / 47.5 | 62.2 / 72.2 |
 | fine-tuned, ranking only | 39.0 / 47.5 | 60.2 / 72.2 |
 
-Swapping the ranking model alone changes nothing: the ranking is three lexical features and one cosine,
-and the candidates come from the old index. Whether the trained model finds better candidates is the
-re-embedding of the dump, running.
+| fine-tuned, the dump re-embedded with it (`wiki_store_ft1`, IVF rebuilt) | 37.8 / 47.0 | 60.9 / 71.7 |
+
+Nothing moves. The trained model reaches 81% in-batch accuracy on its own pairs but the test queries
+(other questions) read the same through it, as ranking model or as index: the candidates are mostly the
+lexical channel's, and what the ranking needs (which of the answer-bearing pages to serve) is not in a
+384-dimensional similarity. The dedicated retriever is kept on the hub (`localsearch/bge-small-ft1`,
+`localsearch/wiki_en_20231101_ft1`) and the end-to-end held-out with it (gq14R) runs for the record.
 
 **The ranking re-fitted for answer-bearing pages** (1,200 training queries with the question's answer
 known, features per candidate: cosine of either model, title overlap, opening overlap, query-names-title,
