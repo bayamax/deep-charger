@@ -129,3 +129,15 @@ between coverage (68-70%) and top-three (52%) is pages that share a name or a su
 The end-to-end measure - the 4-bit model on the search held-out with this search in place of the API - is
 what decides whether the lower coverage costs answers; the float model with the first version scored the
 same as the API (48.0 / 48.0 on 102 rollouts).
+
+## End to end with the 4-bit model (2026-09-28)
+
+The GPTQ 4-bit model (`release/g14-4bit-gptq`) on the search held-out, 102 rollouts, its own pooler:
+
+| search | correct | grounded | searches per rollout | shards |
+|---|---|---|---|---|
+| Wikipedia API | 48.0% | 72% | 3.7 | 47.1 / 47.1 / 50.0 |
+| local, device layout (IVF, int8 embedder, lean ranking) | **48.0%** | 71% | 2.2 | 50.0 / 47.1 / 47.1 |
+
+Same answers, fewer searches, and 20 s a rollout against 35-50 s with the API. The 300-rollout pairing
+follows.
