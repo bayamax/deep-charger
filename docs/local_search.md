@@ -188,7 +188,8 @@ Nothing moves. The trained model reaches 81% in-batch accuracy on its own pairs 
 (other questions) read the same through it, as ranking model or as index: the candidates are mostly the
 lexical channel's, and what the ranking needs (which of the answer-bearing pages to serve) is not in a
 384-dimensional similarity. The dedicated retriever is kept on the hub (`localsearch/bge-small-ft1`,
-`localsearch/wiki_en_20231101_ft1`) and the end-to-end held-out with it (gq14R) runs for the record.
+`localsearch/wiki_en_20231101_ft1`); end to end (gq14R, 102 rollouts) it read 49.0% (52.9 / 50.0 / 44.1),
++1.0 +- 5.5 paired against the shipped index on the same 51 questions: the same.
 
 **The ranking re-fitted for answer-bearing pages** (1,200 training queries with the question's answer
 known, features per candidate: cosine of either model, title overlap, opening overlap, query-names-title,
