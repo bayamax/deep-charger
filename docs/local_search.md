@@ -185,3 +185,11 @@ page served carries the answer (the API's page carries it 53.4% of the time on t
 Swapping the ranking model alone changes nothing: the ranking is three lexical features and one cosine,
 and the candidates come from the old index. Whether the trained model finds better candidates is the
 re-embedding of the dump, running.
+
+**The ranking re-fitted for answer-bearing pages** (1,200 training queries with the question's answer
+known, features per candidate: cosine of either model, title overlap, opening overlap, query-names-title,
+BM25; grid and a listwise linear fit): 62.2% → 63-65% top-1 on the 400 test queries, inside the noise of
+399 queries. The candidates hold an answer-bearing page 81% of the time; no linear ranking over these
+features reaches it more often than about 64%. Pulling the query's sentence forward in the served text was
+also measured and dropped: in only 3 of the 300 local rollouts did the page carry the answer beyond the
+block the model read.
