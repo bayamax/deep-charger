@@ -122,6 +122,10 @@ class LocalSearch:
     def __init__(self, store_path, model_dir, threads=0, coarse=48, lex_k=48, title_k=12, rerank=64):
         self.st = Store(store_path)
         self.emb = Embedder(model_dir, threads)
+        # SP_LOCAL_RERANK_MODEL: a second embedder for the ranking only (a retriever trained on the lineage's queries,
+        # judged before the index is rebuilt with it); the coarse channel keeps the model the sign index was built with
+        rr = os.environ.get("SP_LOCAL_RERANK_MODEL")
+        self.emb_rank = Embedder(rr, threads) if rr and os.path.abspath(rr) != os.path.abspath(model_dir) else self.emb
         self.bits = np.memmap(os.path.join(store_path, "emb.bin"), dtype=np.uint8, mode="r").reshape(-1, DIM // 8)
         assert self.bits.shape[0] == self.st.n_docs, f"index {self.bits.shape[0]} vs store {self.st.n_docs}"
         self.maxlen_doc = int(os.environ.get("SP_LOCAL_DOCLEN", "96"))
@@ -214,8 +218,8 @@ class LocalSearch:
         cands += [i for i, _ in self._lex_hits(query, self.title_k, column="title")]
         cands = list(dict.fromkeys(cands))[:self.rerank]
         docs = [self.st.doc(i) for i in cands]
-        dv = self.emb([f"{t}. {b[:400]}" for t, b in docs], maxlen=self.maxlen_doc)
-        sims = dv @ qv
+        dv = self.emb_rank([f"{t}. {b[:400]}" for t, b in docs], maxlen=self.maxlen_doc)
+        sims = dv @ (qv if self.emb_rank is self.emb else self.emb_rank([QUERY_PREFIX + query])[0])
         ql = " " + re.sub(r"[^a-z0-9 ]", " ", query.lower()) + " "
         qw = [w.lower() for w in WORD.findall(query) if w.lower() not in STOP and len(w) > 1]
         W = sum(self.idf.get(w, self.idf_max) for w in qw) or 1.0

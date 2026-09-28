@@ -237,6 +237,42 @@ IK
   echo "IVF_LAUNCHED $(date -u)"
 fi
 
+# The dedicated retriever: bge-small fine-tuned on the lineage's own (query, page) pairs, then the dump re-embedded
+# with it into a second store beside the first (the live one keeps serving), IVF rebuilt, the 400 test queries
+# scored, everything uploaded. Waits for the GPU (no evaluation running). RETR_TAG bumps to redo.
+RETRIEVER=${RETRIEVER:-1}; RETR_TAG=${RETR_TAG:-ft1}
+if [ "$RETRIEVER" = 1 ] && ! pgrep -f "retrkee[p].sh" >/dev/null && ! grep -q "RETR_JOB_DONE $RETR_TAG" /root/retr.log 2>/dev/null && [ -s /root/work/localsearch/data/train_negs.json ] && [ -s /root/wiki_store/emb_ivf.bin ]; then
+  cat > /root/retrkeep.sh <<RK1
+RTAG=$RETR_TAG
+RK1
+  cat >> /root/retrkeep.sh <<'RK2'
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); R=baya1116/hypernet-sp-distill; ST=/root/wiki_store; M=/root/bge-small
+L=/root/work/localsearch; FT=/root/bge_$RTAG; ST2=/root/wiki_store_$RTAG
+while pgrep -f "pool_eval.py" >/dev/null; do sleep 120; done
+echo "[retr] $RTAG start $(date -u +%H:%M)"
+if ! [ -s $FT/model_int8.onnx ]; then
+  python3 $L/train_retriever.py --base $M --store $ST --pairs $L/data/train_pairs.json --negs $L/data/train_negs.json --out $FT --epochs 2 --bs 32 2>&1 | grep -E "^\[retriever\]|step [0-9]*0/|TRAIN_DONE|Error|Traceback" | tail -40
+  grep -q . $FT/config.json 2>/dev/null || { echo "RETR_ABORT $RTAG: training left no model"; exit 1; }
+  python3 $L/export_onnx.py $FT $FT 2>&1 | grep -E "EXPORT_DONE|Error|Traceback"
+  for f in model.safetensors model_int8.onnx tokenizer.json tokenizer_config.json config.json special_tokens_map.json vocab.txt; do hf upload $R $FT/$f localsearch/bge-small-$RTAG/$f >/dev/null 2>&1; done
+  echo "[retr] model uploaded $(date -u +%H:%M)"
+fi
+# the ranking alone with the trained model, on the live index, before the re-embedding
+SP_LOCAL_RERANK_MODEL=$FT OMP_NUM_THREADS=4 python3 $L/test_retriever.py --store $ST --model $M --tag "$RTAG-rerank-only" 2>&1 | grep -E "RETR_TEST|Error|Traceback"
+OMP_NUM_THREADS=4 python3 $L/test_retriever.py --store $ST --model $M --tag "base" 2>&1 | grep -E "RETR_TEST|Error|Traceback"
+mkdir -p $ST2; for f in docs.bin blocks.idx titles.txt meta.json lex.sqlite idf.pkl; do [ -e $ST2/$f ] || ln -s $ST/$f $ST2/$f; done
+while pgrep -f "pool_eval.py" >/dev/null; do sleep 120; done
+[ -s $ST2/emb_ivf.bin ] || python3 $L/embed.py --store $ST2 --model $FT --backend torch --batch 256 --float16-out 0 2>&1 | grep -E "^\[embed\].*(000000|done|articles in)|EMBED_DONE|Error|Traceback" | tail -20
+[ -s $ST2/emb_ivf.bin ] || python3 $L/ivf.py --store $ST2 --k 2048 2>&1 | grep -E "^\[ivf\] [0-9]+ articles|IVF_DONE|Error|Traceback"
+OMP_NUM_THREADS=4 python3 $L/test_retriever.py --store $ST2 --model $FT --tag "$RTAG-full" 2>&1 | grep -E "RETR_TEST|Error|Traceback"
+for f in emb.bin ivf_centroids.npy ivf_order.npy ivf_offsets.npy emb_ivf.bin; do hf upload $R $ST2/$f localsearch/wiki_en_20231101_$RTAG/$f >/dev/null 2>&1; done
+echo "RETR_JOB_DONE $RTAG $(date -u)"
+RK2
+  chmod +x /root/retrkeep.sh
+  setsid nohup bash -c 'bash /root/retrkeep.sh 2>&1 | tee -a /root/retr.log' >> /proc/1/fd/1 2>&1 < /dev/null 9>&- &
+  echo "RETR_LAUNCHED $RETR_TAG $(date -u)"
+fi
+
 # one-shot: the released directories, copied on the hub under release/ with a README (RELEASE_SERIAL bumps to redo)
 RELEASE_SERIAL=4
 if [ "$(cat /root/.release_serial 2>/dev/null)" != "$RELEASE_SERIAL" ] && ! pgrep -f "releasekee[p].sh" >/dev/null; then
@@ -480,6 +516,7 @@ while :; do
     echo "--- quant.log (tail) ---"; tail -n 30 /root/quant.log 2>/dev/null | cut -c1-300
     echo "--- wiki.log (tail) ---"; tail -n 8 /root/wiki.log 2>/dev/null | cut -c1-300
     echo "--- ivf.log (tail) ---"; tail -n 8 /root/ivf.log 2>/dev/null | cut -c1-300
+    echo "--- retr.log (tail) ---"; tail -n 8 /root/retr.log 2>/dev/null | cut -c1-300
     echo "--- release.log (tail) ---"; tail -n 6 /root/release.log 2>/dev/null | cut -c1-200
     for f in /root/gptq_*.log; do [ -s "$f" ] && { echo "--- $f (tail) ---"; grep -E "^\[gptq\]|^\[out\]|GPTQ_DONE|Error" "$f" | tail -n 4 | cut -c1-200; }; done
     f=$(ls -t /root/q14*_q14*[0-9].log /root/g14*_g14*[0-9].log /root/gq14*_gq14*[0-9].log 2>/dev/null | head -1); [ -s "$f" ] && { echo "--- $f (tail) ---"; tail -n 8 "$f" | cut -c1-220; }
@@ -1393,14 +1430,14 @@ PYG
   [ -s /root/hfdl/pooler_distill/chat_eval60.jsonl ] || hf download $R --include "pooler_distill/chat_eval60.jsonl" --local-dir /root/hfdl 2>&1 | tail -1
   cat > /root/reevalkeep.sh <<RK
 #!/bin/bash
-RRUN=$RRUN; RHF=$RHF; R=$R; RCKPT=$RCKPT; RQSRC=${RQSRC:-}; RHINT=${RHINT:-}; RFAST=${RFAST:-1}; RB=${RB:-12}; RLOOP=${RLOOP:-}; RBUDGET=${RBUDGET:-2400}; RSHARDS=${RSHARDS:-3}; RTEMP=${RTEMP:-0.9}; RCAP=${RCAP:-600}; RGEN=${RGEN:-1500}; RN=${RN:-999}; RQ4=${RQ4:-}; RQ4SKIP=${RQ4SKIP:-}; RQ4BITS=${RQ4BITS:-4}; RLOCAL=${RLOCAL:-}; RLOCALK=${RLOCALK:-1}; RLOCALCHARS=${RLOCALCHARS:-0}
+RRUN=$RRUN; RHF=$RHF; R=$R; RCKPT=$RCKPT; RQSRC=${RQSRC:-}; RHINT=${RHINT:-}; RFAST=${RFAST:-1}; RB=${RB:-12}; RLOOP=${RLOOP:-}; RBUDGET=${RBUDGET:-2400}; RSHARDS=${RSHARDS:-3}; RTEMP=${RTEMP:-0.9}; RCAP=${RCAP:-600}; RGEN=${RGEN:-1500}; RN=${RN:-999}; RQ4=${RQ4:-}; RQ4SKIP=${RQ4SKIP:-}; RQ4BITS=${RQ4BITS:-4}; RLOCAL=${RLOCAL:-}; RLOCALK=${RLOCALK:-1}; RLOCALCHARS=${RLOCALCHARS:-0}; RLOCALSTORE=${RLOCALSTORE:-/root/wiki_store}; RLOCALMODEL=${RLOCALMODEL:-/root/bge-small}
 RK
   cat >> /root/reevalkeep.sh <<'RKB'
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null)
 run_one() {  # $1 questions file, $2 out file, $3 tag
   want=$(wc -l < "$1"); [ "${RN:-999}" -lt "$want" ] && want=${RN:-999}
   [ -s "$2" ] && [ "$(wc -l < "$2")" -ge "$want" ] && return 0
-  cd /root/work && env ${RLOCAL:+SP_LOCAL_STORE=/root/wiki_store SP_LOCAL_MODEL=/root/bge-small SP_LOCAL_GPU=1 SP_LOCAL_K=${RLOCALK:-1} SP_LOCAL_CHARS=${RLOCALCHARS:-0}} SP_BASE=$RHF SP_RANK=16 SP_NOSYS=1 SP_EPISODIC=1 OMP_NUM_THREADS=1 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python3 /root/work/pool_eval.py     $RCKPT "$1" "$2" --n $RN --rw 768 --maxd 384 --samepage 1 --decode plain --temp $RTEMP --gen $RGEN --stop eos --replycap $RCAP ${RQ4:+--q4 $RQ4 --q4skip "${RQ4SKIP:-}" --q4bits ${RQ4BITS:-4}} --tag "[$3]" >> /root/${RRUN}_$3.log 2>&1
+  cd /root/work && env ${RLOCAL:+SP_LOCAL_STORE=$RLOCALSTORE SP_LOCAL_MODEL=$RLOCALMODEL SP_LOCAL_GPU=1 SP_LOCAL_K=${RLOCALK:-1} SP_LOCAL_CHARS=${RLOCALCHARS:-0}} SP_BASE=$RHF SP_RANK=16 SP_NOSYS=1 SP_EPISODIC=1 OMP_NUM_THREADS=1 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python3 /root/work/pool_eval.py     $RCKPT "$1" "$2" --n $RN --rw 768 --maxd 384 --samepage 1 --decode plain --temp $RTEMP --gen $RGEN --stop eos --replycap $RCAP ${RQ4:+--q4 $RQ4 --q4skip "${RQ4SKIP:-}" --q4bits ${RQ4BITS:-4}} --tag "[$3]" >> /root/${RRUN}_$3.log 2>&1
   [ -s "$2" ] && [ "$(wc -l < "$2")" -ge "$want" ] || { echo "REEVAL_ABORT $RRUN at $3: $(tail -1 /root/${RRUN}_$3.log | cut -c1-100)"; exit 1; }
   echo "[$RRUN] $3: $(grep -h -m1 "pooler restored\|WARNING: no pooler" /root/${RRUN}_$3.log)"
 }
