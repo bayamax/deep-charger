@@ -13,5 +13,5 @@ from onnxruntime.quantization import quantize_dynamic, QuantType
 quantize_dynamic(os.path.join(dst, "model.onnx"), os.path.join(dst, "model_int8.onnx"), weight_type=QuantType.QInt8)
 import shutil
 for f in ("tokenizer.json", "tokenizer_config.json", "config.json", "vocab.txt", "special_tokens_map.json"):
-    if os.path.exists(os.path.join(src, f)): shutil.copy(os.path.join(src, f), dst)
+    if os.path.abspath(src) != os.path.abspath(dst) and os.path.exists(os.path.join(src, f)): shutil.copy(os.path.join(src, f), dst)
 print("EXPORT_DONE", dst, {f: os.path.getsize(os.path.join(dst, f)) // 1000000 for f in ("model.onnx", "model_int8.onnx")}, "MB")
