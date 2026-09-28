@@ -21,6 +21,7 @@ ap.add_argument("--questions", default=os.path.join(D, "reward_questions.jsonl")
 ap.add_argument("--epochs", type=int, default=4); ap.add_argument("--lr", type=float, default=1e-5); ap.add_argument("--temp", type=float, default=0.05)
 ap.add_argument("--qlen", type=int, default=48); ap.add_argument("--dlen", type=int, default=96); ap.add_argument("--seed", type=int, default=0)
 ap.add_argument("--device", default="auto"); ap.add_argument("--holdout", type=float, default=0.2)
+ap.add_argument("--arch", default="bi", choices=["bi", "ce"], help="bi: the bge embedder (cosine + the lexical terms); ce: a cross-encoder over (query, page), its logit alone")
 A = ap.parse_args()
 random.seed(A.seed); torch.manual_seed(A.seed)
 dev = ("cuda" if torch.cuda.is_available() else "cpu") if A.device == "auto" else A.device
@@ -43,7 +44,12 @@ for q, d in groups.items():
     items.append((q, query_of[q], docs, rew))
 random.shuffle(items); nh = int(len(items) * A.holdout); held, train = items[:nh], items[nh:]
 print(f"[ranker] {len(groups)} questions with rows, {len(items)} with a signal; train {len(train)} held-out {len(held)}; device {dev}", flush=True)
-tok = AutoTokenizer.from_pretrained(A.base); model = AutoModel.from_pretrained(A.base).to(dev)
+tok = AutoTokenizer.from_pretrained(A.base)
+if A.arch == "ce":
+    from transformers import AutoModelForSequenceClassification
+    model = AutoModelForSequenceClassification.from_pretrained(A.base).to(dev)
+else:
+    model = AutoModel.from_pretrained(A.base).to(dev)
 def lex(query, docs):
     ql = " " + re.sub(r"[^a-z0-9 ]", " ", query.lower()) + " "
     qw = [w.lower() for w in WORD.findall(query) if w.lower() not in STOP and len(w) > 1]
@@ -59,6 +65,9 @@ def lex(query, docs):
     return torch.tensor(out, device=dev)
 def enc(texts, n): return {k: v.to(dev) for k, v in tok(texts, padding=True, truncation=True, max_length=n, return_tensors="pt").items()}
 def scores(query, docs):
+    if A.arch == "ce":
+        enc = tok([query[:300]] * len(docs), [f"{st.doc(i)[0]}. {st.doc(i)[1][:500]}" for i in docs], padding=True, truncation="longest_first", max_length=160, return_tensors="pt")
+        return model(**{k: v.to(dev) for k, v in enc.items()}).logits.squeeze(-1)
     q = F.normalize(model(**enc([QUERY_PREFIX + query], A.qlen)).last_hidden_state[:, 0], dim=1)
     d = F.normalize(model(**enc([f"{st.doc(i)[0]}. {st.doc(i)[1][:400]}" for i in docs], A.dlen)).last_hidden_state[:, 0], dim=1)
     return (d @ q.T).squeeze(1) + lex(query, docs)

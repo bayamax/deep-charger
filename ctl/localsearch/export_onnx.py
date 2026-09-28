@@ -2,13 +2,21 @@
 import sys, os, torch
 from transformers import AutoModel
 src, dst = sys.argv[1], sys.argv[2]; os.makedirs(dst, exist_ok=True)
-m = AutoModel.from_pretrained(src).eval()
+CLS = "--cls" in sys.argv   # a cross-encoder: export the classification logits
+if CLS:
+    from transformers import AutoModelForSequenceClassification
+    m = AutoModelForSequenceClassification.from_pretrained(src).eval()
+else:
+    m = AutoModel.from_pretrained(src).eval()
 ids = torch.ones(1, 8, dtype=torch.long); am = torch.ones(1, 8, dtype=torch.long); tt = torch.zeros(1, 8, dtype=torch.long)
 class W(torch.nn.Module):
     def __init__(s): super().__init__(); s.m = m
-    def forward(s, input_ids, attention_mask, token_type_ids): return s.m(input_ids=input_ids, attention_mask=attention_mask, token_type_ids=token_type_ids).last_hidden_state
-torch.onnx.export(W(), (ids, am, tt), os.path.join(dst, "model.onnx"), input_names=["input_ids", "attention_mask", "token_type_ids"], output_names=["last_hidden_state"],
-                  dynamic_axes={"input_ids": {0: "b", 1: "s"}, "attention_mask": {0: "b", 1: "s"}, "token_type_ids": {0: "b", 1: "s"}, "last_hidden_state": {0: "b", 1: "s"}}, opset_version=17, dynamo=False)
+    def forward(s, input_ids, attention_mask, token_type_ids):
+        out = s.m(input_ids=input_ids, attention_mask=attention_mask, token_type_ids=token_type_ids)
+        return out.logits if CLS else out.last_hidden_state
+oname = "logits" if CLS else "last_hidden_state"
+torch.onnx.export(W(), (ids, am, tt), os.path.join(dst, "model.onnx"), input_names=["input_ids", "attention_mask", "token_type_ids"], output_names=[oname],
+                  dynamic_axes={"input_ids": {0: "b", 1: "s"}, "attention_mask": {0: "b", 1: "s"}, "token_type_ids": {0: "b", 1: "s"}, oname: ({0: "b"} if CLS else {0: "b", 1: "s"})}, opset_version=17, dynamo=False)
 from onnxruntime.quantization import quantize_dynamic, QuantType
 quantize_dynamic(os.path.join(dst, "model.onnx"), os.path.join(dst, "model_int8.onnx"), weight_type=QuantType.QInt8)
 import shutil

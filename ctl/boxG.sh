@@ -294,6 +294,16 @@ grep -q . $FT/config.json 2>/dev/null || { echo "RANKER_ABORT $RTAG: no model wr
 python3 $L/export_onnx.py $FT $FT 2>&1 | grep -E "EXPORT_DONE|Error|Traceback"
 for f in model.safetensors model_int8.onnx tokenizer.json tokenizer_config.json config.json special_tokens_map.json vocab.txt; do hf upload $R $FT/$f localsearch/bge-small-$RTAG/$f >/dev/null 2>&1; done
 SP_LOCAL_RERANK_MODEL=$FT OMP_NUM_THREADS=4 python3 $L/test_retriever.py --store $ST --model $M --tag "$RTAG-rerank-only" 2>&1 | grep -E "RETR_TEST|Error|Traceback"
+# the cross-encoder arm on the same verdicts: MiniLM-L6 (ms-marco) trained listwise, reranking the fused top 16
+CE=/root/ce_$RTAG; CEB=/root/ce_base
+[ -s $CEB/config.json ] || hf download cross-encoder/ms-marco-MiniLM-L-6-v2 --local-dir $CEB >/dev/null 2>&1
+python3 $L/train_ranker.py --arch ce --rows $ROWS --base $CEB --store $ST --out $CE --epochs 4 --lr 2e-5 2>&1 | grep -E "^\[ranker\]|RANKER_DONE|Error|Traceback" | tail -20
+if grep -q . $CE/config.json 2>/dev/null; then
+  python3 $L/export_onnx.py $CE $CE --cls 2>&1 | grep -E "EXPORT_DONE|Error|Traceback"
+  for f in model.safetensors model_int8.onnx tokenizer.json tokenizer_config.json config.json special_tokens_map.json vocab.txt; do hf upload $R $CE/$f localsearch/ce-$RTAG/$f >/dev/null 2>&1; done
+  SP_LOCAL_CE=$CEB OMP_NUM_THREADS=4 python3 $L/test_retriever.py --store $ST --model $M --tag "ce-base" 2>&1 | grep -E "RETR_TEST|Error|Traceback"
+  SP_LOCAL_CE=$CE OMP_NUM_THREADS=4 python3 $L/test_retriever.py --store $ST --model $M --tag "ce-$RTAG" 2>&1 | grep -E "RETR_TEST|Error|Traceback"
+fi
 echo "RANKER_JOB_DONE $RTAG $(date -u)"
 RK2
   chmod +x /root/rankkeep.sh

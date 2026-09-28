@@ -118,6 +118,45 @@ def build_idf(store, n=40000):
     return idf, math.log(cnt + 1) + 1
 
 
+class CrossEncoder:
+    """(query, page) -> relevance logit. onnxruntime when model_int8.onnx / model.onnx is in the directory (the
+    device path), else torch + transformers."""
+
+    def __init__(self, model_dir, threads=0, maxlen=160):
+        from tokenizers import Tokenizer
+        self.tok = Tokenizer.from_file(os.path.join(model_dir, "tokenizer.json"))
+        self.tok.enable_truncation(maxlen, strategy="longest_first"); self.tok.enable_padding(length=None)
+        self.torch = None
+        onnx = next((f for f in ("model_int8.onnx", "model.onnx") if os.path.exists(os.path.join(model_dir, f))), None)
+        if onnx:
+            import onnxruntime as ort
+            so = ort.SessionOptions()
+            if threads:
+                so.intra_op_num_threads = threads
+            self.sess = ort.InferenceSession(os.path.join(model_dir, onnx), so, providers=["CPUExecutionProvider"])
+            self.names = [i.name for i in self.sess.get_inputs()]
+        else:
+            import torch
+            from transformers import AutoModelForSequenceClassification
+            self.torch = torch; self.dev = "cuda" if torch.cuda.is_available() else "cpu"
+            self.model = AutoModelForSequenceClassification.from_pretrained(model_dir).to(self.dev).eval()
+
+    def __call__(self, query, texts, batch=16):
+        if len(texts) > batch:
+            return np.concatenate([self(query, texts[i:i + batch]) for i in range(0, len(texts), batch)])
+        enc = self.tok.encode_batch([(query[:300], t) for t in texts])
+        ids = np.array([e.ids for e in enc], dtype=np.int64); am = np.array([e.attention_mask for e in enc], dtype=np.int64)
+        tt = np.array([e.type_ids for e in enc], dtype=np.int64)
+        if self.torch is not None:
+            with self.torch.no_grad():
+                out = self.model(input_ids=self.torch.tensor(ids, device=self.dev), attention_mask=self.torch.tensor(am, device=self.dev), token_type_ids=self.torch.tensor(tt, device=self.dev)).logits
+                return out.float().squeeze(-1).cpu().numpy()
+        feed = {"input_ids": ids, "attention_mask": am}
+        if "token_type_ids" in self.names:
+            feed["token_type_ids"] = tt
+        return self.sess.run(None, feed)[0].reshape(len(texts), -1)[:, -1]
+
+
 class LocalSearch:
     def __init__(self, store_path, model_dir, threads=0, coarse=48, lex_k=48, title_k=12, rerank=64):
         self.st = Store(store_path)
@@ -126,6 +165,9 @@ class LocalSearch:
         # judged before the index is rebuilt with it); the coarse channel keeps the model the sign index was built with
         rr = os.environ.get("SP_LOCAL_RERANK_MODEL")
         self.emb_rank = Embedder(rr, threads) if rr and os.path.abspath(rr) != os.path.abspath(model_dir) else self.emb
+        # SP_LOCAL_CE: a cross-encoder (MiniLM-class) reranking the top SP_LOCAL_CEK pages of the fused ranking by its logit
+        self.ce = CrossEncoder(os.environ["SP_LOCAL_CE"], threads) if os.environ.get("SP_LOCAL_CE") else None
+        self.ce_k = int(os.environ.get("SP_LOCAL_CEK", "16"))
         self.bits = np.memmap(os.path.join(store_path, "emb.bin"), dtype=np.uint8, mode="r").reshape(-1, DIM // 8)
         assert self.bits.shape[0] == self.st.n_docs, f"index {self.bits.shape[0]} vs store {self.st.n_docs}"
         self.maxlen_doc = int(os.environ.get("SP_LOCAL_DOCLEN", "96"))
@@ -267,6 +309,11 @@ class LocalSearch:
             # cosine plus the lexical overlap the model's keyword queries were shaped by (weights from the shard-0 grid)
             scored.append((float(s) + W_TITLE * ft + W_BODY * fb + full + W_BM25 * bm.get(i, 0.0) / bmax, i, t, b))
         scored.sort(key=lambda x: -x[0])
+        if self.ce is not None and scored:
+            top = scored[:self.ce_k]
+            ce = self.ce(query, [f"{t}. {b[:500]}" for _, _, t, b in top])
+            top = [(float(c), i, t, b) for c, (_, i, t, b) in zip(ce, top)]
+            top.sort(key=lambda x: -x[0]); return top[:k]
         return scored[:k]
 
     def fetch(self, kw, k=None, chars=None):
