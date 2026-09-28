@@ -80,7 +80,7 @@ PSKIP=
 # The raw GitHub copy this box fetches can lag and hand a control run an OLDER version of this file (04:48 on 09-22 it
 # relaunched the online loop under the previous mode while the newer run was merging a checkpoint on the same card).
 # Every edit bumps BOXG_SERIAL; a run that sees a lower serial than one already executed stops here.
-BOXG_SERIAL=2026092662
+BOXG_SERIAL=2026092663
 if [ -f /root/.boxg_serial ] && [ "$(cat /root/.boxg_serial)" -gt "$BOXG_SERIAL" ] 2>/dev/null; then echo "BOXG_STALE $BOXG_SERIAL < $(cat /root/.boxg_serial)"; exit 0; fi
 echo $BOXG_SERIAL > /root/.boxg_serial
 MODE=reeval       # 2026-09-28: the GPTQ 4-bit with the local search at 300 rollouts (48.0% on 102, the API's 48.0 / 45.0 on 300)
@@ -1262,7 +1262,7 @@ if [ "$MODE" = "reeval" ]; then
   # two control runs fired within a minute of each other on 09-21 and merged the same checkpoint side by side: CUDA OOM for both
   exec 9>/root/.reeval.lock; flock -n 9 || { echo "REEVAL_SKIP: another control run is already doing this"; exit 0; }
   # a push that changes this file re-runs it; the evaluation already under way for the same RRUN is left alone
-  if pgrep -f "reevalkee[p].sh" >/dev/null && grep -q "^RRUN=${RRUN:-basefix};.*; RB=${RB:-12};" /root/reevalkeep.sh 2>/dev/null; then echo "REEVAL_SKIP: $RRUN is already running"; exit 0; fi
+  if pgrep -f "reevalkee[p].sh" >/dev/null && grep -q "^RRUN=${RRUN:-basefix};.*; RB=${RB:-12};.*; RN=${RN:-999};" /root/reevalkeep.sh 2>/dev/null; then echo "REEVAL_SKIP: $RRUN is already running"; exit 0; fi
   pkill -f "onlinekee[p].sh"; pkill -f "online_loop.p[y]"; sleep 5; pkill -9 -f "online_loop.p[y]" 2>/dev/null
   pkill -f "build_merged.p[y]"; sleep 3; pkill -9 -f "build_merged.p[y]" 2>/dev/null   # a merge that died half-way may still hold the card
   # Re-measure an earlier checkpoint under the fixed conversational stop rule (EOS terminal), so the
