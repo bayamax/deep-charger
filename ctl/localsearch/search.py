@@ -144,7 +144,9 @@ class LocalSearch:
         self.con = sqlite3.connect("file:" + build_lex_index(store_path) + "?mode=ro", uri=True)
         self.con.execute("PRAGMA cache_size=-4096")   # 4 MB of page cache; the rest of the index stays on disk
         self.idf, self.idf_max = build_idf(self.st)
-        self.coarse, self.lex_k, self.title_k, self.rerank = coarse, lex_k, title_k, rerank
+        e = os.environ
+        self.coarse, self.lex_k, self.title_k, self.rerank = int(e.get("SP_LOCAL_COARSE", coarse)), int(e.get("SP_LOCAL_LEXK", lex_k)), int(e.get("SP_LOCAL_TITLEK", title_k)), int(e.get("SP_LOCAL_RERANK", rerank))
+        self.lex_or = e.get("SP_LOCAL_LEXOR", "0") == "1"   # 1: the four-rarest-terms OR always joins the AND, not only when the AND falls short
 
     def _coarse_top(self, qv, k):
         """Asymmetric scoring: the float query against each article's signs. On shard 0 of the dump this finds the
@@ -196,7 +198,7 @@ class LocalSearch:
             except sqlite3.OperationalError:
                 rows = []
             out += [(r[0] - 1, -r[1]) for r in rows]
-            if len(out) >= k:
+            if len(out) >= k and not self.lex_or:
                 break
         seen = set(); res = []
         for i, sc in out:
