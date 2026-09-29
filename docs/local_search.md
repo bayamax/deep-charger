@@ -223,3 +223,36 @@ pairs labelled helped / did not help (the rollouts' verdicts and the answer-in-t
 confusers): 53.4 / 65.7, worse than no reranking. The proxy labels do not carry the distinction the
 reranking needs; the reward table (the frozen model's own verdict on each candidate page, `rew1`) is the
 remaining source of labels for it.
+
+## A store beyond the opening (2026-09-29)
+
+The model reads deep into articles when the text is there (a user's example: asked for Miyazaki's first
+work it answered Gulliver's Travels Beyond the Moon, which sits in the career section). Measured over the
+dump: articles are 1,373 characters at the median, 3,034 on average, 19.4 GB of cleaned text in all; the
+store at 1,500 / 3,000 / 6,000 / 12,000 characters / whole articles is 2.2 / 3.3 / 4.4 / 5.3 / 6.2 GB at
+zstd level 19 (level 3: 2.5 / 3.8 / 5.1 / 6.0 / 7.1). Where the answers sit, over the 1,777 (query, page)
+events whose page carries the question's answer: within 1,500 characters 71%, 3,000 78%, 6,000 85%,
+12,000 91%.
+
+A 6,000-character store was built (`build_store.py --chars 6000 --level 19`, 4.42 GB; the same
+6,396,307 articles in the same order, so the sign index, its IVF layout and the lexical index are reused).
+Two changes in `search.py` use the depth: a ranking term for query words found only beyond the opening
+(`SP_LOCAL_WDEEP`), and `compose()` (`SP_LOCAL_PASSAGE=1`): the served text becomes the opening (about
+500 characters of whole sentences), then the 500-character window of the rest carrying most of the query's
+IDF-weighted terms, then everything else in order, so a deep fact reaches the model's first 256 tokens
+when the query points at it.
+
+On the 400 test queries nothing changes (answer-bearing top-1 62.2%, in the first 1,000 served characters
+62.2 → 62.7%): their answers were in the openings all along (248 of 251 top-1 hits), and the deep term
+hurts at any weight. On 300 queries whose answer sits beyond 1,500 characters in Wikipedia's page:
+
+| | answer anywhere in the served page | in the first 1,000 characters served |
+|---|---|---|
+| store 1,500 | 26% | 24% |
+| store 6,000, as stored | 70% | 24% |
+| store 6,000, opening + the query's passage | 70% | **33%** |
+
+Window choice by term overlap beats the embedder's (31%) and other head/passage splits. The rest of the
+70% needs `<more>` or a second search. The 6,000-character store with passage serving is the one to ship:
+it costs nothing on the held-out's kind of question and triples the reach on the deep kind; the held-out
+run with it (RLOCALSTORE=/root/wiki_store6, RLOCALPASSAGE=1) follows the box's build.

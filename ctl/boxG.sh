@@ -80,7 +80,7 @@ PSKIP=
 # The raw GitHub copy this box fetches can lag and hand a control run an OLDER version of this file (04:48 on 09-22 it
 # relaunched the online loop under the previous mode while the newer run was merging a checkpoint on the same card).
 # Every edit bumps BOXG_SERIAL; a run that sees a lower serial than one already executed stops here.
-BOXG_SERIAL=2026092672
+BOXG_SERIAL=2026092673
 if [ -f /root/.boxg_serial ] && [ "$(cat /root/.boxg_serial)" -gt "$BOXG_SERIAL" ] 2>/dev/null; then echo "BOXG_STALE $BOXG_SERIAL < $(cat /root/.boxg_serial)"; exit 0; fi
 echo $BOXG_SERIAL > /root/.boxg_serial
 MODE=reeval       # 2026-09-28: the reward table - 200 training questions x 5 candidate pages, the first search served each page, the 4-bit model frozen
@@ -213,6 +213,35 @@ from huggingface_hub import HfApi
 HfApi().delete_file("localsearch/wiki_en_20231101/titles.sqlite", "baya1116/hypernet-sp-distill"); print("titles.sqlite removed from the hub")
 PYD
   fi
+fi
+
+# The store with 6,000 characters an article (zstd 19): the same articles in the same order, so the index files of
+# the 1,500-character store serve it (symlinked). WIKI6=1 builds it once beside whatever runs; it resumes shard by shard.
+WIKI6=${WIKI6:-1}
+if [ "$WIKI6" = 1 ] && ! pgrep -f "wiki6kee[p].sh" >/dev/null && ! grep -q WIKI6_DONE /root/wiki6.log 2>/dev/null && [ -s /root/wiki_store/emb_ivf.bin ]; then
+  cat > /root/wiki6keep.sh <<'W6'
+#!/bin/bash
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); R=baya1116/hypernet-sp-distill
+ST=/root/wiki_store6; mkdir -p $ST /root/wikidl
+for i in $(seq -f %05g 0 40); do
+  f=20231101.en/train-$i-of-00041.parquet
+  grep -q "\"$f\"" $ST/meta.json 2>/dev/null && continue
+  [ "$(df -BG /root | awk 'NR==2{print $4+0}')" -ge 3 ] || { echo "WIKI6_ABORT disk $(df -h /root | awk 'NR==2{print $4}') free $(date -u)"; exit 0; }
+  for try in 1 2 3 4 5; do hf download wikimedia/wikipedia --repo-type dataset --include "$f" --local-dir /root/wikidl >/dev/null 2>&1; [ -s /root/wikidl/$f ] && break; sleep 30; done
+  [ -s /root/wikidl/$f ] || { echo "WIKI6_ABORT shard $i download failed $(date -u)"; exit 0; }
+  (cd /root/wikidl && python3 /root/work/localsearch/build_store.py --out $ST --chars 6000 --level 19 "$f" 2>&1 | grep "^\[store\]")
+  rm -f /root/wikidl/$f
+done
+n=$(python3 -c "import json;print(json.load(open('$ST/meta.json'))['n_docs'])"); n0=$(python3 -c "import json;print(json.load(open('/root/wiki_store/meta.json'))['n_docs'])")
+[ "$n" = "$n0" ] && cmp -s $ST/titles.txt /root/wiki_store/titles.txt || { echo "WIKI6_ABORT $n articles against $n0, or the titles differ"; exit 0; }
+for f in emb.bin emb_ivf.bin ivf_centroids.npy ivf_order.npy ivf_offsets.npy lex.sqlite idf.pkl; do [ -e $ST/$f ] || ln -s /root/wiki_store/$f $ST/$f; done
+echo "[wiki6] store $(du -shL $ST/docs.bin | cut -f1) docs.bin"
+for f in docs.bin blocks.idx meta.json; do for try in 1 2 3; do hf upload $R $ST/$f localsearch/wiki_en_20231101_6000/$f >/dev/null 2>&1 && break; sleep 60; done; done
+echo "WIKI6_DONE $n articles $(date -u)"
+W6
+  chmod +x /root/wiki6keep.sh
+  setsid nohup bash -c 'bash /root/wiki6keep.sh 2>&1 | tee -a /root/wiki6.log' >> /proc/1/fd/1 2>&1 < /dev/null 9>&- &
+  echo "WIKI6_LAUNCHED $(date -u)"
 fi
 
 # The device layout of the local search, as a side job on the CPU: the int8 embedder, the IVF layout of the sign
@@ -604,6 +633,7 @@ while :; do
     echo "--- wiki.log (tail) ---"; tail -n 8 /root/wiki.log 2>/dev/null | cut -c1-300
     echo "--- ivf.log (tail) ---"; tail -n 8 /root/ivf.log 2>/dev/null | cut -c1-300
     echo "--- retr.log (tail) ---"; tail -n 8 /root/retr.log 2>/dev/null | cut -c1-300
+    echo "--- wiki6.log (tail) ---"; tail -n 4 /root/wiki6.log 2>/dev/null | cut -c1-300
     echo "--- ranker.log (tail) ---"; tail -n 8 /root/ranker.log 2>/dev/null | cut -c1-300
     echo "--- release.log (tail) ---"; tail -n 6 /root/release.log 2>/dev/null | cut -c1-200
     for f in /root/gptq_*.log; do [ -s "$f" ] && { echo "--- $f (tail) ---"; grep -E "^\[gptq\]|^\[out\]|GPTQ_DONE|Error" "$f" | tail -n 4 | cut -c1-200; }; done
@@ -1518,14 +1548,14 @@ PYG
   [ -s /root/hfdl/pooler_distill/chat_eval60.jsonl ] || hf download $R --include "pooler_distill/chat_eval60.jsonl" --local-dir /root/hfdl 2>&1 | tail -1
   cat > /root/reevalkeep.sh <<RK
 #!/bin/bash
-RRUN=$RRUN; RHF=$RHF; R=$R; RCKPT=$RCKPT; RQSRC=${RQSRC:-}; RHINT=${RHINT:-}; RFAST=${RFAST:-1}; RB=${RB:-12}; RLOOP=${RLOOP:-}; RBUDGET=${RBUDGET:-2400}; RSHARDS=${RSHARDS:-3}; RTEMP=${RTEMP:-0.9}; RCAP=${RCAP:-600}; RGEN=${RGEN:-1500}; RN=${RN:-999}; RQ4=${RQ4:-}; RQ4SKIP=${RQ4SKIP:-}; RQ4BITS=${RQ4BITS:-4}; RLOCAL=${RLOCAL:-}; RLOCALK=${RLOCALK:-1}; RLOCALCHARS=${RLOCALCHARS:-0}; RLOCALSTORE=${RLOCALSTORE:-/root/wiki_store}; RLOCALMODEL=${RLOCALMODEL:-/root/bge-small}; RQFILE=${RQFILE:-}; RFORCE=${RFORCE:-}; RFORCEK=${RFORCEK:-5}
+RRUN=$RRUN; RHF=$RHF; R=$R; RCKPT=$RCKPT; RQSRC=${RQSRC:-}; RHINT=${RHINT:-}; RFAST=${RFAST:-1}; RB=${RB:-12}; RLOOP=${RLOOP:-}; RBUDGET=${RBUDGET:-2400}; RSHARDS=${RSHARDS:-3}; RTEMP=${RTEMP:-0.9}; RCAP=${RCAP:-600}; RGEN=${RGEN:-1500}; RN=${RN:-999}; RQ4=${RQ4:-}; RQ4SKIP=${RQ4SKIP:-}; RQ4BITS=${RQ4BITS:-4}; RLOCAL=${RLOCAL:-}; RLOCALK=${RLOCALK:-1}; RLOCALCHARS=${RLOCALCHARS:-0}; RLOCALSTORE=${RLOCALSTORE:-/root/wiki_store}; RLOCALMODEL=${RLOCALMODEL:-/root/bge-small}; RQFILE=${RQFILE:-}; RFORCE=${RFORCE:-}; RFORCEK=${RFORCEK:-5}; RLOCALPASSAGE=${RLOCALPASSAGE:-0}
 RK
   cat >> /root/reevalkeep.sh <<'RKB'
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null)
 run_one() {  # $1 questions file, $2 out file, $3 tag
   want=$(wc -l < "$1"); [ "${RN:-999}" -lt "$want" ] && want=${RN:-999}; [ -n "$RFORCE" ] && want=$((want * ${RFORCEK:-5}))
   [ -s "$2" ] && [ "$(wc -l < "$2")" -ge "$want" ] && return 0
-  cd /root/work && env ${RLOCAL:+SP_LOCAL_STORE=$RLOCALSTORE SP_LOCAL_MODEL=$RLOCALMODEL SP_LOCAL_GPU=1 SP_LOCAL_K=${RLOCALK:-1} SP_LOCAL_CHARS=${RLOCALCHARS:-0}} SP_BASE=$RHF SP_RANK=16 SP_NOSYS=1 SP_EPISODIC=1 OMP_NUM_THREADS=1 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python3 /root/work/pool_eval.py     $RCKPT "$1" "$2" --n $RN --rw 768 --maxd 384 --samepage 1 --decode plain --temp $RTEMP --gen $RGEN --stop eos --replycap $RCAP ${RQ4:+--q4 $RQ4 --q4skip "${RQ4SKIP:-}" --q4bits ${RQ4BITS:-4}} ${RFORCE:+--force $RFORCE} --tag "[$3]" >> /root/${RRUN}_$3.log 2>&1
+  cd /root/work && env ${RLOCAL:+SP_LOCAL_STORE=$RLOCALSTORE SP_LOCAL_MODEL=$RLOCALMODEL SP_LOCAL_GPU=1 SP_LOCAL_K=${RLOCALK:-1} SP_LOCAL_CHARS=${RLOCALCHARS:-0} SP_LOCAL_PASSAGE=${RLOCALPASSAGE:-0}} SP_BASE=$RHF SP_RANK=16 SP_NOSYS=1 SP_EPISODIC=1 OMP_NUM_THREADS=1 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python3 /root/work/pool_eval.py     $RCKPT "$1" "$2" --n $RN --rw 768 --maxd 384 --samepage 1 --decode plain --temp $RTEMP --gen $RGEN --stop eos --replycap $RCAP ${RQ4:+--q4 $RQ4 --q4skip "${RQ4SKIP:-}" --q4bits ${RQ4BITS:-4}} ${RFORCE:+--force $RFORCE} --tag "[$3]" >> /root/${RRUN}_$3.log 2>&1
   [ -s "$2" ] && [ "$(wc -l < "$2")" -ge "$want" ] || { echo "REEVAL_ABORT $RRUN at $3: $(tail -1 /root/${RRUN}_$3.log | cut -c1-100)"; exit 1; }
   echo "[$RRUN] $3: $(grep -h -m1 "pooler restored\|WARNING: no pooler" /root/${RRUN}_$3.log)"
 }
