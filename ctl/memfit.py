@@ -29,6 +29,7 @@ ap.add_argument("--rw", type=int, default=768); ap.add_argument("--maxd", type=i
 ap.add_argument("--maxtok", type=int, default=2600); ap.add_argument("--val", type=int, default=24); ap.add_argument("--val-every", type=int, default=50)
 ap.add_argument("--reply-bias", type=float, default=0.5, help="share of steps that take the block holding </think> (where the reply starts)")
 ap.add_argument("--student", default="stream", choices=["stream", "mix", "full"], help="full: every earlier exchange (question + reply) verbatim in the pinned prompt, the pooler only for this turn's own evicted tokens; stream: every earlier turn through the pooler; mix: the last exchange (question + reply) verbatim in the pinned prompt, older turns through the pooler - names travel verbatim, the pooler carries the rest")
+ap.add_argument("--objective", default="kl", choices=["kl", "ce"], help="kl: match the model's own single-turn behaviour on the self-contained version (the default); ce: rejection-sampled self-training - the data are the model's OWN successful runs (rows with correct=true, e.g. pool_eval --mt-mode full --mt-save-tokens 1), their prompt as run and their tokens as the target, so the history-in-view behaviour it already gets right is reinforced and nothing else is asked of it")
 ap.add_argument("--anchor", type=int, default=0, help="single-turn anchors: a solo trace with NO history, the student's prompt the teacher's own - the KL then only holds the LoRA to the model as it was (mem5 without them lost 9 of 41 first turns and doubled the searches). -1: as many as the real examples")
 ap.add_argument("--synth-switch", type=int, default=-1, help="topic switches assembled from the traces: one dialogue's history, then a self-contained turn of ANOTHER dialogue (its own solo trajectory is the teacher's). -1: as many as the real examples; 0: none")
 ap.add_argument("--gen", type=int, default=1500); ap.add_argument("--seed", type=int, default=0); ap.add_argument("--selftest", type=int, default=0)
@@ -62,6 +63,10 @@ pl = {k[len("pooler."):]: v for k, v in sd.items() if k.startswith("pooler.")}
 if not pl and not any(k.startswith(("model.", "lm_head", "base_model")) for k in sd):
     pl = dict(sd)
 print(f"[pooler] restored {pooler.load_sd(pl) if pl else 0} tensors from {A.ckpt}", flush=True)
+_md = {k: v for k, v in sd.items() if not k.startswith("pooler.") and "lora" in k}
+if _md:   # a checkpoint written by an earlier memfit run carries its LoRA: continue from it
+    _r = model.load_state_dict(_md, strict=False)
+    print(f"[lora] restored {len(_md)} LoRA tensors from {A.ckpt} ({len(_r.unexpected_keys)} unexpected)", flush=True)
 POOL_REF = {k: v.detach().clone() for k, v in pooler.A.items()}
 pooler.make_trainable(); POOL_TRAIN = dict(pooler.A)
 pp = list(pooler.parameters())
@@ -167,6 +172,14 @@ for k in range(n_anc if ALLSOLO else 0):
     did, r = ALLSOLO[k % len(ALLSOLO)] if k < len(ALLSOLO) else rng.choice(ALLSOLO)
     EX.append({"dialog": f"{did}~anchor", "turn": -2, "carry": [], "tq": r["q_ids"], "sq": r["q_ids"], "gen": r["gen"][:A.maxtok]})
 print(f"[data] + {sum(1 for e in EX if e['turn'] == -2)} single-turn anchors (no history, the teacher's own prompt)", flush=True)
+if A.objective == "ce":
+    EX = []
+    for did, rs in rows.items():
+        for r in rs:
+            if r.get("correct") and len(r["gen"]) >= 8:
+                EX.append({"dialog": did, "turn": r["turn"], "carry": [], "tq": r["q_ids"], "sq": r["q_ids"], "gen": r["gen"][:A.maxtok]})
+    k0 = sum(1 for e in EX if e["turn"] == 0); k1 = len(EX) - k0
+    print(f"[data] ce: {len(EX)} successful turns of the model's own ({k0} first turns, no history; {k1} later turns, history in the prompt)", flush=True)
 random.shuffle(EX)
 dids = sorted({e["dialog"].split("~")[0] for e in EX}); random.Random(1).shuffle(dids); vd = set(dids[:max(1, len(dids) // 10)])
 VAL = [e for e in EX if e["dialog"].split("~")[0] in vd][:A.val]; TRAIN = [e for e in EX if e["dialog"].split("~")[0] not in vd and not any(x in vd for x in e["dialog"].split("~"))]
@@ -212,6 +225,11 @@ def kl_of(e, seg_i=None):
     keep = [i for i in range(c1 - c0) if own[c0 + i] > 0]
     if not keep: return None
     idx = torch.tensor(keep, device=DEV)
+    if A.objective == "ce":
+        set_teacher(False)
+        ls = logits_for(e["sq"], gen, ssegs[j])[idx]
+        tgt = torch.tensor([gen[c0 + i] for i in keep], device=DEV)
+        return F.cross_entropy(ls, tgt)
     set_teacher(True)
     with torch.no_grad(), (model.disable_adapter() if lora else _null()):   # the teacher is the model as it stands, LoRA off
         lt = logits_for(e["tq"], gen, tsegs[j])[idx]
