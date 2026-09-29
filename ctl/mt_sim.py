@@ -62,14 +62,16 @@ def r1(messages, tries=3):
     return None, None
 
 
-USER_SYS = "You role-play a person chatting with an AI assistant. Write only that person's next message, in character: natural, often casual, sometimes terse. Output JSON {\"message\": \"...\"}."
+USER_SYS = ("You role-play a person chatting with an AI assistant. Write only that person's next message, in character: natural, often casual, "
+            "sometimes terse - ONE or TWO short sentences, like a real chat message. Never state your persona, job or age outright; let it show only "
+            "in tone. Output JSON {\"message\": \"...\"}.")
 PERSONAS = ["a retired teacher who likes history", "a college student cramming for a quiz", "a curious 12-year-old", "a sports fan in a bar argument",
             "a nurse on a night shift", "a software engineer on a coffee break", "a novelist researching details", "a tourist planning a trip",
             "a parent helping with homework", "a trivia-night regular", "a film buff", "a music producer"]
 MOVES = {
     "follow": "Ask a natural follow-up about something the assistant just said (a detail it mentioned, why/how, or 'and what about ...').",
     "refer": "Ask about something named EARLIER in the conversation (not necessarily the last reply) but refer to it only with a pronoun or a phrase like 'that film' / 'that guy' - do not repeat its name.",
-    "correct": "Push back on or question the assistant's last answer ('are you sure?', 'no, I meant ...', 'that doesn't sound right').",
+    "correct": "Briefly push back on or question the assistant's last answer ('are you sure?', 'no, I meant ...', 'that doesn't sound right') - one sentence, no long argument.",
     "chat": "Say something personal or make small talk related loosely to the conversation (a feeling, an anecdote, a plan) - not a question to look up.",
 }
 
