@@ -80,7 +80,7 @@ PSKIP=
 # The raw GitHub copy this box fetches can lag and hand a control run an OLDER version of this file (04:48 on 09-22 it
 # relaunched the online loop under the previous mode while the newer run was merging a checkpoint on the same card).
 # Every edit bumps BOXG_SERIAL; a run that sees a lower serial than one already executed stops here.
-BOXG_SERIAL=2026092685
+BOXG_SERIAL=2026092686
 if [ -f /root/.boxg_serial ] && [ "$(cat /root/.boxg_serial)" -gt "$BOXG_SERIAL" ] 2>/dev/null; then echo "BOXG_STALE $BOXG_SERIAL < $(cat /root/.boxg_serial)"; exit 0; fi
 echo $BOXG_SERIAL > /root/.boxg_serial
 MODE=idle         # 2026-09-29: the side jobs hold the card (multi-turn measurement and training); a finished reeval re-launched on every control run and killed their evaluators
@@ -321,6 +321,15 @@ fi
 
 if [ ! -e /root/.mem3_swap ]; then touch /root/.mem3_swap; pkill -f "mttkee[p].sh"; sleep 2; echo "MEM3_SWAP stopped the mem2 keeper $(date -u)"; fi
 if [ ! -e /root/.mem4_swap ]; then touch /root/.mem4_swap; pkill -f "mttkee[p].sh"; sleep 2; echo "MEM4_SWAP stopped the mem3 keeper (its traces run carries on and is resumed) $(date -u)"; fi
+# The teacher traces run at ~3.3 minutes a dialogue (full thinking per turn): 120 would end near 22:30. Stop them at
+# ~80 dialogues (185 turns); the keeper then goes on to memfit with what is there (switches are also assembled from it).
+if [ ! -e /root/.mem5_tracecut ] && pgrep -f "mttkee[p].sh" >/dev/null; then
+  touch /root/.mem5_tracecut
+  setsid nohup bash -c 'until [ "$(wc -l < /root/work/mtt_solo.jsonl 2>/dev/null || echo 0)" -ge 185 ]; do pgrep -f "mttkee[p].sh" >/dev/null || exit 0; sleep 120; done
+    pkill -f "pool_eval.py .*--mt-save-tokens"; echo "[mtt] traces cut at $(wc -l < /root/work/mtt_solo.jsonl) turns $(date -u +%H:%M)" >> /root/mtt.log' > /dev/null 2>&1 < /dev/null &
+  echo "MEM5_TRACECUT armed $(date -u)"
+fi
+
 # Multi-turn, switch first (2026-09-29, the user: no long-range recall needed; a natural rally, the topic switch is
 # the bottleneck; keep existing ability). mem5: a switch-heavy held-out set (all 20 switch dialogues of mt_eval + 40
 # more pairs of eval300 questions mt_eval did not use) measured before and after; training dialogues from TRAINING
