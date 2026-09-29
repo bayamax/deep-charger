@@ -80,7 +80,7 @@ PSKIP=
 # The raw GitHub copy this box fetches can lag and hand a control run an OLDER version of this file (04:48 on 09-22 it
 # relaunched the online loop under the previous mode while the newer run was merging a checkpoint on the same card).
 # Every edit bumps BOXG_SERIAL; a run that sees a lower serial than one already executed stops here.
-BOXG_SERIAL=2026092686
+BOXG_SERIAL=2026092687
 if [ -f /root/.boxg_serial ] && [ "$(cat /root/.boxg_serial)" -gt "$BOXG_SERIAL" ] 2>/dev/null; then echo "BOXG_STALE $BOXG_SERIAL < $(cat /root/.boxg_serial)"; exit 0; fi
 echo $BOXG_SERIAL > /root/.boxg_serial
 MODE=idle         # 2026-09-29: the side jobs hold the card (multi-turn measurement and training); a finished reeval re-launched on every control run and killed their evaluators
@@ -442,6 +442,39 @@ if [ "$(cat /root/.mtsim_serial 2>/dev/null)" != "$MTSIM_SERIAL" ] && [ -s /root
     export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); hf upload baya1116/hypernet-sp-distill /root/work/mt_sim_smoke.jsonl pooler_distill/chatsft/multiturn/mt_sim_smoke.jsonl >/dev/null 2>&1
     echo "[mtsim] smoke uploaded $(date -u +%H:%M)" ) >> /root/mtsim.log 2>&1 &
   echo "MTSIM_SMOKE_LAUNCHED $(date -u)"
+fi
+
+# mem6, queued behind mem5 on the same teacher traces: mem5 moved the switch turn 17 -> 26 of 60 but lost the first
+# turns 41 -> 32 (searches per turn 3.1 -> 5.6): the LoRA drifted where it was never held. mem6 adds single-turn anchors
+# (no history, the student's prompt = the teacher's, as many as the real examples), trains fewer steps at half the
+# LoRA rate, and is measured the same way. MEM6=0 cancels.
+MEM6=${MEM6:-1}
+if [ "$MEM6" = 1 ] && ! pgrep -f "mem6kee[p].sh" >/dev/null && ! grep -q "MEM6_JOB_DONE" /root/mem6.log 2>/dev/null; then
+  cat > /root/mem6keep.sh <<'M6'
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); R=baya1116/hypernet-sp-distill; cd /root/work; T=mem6
+ENV="SP_BASE=/root/gptq_hf_gq14 SP_RANK=16 SP_NOSYS=1 SP_EPISODIC=1 OMP_NUM_THREADS=1 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True"
+EVARGS="--rw 768 --maxd 384 --samepage 1 --decode plain --temp 0.6 --gen 4000 --stop eos --replycap 600"
+until grep -qE "MTT_JOB_DONE mem5|MTT_ABORT" /root/mtt.log 2>/dev/null; do sleep 300; done
+while pgrep -f "pool_eval.py|memfit.py" >/dev/null; do sleep 60; done
+echo "[mem6] memfit start $(date -u +%H:%M)"
+env SP_BASE=/root/gptq_hf_gq14 SP_RANK=16 SP_NOSYS=1 SP_EPISODIC=1 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
+  python3 /root/work/memfit.py --student full --anchor -1 --ckpt /root/reeval_g14m_pooler.safetensors --data /root/work/mtt_solo.jsonl --out /root/pooler_$T.safetensors --log /root/memfit_$T.log --steps 300 --val-every 50 --lr 5e-6 --lr-lora 5e-6 > /root/memfit_${T}_run.log 2>&1
+grep -E "^\[memfit\]|^\[data\]|^val |MEMFIT_DONE|Error|Traceback" /root/memfit_${T}_run.log | tail -14 | cut -c1-200
+[ -s /root/pooler_$T.safetensors ] || { echo "MEM6_ABORT memfit: $(tail -3 /root/memfit_${T}_run.log | tr '\n' ' ' | cut -c1-300)"; exit 1; }
+hf upload $R /root/pooler_$T.safetensors pooler_distill/chatsft/multiturn/pooler_$T.safetensors >/dev/null 2>&1
+ev() { while pgrep -f "pool_eval.py" >/dev/null; do sleep 60; done
+  env $ENV python3 /root/work/pool_eval.py $1 /root/work/eval300.jsonl $3 --multiturn $2 --mt-mode $4 --n $5 $EVARGS --tag "[$6]" > /root/$6.log 2>&1
+  grep -E "EVAL_DONE|Error|Traceback" /root/$6.log | tail -2 | cut -c1-300; hf upload $R $3 pooler_distill/chatsft/multiturn/$(basename $3) >/dev/null 2>&1; }
+ev /root/pooler_$T.safetensors /root/work/mt_eval_sw.jsonl /root/work/${T}_sw_full.jsonl full 60 ${T}-sw-full
+for i in 0 1 2; do while pgrep -f "pool_eval.py" >/dev/null; do sleep 60; done
+  env $ENV python3 /root/work/pool_eval.py /root/pooler_$T.safetensors /root/work/ev_$i.jsonl /root/work/${T}st_out_$i.jsonl --n 34 $EVARGS --tag "[${T}st$i]" > /root/${T}st_$i.log 2>&1
+  grep -E "EVAL_DONE|Error|Traceback" /root/${T}st_$i.log | tail -1 | cut -c1-300; hf upload $R /root/work/${T}st_out_$i.jsonl pooler_distill/chatsft/rollouts/${T}st_$i.jsonl >/dev/null 2>&1; done
+ev /root/pooler_$T.safetensors /root/work/mt_eval.jsonl /root/work/${T}_full.jsonl full 30 ${T}-full
+echo "MEM6_JOB_DONE $(date -u)"
+M6
+  chmod +x /root/mem6keep.sh
+  setsid nohup bash -c 'bash /root/mem6keep.sh 2>&1 | tee -a /root/mem6.log' >> /proc/1/fd/1 2>&1 < /dev/null 9>&- &
+  echo "MEM6_LAUNCHED $(date -u)"
 fi
 
 # The device layout of the local search, as a side job on the CPU: the int8 embedder, the IVF layout of the sign
@@ -838,6 +871,7 @@ while :; do
     echo "--- mtsim.log (tail) ---"; tail -n 4 /root/mtsim.log 2>/dev/null | cut -c1-300
     echo "--- mtt.log (tail) ---"; tail -n 12 /root/mtt.log 2>/dev/null | cut -c1-300; tail -n 2 /root/mtt_traces.log 2>/dev/null | cut -c1-300; grep -E "^val " /root/memfit_mem5_run.log 2>/dev/null | tail -3
     echo "--- mtm.log (tail) ---"; tail -n 6 /root/mtm.log 2>/dev/null | cut -c1-300; grep -E "^val " /root/memfit_mem3m_run.log 2>/dev/null | tail -3
+    echo "--- mem6.log (tail) ---"; tail -n 10 /root/mem6.log 2>/dev/null | cut -c1-300; grep -E "^val " /root/memfit_mem6_run.log 2>/dev/null | tail -2
     echo "--- mt.log (tail) ---"; tail -n 8 /root/mt.log 2>/dev/null | cut -c1-300; for f in $(ls -t /root/mt*_*.log 2>/dev/null | head -1); do echo "--- $f (tail) ---"; grep -E "^\[mt |EVAL_DONE|Error|Traceback" $f | tail -3 | cut -c1-300; done
     echo "--- ranker.log (tail) ---"; tail -n 8 /root/ranker.log 2>/dev/null | cut -c1-300
     echo "--- release.log (tail) ---"; tail -n 6 /root/release.log 2>/dev/null | cut -c1-200

@@ -29,6 +29,7 @@ ap.add_argument("--rw", type=int, default=768); ap.add_argument("--maxd", type=i
 ap.add_argument("--maxtok", type=int, default=2600); ap.add_argument("--val", type=int, default=24); ap.add_argument("--val-every", type=int, default=50)
 ap.add_argument("--reply-bias", type=float, default=0.5, help="share of steps that take the block holding </think> (where the reply starts)")
 ap.add_argument("--student", default="stream", choices=["stream", "mix", "full"], help="full: every earlier exchange (question + reply) verbatim in the pinned prompt, the pooler only for this turn's own evicted tokens; stream: every earlier turn through the pooler; mix: the last exchange (question + reply) verbatim in the pinned prompt, older turns through the pooler - names travel verbatim, the pooler carries the rest")
+ap.add_argument("--anchor", type=int, default=0, help="single-turn anchors: a solo trace with NO history, the student's prompt the teacher's own - the KL then only holds the LoRA to the model as it was (mem5 without them lost 9 of 41 first turns and doubled the searches). -1: as many as the real examples")
 ap.add_argument("--synth-switch", type=int, default=-1, help="topic switches assembled from the traces: one dialogue's history, then a self-contained turn of ANOTHER dialogue (its own solo trajectory is the teacher's). -1: as many as the real examples; 0: none")
 ap.add_argument("--gen", type=int, default=1500); ap.add_argument("--seed", type=int, default=0); ap.add_argument("--selftest", type=int, default=0)
 A = ap.parse_args()
@@ -159,6 +160,13 @@ for _ in range(n_syn if SOLO and len(hd) > 1 else 0):
         sq = single_q_ids(r["q"]); carry = c
     EX.append({"dialog": f"{bid}~{aid}", "turn": -1, "carry": carry, "tq": r["q_ids"], "sq": sq, "gen": r["gen"][:A.maxtok]})
 print(f"[data] + {sum(1 for e in EX if e['turn'] == -1)} topic switches assembled from other dialogues", flush=True)
+n_real = sum(1 for e in EX if e["turn"] != -1)
+n_anc = n_real if A.anchor < 0 else A.anchor
+ALLSOLO = [(did, r) for did, rs in rows.items() for r in rs if len(r["gen"]) >= 8]
+for k in range(n_anc if ALLSOLO else 0):
+    did, r = ALLSOLO[k % len(ALLSOLO)] if k < len(ALLSOLO) else rng.choice(ALLSOLO)
+    EX.append({"dialog": f"{did}~anchor", "turn": -2, "carry": [], "tq": r["q_ids"], "sq": r["q_ids"], "gen": r["gen"][:A.maxtok]})
+print(f"[data] + {sum(1 for e in EX if e['turn'] == -2)} single-turn anchors (no history, the teacher's own prompt)", flush=True)
 random.shuffle(EX)
 dids = sorted({e["dialog"].split("~")[0] for e in EX}); random.Random(1).shuffle(dids); vd = set(dids[:max(1, len(dids) // 10)])
 VAL = [e for e in EX if e["dialog"].split("~")[0] in vd][:A.val]; TRAIN = [e for e in EX if e["dialog"].split("~")[0] not in vd and not any(x in vd for x in e["dialog"].split("~"))]
