@@ -281,3 +281,10 @@ there to learn. Dropped; the models stay on the hub (`localsearch/bge-small-rl2`
 (BM25 weight 0, the best of 0 / 0.3 / 0.6) against 62.2 / 72.2 with it, at 180 ms a query against 700.
 The embedder is worth about four points in choosing the page, so it stays in the ranking until the
 whole-text term index is in and the comparison is re-run with it.
+
+**End to end, 6,000-character store with passage serving** (gq14P, the 4-bit model, 102 rollouts): 44.1%
+(50.0 / 38.2 / 44.1), paired against the 1,500-character store on the same 51 questions -3.9 +- 5.2,
+against the API -3.9 +- 6.6. Inside the noise and not better: the held-out's answers sit in the
+openings, where the extra depth changes nothing and the reordered text (opening, then a passage) is
+text the model did not train on. The deep store is for the deep kind of question; whether it costs the
+held-out anything is a 300-rollout question, run with the whole-text index once its tests are in.
