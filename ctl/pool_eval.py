@@ -31,6 +31,7 @@ ap.add_argument("--replycap", type=int, default=200)
 ap.add_argument("--greedy", type=int, default=0, help="1: argmax decoding (deterministic up to hardware), for evaluator A/B checks")
 ap.add_argument("--multiturn", default="", help="jsonl of dialogues {id, kind, turns: [{q, gold}]}: each dialogue runs turn by turn with --mt-mode carrying the history; one output row per turn")
 ap.add_argument("--mt-mode", default="stream", choices=["none", "full", "stream", "mix"], help="none: no history (each turn alone); full: the previous turns (user + reply, no thinking) in the pinned prompt; stream: only the current question pinned, everything before it (earlier questions, thinking, search results, replies) flows through the pooler; mix: the last exchange pinned as in full, the rest as in stream")
+ap.add_argument("--mt-standalone", type=int, default=0, help="1 (with --mt-mode none): each turn runs its self-contained version (the turn's 'standalone' field) - memfit's teacher trajectories")
 ap.add_argument("--mt-save-tokens", type=int, default=0, help="1: each multi-turn row also carries the prompt ids and the generated token stream")
 ap.add_argument("--force", default="", help="JSON {question: [local store doc ids]}: one rollout per (question, doc) with the FIRST search served that page (the reward table of a retriever trained against this frozen model); needs SP_LOCAL_STORE")
 A = ap.parse_args()
@@ -343,14 +344,15 @@ def run_multiturn():
                 elif A.mt_mode == "full": prefix, seed = msgs, None
                 elif A.mt_mode == "stream": prefix, seed = None, carry
                 else: prefix, seed = msgs[-2:], carry
-                txt, ans, ns_, nm, served, queries, landed, dead = rollout(q, prefix=prefix, seed_kept=seed)
+                qrun = (turn.get("standalone") or q) if A.mt_standalone else q
+                txt, ans, ns_, nm, served, queries, landed, dead = rollout(qrun, prefix=prefix, seed_kept=seed)
                 reply = txt.split("</think>")[-1].strip() if landed else ""
                 reply = re.sub(r"<｜end▁of▁sentence｜>.*", "", reply, flags=re.S).strip()
                 correct = bool(g) and landed and has(reply, g)
                 grounded = bool(g) and any(has(x, g) for x in served)
                 rec = {"dialog": d["id"], "kind": d.get("kind", ""), "turn": i, "n_turns": len(d["turns"]), "q": q, "gold": g,
                        "correct": correct, "grounded": grounded, "landed": landed, "dead": dead, "ns": ns_, "more": nm,
-                       "reply": reply[:2000], "queries": queries, "text": txt, "mode": A.mt_mode}
+                       "reply": reply[:2000], "queries": queries, "text": txt, "mode": A.mt_mode, "standalone": turn.get("standalone", q), "ran": qrun}
                 if A.mt_save_tokens:   # what memfit.py needs to rebuild the turn: the prompt as run and the generated stream
                     rec["q_ids"] = LAST["q_ids"]; rec["gen"] = LAST["gen"]
                 if (d["id"], i) not in done:

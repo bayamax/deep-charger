@@ -61,13 +61,16 @@ def make_bridge(qg):
     if not r or r.get("skip") or not r.get("turn1") or not r.get("turn2") or not r.get("bridge"): return None
     b = r["bridge"].strip()
     if b.lower() in r["turn2"].lower(): return None   # the follow-up must not name the bridge
-    return {"kind": "bridge", "seed": q, "turns": [{"q": r["turn1"].strip(), "gold": b}, {"q": r["turn2"].strip(), "gold": g}]}
+    return {"kind": "bridge", "seed": q, "turns": [{"q": r["turn1"].strip(), "gold": b, "standalone": r["turn1"].strip()},
+                                                   {"q": r["turn2"].strip(), "gold": g, "standalone": q}]}
 def make_memory(args):
     (q, g), topic = args; r = chat(MEMORY_SYS, MEMORY_USER.format(topic=topic))
     if not r or not r.get("remark") or not r.get("detail") or not r.get("recall"): return None
     det = r["detail"].strip()
     if det.lower() not in r["remark"].lower() or det.lower() in r["recall"].lower(): return None
-    return {"kind": "memory", "seed": q, "turns": [{"q": r["remark"].strip(), "gold": ""}, {"q": q, "gold": g}, {"q": r["recall"].strip(), "gold": det}]}
+    rem, rec = r["remark"].strip(), r["recall"].strip()
+    return {"kind": "memory", "seed": q, "turns": [{"q": rem, "gold": "", "standalone": rem}, {"q": q, "gold": g, "standalone": q},
+                                                   {"q": rec, "gold": det, "standalone": f'Earlier in our chat I told you: "{rem}" {rec}'}]}
 out = []; i = 0
 with cf.ThreadPoolExecutor(A.workers) as ex:
     pool = seeds[:]
@@ -75,7 +78,8 @@ with cf.ThreadPoolExecutor(A.workers) as ex:
     print(f"[mtgen] bridge {len(bridges)}", flush=True)
     mem = [x for x in ex.map(make_memory, [(pool[k], TOPICS[k % len(TOPICS)]) for k in range(int(A.n_memory * 1.5))]) if x][:A.n_memory]; pool = pool[int(A.n_memory * 1.5):]
     print(f"[mtgen] memory {len(mem)}", flush=True)
-sw = [{"kind": "switch", "seed": pool[2 * k][0], "turns": [{"q": pool[2 * k][0], "gold": pool[2 * k][1]}, {"q": pool[2 * k + 1][0], "gold": pool[2 * k + 1][1]}]} for k in range(min(A.n_switch, len(pool) // 2))]
+sw = [{"kind": "switch", "seed": pool[2 * k][0], "turns": [{"q": pool[2 * k][0], "gold": pool[2 * k][1], "standalone": pool[2 * k][0]},
+                                                           {"q": pool[2 * k + 1][0], "gold": pool[2 * k + 1][1], "standalone": pool[2 * k + 1][0]}]} for k in range(min(A.n_switch, len(pool) // 2))]
 allv = bridges + mem + sw
 for k, d in enumerate(allv): d["id"] = f"{d['kind']}{k:04d}"
 random.shuffle(allv)

@@ -1,15 +1,18 @@
 #!/usr/bin/env python3
 """Teach the pooler to carry a conversation: multi-turn self-distillation.
 
-At turn k the model should behave the same whether the earlier turns sit verbatim in its prompt (the teacher:
-the history rendered into the pinned prompt, what `pool_eval --mt-mode full` runs) or only reach it through the
-pooler (the student: the current question pinned, every earlier token - questions, thinking, search results,
-replies - handed to the pooler and mass-evicted to maxd, what `--mt-mode stream` runs and what keeps the phone's
-KV bounded). Same weights on both sides; the teacher's pooler is the one as it stands, the student's trains.
-The loss is the KL between the two sides' logits on the turn's own tokens, one block at a time.
+At turn k the student sees the turn as the user asked it ("when was that film released?") with every earlier token
+of the conversation - questions, thinking, search results, replies - reaching it only through the pooler (the current
+question pinned, the rest mass-evicted to maxd: `pool_eval --mt-mode stream`, the phone's bounded-KV protocol). The
+teacher is the same model on the turn's SELF-CONTAINED version ("when was Spirited Away released?"), no history: what
+the model does well, single-turn. The loss is the KL between them on the teacher's own trajectory, one block at a time,
+so the student learns to resolve the reference from the compressed history - and, on a topic switch (the
+self-contained version is the question itself), to ignore it. The full-history protocol is not the teacher: measured
+2026-09-29 (mt2), with earlier turns in the prompt the model answers the FIRST question of the conversation on a topic
+switch (0 of 8).
 
-Data: rows of `pool_eval --multiturn ... --mt-mode full --mt-save-tokens 1` (the model's own full-history runs).
-Turn 0 of a dialogue has no history and is skipped.
+Data: rows of `pool_eval --multiturn ... --mt-mode none --mt-standalone 1 --mt-save-tokens 1` (each turn's
+self-contained version, run alone). Turn 0 of a dialogue has no history and is skipped.
 
   SP_BASE=/root/gptq_hf_gq14 SP_RANK=16 SP_NOSYS=1 SP_EPISODIC=1 python3 memfit.py --ckpt /root/reeval_g14m_pooler.safetensors \
       --data /root/work/mtt_full.jsonl --out /root/pooler_mem.safetensors
@@ -70,6 +73,10 @@ EOS_IDS = tok.encode("<｜end▁of▁sentence｜>", add_special_tokens=False)
 BOS = tok.bos_token_id
 
 
+import contextlib
+_null = contextlib.nullcontext
+
+
 def set_teacher(t):
     pooler.A = POOL_REF if t else POOL_TRAIN
 
@@ -106,9 +113,10 @@ EX = []
 for did, rs in rows.items():
     rs.sort(key=lambda r: r["turn"]); carry = []
     for r in rs:
-        sq = single_q_ids(r["q"])
+        sq = single_q_ids(r["q"])                                   # the turn as asked
+        tq = r["q_ids"]                                               # the self-contained version the trajectory was run on
         if r["turn"] > 0 and len(r["gen"]) >= 8:
-            EX.append({"dialog": did, "turn": r["turn"], "carry": list(carry), "tq": r["q_ids"], "sq": sq, "gen": r["gen"][:A.maxtok]})
+            EX.append({"dialog": did, "turn": r["turn"], "carry": list(carry), "tq": tq, "sq": sq, "gen": r["gen"][:A.maxtok]})
         carry = carry + (sq[1:] if sq and sq[0] == BOS else sq) + r["gen"] + EOS_IDS
 random.shuffle(EX)
 dids = sorted({e["dialog"] for e in EX}); random.Random(1).shuffle(dids); vd = set(dids[:max(1, len(dids) // 10)])
@@ -156,7 +164,7 @@ def kl_of(e, seg_i=None):
     if not keep: return None
     idx = torch.tensor(keep, device=DEV)
     set_teacher(True)
-    with torch.no_grad():
+    with torch.no_grad(), (model.disable_adapter() if lora else _null()):   # the teacher is the model as it stands, LoRA off
         lt = logits_for(e["tq"], gen, tsegs[j])[idx]
     set_teacher(False)
     ls = logits_for(e["sq"], gen, ssegs[j])[idx]
@@ -201,8 +209,11 @@ for i in range(N):
     if (i + 1) % A.val_every == 0 or i + 1 == N:
         v = validate(); better = keep_if_best(v, i + 1)
         print(f"val {i+1} kl={v:.4f} {'best' if better else 'worse than step %d (%.4f)' % (BEST['step'], BEST['v'])}", flush=True); log.write(f"val {i+1} kl={v:.4f}\n"); log.flush()
-out = {k: v.float().contiguous() for k, v in BEST["p"].items()}
-save_file(out, A.out)
 if lora and BEST["l"]:
-    torch.save(BEST["l"], A.out.replace(".safetensors", "_lora.pt"))
+    # one file pool_eval reads as it is: the pooler under pooler.-prefixed keys, the LoRA under the model's own names
+    out = {"pooler." + k: v.float().contiguous() for k, v in BEST["p"].items()}
+    out.update({n: v.contiguous() for n, v in BEST["l"].items()})
+else:
+    out = {k: v.float().contiguous() for k, v in BEST["p"].items()}
+save_file(out, A.out)
 print(f"MEMFIT_DONE best step {BEST['step']} val kl {BEST['v']:.4f} (from {v0:.4f}) -> {A.out}", flush=True)
