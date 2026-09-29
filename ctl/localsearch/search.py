@@ -26,6 +26,7 @@ QUERY_PREFIX = "Represent this sentence for searching relevant passages: "
 UNPACK = (np.unpackbits(np.arange(256, dtype=np.uint8)[:, None], axis=1).astype(np.int8) * 2 - 1)   # byte -> 8 signs
 UNPACK_T = None
 W_TITLE, W_BODY, W_BM25, W_FULL = 0.2, 0.4, 0.0, 0.2   # ranking weights from the whole-dump grid (200 of the model's queries: top-1 49%, top-3 52%)
+W_DEEP = float(os.environ.get("SP_LOCAL_WDEEP", "0"))    # query terms found in the body beyond the opening (a store with more than the opening)
 
 
 class Embedder:
@@ -116,6 +117,44 @@ def build_idf(store, n=40000):
     idf = {w: math.log((cnt + 1) / (c + 1)) + 1 for w, c in df.items() if c > 1}
     pickle.dump((idf, math.log(cnt + 1) + 1), open(path, "wb"))
     return idf, math.log(cnt + 1) + 1
+
+
+SENT = re.compile(r"(?<=[.!?])\s+(?=[A-Z\"'(\[])")
+
+
+def compose(query, body, idf, idf_max, head=500, passage=500):
+    """What a store holding more than the opening serves: the article's opening (about `head` characters, whole
+    sentences), then the `passage`-character window of the rest that carries most of the query's IDF-weighted
+    terms, then everything else in order. The model reads the first 256 tokens (~1000 characters), so a fact
+    deep in the article reaches it in the first block when the query points at it; <more> still walks the rest."""
+    if len(body) <= head + passage:
+        return body
+    qw = set(w.lower() for w in WORD.findall(query) if w.lower() not in STOP and len(w) > 1)
+    sents = SENT.split(body)
+    # the opening: whole sentences up to about head characters
+    k = 0; acc = 0
+    while k < len(sents) and acc + len(sents[k]) <= head:
+        acc += len(sents[k]) + 1; k += 1
+    k = max(k, 1)
+    rest = sents[k:]
+    if not qw or not rest:
+        return body
+    # windows of consecutive sentences up to `passage` characters; score = IDF mass of distinct query terms present
+    best = (0.0, None)
+    for a in range(len(rest)):
+        L = 0; b = a; seen = set()
+        while b < len(rest) and L + len(rest[b]) <= passage:
+            seen.update(w.lower() for w in WORD.findall(rest[b]) if w.lower() in qw); L += len(rest[b]) + 1; b += 1
+        b = max(b, a + 1)
+        sc = sum(idf.get(w, idf_max) for w in seen)
+        if sc > best[0]:
+            best = (sc, (a, b))
+    if best[1] is None:
+        return body
+    a, b = best[1]
+    if a == 0:
+        return body   # the best window is already next
+    return " ".join(sents[:k] + rest[a:b] + rest[:a] + rest[b:])
 
 
 class CrossEncoder:
@@ -306,8 +345,12 @@ class LocalSearch:
             tw = set(w.lower() for w in WORD.findall(t)); bw = set(w.lower() for w in WORD.findall(b[:600]))
             ft = sum(self.idf.get(w, self.idf_max) for w in qw if w in tw) / W        # query terms in the title
             fb = sum(self.idf.get(w, self.idf_max) for w in qw if w in tw or w in bw) / W   # ... or in the opening
+            fd = 0.0
+            if W_DEEP and len(b) > 600:
+                dw = set(w.lower() for w in WORD.findall(b[600:]))
+                fd = sum(self.idf.get(w, self.idf_max) for w in qw if w in dw and w not in tw and w not in bw) / W   # ... only deeper in the article
             # cosine plus the lexical overlap the model's keyword queries were shaped by (weights from the shard-0 grid)
-            scored.append((float(s) + W_TITLE * ft + W_BODY * fb + full + W_BM25 * bm.get(i, 0.0) / bmax, i, t, b))
+            scored.append((float(s) + W_TITLE * ft + W_BODY * fb + W_DEEP * fd + full + W_BM25 * bm.get(i, 0.0) / bmax, i, t, b))
         scored.sort(key=lambda x: -x[0])
         if self.ce is not None and scored:
             top = scored[:self.ce_k]
@@ -323,6 +366,8 @@ class LocalSearch:
         hits = self.search(kw, k)
         if not hits:
             return ""
+        if os.environ.get("SP_LOCAL_PASSAGE", "0") == "1":
+            hits = [(s, i, t, compose(kw, b, self.idf, self.idf_max)) for s, i, t, b in hits]
         if k == 1 or not chars:
             return "\n\n".join(f"{t}: {b}" for _, _, t, b in hits)
         return "\n\n".join(f"{t}: {b[:chars]}" for _, _, t, b in hits)
