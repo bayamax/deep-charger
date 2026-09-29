@@ -358,6 +358,8 @@ class LocalSearch:
         return [i for i, _ in top]
 
     def search(self, query, k=3):
+        if os.environ.get("SP_LOCAL_NOEMB", "0") == "1":
+            return self._search_lexical(query, k)
         qv = self.emb([QUERY_PREFIX + query])[0]
         lex = self._lex_hits(query, self.lex_k); bm = {i: s for i, s in lex}; bmax = max(bm.values(), default=1.0) or 1.0
         emb_c = [int(c) for c in self._coarse_top(qv, self.coarse)]
@@ -393,6 +395,30 @@ class LocalSearch:
             ce = self.ce(query, [f"{t}. {b[:500]}" for _, _, t, b in top])
             top = [(float(c), i, t, b) for c, (_, i, t, b) in zip(ce, top)]
             top.sort(key=lambda x: -x[0]); return top[:k]
+        return scored[:k]
+
+    def _search_lexical(self, query, k=3):
+        """The search without the embedder (SP_LOCAL_NOEMB=1): candidates from the lexical channels (and the
+        whole-text term index when present), ranked by the same lexical terms without the cosine."""
+        lex = self._lex_hits(query, self.lex_k); bm = {i: s for i, s in lex}; bmax = max(bm.values(), default=1.0) or 1.0
+        cands = [i for i, _ in lex] + [i for i, _ in self._lex_hits(query, self.title_k, column="title")]
+        if self.terms is not None:
+            cands = self._term_hits(query, self.term_k) + cands
+        cands = list(dict.fromkeys(cands))[:self.rerank]
+        ql = " " + re.sub(r"[^a-z0-9 ]", " ", query.lower()) + " "
+        qw = [w.lower() for w in WORD.findall(query) if w.lower() not in STOP and len(w) > 1]
+        W = sum(self.idf.get(w, self.idf_max) for w in qw) or 1.0
+        wb = float(os.environ.get("SP_LOCAL_NOEMB_WBM25", "0.3"))
+        scored = []
+        for i in cands:
+            t, b = self.st.doc(i)
+            tl = " " + re.sub(r"[^a-z0-9 ]", " ", t.lower()).strip() + " "
+            full = W_FULL if (len(tl.strip()) > 2 and tl in ql) else 0.0
+            tw = set(w.lower() for w in WORD.findall(t)); bw = set(w.lower() for w in WORD.findall(b[:600]))
+            ft = sum(self.idf.get(w, self.idf_max) for w in qw if w in tw) / W
+            fb = sum(self.idf.get(w, self.idf_max) for w in qw if w in tw or w in bw) / W
+            scored.append((W_TITLE * ft + W_BODY * fb + full + wb * bm.get(i, 0.0) / bmax, i, t, b))
+        scored.sort(key=lambda x: -x[0])
         return scored[:k]
 
     def fetch(self, kw, k=None, chars=None):
