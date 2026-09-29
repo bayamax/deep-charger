@@ -29,6 +29,7 @@ ap.add_argument("--rw", type=int, default=768); ap.add_argument("--maxd", type=i
 ap.add_argument("--maxtok", type=int, default=2600); ap.add_argument("--val", type=int, default=24); ap.add_argument("--val-every", type=int, default=50)
 ap.add_argument("--reply-bias", type=float, default=0.5, help="share of steps that take the block holding </think> (where the reply starts)")
 ap.add_argument("--student", default="stream", choices=["stream", "mix", "full"], help="full: every earlier exchange (question + reply) verbatim in the pinned prompt, the pooler only for this turn's own evicted tokens; stream: every earlier turn through the pooler; mix: the last exchange (question + reply) verbatim in the pinned prompt, older turns through the pooler - names travel verbatim, the pooler carries the rest")
+ap.add_argument("--synth-switch", type=int, default=-1, help="topic switches assembled from the traces: one dialogue's history, then a self-contained turn of ANOTHER dialogue (its own solo trajectory is the teacher's). -1: as many as the real examples; 0: none")
 ap.add_argument("--gen", type=int, default=1500); ap.add_argument("--seed", type=int, default=0); ap.add_argument("--selftest", type=int, default=0)
 A = ap.parse_args()
 os.environ.setdefault("SP_HOTPOT2", "0"); os.environ.setdefault("SP_RANK", "16"); os.environ.setdefault("SP_NOSYS", "1"); os.environ.setdefault("SP_EPISODIC", "1")
@@ -133,9 +134,34 @@ for did, rs in rows.items():
         carry = carry + this
         txt = tok.decode(r["gen"]); prev = (r["q"], txt.split("</think>")[-1].replace("<｜end▁of▁sentence｜>", "").strip() if "</think>" in txt else "")
         msgs = msgs + [{"role": "user", "content": prev[0]}, {"role": "assistant", "content": prev[1] or "(no reply)"}]
+# topic switches: the history of dialogue A (all its turns), then a turn of dialogue B that is self-contained (its
+# question is its own standalone version), which the model must answer as if nothing came before
+HIST = {}
+for did, rs in rows.items():
+    rs = sorted(rs, key=lambda r: r["turn"]); c = []; m = []
+    for r in rs:
+        sq = single_q_ids(r["q"]); c = c + (sq[1:] if sq and sq[0] == BOS else sq) + r["gen"] + EOS_IDS
+        txt = tok.decode(r["gen"]); rep = txt.split("</think>")[-1].replace("<｜end▁of▁sentence｜>", "").strip() if "</think>" in txt else ""
+        m = m + [{"role": "user", "content": r["q"]}, {"role": "assistant", "content": rep or "(no reply)"}]
+    HIST[did] = (c, m)
+SOLO = [(did, r) for did, rs in rows.items() for r in rs if r.get("standalone", r["q"]) == r["q"] and len(r["gen"]) >= 8]
+n_syn = len(EX) if A.synth_switch < 0 else A.synth_switch
+rng = random.Random(3); hd = list(HIST)
+for _ in range(n_syn if SOLO and len(hd) > 1 else 0):
+    bid, r = rng.choice(SOLO); aid = rng.choice(hd)
+    if aid == bid: continue
+    c, m = HIST[aid]
+    if A.student == "full":
+        sq = tok.encode(tok.apply_chat_template(m + [{"role": "user", "content": r["q"]}], add_generation_prompt=True, tokenize=False) + "<think>\n"); carry = []
+    elif A.student == "mix":
+        sq = tok.encode(tok.apply_chat_template(m[-2:] + [{"role": "user", "content": r["q"]}], add_generation_prompt=True, tokenize=False) + "<think>\n"); carry = c
+    else:
+        sq = single_q_ids(r["q"]); carry = c
+    EX.append({"dialog": f"{bid}~{aid}", "turn": -1, "carry": carry, "tq": r["q_ids"], "sq": sq, "gen": r["gen"][:A.maxtok]})
+print(f"[data] + {sum(1 for e in EX if e['turn'] == -1)} topic switches assembled from other dialogues", flush=True)
 random.shuffle(EX)
-dids = sorted({e["dialog"] for e in EX}); random.Random(1).shuffle(dids); vd = set(dids[:max(1, len(dids) // 10)])
-VAL = [e for e in EX if e["dialog"] in vd][:A.val]; TRAIN = [e for e in EX if e["dialog"] not in vd]
+dids = sorted({e["dialog"].split("~")[0] for e in EX}); random.Random(1).shuffle(dids); vd = set(dids[:max(1, len(dids) // 10)])
+VAL = [e for e in EX if e["dialog"].split("~")[0] in vd][:A.val]; TRAIN = [e for e in EX if e["dialog"].split("~")[0] not in vd and not any(x in vd for x in e["dialog"].split("~"))]
 print(f"[data] {len(EX)} turns with history from {len(rows)} dialogues; train {len(TRAIN)}, validation {len(VAL)}", flush=True)
 for e in EX: e["own"] = own_mask(e["gen"])
 
