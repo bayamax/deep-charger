@@ -48,22 +48,38 @@ def _decode(buf):
 class TermIndex:
     def __init__(self, path):
         self.path = path
-        self.terms = {}
-        for i, t in enumerate(open(os.path.join(path, "terms.txt"), encoding="utf-8")):
-            self.terms[t.rstrip("\n")] = i
-        self.df = np.load(os.path.join(path, "term_df.npy"))
+        # the vocabulary stays on disk: terms.txt is sorted, a term is found by binary search over its line offsets
+        # (term_lines.npy, built once), so memory holds neither a dict of millions of strings nor the file
+        tf = os.path.join(path, "terms.txt"); lf = os.path.join(path, "term_lines.npy")
+        if not os.path.exists(lf):
+            raw = np.fromfile(tf, dtype=np.uint8); nl = np.nonzero(raw == 10)[0]
+            np.save(lf, np.concatenate([[0], nl + 1]).astype(np.int64)); del raw
+        self.lines = np.load(lf, mmap_mode="r"); self.tbytes = np.memmap(tf, dtype=np.uint8, mode="r")
+        self.V = len(self.lines) - 1
+        self.df = np.load(os.path.join(path, "term_df.npy"), mmap_mode="r")
         if os.path.exists(os.path.join(path, "postings_vb.bin")):
             self.voff = np.load(os.path.join(path, "term_voffsets.npy")); self.vb = np.memmap(os.path.join(path, "postings_vb.bin"), dtype=np.uint8, mode="r"); self.raw = None
         else:
             self.off = np.load(os.path.join(path, "term_offsets.npy")); self.raw = np.memmap(os.path.join(path, "postings.bin"), dtype=np.uint32, mode="r")
         self.n_docs = None
 
+    def _term(self, i):
+        return bytes(self.tbytes[int(self.lines[i]):int(self.lines[i + 1]) - 1])
+
+    def lookup(self, term):
+        key = term.encode("utf-8"); lo, hi = 0, self.V
+        while lo < hi:
+            mid = (lo + hi) // 2
+            if self._term(mid) < key: lo = mid + 1
+            else: hi = mid
+        return lo if lo < self.V and self._term(lo) == key else None
+
     def has(self, term):
-        return term in self.terms
+        return self.lookup(term) is not None
 
     def docs(self, term):
         """The ids of the articles whose text mentions the term anywhere (sorted)."""
-        t = self.terms.get(term)
+        t = self.lookup(term)
         if t is None:
             return np.zeros(0, dtype=np.int64)
         if self.raw is not None:
@@ -72,7 +88,7 @@ class TermIndex:
         return _decode(bytes(self.vb[a:b])) if b > a else np.zeros(0, dtype=np.int64)
 
     def df_of(self, term):
-        t = self.terms.get(term)
+        t = self.lookup(term)
         return int(self.df[t]) if t is not None else 0
 
 
