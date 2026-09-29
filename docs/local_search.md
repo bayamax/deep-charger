@@ -256,3 +256,22 @@ Window choice by term overlap beats the embedder's (31%) and other head/passage 
 70% needs `<more>` or a second search. The 6,000-character store with passage serving is the one to ship:
 it costs nothing on the held-out's kind of question and triples the reach on the deep kind; the held-out
 run with it (RLOCALSTORE=/root/wiki_store6, RLOCALPASSAGE=1) follows the box's build.
+
+## The retriever trained on the frozen model's verdicts (2026-09-29, measured and dropped)
+
+The reward table `rew1`: 200 training questions x 5 candidate pages (the search's top 4 plus, when none of
+them carried the answer, the best-ranked page that did), one rollout each with the first search served
+that page (`pool_eval --force`), the 4-bit model frozen: 1,000 rollouts, 8 hours on the 3060. 145
+questions had a signal (some pages right, some wrong); 116 to train, 29 held out. `train_ranker.py` then
+trains the ranking model by group-relative policy gradient over each question's candidates (advantage =
+reward - the question's mean; the model's softmax over the candidates).
+
+| ranking model | first-ranked page's reward, held-out 29 questions | train | 400 test queries, answer-bearing top-1 |
+|---|---|---|---|
+| bge-small (cosine + lexical terms), before → after | 55.2 → 62.1% | 63.8 → 75.9% | - |
+| MiniLM cross-encoder over the top 16, before → after | 58.6 → 55.2% | 65.5 → 83.6% | 64.7 → 48.9% |
+
+Both fit the 116 questions and neither generalises: the cross-encoder loses 16 points on the test queries,
+the bi-encoder's +7 on 29 held-out questions is two questions. A ranker learned from the model's own
+verdicts would need ten times the table (about four days of the box) and there is no sign the signal is
+there to learn. Dropped; the models stay on the hub (`localsearch/bge-small-rl2`, `localsearch/ce-rl2`).
