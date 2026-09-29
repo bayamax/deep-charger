@@ -80,7 +80,7 @@ PSKIP=
 # The raw GitHub copy this box fetches can lag and hand a control run an OLDER version of this file (04:48 on 09-22 it
 # relaunched the online loop under the previous mode while the newer run was merging a checkpoint on the same card).
 # Every edit bumps BOXG_SERIAL; a run that sees a lower serial than one already executed stops here.
-BOXG_SERIAL=2026092682
+BOXG_SERIAL=2026092683
 if [ -f /root/.boxg_serial ] && [ "$(cat /root/.boxg_serial)" -gt "$BOXG_SERIAL" ] 2>/dev/null; then echo "BOXG_STALE $BOXG_SERIAL < $(cat /root/.boxg_serial)"; exit 0; fi
 echo $BOXG_SERIAL > /root/.boxg_serial
 MODE=idle         # 2026-09-29: the side jobs hold the card (multi-turn measurement and training); a finished reeval re-launched on every control run and killed their evaluators
@@ -320,11 +320,12 @@ if [ ! -e /root/.mt2_cut ] && pgrep -f "mtkee[p].sh" >/dev/null; then
 fi
 
 if [ ! -e /root/.mem3_swap ]; then touch /root/.mem3_swap; pkill -f "mttkee[p].sh"; sleep 2; echo "MEM3_SWAP stopped the mem2 keeper $(date -u)"; fi
+if [ ! -e /root/.mem4_swap ]; then touch /root/.mem4_swap; pkill -f "mttkee[p].sh"; sleep 2; echo "MEM4_SWAP stopped the mem3 keeper (its traces run carries on and is resumed) $(date -u)"; fi
 # Multi-turn training, queued behind the measurement (mt1): dialogues from TRAINING seeds (eval300 excluded), the
 # 4-bit model's own full-history runs on them (tokens saved), then memfit.py - the pooler learns to carry the history
 # (self-distillation, full-history teacher -> history-through-pooler student) - then the stream protocol measured
 # again on the same held-out dialogues with the new pooler. MTT=0 cancels; MTT_TAG bumps to redo.
-MTT=${MTT:-1}; MTT_TAG=${MTT_TAG:-mem3}; MTT_N=${MTT_N:-180}
+MTT=${MTT:-1}; MTT_TAG=${MTT_TAG:-mem4}; MTT_N=${MTT_N:-180}
 if [ "$MTT" = 1 ] && ! pgrep -f "mttkee[p].sh" >/dev/null && ! grep -q "MTT_JOB_DONE $MTT_TAG" /root/mtt.log 2>/dev/null && [ -s /root/gptq_hf_gq14/model.safetensors ]; then
   cat > /root/mttkeep.sh <<TK1
 TTAG=$MTT_TAG; TN=$MTT_N
@@ -344,15 +345,15 @@ grep -E "EVAL_DONE|Error|Traceback" /root/mtt_traces.log | tail -2 | cut -c1-300
 hf upload $R /root/work/mtt_solo.jsonl pooler_distill/chatsft/multiturn/mtt_solo.jsonl >/dev/null 2>&1
 echo "[mtt] memfit start $(date -u +%H:%M)"
 SP_BASE=/root/gptq_hf_gq14 SP_RANK=16 SP_NOSYS=1 SP_EPISODIC=1 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
-  python3 /root/work/memfit.py --ckpt /root/reeval_g14m_pooler.safetensors --data /root/work/mtt_solo.jsonl --out /root/pooler_$TTAG.safetensors --log /root/memfit_$TTAG.log --steps 600 --lr 1e-5 --lr-lora 1e-5 > /root/memfit_${TTAG}_run.log 2>&1
+  python3 /root/work/memfit.py --ckpt /root/reeval_g14m_pooler.safetensors --data /root/work/mtt_solo.jsonl --student full --out /root/pooler_$TTAG.safetensors --log /root/memfit_$TTAG.log --steps 600 --lr 1e-5 --lr-lora 1e-5 > /root/memfit_${TTAG}_run.log 2>&1
 grep -E "^\[memfit\]|^\[data\]|^val |MEMFIT_DONE|Error|Traceback" /root/memfit_${TTAG}_run.log | tail -16 | cut -c1-200
 [ -s /root/pooler_$TTAG.safetensors ] || { echo "MTT_ABORT memfit: $(tail -3 /root/memfit_${TTAG}_run.log | tr '\n' ' ' | cut -c1-300)"; exit 1; }
 hf upload $R /root/pooler_$TTAG.safetensors pooler_distill/chatsft/multiturn/pooler_$TTAG.safetensors >/dev/null 2>&1
 SP_BASE=/root/gptq_hf_gq14 SP_RANK=16 SP_NOSYS=1 SP_EPISODIC=1 OMP_NUM_THREADS=1 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
-  python3 /root/work/pool_eval.py /root/pooler_$TTAG.safetensors /root/work/eval300.jsonl /root/work/${TTAG}_stream.jsonl --multiturn /root/work/mt_eval.jsonl --mt-mode stream \
-  --n 45 --rw 768 --maxd 384 --samepage 1 --decode plain --temp 0.6 --gen 4000 --stop eos --replycap 600 --tag "[$TTAG-stream]" > /root/${TTAG}_stream.log 2>&1
-grep -E "EVAL_DONE|Error|Traceback" /root/${TTAG}_stream.log | tail -2 | cut -c1-300
-hf upload $R /root/work/${TTAG}_stream.jsonl pooler_distill/chatsft/multiturn/${TTAG}_stream.jsonl >/dev/null 2>&1
+  python3 /root/work/pool_eval.py /root/pooler_$TTAG.safetensors /root/work/eval300.jsonl /root/work/${TTAG}_full.jsonl --multiturn /root/work/mt_eval.jsonl --mt-mode full \
+  --n 30 --rw 768 --maxd 384 --samepage 1 --decode plain --temp 0.6 --gen 4000 --stop eos --replycap 600 --tag "[$TTAG-full]" > /root/${TTAG}_full.log 2>&1
+grep -E "EVAL_DONE|Error|Traceback" /root/${TTAG}_full.log | tail -2 | cut -c1-300
+hf upload $R /root/work/${TTAG}_full.jsonl pooler_distill/chatsft/multiturn/${TTAG}_full.jsonl >/dev/null 2>&1
 echo "MTT_JOB_DONE $TTAG $(date -u)"
 TK2
   chmod +x /root/mttkeep.sh
@@ -780,7 +781,7 @@ while :; do
     echo "--- retr.log (tail) ---"; tail -n 8 /root/retr.log 2>/dev/null | cut -c1-300
     echo "--- wiki6.log (tail) ---"; tail -n 4 /root/wiki6.log 2>/dev/null | cut -c1-300
     echo "--- terms.log (tail) ---"; tail -n 4 /root/terms.log 2>/dev/null | cut -c1-300
-    echo "--- mtt.log (tail) ---"; tail -n 8 /root/mtt.log 2>/dev/null | cut -c1-300; tail -n 2 /root/mtt_traces.log 2>/dev/null | cut -c1-300; grep -E "^val " /root/memfit_mem3_run.log 2>/dev/null | tail -3
+    echo "--- mtt.log (tail) ---"; tail -n 8 /root/mtt.log 2>/dev/null | cut -c1-300; tail -n 2 /root/mtt_traces.log 2>/dev/null | cut -c1-300; grep -E "^val " /root/memfit_mem4_run.log 2>/dev/null | tail -3
     echo "--- mtm.log (tail) ---"; tail -n 6 /root/mtm.log 2>/dev/null | cut -c1-300; grep -E "^val " /root/memfit_mem3m_run.log 2>/dev/null | tail -3
     echo "--- mt.log (tail) ---"; tail -n 8 /root/mt.log 2>/dev/null | cut -c1-300; for f in $(ls -t /root/mt*_*.log 2>/dev/null | head -1); do echo "--- $f (tail) ---"; grep -E "^\[mt |EVAL_DONE|Error|Traceback" $f | tail -3 | cut -c1-300; done
     echo "--- ranker.log (tail) ---"; tail -n 8 /root/ranker.log 2>/dev/null | cut -c1-300

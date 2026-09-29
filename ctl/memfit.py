@@ -28,7 +28,7 @@ ap.add_argument("--warmup", type=int, default=30); ap.add_argument("--temp", typ
 ap.add_argument("--rw", type=int, default=768); ap.add_argument("--maxd", type=int, default=384); ap.add_argument("--chunk", type=int, default=128)
 ap.add_argument("--maxtok", type=int, default=2600); ap.add_argument("--val", type=int, default=24); ap.add_argument("--val-every", type=int, default=50)
 ap.add_argument("--reply-bias", type=float, default=0.5, help="share of steps that take the block holding </think> (where the reply starts)")
-ap.add_argument("--student", default="stream", choices=["stream", "mix"], help="stream: every earlier turn through the pooler; mix: the last exchange (question + reply) verbatim in the pinned prompt, older turns through the pooler - names travel verbatim, the pooler carries the rest")
+ap.add_argument("--student", default="stream", choices=["stream", "mix", "full"], help="full: every earlier exchange (question + reply) verbatim in the pinned prompt, the pooler only for this turn's own evicted tokens; stream: every earlier turn through the pooler; mix: the last exchange (question + reply) verbatim in the pinned prompt, older turns through the pooler - names travel verbatim, the pooler carries the rest")
 ap.add_argument("--gen", type=int, default=1500); ap.add_argument("--seed", type=int, default=0); ap.add_argument("--selftest", type=int, default=0)
 A = ap.parse_args()
 os.environ.setdefault("SP_HOTPOT2", "0"); os.environ.setdefault("SP_RANK", "16"); os.environ.setdefault("SP_NOSYS", "1"); os.environ.setdefault("SP_EPISODIC", "1")
@@ -112,12 +112,15 @@ for l in open(A.data):
     if "q_ids" in r and "gen" in r: rows[r["dialog"]].append(r)
 EX = []
 for did, rs in rows.items():
-    rs.sort(key=lambda r: r["turn"]); carry = []; older = []; prev = None
+    rs.sort(key=lambda r: r["turn"]); carry = []; older = []; prev = None; msgs = []
     for r in rs:
         sq = single_q_ids(r["q"])                                   # the turn as asked
         tq = r["q_ids"]                                               # the self-contained version the trajectory was run on
         if r["turn"] > 0 and len(r["gen"]) >= 8:
-            if A.student == "mix" and prev is not None:
+            if A.student == "full":
+                sq_full = tok.encode(tok.apply_chat_template(msgs + [{"role": "user", "content": r["q"]}], add_generation_prompt=True, tokenize=False) + "<think>\n")
+                EX.append({"dialog": did, "turn": r["turn"], "carry": [], "tq": tq, "sq": sq_full, "gen": r["gen"][:A.maxtok]})
+            elif A.student == "mix" and prev is not None:
                 pq, preply = prev
                 sq_mix = tok.encode(tok.apply_chat_template([{"role": "user", "content": pq}, {"role": "assistant", "content": preply or "(no reply)"},
                                                              {"role": "user", "content": r["q"]}], add_generation_prompt=True, tokenize=False) + "<think>\n")
@@ -129,6 +132,7 @@ for did, rs in rows.items():
         older = carry + r["gen"] + EOS_IDS if A.student == "mix" else older
         carry = carry + this
         txt = tok.decode(r["gen"]); prev = (r["q"], txt.split("</think>")[-1].replace("<｜end▁of▁sentence｜>", "").strip() if "</think>" in txt else "")
+        msgs = msgs + [{"role": "user", "content": prev[0]}, {"role": "assistant", "content": prev[1] or "(no reply)"}]
 random.shuffle(EX)
 dids = sorted({e["dialog"] for e in EX}); random.Random(1).shuffle(dids); vd = set(dids[:max(1, len(dids) // 10)])
 VAL = [e for e in EX if e["dialog"] in vd][:A.val]; TRAIN = [e for e in EX if e["dialog"] not in vd]
