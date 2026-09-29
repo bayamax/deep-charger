@@ -80,7 +80,7 @@ PSKIP=
 # The raw GitHub copy this box fetches can lag and hand a control run an OLDER version of this file (04:48 on 09-22 it
 # relaunched the online loop under the previous mode while the newer run was merging a checkpoint on the same card).
 # Every edit bumps BOXG_SERIAL; a run that sees a lower serial than one already executed stops here.
-BOXG_SERIAL=2026092678
+BOXG_SERIAL=2026092679
 if [ -f /root/.boxg_serial ] && [ "$(cat /root/.boxg_serial)" -gt "$BOXG_SERIAL" ] 2>/dev/null; then echo "BOXG_STALE $BOXG_SERIAL < $(cat /root/.boxg_serial)"; exit 0; fi
 echo $BOXG_SERIAL > /root/.boxg_serial
 MODE=reeval       # 2026-09-29: the 4-bit with the local search on the 6,000-character store, the opening + the query's passage served
@@ -300,6 +300,18 @@ MK2
   chmod +x /root/mtkeep.sh
   setsid nohup bash -c 'bash /root/mtkeep.sh 2>&1 | tee -a /root/mt.log' >> /proc/1/fd/1 2>&1 < /dev/null 9>&- &
   echo "MT_LAUNCHED $MT_TAG $(date -u)"
+fi
+
+# The measurement at 4 minutes a dialogue is 9 hours for three protocols: cut each mode short (none: its answer is
+# plain without history; full and stream: the same first ~30 dialogues, paired). The keeper then moves to the next mode.
+if [ ! -e /root/.mt1_cut ] && pgrep -f "mtkee[p].sh" >/dev/null; then
+  touch /root/.mt1_cut
+  setsid nohup bash -c 'for m in "none 25" "full 70" "stream 70"; do set -- $m
+    until [ "$(wc -l < /root/work/mt1_$1.jsonl 2>/dev/null || echo 0)" -ge $2 ] && pgrep -f "pool_eval.py .*--mt-mode $1" >/dev/null; do
+      pgrep -f "mtkee[p].sh" >/dev/null || exit 0; sleep 60; done
+    pkill -f "pool_eval.py .*--mt-mode $1"; echo "[mt1] $1 cut at $(wc -l < /root/work/mt1_$1.jsonl) turns $(date -u +%H:%M)" >> /root/mt.log
+  done' > /dev/null 2>&1 < /dev/null &
+  echo "MT1_CUT armed $(date -u)"
 fi
 
 # Multi-turn training, queued behind the measurement (mt1): dialogues from TRAINING seeds (eval300 excluded), the
