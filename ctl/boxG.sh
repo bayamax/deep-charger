@@ -80,7 +80,7 @@ PSKIP=
 # The raw GitHub copy this box fetches can lag and hand a control run an OLDER version of this file (04:48 on 09-22 it
 # relaunched the online loop under the previous mode while the newer run was merging a checkpoint on the same card).
 # Every edit bumps BOXG_SERIAL; a run that sees a lower serial than one already executed stops here.
-BOXG_SERIAL=2026092677
+BOXG_SERIAL=2026092678
 if [ -f /root/.boxg_serial ] && [ "$(cat /root/.boxg_serial)" -gt "$BOXG_SERIAL" ] 2>/dev/null; then echo "BOXG_STALE $BOXG_SERIAL < $(cat /root/.boxg_serial)"; exit 0; fi
 echo $BOXG_SERIAL > /root/.boxg_serial
 MODE=reeval       # 2026-09-29: the 4-bit with the local search on the 6,000-character store, the opening + the query's passage served
@@ -156,7 +156,7 @@ OSEARCHGEN=1500   # and capped as it capped them; the reasoning side keeps OGEN
 OTEMP=0.6
 SHARDS=3
 RAW="https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl"
-for f in pool_eval.py q4.py qat.py dwq.py poolerfit.py jointfit.py checkmlx.py packmlx.py dequant_state.py gptq.py sft_lora.py selfgen_gpu.py build_merged.py web_search.py grpo_pool.py online_loop.py mt_gen.py; do
+for f in pool_eval.py q4.py qat.py dwq.py poolerfit.py jointfit.py checkmlx.py packmlx.py dequant_state.py gptq.py sft_lora.py selfgen_gpu.py build_merged.py web_search.py grpo_pool.py online_loop.py mt_gen.py memfit.py; do
   for try in 1 2 3; do curl -sS -o /root/work/$f "$RAW/$f?nocache=$(date +%s)" && python3 -m py_compile /root/work/$f && break; sleep 5; done
 done
 cp /root/work/web_search.py /root/work/runtime/web_search.py 2>/dev/null
@@ -300,6 +300,46 @@ MK2
   chmod +x /root/mtkeep.sh
   setsid nohup bash -c 'bash /root/mtkeep.sh 2>&1 | tee -a /root/mt.log' >> /proc/1/fd/1 2>&1 < /dev/null 9>&- &
   echo "MT_LAUNCHED $MT_TAG $(date -u)"
+fi
+
+# Multi-turn training, queued behind the measurement (mt1): dialogues from TRAINING seeds (eval300 excluded), the
+# 4-bit model's own full-history runs on them (tokens saved), then memfit.py - the pooler learns to carry the history
+# (self-distillation, full-history teacher -> history-through-pooler student) - then the stream protocol measured
+# again on the same held-out dialogues with the new pooler. MTT=0 cancels; MTT_TAG bumps to redo.
+MTT=${MTT:-1}; MTT_TAG=${MTT_TAG:-mem1}; MTT_N=${MTT_N:-180}
+if [ "$MTT" = 1 ] && ! pgrep -f "mttkee[p].sh" >/dev/null && ! grep -q "MTT_JOB_DONE $MTT_TAG" /root/mtt.log 2>/dev/null && [ -s /root/gptq_hf_gq14/model.safetensors ]; then
+  cat > /root/mttkeep.sh <<TK1
+TTAG=$MTT_TAG; TN=$MTT_N
+TK1
+  cat >> /root/mttkeep.sh <<'TK2'
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); R=baya1116/hypernet-sp-distill; cd /root/work
+until grep -q "MT_JOB_DONE" /root/mt.log 2>/dev/null; do sleep 300; done
+[ -s /root/work/mt_train.jsonl ] || python3 /root/work/mt_gen.py --seeds /root/work/selfq_all.jsonl --exclude /root/work/eval300.jsonl --out /root/work/mt_train.jsonl --n-bridge 110 --n-memory 70 --n-switch 20 --seed 7 2>&1 | grep -E "^\[mtgen\]|MTGEN_DONE|Error|Traceback"
+[ -s /root/work/mt_train.jsonl ] || { echo "MTT_ABORT no training dialogues"; exit 1; }
+hf upload $R /root/work/mt_train.jsonl pooler_distill/chatsft/multiturn/mt_train.jsonl >/dev/null 2>&1
+while pgrep -f "pool_eval.py" >/dev/null; do sleep 120; done
+echo "[mtt] traces start $(date -u +%H:%M)"
+SP_BASE=/root/gptq_hf_gq14 SP_RANK=16 SP_NOSYS=1 SP_EPISODIC=1 OMP_NUM_THREADS=1 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
+  python3 /root/work/pool_eval.py /root/reeval_g14m_pooler.safetensors /root/work/eval300.jsonl /root/work/mtt_full.jsonl --multiturn /root/work/mt_train.jsonl --mt-mode full --mt-save-tokens 1 \
+  --n $TN --rw 768 --maxd 384 --samepage 1 --decode plain --temp 0.6 --gen 4000 --stop eos --replycap 600 --tag "[mtt-full]" > /root/mtt_traces.log 2>&1
+grep -E "EVAL_DONE|Error|Traceback" /root/mtt_traces.log | tail -2 | cut -c1-300
+hf upload $R /root/work/mtt_full.jsonl pooler_distill/chatsft/multiturn/mtt_full.jsonl >/dev/null 2>&1
+echo "[mtt] memfit start $(date -u +%H:%M)"
+SP_BASE=/root/gptq_hf_gq14 SP_RANK=16 SP_NOSYS=1 SP_EPISODIC=1 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
+  python3 /root/work/memfit.py --ckpt /root/reeval_g14m_pooler.safetensors --data /root/work/mtt_full.jsonl --out /root/pooler_$TTAG.safetensors --log /root/memfit_$TTAG.log --steps 600 > /root/memfit_${TTAG}_run.log 2>&1
+grep -E "^\[memfit\]|^\[data\]|^val |MEMFIT_DONE|Error|Traceback" /root/memfit_${TTAG}_run.log | tail -16 | cut -c1-200
+[ -s /root/pooler_$TTAG.safetensors ] || { echo "MTT_ABORT memfit: $(tail -3 /root/memfit_${TTAG}_run.log | tr '\n' ' ' | cut -c1-300)"; exit 1; }
+hf upload $R /root/pooler_$TTAG.safetensors pooler_distill/chatsft/multiturn/pooler_$TTAG.safetensors >/dev/null 2>&1
+SP_BASE=/root/gptq_hf_gq14 SP_RANK=16 SP_NOSYS=1 SP_EPISODIC=1 OMP_NUM_THREADS=1 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
+  python3 /root/work/pool_eval.py /root/pooler_$TTAG.safetensors /root/work/eval300.jsonl /root/work/${TTAG}_stream.jsonl --multiturn /root/work/mt_eval.jsonl --mt-mode stream \
+  --n 45 --rw 768 --maxd 384 --samepage 1 --decode plain --temp 0.6 --gen 4000 --stop eos --replycap 600 --tag "[$TTAG-stream]" > /root/${TTAG}_stream.log 2>&1
+grep -E "EVAL_DONE|Error|Traceback" /root/${TTAG}_stream.log | tail -2 | cut -c1-300
+hf upload $R /root/work/${TTAG}_stream.jsonl pooler_distill/chatsft/multiturn/${TTAG}_stream.jsonl >/dev/null 2>&1
+echo "MTT_JOB_DONE $TTAG $(date -u)"
+TK2
+  chmod +x /root/mttkeep.sh
+  setsid nohup bash -c 'bash /root/mttkeep.sh 2>&1 | tee -a /root/mtt.log' >> /proc/1/fd/1 2>&1 < /dev/null 9>&- &
+  echo "MTT_LAUNCHED $MTT_TAG $(date -u)"
 fi
 
 # The device layout of the local search, as a side job on the CPU: the int8 embedder, the IVF layout of the sign
@@ -693,6 +733,7 @@ while :; do
     echo "--- retr.log (tail) ---"; tail -n 8 /root/retr.log 2>/dev/null | cut -c1-300
     echo "--- wiki6.log (tail) ---"; tail -n 4 /root/wiki6.log 2>/dev/null | cut -c1-300
     echo "--- terms.log (tail) ---"; tail -n 4 /root/terms.log 2>/dev/null | cut -c1-300
+    echo "--- mtt.log (tail) ---"; tail -n 8 /root/mtt.log 2>/dev/null | cut -c1-300; tail -n 2 /root/mtt_traces.log 2>/dev/null | cut -c1-300; grep -E "^val " /root/memfit_mem1_run.log 2>/dev/null | tail -3
     echo "--- mt.log (tail) ---"; tail -n 8 /root/mt.log 2>/dev/null | cut -c1-300; for f in $(ls -t /root/mt*_*.log 2>/dev/null | head -1); do echo "--- $f (tail) ---"; grep -E "^\[mt |EVAL_DONE|Error|Traceback" $f | tail -3 | cut -c1-300; done
     echo "--- ranker.log (tail) ---"; tail -n 8 /root/ranker.log 2>/dev/null | cut -c1-300
     echo "--- release.log (tail) ---"; tail -n 6 /root/release.log 2>/dev/null | cut -c1-200

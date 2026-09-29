@@ -31,6 +31,7 @@ ap.add_argument("--replycap", type=int, default=200)
 ap.add_argument("--greedy", type=int, default=0, help="1: argmax decoding (deterministic up to hardware), for evaluator A/B checks")
 ap.add_argument("--multiturn", default="", help="jsonl of dialogues {id, kind, turns: [{q, gold}]}: each dialogue runs turn by turn with --mt-mode carrying the history; one output row per turn")
 ap.add_argument("--mt-mode", default="stream", choices=["none", "full", "stream", "mix"], help="none: no history (each turn alone); full: the previous turns (user + reply, no thinking) in the pinned prompt; stream: only the current question pinned, everything before it (earlier questions, thinking, search results, replies) flows through the pooler; mix: the last exchange pinned as in full, the rest as in stream")
+ap.add_argument("--mt-save-tokens", type=int, default=0, help="1: each multi-turn row also carries the prompt ids and the generated token stream")
 ap.add_argument("--force", default="", help="JSON {question: [local store doc ids]}: one rollout per (question, doc) with the FIRST search served that page (the reward table of a retriever trained against this frozen model); needs SP_LOCAL_STORE")
 A = ap.parse_args()
 
@@ -350,6 +351,8 @@ def run_multiturn():
                 rec = {"dialog": d["id"], "kind": d.get("kind", ""), "turn": i, "n_turns": len(d["turns"]), "q": q, "gold": g,
                        "correct": correct, "grounded": grounded, "landed": landed, "dead": dead, "ns": ns_, "more": nm,
                        "reply": reply[:2000], "queries": queries, "text": txt, "mode": A.mt_mode}
+                if A.mt_save_tokens:   # what memfit.py needs to rebuild the turn: the prompt as run and the generated stream
+                    rec["q_ids"] = LAST["q_ids"]; rec["gen"] = LAST["gen"]
                 if (d["id"], i) not in done:
                     fh.write(json.dumps(rec, ensure_ascii=False) + "\n"); fh.flush()
                 if g:
