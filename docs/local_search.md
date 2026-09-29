@@ -275,3 +275,9 @@ Both fit the 116 questions and neither generalises: the cross-encoder loses 16 p
 the bi-encoder's +7 on 29 held-out questions is two questions. A ranker learned from the model's own
 verdicts would need ten times the table (about four days of the box) and there is no sign the signal is
 there to learn. Dropped; the models stay on the hub (`localsearch/bge-small-rl2`, `localsearch/ce-rl2`).
+
+**Without the embedder** (`SP_LOCAL_NOEMB=1`: the lexical channels only, ranked by the lexical terms; the
+6,000-character store, passage serving; 400 test queries): answer-bearing top-1 58.4% / top-3 69.9%
+(BM25 weight 0, the best of 0 / 0.3 / 0.6) against 62.2 / 72.2 with it, at 180 ms a query against 700.
+The embedder is worth about four points in choosing the page, so it stays in the ranking until the
+whole-text term index is in and the comparison is re-run with it.
