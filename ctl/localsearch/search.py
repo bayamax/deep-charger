@@ -27,6 +27,7 @@ UNPACK = (np.unpackbits(np.arange(256, dtype=np.uint8)[:, None], axis=1).astype(
 UNPACK_T = None
 W_TITLE, W_BODY, W_BM25, W_FULL = 0.2, 0.4, 0.0, 0.2   # ranking weights from the whole-dump grid (200 of the model's queries: top-1 49%, top-3 52%)
 W_DEEP = float(os.environ.get("SP_LOCAL_WDEEP", "0"))    # query terms found in the body beyond the opening (a store with more than the opening)
+W_PRIOR = float(os.environ.get("SP_LOCAL_WPRIOR", "0"))  # a page prior: log of the article's size (distinct terms in its whole text), as Wikipedia's search favours well-developed pages
 
 
 class Embedder:
@@ -220,11 +221,13 @@ class LocalSearch:
             self.link_k = int(os.environ.get("SP_LOCAL_LINKK", "16")); self.link_lex = int(os.environ.get("SP_LOCAL_LINKLEX", "400"))
         # SP_LOCAL_TERMS: the whole-text term index (terms.py) - articles mentioning the query's rare terms anywhere in
         # their body, the reach Wikipedia's search has; a channel of SP_LOCAL_TERMK candidates ahead of the others
-        self.terms = None
+        self.terms = None; self.prior = None
         tp = os.environ.get("SP_LOCAL_TERMS", os.path.join(store_path, "terms"))
         if os.path.exists(os.path.join(tp, "terms.txt")) and os.environ.get("SP_LOCAL_NOTERMS", "0") != "1":
             from terms import TermIndex
             self.terms = TermIndex(tp); self.term_k = int(os.environ.get("SP_LOCAL_TERMK", "24")); self.term_cap = int(os.environ.get("SP_LOCAL_TERMCAP", "20000"))
+            pf = os.path.join(tp, "doc_terms.npy")
+            self.prior = (np.log1p(np.load(pf, mmap_mode="r").astype(np.float32)) / np.log1p(20000.0)) if os.path.exists(pf) else None
         self.gpu = None
         self.pq = None
         self.ivf = None
@@ -354,6 +357,9 @@ class LocalSearch:
                 score[i] = score.get(i, 0.0) + idf
         if not score:
             return []
+        if self.prior is not None and W_PRIOR:
+            wt = float(os.environ.get("SP_LOCAL_TERMPRIOR", "4.0"))   # in IDF units: a developed page outranks a stub that happens to share the terms
+            score = {i: v + wt * float(self.prior[i]) for i, v in score.items()}
         top = sorted(score.items(), key=lambda x: -x[1])[:k]
         return [i for i, _ in top]
 
@@ -388,7 +394,8 @@ class LocalSearch:
                 dw = set(w.lower() for w in WORD.findall(b[600:]))
                 fd = sum(self.idf.get(w, self.idf_max) for w in qw if w in dw and w not in tw and w not in bw) / W   # ... only deeper in the article
             # cosine plus the lexical overlap the model's keyword queries were shaped by (weights from the shard-0 grid)
-            scored.append((float(s) + W_TITLE * ft + W_BODY * fb + W_DEEP * fd + full + W_BM25 * bm.get(i, 0.0) / bmax, i, t, b))
+            pr = W_PRIOR * float(self.prior[i]) if (self.prior is not None and W_PRIOR) else 0.0
+            scored.append((float(s) + W_TITLE * ft + W_BODY * fb + W_DEEP * fd + full + W_BM25 * bm.get(i, 0.0) / bmax + pr, i, t, b))
         scored.sort(key=lambda x: -x[0])
         if self.ce is not None and scored:
             top = scored[:self.ce_k]
@@ -417,7 +424,8 @@ class LocalSearch:
             tw = set(w.lower() for w in WORD.findall(t)); bw = set(w.lower() for w in WORD.findall(b[:600]))
             ft = sum(self.idf.get(w, self.idf_max) for w in qw if w in tw) / W
             fb = sum(self.idf.get(w, self.idf_max) for w in qw if w in tw or w in bw) / W
-            scored.append((W_TITLE * ft + W_BODY * fb + full + wb * bm.get(i, 0.0) / bmax, i, t, b))
+            pr = W_PRIOR * float(self.prior[i]) if (self.prior is not None and W_PRIOR) else 0.0
+            scored.append((W_TITLE * ft + W_BODY * fb + full + wb * bm.get(i, 0.0) / bmax + pr, i, t, b))
         scored.sort(key=lambda x: -x[0])
         return scored[:k]
 
