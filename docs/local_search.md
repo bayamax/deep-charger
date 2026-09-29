@@ -288,3 +288,14 @@ against the API -3.9 +- 6.6. Inside the noise and not better: the held-out's ans
 openings, where the extra depth changes nothing and the reordered text (opening, then a passage) is
 text the model did not train on. The deep store is for the deep kind of question; whether it costs the
 held-out anything is a 300-rollout question, run with the whole-text index once its tests are in.
+
+**The whole-text term index** (`build_terms.py`, `terms.py`; 3,848,811 terms in 2..200,000 articles,
+688,538,347 (term, article) postings, 2.75 GB as uint32, 1.07 GB as delta varints; the vocabulary stays on
+disk and is binary-searched, 150 MB resident). Wikipedia's page is among the candidates for 64% of the
+deep queries without it; the term channel's top 24 adds 7 points, its top 200 adds 14, but its own ranking
+places the page at a median 32nd (presence of the query's rare terms only). As a channel ahead of the
+others it moves nothing (deep: same page in the top 10 58.7 → 61.3%, answer in the first 1,000 served
+characters 32.7 → 30.7%; test queries: answer-bearing top-1 62.2 → 61.9%). A page prior (the log of the
+article's distinct terms, a stand-in for how developed a page is) in the ranking: test queries same page
+top-1 40.2 → 42.0%, answer-bearing top-1 62.2 → 62.7% (weight 0.4), deep queries 36.3 → 37.0%: inside the
+noise. Parked here, 2026-09-29, for the multi-turn work.
