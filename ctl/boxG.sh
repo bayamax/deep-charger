@@ -80,7 +80,7 @@ PSKIP=
 # The raw GitHub copy this box fetches can lag and hand a control run an OLDER version of this file (04:48 on 09-22 it
 # relaunched the online loop under the previous mode while the newer run was merging a checkpoint on the same card).
 # Every edit bumps BOXG_SERIAL; a run that sees a lower serial than one already executed stops here.
-BOXG_SERIAL=2026092675
+BOXG_SERIAL=2026092676
 if [ -f /root/.boxg_serial ] && [ "$(cat /root/.boxg_serial)" -gt "$BOXG_SERIAL" ] 2>/dev/null; then echo "BOXG_STALE $BOXG_SERIAL < $(cat /root/.boxg_serial)"; exit 0; fi
 echo $BOXG_SERIAL > /root/.boxg_serial
 MODE=reeval       # 2026-09-29: the 4-bit with the local search on the 6,000-character store, the opening + the query's passage served
@@ -247,6 +247,12 @@ fi
 # The whole-text term index (build_terms.py): two passes over the dump on the CPU, packed to varints, uploaded.
 # TERMS=1 builds it once beside whatever runs (the 6,000-character store's job first: the dump is streamed twice more).
 TERMS=${TERMS:-1}
+# the first packer was a per-posting Python loop (hours) and wrote postings_vb.bin in place: stop it once and drop
+# its partial output; the vectorised packer writes a .part file and renames it when complete
+if [ ! -e /root/.terms_packfix ] && pgrep -f "localsearch/terms.py /root/wiki_store/terms" >/dev/null; then
+  pkill -f "termskee[p].sh"; pkill -f "localsearch/terms.py /root/wiki_store/terms"; sleep 2
+  rm -f /root/wiki_store/terms/postings_vb.bin; touch /root/.terms_packfix; echo "TERMS_PACKFIX restarted the packer $(date -u)"
+fi
 if [ "$TERMS" = 1 ] && ! pgrep -f "termskee[p].sh" >/dev/null && ! grep -q TERMS_JOB_DONE /root/terms.log 2>/dev/null && [ -s /root/wiki_store/titles.txt ] && grep -q WIKI6_DONE /root/wiki6.log 2>/dev/null; then
   cat > /root/termskeep.sh <<'TK'
 #!/bin/bash

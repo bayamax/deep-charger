@@ -11,26 +11,35 @@ import os, sys
 import numpy as np
 
 
-def pack(src, dst=None):
+def pack(src, dst=None, chunk=20_000_000):
+    """Delta + LEB128 varint per term list, vectorised over chunks of whole terms. Written to a .part file and
+    renamed at the end, so a partial file is never mistaken for a packed index."""
     dst = dst or src
     off = np.load(os.path.join(src, "term_offsets.npy")); post = np.memmap(os.path.join(src, "postings.bin"), dtype=np.uint32, mode="r")
     V = len(off) - 1; voff = np.zeros(V + 1, dtype=np.int64)
-    out = open(os.path.join(dst, "postings_vb.bin"), "wb"); pos = 0
-    for t in range(V):
-        a, b = int(off[t]), int(off[t + 1])
-        if b > a:
-            ids = np.asarray(post[a:b], dtype=np.int64); d = np.diff(ids, prepend=-1) - 1 + (ids[:1] * 0)   # first as is, then gaps - 1
-            d[0] = ids[0]
-            buf = bytearray()
-            for x in d.tolist():
-                while x >= 0x80:
-                    buf.append((x & 0x7F) | 0x80); x >>= 7
-                buf.append(x)
-            out.write(buf); pos += len(buf)
-        voff[t + 1] = pos
-        if t % 200000 == 0:
+    part = os.path.join(dst, "postings_vb.bin.part"); out = open(part, "wb"); pos = 0; t = 0
+    while t < V:
+        t2 = int(np.searchsorted(off, off[t] + chunk, side="right")) - 1; t2 = min(max(t2, t + 1), V)
+        a, b = int(off[t]), int(off[t2])
+        ids = np.asarray(post[a:b], dtype=np.int64)
+        d = np.empty_like(ids); d[1:] = ids[1:] - ids[:-1] - 1; d[:1] = ids[:1]
+        starts = off[t:t2] - a; starts = starts[starts < len(ids)]; d[starts] = ids[starts]   # each term's first id as is
+        nb = 1 + (d >= 1 << 7) + (d >= 1 << 14) + (d >= 1 << 21) + (d >= 1 << 28)
+        tot = int(nb.sum()); buf = np.empty(tot, dtype=np.uint8)
+        first = np.concatenate([[0], np.cumsum(nb)[:-1]])
+        for k in range(5):
+            m = nb > k
+            byte = (d[m] >> (7 * k)) & 0x7F
+            cont = (nb[m] > k + 1).astype(np.int64) << 7
+            buf[first[m] + k] = (byte | cont).astype(np.uint8)
+        out.write(buf.tobytes())
+        ends = np.cumsum(nb)   # byte end of each value; a term's byte end is the end of its last value
+        tend = off[t + 1:t2 + 1] - a   # value index one past each term's last
+        voff[t + 1:t2 + 1] = pos + np.where(tend > 0, ends[np.maximum(tend - 1, 0)], 0)
+        pos += tot; t = t2; nchunk = getattr(pack, "_n", 0) + 1; pack._n = nchunk
+        if nchunk % 10 == 0 or t == V:
             print(f"[pack] {t}/{V} terms, {pos/1e9:.2f} GB", flush=True)
-    out.close(); np.save(os.path.join(dst, "term_voffsets.npy"), voff)
+    out.close(); np.save(os.path.join(dst, "term_voffsets.npy"), voff); os.replace(part, os.path.join(dst, "postings_vb.bin"))
     print(f"PACK_DONE {V} terms {pos/1e9:.2f} GB (raw {int(off[-1])*4/1e9:.2f} GB)", flush=True)
 
 
