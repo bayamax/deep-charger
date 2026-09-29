@@ -82,7 +82,7 @@ def make(args):
     i, persona, seeds = args
     rng = random.Random(A.seed * 1000 + i)
     n_turns = rng.choice([3, 4, 4, 5])
-    plan = ["open"] + [rng.choices(["follow", "refer", "switch", "correct", "chat"], weights=[3, 2, 3, 1, 1])[0] for _ in range(n_turns - 1)]
+    plan = ["open"] + [rng.choices(["follow", "refer", "switch", "correct", "chat"], weights=[3, 1, 3, 1, 2])[0] for _ in range(n_turns - 1)]   # names are the memory bank's job (the user, 2026-09-29): references back are kept rare
     if "switch" not in plan: plan[rng.randrange(1, n_turns)] = "switch"
     turns, si, msgs = [], 0, []
     for mv in plan:

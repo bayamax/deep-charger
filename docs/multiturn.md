@@ -38,7 +38,9 @@ From eval300 questions (never trained on), 86 dialogues with gold answers:
 
 So: names travel as text, gist can travel through the pooler, and the model must learn to answer the latest
 question with history in view. The user's trade-off (2026-09-29): no long-range recall is required, a natural
-rally is; the topic switch is the bottleneck; existing ability must be kept.
+rally is; the topic switch is the bottleneck; existing ability must be kept. Names and facts from earlier in a
+conversation are not the model's job - a memory bank retrieves them the proper way - so the bridge and memory
+numbers are read as information, and the targets are the switch, the rally's fluency, and no loss elsewhere.
 
 ## The training (memfit.py, run mem5)
 
