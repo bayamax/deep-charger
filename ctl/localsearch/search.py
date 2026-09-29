@@ -14,7 +14,7 @@ drops into pool_eval/online_loop in place of the Wikipedia call.
 
   python3 search.py --store /root/wiki_store --model /root/bge-small "who designed the Welcome to Las Vegas sign"
 """
-import argparse, os, re, sqlite3, sys, time
+import argparse, math, os, re, sqlite3, sys, time
 
 import numpy as np
 
@@ -218,6 +218,13 @@ class LocalSearch:
             self.link_off = np.load(os.path.join(lp, "inlinks_offsets.npy"), mmap_mode="r")
             self.links = np.memmap(os.path.join(lp, "inlinks.bin"), dtype=np.int32, mode="r")
             self.link_k = int(os.environ.get("SP_LOCAL_LINKK", "16")); self.link_lex = int(os.environ.get("SP_LOCAL_LINKLEX", "400"))
+        # SP_LOCAL_TERMS: the whole-text term index (terms.py) - articles mentioning the query's rare terms anywhere in
+        # their body, the reach Wikipedia's search has; a channel of SP_LOCAL_TERMK candidates ahead of the others
+        self.terms = None
+        tp = os.environ.get("SP_LOCAL_TERMS", os.path.join(store_path, "terms"))
+        if os.path.exists(os.path.join(tp, "terms.txt")) and os.environ.get("SP_LOCAL_NOTERMS", "0") != "1":
+            from terms import TermIndex
+            self.terms = TermIndex(tp); self.term_k = int(os.environ.get("SP_LOCAL_TERMK", "24")); self.term_cap = int(os.environ.get("SP_LOCAL_TERMCAP", "20000"))
         self.gpu = None
         self.pq = None
         self.ivf = None
@@ -323,6 +330,33 @@ class LocalSearch:
         out = [i for i, _ in wide if i in src and i not in named]
         return out[:k]
 
+    def _term_hits(self, query, k):
+        """Articles whose whole text carries the query's rarest terms: the postings of the four rarest vocabulary
+        terms, each list capped (a term in more than term_cap articles is too common to point anywhere), scored by
+        the IDF mass of the terms an article carries; the best k."""
+        if self.terms is None:
+            return []
+        words = [w.lower() for w in dict.fromkeys(WORD.findall(query)) if len(w) >= 3 and w.lower() not in STOP]
+        words = [w for w in words if self.terms.has(w)]
+        if not words:
+            return []
+        words.sort(key=lambda w: self.terms.df_of(w))
+        n = self.st.n_docs; score = {}
+        used = 0
+        for w in words:
+            if used >= 4:
+                break
+            d = self.terms.docs(w)
+            if len(d) == 0 or len(d) > self.term_cap:
+                continue
+            used += 1; idf = math.log((n + 1) / (len(d) + 1)) + 1
+            for i in d.tolist():
+                score[i] = score.get(i, 0.0) + idf
+        if not score:
+            return []
+        top = sorted(score.items(), key=lambda x: -x[1])[:k]
+        return [i for i, _ in top]
+
     def search(self, query, k=3):
         qv = self.emb([QUERY_PREFIX + query])[0]
         lex = self._lex_hits(query, self.lex_k); bm = {i: s for i, s in lex}; bmax = max(bm.values(), default=1.0) or 1.0
@@ -331,6 +365,8 @@ class LocalSearch:
         cands += [i for i, _ in self._lex_hits(query, self.title_k, column="title")]
         if self.links is not None:
             cands = self._link_hits(query, self.link_k) + cands   # ahead of the cut: they are few and Wikipedia's search would have reached them
+        if self.terms is not None:
+            cands = self._term_hits(query, self.term_k) + cands   # the whole-text reach, ahead of the cut
         cands = list(dict.fromkeys(cands))[:self.rerank]
         docs = [self.st.doc(i) for i in cands]
         dv = self.emb_rank([f"{t}. {b[:400]}" for t, b in docs], maxlen=self.maxlen_doc)

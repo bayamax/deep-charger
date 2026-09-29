@@ -80,7 +80,7 @@ PSKIP=
 # The raw GitHub copy this box fetches can lag and hand a control run an OLDER version of this file (04:48 on 09-22 it
 # relaunched the online loop under the previous mode while the newer run was merging a checkpoint on the same card).
 # Every edit bumps BOXG_SERIAL; a run that sees a lower serial than one already executed stops here.
-BOXG_SERIAL=2026092673
+BOXG_SERIAL=2026092674
 if [ -f /root/.boxg_serial ] && [ "$(cat /root/.boxg_serial)" -gt "$BOXG_SERIAL" ] 2>/dev/null; then echo "BOXG_STALE $BOXG_SERIAL < $(cat /root/.boxg_serial)"; exit 0; fi
 echo $BOXG_SERIAL > /root/.boxg_serial
 MODE=reeval       # 2026-09-28: the reward table - 200 training questions x 5 candidate pages, the first search served each page, the 4-bit model frozen
@@ -161,7 +161,7 @@ for f in pool_eval.py q4.py qat.py dwq.py poolerfit.py jointfit.py checkmlx.py p
 done
 cp /root/work/web_search.py /root/work/runtime/web_search.py 2>/dev/null
 mkdir -p /root/work/localsearch
-for f in build_store.py store.py embed.py search.py pq.py ivf.py memcheck.py train_retriever.py export_onnx.py test_retriever.py train_ranker.py reward_prep.py; do
+for f in build_store.py store.py embed.py search.py pq.py ivf.py memcheck.py train_retriever.py export_onnx.py test_retriever.py train_ranker.py reward_prep.py terms.py build_terms.py; do
   for try in 1 2 3; do curl -sS -o /root/work/localsearch/$f "$RAW/localsearch/$f?nocache=$(date +%s)" && python3 -m py_compile /root/work/localsearch/$f && break; sleep 5; done
 done
 mkdir -p /root/work/localsearch/data   # the retriever's pairs; a missing file must not leave a 404 body behind
@@ -242,6 +242,28 @@ W6
   chmod +x /root/wiki6keep.sh
   setsid nohup bash -c 'bash /root/wiki6keep.sh 2>&1 | tee -a /root/wiki6.log' >> /proc/1/fd/1 2>&1 < /dev/null 9>&- &
   echo "WIKI6_LAUNCHED $(date -u)"
+fi
+
+# The whole-text term index (build_terms.py): two passes over the dump on the CPU, packed to varints, uploaded.
+# TERMS=1 builds it once beside whatever runs (the 6,000-character store's job first: the dump is streamed twice more).
+TERMS=${TERMS:-1}
+if [ "$TERMS" = 1 ] && ! pgrep -f "termskee[p].sh" >/dev/null && ! grep -q TERMS_JOB_DONE /root/terms.log 2>/dev/null && [ -s /root/wiki_store/titles.txt ] && grep -q WIKI6_DONE /root/wiki6.log 2>/dev/null; then
+  cat > /root/termskeep.sh <<'TK'
+#!/bin/bash
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); R=baya1116/hypernet-sp-distill; L=/root/work/localsearch; OUT=/root/wiki_store/terms
+[ "$(df -BG /root | awk 'NR==2{print $4+0}')" -ge 6 ] || { echo "TERMS_ABORT disk $(df -h /root | awk 'NR==2{print $4}') free"; exit 0; }
+mkdir -p $OUT
+[ -s $OUT/postings.bin ] && [ -s $OUT/terms_meta.json ] || python3 $L/build_terms.py --out $OUT --store /root/wiki_store 2>&1 | grep -E "^\[terms\] (pass 1 file 40|pass 2 file 40|vocabulary|terms whose)|TERMS_DONE|Error|Traceback"
+[ -s $OUT/terms_meta.json ] || { echo "TERMS_ABORT build"; exit 1; }
+[ -s $OUT/postings_vb.bin ] || python3 $L/terms.py $OUT 2>&1 | grep -E "PACK_DONE|Error|Traceback"
+[ -s $OUT/postings_vb.bin ] && rm -f $OUT/postings.bin
+for f in terms.txt term_df.npy term_voffsets.npy postings_vb.bin terms_meta.json; do for try in 1 2 3; do hf upload $R $OUT/$f localsearch/wiki_en_20231101/terms/$f >/dev/null 2>&1 && break; sleep 60; done; done
+echo "[terms] $(du -sh $OUT | cut -f1) on disk"
+echo "TERMS_JOB_DONE $(date -u)"
+TK
+  chmod +x /root/termskeep.sh
+  setsid nohup bash -c 'bash /root/termskeep.sh 2>&1 | tee -a /root/terms.log' >> /proc/1/fd/1 2>&1 < /dev/null 9>&- &
+  echo "TERMS_LAUNCHED $(date -u)"
 fi
 
 # The device layout of the local search, as a side job on the CPU: the int8 embedder, the IVF layout of the sign
@@ -634,6 +656,7 @@ while :; do
     echo "--- ivf.log (tail) ---"; tail -n 8 /root/ivf.log 2>/dev/null | cut -c1-300
     echo "--- retr.log (tail) ---"; tail -n 8 /root/retr.log 2>/dev/null | cut -c1-300
     echo "--- wiki6.log (tail) ---"; tail -n 4 /root/wiki6.log 2>/dev/null | cut -c1-300
+    echo "--- terms.log (tail) ---"; tail -n 4 /root/terms.log 2>/dev/null | cut -c1-300
     echo "--- ranker.log (tail) ---"; tail -n 8 /root/ranker.log 2>/dev/null | cut -c1-300
     echo "--- release.log (tail) ---"; tail -n 6 /root/release.log 2>/dev/null | cut -c1-200
     for f in /root/gptq_*.log; do [ -s "$f" ] && { echo "--- $f (tail) ---"; grep -E "^\[gptq\]|^\[out\]|GPTQ_DONE|Error" "$f" | tail -n 4 | cut -c1-200; }; done
