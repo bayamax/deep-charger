@@ -68,8 +68,8 @@ def lex(query, docs):
 def enc(texts, n): return {k: v.to(dev) for k, v in tok(texts, padding=True, truncation=True, max_length=n, return_tensors="pt").items()}
 def scores(query, docs):
     if A.arch == "ce":
-        enc = tok([query[:300]] * len(docs), [f"{st.doc(i)[0]}. {st.doc(i)[1][:500]}" for i in docs], padding=True, truncation="longest_first", max_length=160, return_tensors="pt")
-        return model(**{k: v.to(dev) for k, v in enc.items()}).logits.squeeze(-1)
+        pairs = tok([query[:300]] * len(docs), [f"{st.doc(i)[0]}. {st.doc(i)[1][:500]}" for i in docs], padding=True, truncation="longest_first", max_length=160, return_tensors="pt")
+        return model(**{k: v.to(dev) for k, v in pairs.items()}).logits.squeeze(-1)
     q = F.normalize(model(**enc([QUERY_PREFIX + query], A.qlen)).last_hidden_state[:, 0], dim=1)
     d = F.normalize(model(**enc([f"{st.doc(i)[0]}. {st.doc(i)[1][:400]}" for i in docs], A.dlen)).last_hidden_state[:, 0], dim=1)
     return (d @ q.T).squeeze(1) + lex(query, docs)

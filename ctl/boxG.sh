@@ -80,7 +80,7 @@ PSKIP=
 # The raw GitHub copy this box fetches can lag and hand a control run an OLDER version of this file (04:48 on 09-22 it
 # relaunched the online loop under the previous mode while the newer run was merging a checkpoint on the same card).
 # Every edit bumps BOXG_SERIAL; a run that sees a lower serial than one already executed stops here.
-BOXG_SERIAL=2026092671
+BOXG_SERIAL=2026092672
 if [ -f /root/.boxg_serial ] && [ "$(cat /root/.boxg_serial)" -gt "$BOXG_SERIAL" ] 2>/dev/null; then echo "BOXG_STALE $BOXG_SERIAL < $(cat /root/.boxg_serial)"; exit 0; fi
 echo $BOXG_SERIAL > /root/.boxg_serial
 MODE=reeval       # 2026-09-28: the reward table - 200 training questions x 5 candidate pages, the first search served each page, the 4-bit model frozen
@@ -279,7 +279,7 @@ fi
 
 # The retriever trained on the frozen model's verdicts (the reward table rew1), once the table is complete and
 # the card is free: train, export, the ranking-only test on the 400 test queries, upload. RANKER_TAG bumps to redo.
-RANKER=${RANKER:-1}; RANKER_TAG=${RANKER_TAG:-rl1}; RANKER_ROWS=${RANKER_ROWS:-/root/work/rew1_out_0.jsonl}
+RANKER=${RANKER:-1}; RANKER_TAG=${RANKER_TAG:-rl2}; RANKER_ROWS=${RANKER_ROWS:-/root/work/rew1_out_0.jsonl}
 if [ "$RANKER" = 1 ] && ! pgrep -f "rankkee[p].sh" >/dev/null && ! grep -q "RANKER_JOB_DONE $RANKER_TAG" /root/ranker.log 2>/dev/null && [ -s "$RANKER_ROWS" ] && [ "$(wc -l < $RANKER_ROWS)" -ge "${RANKER_MIN:-1000}" ]; then
   cat > /root/rankkeep.sh <<RK1
 RTAG=$RANKER_TAG; ROWS=$RANKER_ROWS
@@ -289,15 +289,16 @@ export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); R=baya1116/h
 L=/root/work/localsearch; FT=/root/bge_$RTAG
 while pgrep -f "pool_eval.py" >/dev/null; do sleep 120; done
 echo "[ranker] $RTAG start $(date -u +%H:%M) on $(wc -l < $ROWS) rows"
-python3 $L/train_ranker.py --rows $ROWS --base $M --store $ST --out $FT --epochs 4 2>&1 | grep -E "^\[ranker\]|RANKER_DONE|Error|Traceback" | tail -20
-grep -q . $FT/config.json 2>/dev/null || { echo "RANKER_ABORT $RTAG: no model written"; exit 1; }
+python3 $L/train_ranker.py --rows $ROWS --base $M --store $ST --out $FT --epochs 4 > /root/ranker_${RTAG}_bi.log 2>&1; grep -E "^\[ranker\]|RANKER_DONE|Error|Traceback" /root/ranker_${RTAG}_bi.log | tail -20
+grep -q . $FT/config.json 2>/dev/null || { echo "RANKER_ABORT $RTAG: no model written"; tail -5 /root/ranker_${RTAG}_bi.log | cut -c1-200; exit 1; }
 python3 $L/export_onnx.py $FT $FT 2>&1 | grep -E "EXPORT_DONE|Error|Traceback"
 for f in model.safetensors model_int8.onnx tokenizer.json tokenizer_config.json config.json special_tokens_map.json vocab.txt; do hf upload $R $FT/$f localsearch/bge-small-$RTAG/$f >/dev/null 2>&1; done
 SP_LOCAL_RERANK_MODEL=$FT OMP_NUM_THREADS=4 python3 $L/test_retriever.py --store $ST --model $M --tag "$RTAG-rerank-only" 2>&1 | grep -E "RETR_TEST|Error|Traceback"
 # the cross-encoder arm on the same verdicts: MiniLM-L6 (ms-marco) trained listwise, reranking the fused top 16
 CE=/root/ce_$RTAG; CEB=/root/ce_base
 [ -s $CEB/config.json ] || hf download cross-encoder/ms-marco-MiniLM-L-6-v2 --local-dir $CEB >/dev/null 2>&1
-python3 $L/train_ranker.py --arch ce --rows $ROWS --base $CEB --store $ST --out $CE --epochs 4 --lr 2e-5 2>&1 | grep -E "^\[ranker\]|RANKER_DONE|Error|Traceback" | tail -20
+python3 $L/train_ranker.py --arch ce --rows $ROWS --base $CEB --store $ST --out $CE --epochs 4 --lr 2e-5 > /root/ranker_${RTAG}_ce.log 2>&1; grep -E "^\[ranker\]|RANKER_DONE|Error|Traceback" /root/ranker_${RTAG}_ce.log | tail -20
+grep -q . $CE/config.json 2>/dev/null || tail -5 /root/ranker_${RTAG}_ce.log | cut -c1-200
 if grep -q . $CE/config.json 2>/dev/null; then
   python3 $L/export_onnx.py $CE $CE --cls 2>&1 | grep -E "EXPORT_DONE|Error|Traceback"
   for f in model.safetensors model_int8.onnx tokenizer.json tokenizer_config.json config.json special_tokens_map.json vocab.txt; do hf upload $R $CE/$f localsearch/ce-$RTAG/$f >/dev/null 2>&1; done
