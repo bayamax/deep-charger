@@ -80,11 +80,10 @@ PSKIP=
 # The raw GitHub copy this box fetches can lag and hand a control run an OLDER version of this file (04:48 on 09-22 it
 # relaunched the online loop under the previous mode while the newer run was merging a checkpoint on the same card).
 # Every edit bumps BOXG_SERIAL; a run that sees a lower serial than one already executed stops here.
-BOXG_SERIAL=2026092679
+BOXG_SERIAL=2026092680
 if [ -f /root/.boxg_serial ] && [ "$(cat /root/.boxg_serial)" -gt "$BOXG_SERIAL" ] 2>/dev/null; then echo "BOXG_STALE $BOXG_SERIAL < $(cat /root/.boxg_serial)"; exit 0; fi
 echo $BOXG_SERIAL > /root/.boxg_serial
-MODE=reeval       # 2026-09-29: the 4-bit with the local search on the 6,000-character store, the opening + the query's passage served
-RRUN=gq14P; RMODEL=gq14; RKIND=gptqdir; RLOCAL=1; RLOCALSTORE=/root/wiki_store6; RLOCALPASSAGE=1; RTEMP=0.6; RGEN=4000; RN=34; RSHARDS=3
+MODE=idle         # 2026-09-29: the side jobs hold the card (multi-turn measurement and training); a finished reeval re-launched on every control run and killed their evaluators
 ORUN=g14          # 2026-09-26: distillation. The R1 thinking and answer of dolphin_v1 (minus the held-out hundred) as plain SFT, 8 records a step,
                   # one verified search trace at half weight beside them; no rollouts, no judge. Length is allowed to grow (up to ~1000 tokens is
                   # fine by the user); the yardsticks are the Dolphin held-out (85%) and the search held-out (40%) at 400 and at the epoch's end.
@@ -272,10 +271,19 @@ TK
   echo "TERMS_LAUNCHED $(date -u)"
 fi
 
+# One-shot cleanup before the multi-turn jobs relaunch (mt2 / mem2): the re-launched reeval's chat evaluator, the mt1
+# cutter, and the mem1 training keeper (which saw mt1's premature MT_JOB_DONE and would start its traces).
+if [ ! -e /root/.mt2_clean ]; then
+  touch /root/.mt2_clean
+  pkill -f "reevalkee[p].sh"; pkill -f "pool_eval.py .*chat_eval60"; pkill -f "none 25"
+  pkill -f "mttkee[p].sh"; pkill -f "mt_gen.p[y]"; pkill -f "pool_eval.py .*--mt-save-tokens"; sleep 5
+  echo "MT2_CLEAN $(date -u)"
+fi
+
 # Multi-turn: the dialogues (the teacher splits held-out questions into turns), then the 4-bit model on them under
 # each history protocol (none / full / stream), Wikipedia's search, one mode at a time when the card is free.
 # MT_TAG bumps to redo; MT_N dialogues per mode (the screen), MT_MODES which protocols.
-MT=${MT:-1}; MT_TAG=${MT_TAG:-mt1}; MT_N=${MT_N:-45}; MT_MODES=${MT_MODES:-"none full stream"}
+MT=${MT:-1}; MT_TAG=${MT_TAG:-mt2}; MT_N=${MT_N:-30}; MT_MODES=${MT_MODES:-"full stream none"}
 if [ "$MT" = 1 ] && ! pgrep -f "mtkee[p].sh" >/dev/null && ! grep -q "MT_JOB_DONE $MT_TAG" /root/mt.log 2>/dev/null && [ -s /root/gptq_hf_gq14/model.safetensors ]; then
   cat > /root/mtkeep.sh <<MK1
 MTAG=$MT_TAG; MN=$MT_N; MODES="$MT_MODES"
@@ -302,30 +310,27 @@ MK2
   echo "MT_LAUNCHED $MT_TAG $(date -u)"
 fi
 
-# The measurement at 4 minutes a dialogue is 9 hours for three protocols: cut each mode short (none: its answer is
-# plain without history; full and stream: the same first ~30 dialogues, paired). The keeper then moves to the next mode.
-if [ ! -e /root/.mt1_cut ] && pgrep -f "mtkee[p].sh" >/dev/null; then
-  touch /root/.mt1_cut
-  setsid nohup bash -c 'for m in "none 25" "full 70" "stream 70"; do set -- $m
-    until [ "$(wc -l < /root/work/mt1_$1.jsonl 2>/dev/null || echo 0)" -ge $2 ] && pgrep -f "pool_eval.py .*--mt-mode $1" >/dev/null; do
+# The no-history mode (last) is cut at ~10 dialogues: without the history its answer is plain.
+if [ ! -e /root/.mt2_cut ] && pgrep -f "mtkee[p].sh" >/dev/null; then
+  touch /root/.mt2_cut
+  setsid nohup bash -c 'until [ "$(wc -l < /root/work/mt2_none.jsonl 2>/dev/null || echo 0)" -ge 25 ] && pgrep -f "pool_eval.py .*--mt-mode none" >/dev/null; do
       pgrep -f "mtkee[p].sh" >/dev/null || exit 0; sleep 60; done
-    pkill -f "pool_eval.py .*--mt-mode $1"; echo "[mt1] $1 cut at $(wc -l < /root/work/mt1_$1.jsonl) turns $(date -u +%H:%M)" >> /root/mt.log
-  done' > /dev/null 2>&1 < /dev/null &
-  echo "MT1_CUT armed $(date -u)"
+    pkill -f "pool_eval.py .*--mt-mode none"; echo "[mt2] none cut at $(wc -l < /root/work/mt2_none.jsonl) turns $(date -u +%H:%M)" >> /root/mt.log' > /dev/null 2>&1 < /dev/null &
+  echo "MT2_CUT armed $(date -u)"
 fi
 
 # Multi-turn training, queued behind the measurement (mt1): dialogues from TRAINING seeds (eval300 excluded), the
 # 4-bit model's own full-history runs on them (tokens saved), then memfit.py - the pooler learns to carry the history
 # (self-distillation, full-history teacher -> history-through-pooler student) - then the stream protocol measured
 # again on the same held-out dialogues with the new pooler. MTT=0 cancels; MTT_TAG bumps to redo.
-MTT=${MTT:-1}; MTT_TAG=${MTT_TAG:-mem1}; MTT_N=${MTT_N:-180}
+MTT=${MTT:-1}; MTT_TAG=${MTT_TAG:-mem2}; MTT_N=${MTT_N:-180}
 if [ "$MTT" = 1 ] && ! pgrep -f "mttkee[p].sh" >/dev/null && ! grep -q "MTT_JOB_DONE $MTT_TAG" /root/mtt.log 2>/dev/null && [ -s /root/gptq_hf_gq14/model.safetensors ]; then
   cat > /root/mttkeep.sh <<TK1
 TTAG=$MTT_TAG; TN=$MTT_N
 TK1
   cat >> /root/mttkeep.sh <<'TK2'
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); R=baya1116/hypernet-sp-distill; cd /root/work
-until grep -q "MT_JOB_DONE" /root/mt.log 2>/dev/null; do sleep 300; done
+until grep -q "MT_JOB_DONE mt2" /root/mt.log 2>/dev/null; do sleep 300; done
 [ -s /root/work/mt_train.jsonl ] || python3 /root/work/mt_gen.py --seeds /root/work/selfq_all.jsonl --exclude /root/work/eval300.jsonl --out /root/work/mt_train.jsonl --n-bridge 110 --n-memory 70 --n-switch 20 --seed 7 2>&1 | grep -E "^\[mtgen\]|MTGEN_DONE|Error|Traceback"
 [ -s /root/work/mt_train.jsonl ] || { echo "MTT_ABORT no training dialogues"; exit 1; }
 hf upload $R /root/work/mt_train.jsonl pooler_distill/chatsft/multiturn/mt_train.jsonl >/dev/null 2>&1
@@ -745,7 +750,7 @@ while :; do
     echo "--- retr.log (tail) ---"; tail -n 8 /root/retr.log 2>/dev/null | cut -c1-300
     echo "--- wiki6.log (tail) ---"; tail -n 4 /root/wiki6.log 2>/dev/null | cut -c1-300
     echo "--- terms.log (tail) ---"; tail -n 4 /root/terms.log 2>/dev/null | cut -c1-300
-    echo "--- mtt.log (tail) ---"; tail -n 8 /root/mtt.log 2>/dev/null | cut -c1-300; tail -n 2 /root/mtt_traces.log 2>/dev/null | cut -c1-300; grep -E "^val " /root/memfit_mem1_run.log 2>/dev/null | tail -3
+    echo "--- mtt.log (tail) ---"; tail -n 8 /root/mtt.log 2>/dev/null | cut -c1-300; tail -n 2 /root/mtt_traces.log 2>/dev/null | cut -c1-300; grep -E "^val " /root/memfit_mem2_run.log 2>/dev/null | tail -3
     echo "--- mt.log (tail) ---"; tail -n 8 /root/mt.log 2>/dev/null | cut -c1-300; for f in $(ls -t /root/mt*_*.log 2>/dev/null | head -1); do echo "--- $f (tail) ---"; grep -E "^\[mt |EVAL_DONE|Error|Traceback" $f | tail -3 | cut -c1-300; done
     echo "--- ranker.log (tail) ---"; tail -n 8 /root/ranker.log 2>/dev/null | cut -c1-300
     echo "--- release.log (tail) ---"; tail -n 6 /root/release.log 2>/dev/null | cut -c1-200
