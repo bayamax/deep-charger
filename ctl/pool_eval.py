@@ -29,6 +29,8 @@ ap.add_argument("--q4skip", default="", help="comma-separated leaf modules to le
 ap.add_argument("--stop", default="answer", choices=["answer", "eos"], help="answer = stop once 'answer is ...' is complete (the strict lineage); eos = stop at end of sequence or --replycap tokens after </think> (the conversational lineage)")
 ap.add_argument("--replycap", type=int, default=200)
 ap.add_argument("--greedy", type=int, default=0, help="1: argmax decoding (deterministic up to hardware), for evaluator A/B checks")
+ap.add_argument("--multiturn", default="", help="jsonl of dialogues {id, kind, turns: [{q, gold}]}: each dialogue runs turn by turn with --mt-mode carrying the history; one output row per turn")
+ap.add_argument("--mt-mode", default="stream", choices=["none", "full", "stream", "mix"], help="none: no history (each turn alone); full: the previous turns (user + reply, no thinking) in the pinned prompt; stream: only the current question pinned, everything before it (earlier questions, thinking, search results, replies) flows through the pooler; mix: the last exchange pinned as in full, the rest as in stream")
 ap.add_argument("--force", default="", help="JSON {question: [local store doc ids]}: one rollout per (question, doc) with the FIRST search served that page (the reward table of a retriever trained against this frozen model); needs SP_LOCAL_STORE")
 A = ap.parse_args()
 
@@ -201,16 +203,22 @@ def pick_plain(logits, gen):
     return int(torch.argmax(lg).item())
 
 
+LAST = {}
+
+
 @torch.no_grad()
-def rollout(question, force=None):
+def rollout(question, force=None, prefix=None, seed_kept=None):
     """sp_rollout mechanics (SP + raw window, mass eviction) with the grpo_ep_more environment.
-    force: a store doc id served for the first search whatever the query (see --force)."""
-    q_ids = tok.encode(tok.apply_chat_template([{"role": "user", "content": question}],
+    force: a store doc id served for the first search whatever the query (see --force).
+    prefix: earlier messages rendered into the pinned prompt before this question (multi-turn, full/mix).
+    seed_kept: earlier turns' tokens handed to the pooler before this turn starts (multi-turn, stream/mix)."""
+    q_ids = tok.encode(tok.apply_chat_template((prefix or []) + [{"role": "user", "content": question}],
                                                add_generation_prompt=True, tokenize=False) + "<think>\n")
     past = DynamicCache()
     model(input_ids=torch.tensor([q_ids], device=DEV), past_key_values=past, use_cache=True)
     MQ = past.get_seq_length()
-    gen, kept, absorbed = [], [], 0
+    gen, kept, absorbed = [], list(seed_kept or []), 0
+    ktag = [0] * len(kept)
     exempt = set(q_ids); allowed_ng = _ngrams(q_ids)
     n_model, ns_, nm, nmt = 0, 0, 0, 0
     served, queries, page_ids, page_off = [], [], [], 0
@@ -224,10 +232,11 @@ def rollout(question, force=None):
     while n_model < A.gen and time.time() - t0 < 600:
         c0 = len(gen); R = min(c0, A.rw); nd = c0 - R
         if nd > absorbed:
-            kept.extend(gen[absorbed:nd]); absorbed = nd
-            if len(kept) > A.maxd:
-                _, mass = pooler.forward_with_mass(emb(kept).to(torch.float32))
-                mm = mass[0].float().cpu().numpy(); kept = [kept[i] for i in np.sort(np.argsort(mm)[-A.maxd:])]
+            kept.extend(gen[absorbed:nd]); ktag.extend([1] * (nd - absorbed)); absorbed = nd
+        if len(kept) > A.maxd:   # (checked every rebuild: a seeded history can start above the budget)
+            _, mass = pooler.forward_with_mass(emb(kept).to(torch.float32))
+            mm = mass[0].float().cpu().numpy(); keep = np.sort(np.argsort(mm)[-A.maxd:])
+            kept = [kept[i] for i in keep]; ktag = [ktag[i] for i in keep]
         spv = sp(kept)
         parts = [spv] + ([emb(gen[c0 - R:c0])] if R > 0 else []); block = torch.cat(parts, dim=1)
         crop_cache(past, MQ)
@@ -307,8 +316,63 @@ def rollout(question, force=None):
     txt = tok.decode(gen)
     landed = "</think>" in txt and bool(txt.split("</think>")[-1].strip())
     ans = head_sentence(txt.split("</think>")[-1].strip()) if landed else ""
+    LAST.update(q_ids=q_ids, gen=gen, kept=kept, ktag=ktag, absorbed=absorbed)
     return txt, ans, ns_, nm, served, queries, landed, dead
 
+
+def run_multiturn():
+    """Dialogues turn by turn. The history each protocol carries is the model's own: its replies (the text after
+    </think>) and, for stream/mix, everything the previous turns generated and were served."""
+    dialogs = [json.loads(l) for l in open(A.multiturn) if l.strip()][:A.n]
+    done = set()
+    if os.path.exists(A.out):
+        for line in open(A.out):
+            try: r0 = json.loads(line); done.add((r0["dialog"], r0["turn"]))
+            except Exception: pass
+    EOS_IDS = tok.encode("<｜end▁of▁sentence｜>", add_special_tokens=False)
+    stat = collections.Counter(); t0 = time.time()
+    with open(A.out, "a") as fh:
+        for d in dialogs:
+            if all((d["id"], i) in done for i in range(len(d["turns"]))):
+                continue
+            msgs, carry = [], []
+            for i, turn in enumerate(d["turns"]):
+                q, g = turn["q"], (turn.get("gold") or "").strip()
+                if A.mt_mode == "none": prefix, seed = None, None
+                elif A.mt_mode == "full": prefix, seed = msgs, None
+                elif A.mt_mode == "stream": prefix, seed = None, carry
+                else: prefix, seed = msgs[-2:], carry
+                txt, ans, ns_, nm, served, queries, landed, dead = rollout(q, prefix=prefix, seed_kept=seed)
+                reply = txt.split("</think>")[-1].strip() if landed else ""
+                reply = re.sub(r"<｜end▁of▁sentence｜>.*", "", reply, flags=re.S).strip()
+                correct = bool(g) and landed and has(reply, g)
+                grounded = bool(g) and any(has(x, g) for x in served)
+                rec = {"dialog": d["id"], "kind": d.get("kind", ""), "turn": i, "n_turns": len(d["turns"]), "q": q, "gold": g,
+                       "correct": correct, "grounded": grounded, "landed": landed, "dead": dead, "ns": ns_, "more": nm,
+                       "reply": reply[:2000], "queries": queries, "text": txt, "mode": A.mt_mode}
+                if (d["id"], i) not in done:
+                    fh.write(json.dumps(rec, ensure_ascii=False) + "\n"); fh.flush()
+                if g:
+                    last = i == len(d["turns"]) - 1
+                    stat[f"{d.get('kind','')}:{'last' if last else 'mid'}:n"] += 1; stat[f"{d.get('kind','')}:{'last' if last else 'mid'}:c"] += correct
+                # carry the history
+                msgs = msgs + [{"role": "user", "content": q}, {"role": "assistant", "content": reply or "(no reply)"}]
+                L = LAST
+                old_part = [t for t, tg in zip(L["kept"], L["ktag"]) if tg == 0]
+                this_part = [t for t, tg in zip(L["kept"], L["ktag"]) if tg == 1]
+                q_part = L["q_ids"][1:] if L["q_ids"] and L["q_ids"][0] == tok.bos_token_id else L["q_ids"]
+                if A.mt_mode == "mix":   # the last exchange is pinned next turn: carry what came before it plus this turn's thinking
+                    carry = old_part + this_part + L["gen"][L["absorbed"]:] + EOS_IDS
+                else:
+                    carry = old_part + q_part + this_part + L["gen"][L["absorbed"]:] + EOS_IDS
+            el = time.time() - t0
+            print(f"[mt {A.mt_mode}] dialog {d['id']} done | " + " ".join(f"{k[:-2]}={100*stat[k[:-2]+':c']/stat[k]:.0f}%({stat[k]})" for k in sorted(stat) if k.endswith(':n')) + f" | {el/60:.0f} min", flush=True)
+    print(f"EVAL_DONE{A.tag} multiturn mode={A.mt_mode} " + " ".join(f"{k[:-2]}={100*stat[k[:-2]+':c']/stat[k]:.1f}%({stat[k]})" for k in sorted(stat) if k.endswith(':n')), flush=True)
+
+
+if A.multiturn:
+    import collections
+    run_multiturn(); sys.exit(0)
 
 qs = []
 for line in open(A.questions):

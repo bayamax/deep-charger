@@ -80,7 +80,7 @@ PSKIP=
 # The raw GitHub copy this box fetches can lag and hand a control run an OLDER version of this file (04:48 on 09-22 it
 # relaunched the online loop under the previous mode while the newer run was merging a checkpoint on the same card).
 # Every edit bumps BOXG_SERIAL; a run that sees a lower serial than one already executed stops here.
-BOXG_SERIAL=2026092676
+BOXG_SERIAL=2026092677
 if [ -f /root/.boxg_serial ] && [ "$(cat /root/.boxg_serial)" -gt "$BOXG_SERIAL" ] 2>/dev/null; then echo "BOXG_STALE $BOXG_SERIAL < $(cat /root/.boxg_serial)"; exit 0; fi
 echo $BOXG_SERIAL > /root/.boxg_serial
 MODE=reeval       # 2026-09-29: the 4-bit with the local search on the 6,000-character store, the opening + the query's passage served
@@ -156,7 +156,7 @@ OSEARCHGEN=1500   # and capped as it capped them; the reasoning side keeps OGEN
 OTEMP=0.6
 SHARDS=3
 RAW="https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl"
-for f in pool_eval.py q4.py qat.py dwq.py poolerfit.py jointfit.py checkmlx.py packmlx.py dequant_state.py gptq.py sft_lora.py selfgen_gpu.py build_merged.py web_search.py grpo_pool.py online_loop.py; do
+for f in pool_eval.py q4.py qat.py dwq.py poolerfit.py jointfit.py checkmlx.py packmlx.py dequant_state.py gptq.py sft_lora.py selfgen_gpu.py build_merged.py web_search.py grpo_pool.py online_loop.py mt_gen.py; do
   for try in 1 2 3; do curl -sS -o /root/work/$f "$RAW/$f?nocache=$(date +%s)" && python3 -m py_compile /root/work/$f && break; sleep 5; done
 done
 cp /root/work/web_search.py /root/work/runtime/web_search.py 2>/dev/null
@@ -270,6 +270,36 @@ TK
   chmod +x /root/termskeep.sh
   setsid nohup bash -c 'bash /root/termskeep.sh 2>&1 | tee -a /root/terms.log' >> /proc/1/fd/1 2>&1 < /dev/null 9>&- &
   echo "TERMS_LAUNCHED $(date -u)"
+fi
+
+# Multi-turn: the dialogues (the teacher splits held-out questions into turns), then the 4-bit model on them under
+# each history protocol (none / full / stream), Wikipedia's search, one mode at a time when the card is free.
+# MT_TAG bumps to redo; MT_N dialogues per mode (the screen), MT_MODES which protocols.
+MT=${MT:-1}; MT_TAG=${MT_TAG:-mt1}; MT_N=${MT_N:-45}; MT_MODES=${MT_MODES:-"none full stream"}
+if [ "$MT" = 1 ] && ! pgrep -f "mtkee[p].sh" >/dev/null && ! grep -q "MT_JOB_DONE $MT_TAG" /root/mt.log 2>/dev/null && [ -s /root/gptq_hf_gq14/model.safetensors ]; then
+  cat > /root/mtkeep.sh <<MK1
+MTAG=$MT_TAG; MN=$MT_N; MODES="$MT_MODES"
+MK1
+  cat >> /root/mtkeep.sh <<'MK2'
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); R=baya1116/hypernet-sp-distill
+cd /root/work
+[ -s /root/work/mt_eval.jsonl ] || python3 /root/work/mt_gen.py --seeds /root/work/eval300.jsonl --out /root/work/mt_eval.jsonl --n-bridge 40 --n-memory 30 --n-switch 20 2>&1 | grep -E "^\[mtgen\]|MTGEN_DONE|Error|Traceback"
+[ -s /root/work/mt_eval.jsonl ] || { echo "MT_ABORT no dialogues"; exit 1; }
+hf upload $R /root/work/mt_eval.jsonl pooler_distill/chatsft/multiturn/mt_eval.jsonl >/dev/null 2>&1
+for mode in $MODES; do
+  while pgrep -f "pool_eval.py .*--multiturn" >/dev/null || pgrep -f "reevalkee[p].sh" >/dev/null; do sleep 120; done
+  OUT=/root/work/${MTAG}_${mode}.jsonl
+  SP_BASE=/root/gptq_hf_gq14 SP_RANK=16 SP_NOSYS=1 SP_EPISODIC=1 OMP_NUM_THREADS=1 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
+    python3 /root/work/pool_eval.py /root/reeval_g14m_pooler.safetensors /root/work/eval300.jsonl $OUT --multiturn /root/work/mt_eval.jsonl --mt-mode $mode \
+    --n $MN --rw 768 --maxd 384 --samepage 1 --decode plain --temp 0.6 --gen 4000 --stop eos --replycap 600 --tag "[$MTAG-$mode]" > /root/${MTAG}_${mode}.log 2>&1
+  grep -E "EVAL_DONE|Error|Traceback" /root/${MTAG}_${mode}.log | tail -2 | cut -c1-300
+  hf upload $R $OUT pooler_distill/chatsft/multiturn/${MTAG}_${mode}.jsonl >/dev/null 2>&1
+done
+echo "MT_JOB_DONE $MTAG $(date -u)"
+MK2
+  chmod +x /root/mtkeep.sh
+  setsid nohup bash -c 'bash /root/mtkeep.sh 2>&1 | tee -a /root/mt.log' >> /proc/1/fd/1 2>&1 < /dev/null 9>&- &
+  echo "MT_LAUNCHED $MT_TAG $(date -u)"
 fi
 
 # The device layout of the local search, as a side job on the CPU: the int8 embedder, the IVF layout of the sign
@@ -663,6 +693,7 @@ while :; do
     echo "--- retr.log (tail) ---"; tail -n 8 /root/retr.log 2>/dev/null | cut -c1-300
     echo "--- wiki6.log (tail) ---"; tail -n 4 /root/wiki6.log 2>/dev/null | cut -c1-300
     echo "--- terms.log (tail) ---"; tail -n 4 /root/terms.log 2>/dev/null | cut -c1-300
+    echo "--- mt.log (tail) ---"; tail -n 8 /root/mt.log 2>/dev/null | cut -c1-300; for f in $(ls -t /root/mt*_*.log 2>/dev/null | head -1); do echo "--- $f (tail) ---"; grep -E "^\[mt |EVAL_DONE|Error|Traceback" $f | tail -3 | cut -c1-300; done
     echo "--- ranker.log (tail) ---"; tail -n 8 /root/ranker.log 2>/dev/null | cut -c1-300
     echo "--- release.log (tail) ---"; tail -n 6 /root/release.log 2>/dev/null | cut -c1-200
     for f in /root/gptq_*.log; do [ -s "$f" ] && { echo "--- $f (tail) ---"; grep -E "^\[gptq\]|^\[out\]|GPTQ_DONE|Error" "$f" | tail -n 4 | cut -c1-200; }; done
