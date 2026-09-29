@@ -80,7 +80,7 @@ PSKIP=
 # The raw GitHub copy this box fetches can lag and hand a control run an OLDER version of this file (04:48 on 09-22 it
 # relaunched the online loop under the previous mode while the newer run was merging a checkpoint on the same card).
 # Every edit bumps BOXG_SERIAL; a run that sees a lower serial than one already executed stops here.
-BOXG_SERIAL=2026092683
+BOXG_SERIAL=2026092684
 if [ -f /root/.boxg_serial ] && [ "$(cat /root/.boxg_serial)" -gt "$BOXG_SERIAL" ] 2>/dev/null; then echo "BOXG_STALE $BOXG_SERIAL < $(cat /root/.boxg_serial)"; exit 0; fi
 echo $BOXG_SERIAL > /root/.boxg_serial
 MODE=idle         # 2026-09-29: the side jobs hold the card (multi-turn measurement and training); a finished reeval re-launched on every control run and killed their evaluators
@@ -321,39 +321,73 @@ fi
 
 if [ ! -e /root/.mem3_swap ]; then touch /root/.mem3_swap; pkill -f "mttkee[p].sh"; sleep 2; echo "MEM3_SWAP stopped the mem2 keeper $(date -u)"; fi
 if [ ! -e /root/.mem4_swap ]; then touch /root/.mem4_swap; pkill -f "mttkee[p].sh"; sleep 2; echo "MEM4_SWAP stopped the mem3 keeper (its traces run carries on and is resumed) $(date -u)"; fi
-# Multi-turn training, queued behind the measurement (mt1): dialogues from TRAINING seeds (eval300 excluded), the
-# 4-bit model's own full-history runs on them (tokens saved), then memfit.py - the pooler learns to carry the history
-# (self-distillation, full-history teacher -> history-through-pooler student) - then the stream protocol measured
-# again on the same held-out dialogues with the new pooler. MTT=0 cancels; MTT_TAG bumps to redo.
-MTT=${MTT:-1}; MTT_TAG=${MTT_TAG:-mem4}; MTT_N=${MTT_N:-180}
+# Multi-turn, switch first (2026-09-29, the user: no long-range recall needed; a natural rally, the topic switch is
+# the bottleneck; keep existing ability). mem5: a switch-heavy held-out set (all 20 switch dialogues of mt_eval + 40
+# more pairs of eval300 questions mt_eval did not use) measured before and after; training dialogues from TRAINING
+# seeds; the model's solo runs of each turn's self-contained version (teacher trajectories); memfit --student full
+# (history verbatim in the prompt, pooler + LoRA, KL to the model's own single-turn behaviour, half the examples
+# assembled topic switches); after training: the switch set, the first 30 mt_eval dialogues (vs mt2 full), and the
+# single-turn search held-out (102, vs gq14 48.0) as the regression check. MTT=0 cancels; MTT_TAG bumps to redo.
+if [ ! -e /root/.mem5_swap ]; then touch /root/.mem5_swap; pkill -f "mttkee[p].sh"; pkill -f "mtmkee[p].sh"; sleep 2; echo "MEM5_SWAP $(date -u)"; fi
+MTT=${MTT:-1}; MTT_TAG=${MTT_TAG:-mem5}; MTT_N=${MTT_N:-120}
 if [ "$MTT" = 1 ] && ! pgrep -f "mttkee[p].sh" >/dev/null && ! grep -q "MTT_JOB_DONE $MTT_TAG" /root/mtt.log 2>/dev/null && [ -s /root/gptq_hf_gq14/model.safetensors ]; then
   cat > /root/mttkeep.sh <<TK1
 TTAG=$MTT_TAG; TN=$MTT_N
 TK1
   cat >> /root/mttkeep.sh <<'TK2'
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); R=baya1116/hypernet-sp-distill; cd /root/work
+ENV="SP_BASE=/root/gptq_hf_gq14 SP_RANK=16 SP_NOSYS=1 SP_EPISODIC=1 OMP_NUM_THREADS=1 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True"
+EVARGS="--rw 768 --maxd 384 --samepage 1 --decode plain --temp 0.6 --gen 4000 --stop eos --replycap 600"
 until grep -q "MT_JOB_DONE mt2" /root/mt.log 2>/dev/null; do sleep 300; done
-grep -q standalone /root/work/mt_train.jsonl 2>/dev/null || python3 /root/work/mt_gen.py --seeds /root/work/selfq_all.jsonl --exclude /root/work/eval300.jsonl --out /root/work/mt_train.jsonl --n-bridge 110 --n-memory 70 --n-switch 20 --seed 7 2>&1 | grep -E "^\[mtgen\]|MTGEN_DONE|Error|Traceback"
-[ -s /root/work/mt_train.jsonl ] || { echo "MTT_ABORT no training dialogues"; exit 1; }
+[ -s /root/work/mt_eval_sw.jsonl ] || python3 - <<'PY'
+import json, random
+mt = [json.loads(l) for l in open("/root/work/mt_eval.jsonl")]
+used = {t["q"] for d in mt for t in d["turns"]} | {d.get("seed", "") for d in mt}
+ev = [json.loads(l) for l in open("/root/work/eval300.jsonl")]
+free = [(r["q"], r["gold"]) for r in ev if r.get("q") and r.get("gold") and r["q"] not in used]
+random.Random(11).shuffle(free)
+out = [d for d in mt if d["kind"] == "switch"]
+for k in range(min(40, len(free) // 2)):
+    a, b = free[2 * k], free[2 * k + 1]
+    out.append({"id": f"sw{k:03d}", "kind": "switch", "seed": a[0], "turns": [{"q": a[0], "gold": a[1], "standalone": a[0]}, {"q": b[0], "gold": b[1], "standalone": b[0]}]})
+random.Random(12).shuffle(out)
+with open("/root/work/mt_eval_sw.jsonl", "w") as fh:
+    for d in out: fh.write(json.dumps(d, ensure_ascii=False) + "\n")
+print(f"[mtt] switch held-out set: {len(out)} dialogues")
+PY
+hf upload $R /root/work/mt_eval_sw.jsonl pooler_distill/chatsft/multiturn/mt_eval_sw.jsonl >/dev/null 2>&1
+grep -q standalone /root/work/mt_train.jsonl 2>/dev/null || python3 /root/work/mt_gen.py --seeds /root/work/selfq_all.jsonl --exclude /root/work/eval300.jsonl --out /root/work/mt_train.jsonl --n-bridge 80 --n-memory 40 --n-switch 30 --seed 7 2>&1 | grep -E "^\[mtgen\]|MTGEN_DONE|Error|Traceback"
+grep -q standalone /root/work/mt_train.jsonl 2>/dev/null || { echo "MTT_ABORT no training dialogues"; exit 1; }
 hf upload $R /root/work/mt_train.jsonl pooler_distill/chatsft/multiturn/mt_train.jsonl >/dev/null 2>&1
-while pgrep -f "pool_eval.py" >/dev/null; do sleep 120; done
+ev() {  # $1 ckpt $2 dialogues $3 out $4 mode $5 n $6 tag
+  while pgrep -f "pool_eval.py" >/dev/null; do sleep 60; done
+  env $ENV python3 /root/work/pool_eval.py $1 /root/work/eval300.jsonl $3 --multiturn $2 --mt-mode $4 --n $5 $EVARGS --tag "[$6]" > /root/$6.log 2>&1
+  grep -E "EVAL_DONE|Error|Traceback" /root/$6.log | tail -2 | cut -c1-300
+  hf upload $R $3 pooler_distill/chatsft/multiturn/$(basename $3) >/dev/null 2>&1
+}
+echo "[mtt] switch baseline start $(date -u +%H:%M)"
+ev /root/reeval_g14m_pooler.safetensors /root/work/mt_eval_sw.jsonl /root/work/sw0_full.jsonl full 60 sw0-full
 echo "[mtt] traces start $(date -u +%H:%M)"
-SP_BASE=/root/gptq_hf_gq14 SP_RANK=16 SP_NOSYS=1 SP_EPISODIC=1 OMP_NUM_THREADS=1 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
-  python3 /root/work/pool_eval.py /root/reeval_g14m_pooler.safetensors /root/work/eval300.jsonl /root/work/mtt_solo.jsonl --multiturn /root/work/mt_train.jsonl --mt-mode none --mt-standalone 1 --mt-save-tokens 1 \
-  --n $TN --rw 768 --maxd 384 --samepage 1 --decode plain --temp 0.6 --gen 4000 --stop eos --replycap 600 --tag "[mtt-solo]" > /root/mtt_traces.log 2>&1
+while pgrep -f "pool_eval.py" >/dev/null; do sleep 60; done
+env $ENV python3 /root/work/pool_eval.py /root/reeval_g14m_pooler.safetensors /root/work/eval300.jsonl /root/work/mtt_solo.jsonl --multiturn /root/work/mt_train.jsonl --mt-mode none --mt-standalone 1 --mt-save-tokens 1 \
+  --n $TN $EVARGS --tag "[mtt-solo]" > /root/mtt_traces.log 2>&1
 grep -E "EVAL_DONE|Error|Traceback" /root/mtt_traces.log | tail -2 | cut -c1-300
 hf upload $R /root/work/mtt_solo.jsonl pooler_distill/chatsft/multiturn/mtt_solo.jsonl >/dev/null 2>&1
 echo "[mtt] memfit start $(date -u +%H:%M)"
-SP_BASE=/root/gptq_hf_gq14 SP_RANK=16 SP_NOSYS=1 SP_EPISODIC=1 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
-  python3 /root/work/memfit.py --ckpt /root/reeval_g14m_pooler.safetensors --data /root/work/mtt_solo.jsonl --student full --out /root/pooler_$TTAG.safetensors --log /root/memfit_$TTAG.log --steps 600 --lr 1e-5 --lr-lora 1e-5 > /root/memfit_${TTAG}_run.log 2>&1
+env SP_BASE=/root/gptq_hf_gq14 SP_RANK=16 SP_NOSYS=1 SP_EPISODIC=1 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
+  python3 /root/work/memfit.py --student full --ckpt /root/reeval_g14m_pooler.safetensors --data /root/work/mtt_solo.jsonl --out /root/pooler_$TTAG.safetensors --log /root/memfit_$TTAG.log --steps 600 --lr 1e-5 --lr-lora 1e-5 > /root/memfit_${TTAG}_run.log 2>&1
 grep -E "^\[memfit\]|^\[data\]|^val |MEMFIT_DONE|Error|Traceback" /root/memfit_${TTAG}_run.log | tail -16 | cut -c1-200
 [ -s /root/pooler_$TTAG.safetensors ] || { echo "MTT_ABORT memfit: $(tail -3 /root/memfit_${TTAG}_run.log | tr '\n' ' ' | cut -c1-300)"; exit 1; }
 hf upload $R /root/pooler_$TTAG.safetensors pooler_distill/chatsft/multiturn/pooler_$TTAG.safetensors >/dev/null 2>&1
-SP_BASE=/root/gptq_hf_gq14 SP_RANK=16 SP_NOSYS=1 SP_EPISODIC=1 OMP_NUM_THREADS=1 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
-  python3 /root/work/pool_eval.py /root/pooler_$TTAG.safetensors /root/work/eval300.jsonl /root/work/${TTAG}_full.jsonl --multiturn /root/work/mt_eval.jsonl --mt-mode full \
-  --n 30 --rw 768 --maxd 384 --samepage 1 --decode plain --temp 0.6 --gen 4000 --stop eos --replycap 600 --tag "[$TTAG-full]" > /root/${TTAG}_full.log 2>&1
-grep -E "EVAL_DONE|Error|Traceback" /root/${TTAG}_full.log | tail -2 | cut -c1-300
-hf upload $R /root/work/${TTAG}_full.jsonl pooler_distill/chatsft/multiturn/${TTAG}_full.jsonl >/dev/null 2>&1
+ev /root/pooler_$TTAG.safetensors /root/work/mt_eval_sw.jsonl /root/work/${TTAG}_sw_full.jsonl full 60 ${TTAG}-sw-full
+ev /root/pooler_$TTAG.safetensors /root/work/mt_eval.jsonl /root/work/${TTAG}_full.jsonl full 30 ${TTAG}-full
+# the regression check: single-turn search held-out, the same 102 questions as every number in the lineage
+for i in 0 1 2; do
+  while pgrep -f "pool_eval.py" >/dev/null; do sleep 60; done
+  env $ENV python3 /root/work/pool_eval.py /root/pooler_$TTAG.safetensors /root/work/ev_$i.jsonl /root/work/${TTAG}st_out_$i.jsonl --n 34 $EVARGS --tag "[${TTAG}st$i]" > /root/${TTAG}st_$i.log 2>&1
+  grep -E "EVAL_DONE|Error|Traceback" /root/${TTAG}st_$i.log | tail -1 | cut -c1-300
+  hf upload $R /root/work/${TTAG}st_out_$i.jsonl pooler_distill/chatsft/rollouts/${TTAG}st_$i.jsonl >/dev/null 2>&1
+done
 echo "MTT_JOB_DONE $TTAG $(date -u)"
 TK2
   chmod +x /root/mttkeep.sh
@@ -363,7 +397,7 @@ fi
 
 # The mixed student, queued behind mem3 on the same traces: the last exchange verbatim in the prompt (names travel
 # as text), older turns through the pooler; then the mix protocol on the held-out dialogues. MTM=0 cancels.
-MTM=${MTM:-1}; MTM_TAG=${MTM_TAG:-mem3m}
+MTM=${MTM:-0}; MTM_TAG=${MTM_TAG:-mem3m}
 if [ "$MTM" = 1 ] && ! pgrep -f "mtmkee[p].sh" >/dev/null && ! grep -q "MTM_JOB_DONE $MTM_TAG" /root/mtm.log 2>/dev/null && [ -s /root/gptq_hf_gq14/model.safetensors ]; then
   cat > /root/mtmkeep.sh <<MM1
 MTAG=$MTM_TAG
@@ -781,7 +815,7 @@ while :; do
     echo "--- retr.log (tail) ---"; tail -n 8 /root/retr.log 2>/dev/null | cut -c1-300
     echo "--- wiki6.log (tail) ---"; tail -n 4 /root/wiki6.log 2>/dev/null | cut -c1-300
     echo "--- terms.log (tail) ---"; tail -n 4 /root/terms.log 2>/dev/null | cut -c1-300
-    echo "--- mtt.log (tail) ---"; tail -n 8 /root/mtt.log 2>/dev/null | cut -c1-300; tail -n 2 /root/mtt_traces.log 2>/dev/null | cut -c1-300; grep -E "^val " /root/memfit_mem4_run.log 2>/dev/null | tail -3
+    echo "--- mtt.log (tail) ---"; tail -n 12 /root/mtt.log 2>/dev/null | cut -c1-300; tail -n 2 /root/mtt_traces.log 2>/dev/null | cut -c1-300; grep -E "^val " /root/memfit_mem5_run.log 2>/dev/null | tail -3
     echo "--- mtm.log (tail) ---"; tail -n 6 /root/mtm.log 2>/dev/null | cut -c1-300; grep -E "^val " /root/memfit_mem3m_run.log 2>/dev/null | tail -3
     echo "--- mt.log (tail) ---"; tail -n 8 /root/mt.log 2>/dev/null | cut -c1-300; for f in $(ls -t /root/mt*_*.log 2>/dev/null | head -1); do echo "--- $f (tail) ---"; grep -E "^\[mt |EVAL_DONE|Error|Traceback" $f | tail -3 | cut -c1-300; done
     echo "--- ranker.log (tail) ---"; tail -n 8 /root/ranker.log 2>/dev/null | cut -c1-300
