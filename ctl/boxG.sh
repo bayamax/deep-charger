@@ -80,7 +80,7 @@ PSKIP=
 # The raw GitHub copy this box fetches can lag and hand a control run an OLDER version of this file (04:48 on 09-22 it
 # relaunched the online loop under the previous mode while the newer run was merging a checkpoint on the same card).
 # Every edit bumps BOXG_SERIAL; a run that sees a lower serial than one already executed stops here.
-BOXG_SERIAL=2026092684
+BOXG_SERIAL=2026092685
 if [ -f /root/.boxg_serial ] && [ "$(cat /root/.boxg_serial)" -gt "$BOXG_SERIAL" ] 2>/dev/null; then echo "BOXG_STALE $BOXG_SERIAL < $(cat /root/.boxg_serial)"; exit 0; fi
 echo $BOXG_SERIAL > /root/.boxg_serial
 MODE=idle         # 2026-09-29: the side jobs hold the card (multi-turn measurement and training); a finished reeval re-launched on every control run and killed their evaluators
@@ -155,7 +155,7 @@ OSEARCHGEN=1500   # and capped as it capped them; the reasoning side keeps OGEN
 OTEMP=0.6
 SHARDS=3
 RAW="https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl"
-for f in pool_eval.py q4.py qat.py dwq.py poolerfit.py jointfit.py checkmlx.py packmlx.py dequant_state.py gptq.py sft_lora.py selfgen_gpu.py build_merged.py web_search.py grpo_pool.py online_loop.py mt_gen.py memfit.py; do
+for f in pool_eval.py q4.py qat.py dwq.py poolerfit.py jointfit.py checkmlx.py packmlx.py dequant_state.py gptq.py sft_lora.py selfgen_gpu.py build_merged.py web_search.py grpo_pool.py online_loop.py mt_gen.py memfit.py mt_sim.py; do
   for try in 1 2 3; do curl -sS -o /root/work/$f "$RAW/$f?nocache=$(date +%s)" && python3 -m py_compile /root/work/$f && break; sleep 5; done
 done
 cp /root/work/web_search.py /root/work/runtime/web_search.py 2>/dev/null
@@ -422,6 +422,17 @@ MM2
   chmod +x /root/mtmkeep.sh
   setsid nohup bash -c 'bash /root/mtmkeep.sh 2>&1 | tee -a /root/mtm.log' >> /proc/1/fd/1 2>&1 < /dev/null 9>&- &
   echo "MTM_LAUNCHED $MTM_TAG $(date -u)"
+fi
+
+# The fluency stage's data, smoke first (API only, no card): 6 simulated conversations, nano as the user, R1 as the
+# reference assistant, uploaded for reading. MTSIM_SERIAL bumps to redo.
+MTSIM_SERIAL=1
+if [ "$(cat /root/.mtsim_serial 2>/dev/null)" != "$MTSIM_SERIAL" ] && [ -s /root/.oai ] && [ -s /root/.dsk ]; then
+  echo "$MTSIM_SERIAL" > /root/.mtsim_serial
+  ( cd /root/work && python3 /root/work/mt_sim.py --seeds /root/work/selfq_all.jsonl --exclude /root/work/eval300.jsonl --out /root/work/mt_sim_smoke.jsonl --n 6 --workers 6 2>&1 | grep -E "MTSIM_DONE|Error|Traceback" | tail -3 | sed 's/^/[mtsim] /'
+    export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); hf upload baya1116/hypernet-sp-distill /root/work/mt_sim_smoke.jsonl pooler_distill/chatsft/multiturn/mt_sim_smoke.jsonl >/dev/null 2>&1
+    echo "[mtsim] smoke uploaded $(date -u +%H:%M)" ) >> /root/mtsim.log 2>&1 &
+  echo "MTSIM_SMOKE_LAUNCHED $(date -u)"
 fi
 
 # The device layout of the local search, as a side job on the CPU: the int8 embedder, the IVF layout of the sign
@@ -815,6 +826,7 @@ while :; do
     echo "--- retr.log (tail) ---"; tail -n 8 /root/retr.log 2>/dev/null | cut -c1-300
     echo "--- wiki6.log (tail) ---"; tail -n 4 /root/wiki6.log 2>/dev/null | cut -c1-300
     echo "--- terms.log (tail) ---"; tail -n 4 /root/terms.log 2>/dev/null | cut -c1-300
+    echo "--- mtsim.log (tail) ---"; tail -n 4 /root/mtsim.log 2>/dev/null | cut -c1-300
     echo "--- mtt.log (tail) ---"; tail -n 12 /root/mtt.log 2>/dev/null | cut -c1-300; tail -n 2 /root/mtt_traces.log 2>/dev/null | cut -c1-300; grep -E "^val " /root/memfit_mem5_run.log 2>/dev/null | tail -3
     echo "--- mtm.log (tail) ---"; tail -n 6 /root/mtm.log 2>/dev/null | cut -c1-300; grep -E "^val " /root/memfit_mem3m_run.log 2>/dev/null | tail -3
     echo "--- mt.log (tail) ---"; tail -n 8 /root/mt.log 2>/dev/null | cut -c1-300; for f in $(ls -t /root/mt*_*.log 2>/dev/null | head -1); do echo "--- $f (tail) ---"; grep -E "^\[mt |EVAL_DONE|Error|Traceback" $f | tail -3 | cut -c1-300; done
