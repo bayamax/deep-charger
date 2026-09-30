@@ -80,7 +80,7 @@ PSKIP=
 # The raw GitHub copy this box fetches can lag and hand a control run an OLDER version of this file (04:48 on 09-22 it
 # relaunched the online loop under the previous mode while the newer run was merging a checkpoint on the same card).
 # Every edit bumps BOXG_SERIAL; a run that sees a lower serial than one already executed stops here.
-BOXG_SERIAL=2026092692
+BOXG_SERIAL=2026092693
 if [ -f /root/.boxg_serial ] && [ "$(cat /root/.boxg_serial)" -gt "$BOXG_SERIAL" ] 2>/dev/null; then echo "BOXG_STALE $BOXG_SERIAL < $(cat /root/.boxg_serial)"; exit 0; fi
 echo $BOXG_SERIAL > /root/.boxg_serial
 MODE=idle         # 2026-09-29: the side jobs hold the card (multi-turn measurement and training); a finished reeval re-launched on every control run and killed their evaluators
@@ -645,6 +645,30 @@ M8
   echo "MEM8_LAUNCHED $(date -u)"
 fi
 
+# mem9 (2026-09-30): mem8 did not move the native chains (turns 2-4: base 34/90, mem8 35/90, +1.1 +- 5.6), and on
+# them the base's turn 3 (a first question after two unrelated exchanges) reads as high as turn 1. Before more
+# collection: how much of the later turns' drop is the history at all. Each chain question alone (no history), twice
+# (the reading's spread), and quote on the same chains - the measured ceiling a history protocol can reach.
+MEM9=${MEM9:-1}
+if [ "$MEM9" = 1 ] && grep -q "MEM8_JOB_DONE" /root/mem8.log 2>/dev/null && ! pgrep -f "mem9kee[p].sh" >/dev/null && ! grep -q "MEM9_JOB_DONE" /root/mem9.log 2>/dev/null; then
+  cat > /root/mem9keep.sh <<'M9'
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); R=baya1116/hypernet-sp-distill; cd /root/work; B=/root/reeval_g14m_pooler.safetensors
+ENV="SP_BASE=/root/gptq_hf_gq14 SP_RANK=16 SP_NOSYS=1 SP_EPISODIC=1 OMP_NUM_THREADS=1 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True"
+EVARGS="--rw 768 --maxd 384 --samepage 1 --decode plain --temp 0.6 --gen 4000 --stop eos --replycap 600"
+ev() { while pgrep -f "pool_eval.py|memfit.py" >/dev/null; do sleep 60; done
+  env $ENV python3 /root/work/pool_eval.py $B /root/work/eval300.jsonl /root/work/$1.jsonl --multiturn /root/work/mt_eval_chain.jsonl --mt-mode $2 --n 30 $EVARGS --tag "[$1]" > /root/$1.log 2>&1
+  grep -E "EVAL_DONE|Error|Traceback" /root/$1.log | tail -2 | cut -c1-300; hf upload $R /root/work/$1.jsonl pooler_distill/chatsft/multiturn/$1.jsonl >/dev/null 2>&1; }
+echo "[mem9] start $(date -u +%H:%M)"
+ev base_chain_alone1 none
+ev base_chain_quote quote
+ev base_chain_alone2 none
+echo "MEM9_JOB_DONE $(date -u)"
+M9
+  chmod +x /root/mem9keep.sh
+  setsid nohup bash -c 'bash /root/mem9keep.sh 2>&1 | tee -a /root/mem9.log' >> /proc/1/fd/1 2>&1 < /dev/null 9>&- &
+  echo "MEM9_LAUNCHED $(date -u)"
+fi
+
 # The device layout of the local search, as a side job on the CPU: the int8 embedder, the IVF layout of the sign
 # index, the memory and time of the search as its own process on the whole store, all uploaded beside the store.
 IVF=${IVF:-1}
@@ -1042,6 +1066,7 @@ while :; do
     echo "--- mem6.log (tail) ---"; tail -n 10 /root/mem6.log 2>/dev/null | cut -c1-300; grep -E "^val " /root/memfit_mem6_run.log 2>/dev/null | tail -2
     echo "--- mem7.log (tail) ---"; tail -n 10 /root/mem7.log 2>/dev/null | cut -c1-300; grep -E "^val " /root/memfit_mem7_run.log 2>/dev/null | tail -2
     echo "--- qt.log (tail) ---"; tail -n 4 /root/qt.log 2>/dev/null | cut -c1-300
+    echo "--- mem9.log (tail) ---"; tail -n 6 /root/mem9.log 2>/dev/null | cut -c1-300
     echo "--- mem8.log (tail) ---"; tail -n 10 /root/mem8.log 2>/dev/null | cut -c1-300; grep -E "^val " /root/memfit_mem8_run.log 2>/dev/null | tail -2
     echo "--- mt.log (tail) ---"; tail -n 8 /root/mt.log 2>/dev/null | cut -c1-300; for f in $(ls -t /root/mt*_*.log 2>/dev/null | head -1); do echo "--- $f (tail) ---"; grep -E "^\[mt |EVAL_DONE|Error|Traceback" $f | tail -3 | cut -c1-300; done
     echo "--- ranker.log (tail) ---"; tail -n 8 /root/ranker.log 2>/dev/null | cut -c1-300

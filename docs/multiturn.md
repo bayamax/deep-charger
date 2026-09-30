@@ -84,3 +84,24 @@ mem5 45.1%, mem7 50.0%, base 48.0%.
 So the protocol alone - the model given one user message, the history quoted as context - recovers as much of the
 topic switch as the best training, with no weight change and so no loss anywhere. Next: whether quote keeps the
 references and recall the full protocol had (mt_eval), and whether training adds to it (mem6 + quote).
+
+## mem8 (2026-09-30): quote-collected successes trained into the native chat - no measurable effect
+
+Collection: 70 training chains of 4 unrelated questions under quote; correct 29 / 13 / 13 / 22 of 70 by turn (the
+switch turns 2-3 at 19%, below the 28% quote read on the switch set), 77 correct turns in all (67 train, 10
+validation). memfit ce, native prompt, LoRA only, pooler frozen: validation KL 0.76 -> 0.32 (step 200).
+
+The 30 held-out chains of 4 (the switch set's 60 dialogues joined two by two), native protocol, same questions
+paired:
+
+| | turn 1 | turn 2 | turn 3 | turn 4 |
+|---|---|---|---|---|
+| base | 16 | 10 | 16 | 8 |
+| mem8 | 18 | 11 | 14 | 10 |
+
+Turns 2-4: base 34/90, mem8 35/90, +1.1 +- 5.6 points (13 won, 12 lost). The single-turn search held-out (102):
+mem8 49.0% (44.1 / 61.8 / 41.2), base 48.0% - no loss, and no gain on the chains either.
+
+On these chains the base's turn 3 (a first question after two unrelated exchanges) reads as high as turn 1; the
+drop is on turns 2 and 4, the switch set's second questions. So part of the "switch drop" may be those questions'
+own difficulty. mem9 measures it: each chain question alone (twice, for the spread) and quote on the same chains.
