@@ -80,7 +80,7 @@ PSKIP=
 # The raw GitHub copy this box fetches can lag and hand a control run an OLDER version of this file (04:48 on 09-22 it
 # relaunched the online loop under the previous mode while the newer run was merging a checkpoint on the same card).
 # Every edit bumps BOXG_SERIAL; a run that sees a lower serial than one already executed stops here.
-BOXG_SERIAL=2026092693
+BOXG_SERIAL=2026092694
 if [ -f /root/.boxg_serial ] && [ "$(cat /root/.boxg_serial)" -gt "$BOXG_SERIAL" ] 2>/dev/null; then echo "BOXG_STALE $BOXG_SERIAL < $(cat /root/.boxg_serial)"; exit 0; fi
 echo $BOXG_SERIAL > /root/.boxg_serial
 MODE=idle         # 2026-09-29: the side jobs hold the card (multi-turn measurement and training); a finished reeval re-launched on every control run and killed their evaluators
@@ -562,7 +562,10 @@ fi
 # Quote, second round (after QT): the base model with quote on the first 30 mt_eval dialogues (does it keep the
 # references and recall that the full protocol had, bridge 41.7 / memory 40.0?), and mem6 with quote on the switch set
 # (does training add to the protocol fix?). QT2=0 cancels.
-QT2=${QT2:-1}
+# 2026-09-30: cancelled for good - its keeper was re-launched on every control run after the MEM8 swap (no DONE line
+# was ever written) and took the card after mem8; mem9 measures quote on the chains instead.
+QT2=${QT2:-0}
+if [ ! -e /root/.mem9_swap ]; then touch /root/.mem9_swap; pkill -f "qt2kee[p].sh"; pkill -f "pool_eval.py .*/(mtq|mem6q)_full"; sleep 3; echo "MEM9_SWAP stopped the re-launched quote follow-ups $(date -u)"; fi
 if [ "$QT2" = 1 ] && ! pgrep -f "qt2kee[p].sh" >/dev/null && ! grep -q "QT2_JOB_DONE" /root/qt2.log 2>/dev/null; then
   cat > /root/qt2keep.sh <<'QK'
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); R=baya1116/hypernet-sp-distill; cd /root/work
