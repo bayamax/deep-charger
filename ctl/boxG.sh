@@ -80,7 +80,7 @@ PSKIP=
 # The raw GitHub copy this box fetches can lag and hand a control run an OLDER version of this file (04:48 on 09-22 it
 # relaunched the online loop under the previous mode while the newer run was merging a checkpoint on the same card).
 # Every edit bumps BOXG_SERIAL; a run that sees a lower serial than one already executed stops here.
-BOXG_SERIAL=2026092688
+BOXG_SERIAL=2026092689
 if [ -f /root/.boxg_serial ] && [ "$(cat /root/.boxg_serial)" -gt "$BOXG_SERIAL" ] 2>/dev/null; then echo "BOXG_STALE $BOXG_SERIAL < $(cat /root/.boxg_serial)"; exit 0; fi
 echo $BOXG_SERIAL > /root/.boxg_serial
 MODE=idle         # 2026-09-29: the side jobs hold the card (multi-turn measurement and training); a finished reeval re-launched on every control run and killed their evaluators
@@ -477,18 +477,20 @@ M6
   echo "MEM6_LAUNCHED $(date -u)"
 fi
 
-# mem7, rejection-sampled self-training on top of mem6 (the user's suggestion: train only on the model's own successes,
+if [ ! -e /root/.mem7b_swap ]; then touch /root/.mem7b_swap
+  pkill -f "mem6kee[p].sh"; pkill -f "pool_eval.py /root/pooler_mem6"; pkill -f "mem7kee[p].sh"; sleep 3
+  echo "MEM6_JOB_DONE (stopped after the switch set: first turns 41 -> 27) $(date -u)" >> /root/mem6.log; echo "MEM7B_SWAP $(date -u)"; fi
+# mem7, rejection-sampled self-training from the BASE model, pooler frozen (the user's suggestion: train only on the model's own successes,
 # so it finds the way to keep both): mem6 runs 100 training switch pairs + 40 training dialogues with the history in the
 # prompt (tokens saved); every turn it got right - first turns (no history) and later turns alike - is trained on as
 # its own target (memfit --objective ce), from mem6's LoRA and pooler; measured the same way. MEM7=0 cancels.
 MEM7=${MEM7:-1}
-if [ "$MEM7" = 1 ] && ! pgrep -f "mem7kee[p].sh" >/dev/null && ! grep -q "MEM7_JOB_DONE" /root/mem7.log 2>/dev/null; then
+if [ "$MEM7" = 1 ] && ! pgrep -f "mem7kee[p].sh" >/dev/null && ! grep -q "MEM7_JOB_DONE" /root/mem7.log 2>/dev/null && [ -e /root/.mem7b_swap ]; then
   cat > /root/mem7keep.sh <<'M7'
-export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); R=baya1116/hypernet-sp-distill; cd /root/work; T=mem7; B=/root/pooler_mem6.safetensors
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); R=baya1116/hypernet-sp-distill; cd /root/work; T=mem7; B=/root/reeval_g14m_pooler.safetensors
 ENV="SP_BASE=/root/gptq_hf_gq14 SP_RANK=16 SP_NOSYS=1 SP_EPISODIC=1 OMP_NUM_THREADS=1 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True"
 EVARGS="--rw 768 --maxd 384 --samepage 1 --decode plain --temp 0.6 --gen 4000 --stop eos --replycap 600"
 until grep -qE "MEM6_JOB_DONE|MEM6_ABORT" /root/mem6.log 2>/dev/null; do sleep 300; done
-grep -q MEM6_ABORT /root/mem6.log && B=/root/reeval_g14m_pooler.safetensors
 [ -s /root/work/mt_train_sw.jsonl ] || python3 - <<'PY'
 import json, random
 used = set()
@@ -503,14 +505,14 @@ for l in open("/root/work/selfq_all.jsonl"):
     if r.get("q") and r.get("gold") and r["q"].strip() not in used: seeds.append((r["q"].strip(), r["gold"].strip()))
 seeds = list(dict.fromkeys(seeds)); random.Random(21).shuffle(seeds)
 with open("/root/work/mt_train_sw.jsonl", "w") as fh:
-    for k in range(min(100, len(seeds) // 2)):
+    for k in range(min(120, len(seeds) // 2)):
         a, b = seeds[2 * k], seeds[2 * k + 1]
         fh.write(json.dumps({"id": f"tsw{k:03d}", "kind": "switch", "seed": a[0], "turns": [{"q": a[0], "gold": a[1], "standalone": a[0]}, {"q": b[0], "gold": b[1], "standalone": b[0]}]}, ensure_ascii=False) + "\n")
 print("[mem7] training switch pairs written")
 PY
 while pgrep -f "pool_eval.py|memfit.py" >/dev/null; do sleep 60; done
 echo "[mem7] collection start $(date -u +%H:%M)"
-env $ENV python3 /root/work/pool_eval.py $B /root/work/eval300.jsonl /root/work/rft_sw.jsonl --multiturn /root/work/mt_train_sw.jsonl --mt-mode full --mt-save-tokens 1 --n 100 $EVARGS --tag "[rft-sw]" > /root/rft_sw.log 2>&1
+env $ENV python3 /root/work/pool_eval.py $B /root/work/eval300.jsonl /root/work/rft_sw.jsonl --multiturn /root/work/mt_train_sw.jsonl --mt-mode full --mt-save-tokens 1 --n 120 $EVARGS --tag "[rft-sw]" > /root/rft_sw.log 2>&1
 grep -E "EVAL_DONE|Error|Traceback" /root/rft_sw.log | tail -1 | cut -c1-300
 env $ENV python3 /root/work/pool_eval.py $B /root/work/eval300.jsonl /root/work/rft_mt.jsonl --multiturn /root/work/mt_train.jsonl --mt-mode full --mt-save-tokens 1 --n 40 $EVARGS --tag "[rft-mt]" > /root/rft_mt.log 2>&1
 grep -E "EVAL_DONE|Error|Traceback" /root/rft_mt.log | tail -1 | cut -c1-300
@@ -518,7 +520,7 @@ cat /root/work/rft_sw.jsonl /root/work/rft_mt.jsonl > /root/work/rft_all.jsonl
 hf upload $R /root/work/rft_all.jsonl pooler_distill/chatsft/multiturn/rft_all.jsonl >/dev/null 2>&1
 echo "[mem7] memfit (ce) start $(date -u +%H:%M)"
 env SP_BASE=/root/gptq_hf_gq14 SP_RANK=16 SP_NOSYS=1 SP_EPISODIC=1 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
-  python3 /root/work/memfit.py --objective ce --student full --ckpt $B --data /root/work/rft_all.jsonl --out /root/pooler_$T.safetensors --log /root/memfit_$T.log --steps 200 --val-every 50 --lr 5e-6 --lr-lora 5e-6 > /root/memfit_${T}_run.log 2>&1
+  python3 /root/work/memfit.py --objective ce --student full --ckpt $B --data /root/work/rft_all.jsonl --out /root/pooler_$T.safetensors --log /root/memfit_$T.log --steps 200 --val-every 50 --lr 0 --lr-lora 5e-6 > /root/memfit_${T}_run.log 2>&1
 grep -E "^\[memfit\]|^\[data\]|^\[lora\]|^val |MEMFIT_DONE|Error|Traceback" /root/memfit_${T}_run.log | tail -14 | cut -c1-200
 [ -s /root/pooler_$T.safetensors ] || { echo "MEM7_ABORT memfit: $(tail -3 /root/memfit_${T}_run.log | tr '\n' ' ' | cut -c1-300)"; exit 1; }
 hf upload $R /root/pooler_$T.safetensors pooler_distill/chatsft/multiturn/pooler_$T.safetensors >/dev/null 2>&1

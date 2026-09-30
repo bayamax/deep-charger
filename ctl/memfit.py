@@ -248,7 +248,7 @@ def validate():
     return tot / max(n, 1)
 
 
-groups = [{"params": pp, "lr": A.lr}] + ([{"params": lora, "lr": A.lr_lora}] if lora else [])
+groups = ([{"params": pp, "lr": A.lr}] if A.lr > 0 else []) + ([{"params": lora, "lr": A.lr_lora}] if lora else [])   # --lr 0: the pooler stays as it is
 opt = torch.optim.Adam(groups, betas=(0.9, 0.95))
 BEST = {"v": float("inf"), "step": 0, "p": None, "l": None}
 def keep_if_best(v, i):
@@ -265,7 +265,7 @@ v0 = validate(); keep_if_best(v0, 0)
 print(f"[memfit] history-through-pooler KL before training {v0:.4f} over {len(VAL)} unseen turns", flush=True); log.write(f"val 0 kl={v0:.4f}\n"); log.flush()
 t0 = time.time(); N = A.selftest if A.selftest else A.steps
 for i in range(N):
-    for g, base in zip(opt.param_groups, [A.lr] + ([A.lr_lora] if lora else [])): g["lr"] = base * lr_scale(i)
+    for g, base in zip(opt.param_groups, ([A.lr] if A.lr > 0 else []) + ([A.lr_lora] if lora else [])): g["lr"] = base * lr_scale(i)
     opt.zero_grad(set_to_none=True); tot, n = 0.0, 0
     for _ in range(A.accum):
         l = kl_of(TRAIN[random.randrange(len(TRAIN))])
