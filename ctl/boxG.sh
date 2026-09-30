@@ -80,7 +80,7 @@ PSKIP=
 # The raw GitHub copy this box fetches can lag and hand a control run an OLDER version of this file (04:48 on 09-22 it
 # relaunched the online loop under the previous mode while the newer run was merging a checkpoint on the same card).
 # Every edit bumps BOXG_SERIAL; a run that sees a lower serial than one already executed stops here.
-BOXG_SERIAL=2026092690
+BOXG_SERIAL=2026092691
 if [ -f /root/.boxg_serial ] && [ "$(cat /root/.boxg_serial)" -gt "$BOXG_SERIAL" ] 2>/dev/null; then echo "BOXG_STALE $BOXG_SERIAL < $(cat /root/.boxg_serial)"; exit 0; fi
 echo $BOXG_SERIAL > /root/.boxg_serial
 MODE=idle         # 2026-09-29: the side jobs hold the card (multi-turn measurement and training); a finished reeval re-launched on every control run and killed their evaluators
@@ -557,6 +557,28 @@ QK
   chmod +x /root/qtkeep.sh
   setsid nohup bash -c 'bash /root/qtkeep.sh 2>&1 | tee -a /root/qt.log' >> /proc/1/fd/1 2>&1 < /dev/null 9>&- &
   echo "QT_LAUNCHED $(date -u)"
+fi
+
+# Quote, second round (after QT): the base model with quote on the first 30 mt_eval dialogues (does it keep the
+# references and recall that the full protocol had, bridge 41.7 / memory 40.0?), and mem6 with quote on the switch set
+# (does training add to the protocol fix?). QT2=0 cancels.
+QT2=${QT2:-1}
+if [ "$QT2" = 1 ] && ! pgrep -f "qt2kee[p].sh" >/dev/null && ! grep -q "QT2_JOB_DONE" /root/qt2.log 2>/dev/null; then
+  cat > /root/qt2keep.sh <<'QK'
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); R=baya1116/hypernet-sp-distill; cd /root/work
+ENV="SP_BASE=/root/gptq_hf_gq14 SP_RANK=16 SP_NOSYS=1 SP_EPISODIC=1 OMP_NUM_THREADS=1 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True"
+EVARGS="--rw 768 --maxd 384 --samepage 1 --decode plain --temp 0.6 --gen 4000 --stop eos --replycap 600"
+until grep -q "QT_JOB_DONE" /root/qt.log 2>/dev/null; do sleep 300; done
+for m in "/root/reeval_g14m_pooler.safetensors /root/work/mt_eval.jsonl 30 mtq" "/root/pooler_mem6.safetensors /root/work/mt_eval_sw.jsonl 60 mem6q"; do set -- $m
+  while pgrep -f "pool_eval.py|memfit.py" >/dev/null; do sleep 60; done
+  env $ENV python3 /root/work/pool_eval.py $1 /root/work/eval300.jsonl /root/work/$4_full.jsonl --multiturn $2 --mt-mode quote --n $3 $EVARGS --tag "[$4]" > /root/$4.log 2>&1
+  grep -E "EVAL_DONE|Error|Traceback" /root/$4.log | tail -1 | cut -c1-300; hf upload $R /root/work/$4_full.jsonl pooler_distill/chatsft/multiturn/$4_full.jsonl >/dev/null 2>&1
+done
+echo "QT2_JOB_DONE $(date -u)"
+QK
+  chmod +x /root/qt2keep.sh
+  setsid nohup bash -c 'bash /root/qt2keep.sh 2>&1 | tee -a /root/qt2.log' >> /proc/1/fd/1 2>&1 < /dev/null 9>&- &
+  echo "QT2_LAUNCHED $(date -u)"
 fi
 
 # The device layout of the local search, as a side job on the CPU: the int8 embedder, the IVF layout of the sign

@@ -61,3 +61,26 @@ full), and the single-turn search held-out (102 questions, vs 48.0%) for the los
 The last few exchanges (user message + the reply after `</think>`, thinking and search results stripped)
 through the chat template, then the new user message and `<think>\n`; older exchanges dropped. The pooler
 loop runs as for a single question. (Written into release/USAGE.md once the trained model is released.)
+
+## Results so far (2026-09-30, the switch set: 60 held-out dialogues, two unrelated questions each)
+
+Turn 1 has no history, so its prompt is identical in every arm that does not change the weights; three runs of the
+base model under identical conditions read 41, 33 and 29 of 60 - a 60-dialogue reading moves by several points on
+its own, and every comparison below is against the average of the base runs.
+
+| | turn 1 (no history) | turn 2 (after an unrelated exchange) |
+|---|---|---|
+| base, history as separate turns (2 runs) | 41, 33 | 17, 19 |
+| base, **quote** (no training; history quoted inside the one user message) | 29 (the same prompt as base) | **28** |
+| mem5 (self-distillation, pooler + LoRA) | 32 | 26 |
+| mem6 (+ single-turn anchors, gentler) | 27 | 29 |
+| mem7 (rejection-sampled self-training, LoRA only) | 35 | 20 |
+
+Per question against the average of the two base runs, turn 2: quote +16.7 +- 5.5 points, mem6 +18.3 +- 6.3, mem5
++13.3 +- 5.6, mem7 +3.3 +- 6.1. The turn-1 drops read earlier as damage are mostly the base's own spread (mem7 -3.3
++- 5.0, mem5 -8.3 +- 5.4; mem6 -16.7 +- 5.6 the one that may be real). The single-turn search held-out (102):
+mem5 45.1%, mem7 50.0%, base 48.0%.
+
+So the protocol alone - the model given one user message, the history quoted as context - recovers as much of the
+topic switch as the best training, with no weight change and so no loss anywhere. Next: whether quote keeps the
+references and recall the full protocol had (mt_eval), and whether training adds to it (mem6 + quote).
