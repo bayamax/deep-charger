@@ -30,6 +30,7 @@ ap.add_argument("--maxtok", type=int, default=2600); ap.add_argument("--val", ty
 ap.add_argument("--reply-bias", type=float, default=0.5, help="share of steps that take the block holding </think> (where the reply starts)")
 ap.add_argument("--student", default="stream", choices=["stream", "mix", "full"], help="full: every earlier exchange (question + reply) verbatim in the pinned prompt, the pooler only for this turn's own evicted tokens; stream: every earlier turn through the pooler; mix: the last exchange (question + reply) verbatim in the pinned prompt, older turns through the pooler - names travel verbatim, the pooler carries the rest")
 ap.add_argument("--objective", default="kl", choices=["kl", "ce"], help="kl: match the model's own single-turn behaviour on the self-contained version (the default); ce: rejection-sampled self-training - the data are the model's OWN successful runs (rows with correct=true, e.g. pool_eval --mt-mode full --mt-save-tokens 1), their prompt as run and their tokens as the target, so the history-in-view behaviour it already gets right is reinforced and nothing else is asked of it")
+ap.add_argument("--ce-native", type=int, default=0, help="ce: rebuild each successful turn's prompt as the NATIVE multi-turn chat (earlier questions and replies of its dialogue as separate turns, then the question) instead of the prompt it was run with - successes collected under another protocol (quote) trained into the native one")
 ap.add_argument("--anchor", type=int, default=0, help="single-turn anchors: a solo trace with NO history, the student's prompt the teacher's own - the KL then only holds the LoRA to the model as it was (mem5 without them lost 9 of 41 first turns and doubled the searches). -1: as many as the real examples")
 ap.add_argument("--synth-switch", type=int, default=-1, help="topic switches assembled from the traces: one dialogue's history, then a self-contained turn of ANOTHER dialogue (its own solo trajectory is the teacher's). -1: as many as the real examples; 0: none")
 ap.add_argument("--gen", type=int, default=1500); ap.add_argument("--seed", type=int, default=0); ap.add_argument("--selftest", type=int, default=0)
@@ -175,9 +176,15 @@ print(f"[data] + {sum(1 for e in EX if e['turn'] == -2)} single-turn anchors (no
 if A.objective == "ce":
     EX = []
     for did, rs in rows.items():
+        rs = sorted(rs, key=lambda r: r["turn"]); hist = []
         for r in rs:
             if r.get("correct") and len(r["gen"]) >= 8:
-                EX.append({"dialog": did, "turn": r["turn"], "carry": [], "tq": r["q_ids"], "sq": r["q_ids"], "gen": r["gen"][:A.maxtok]})
+                if A.ce_native:
+                    sq = tok.encode(tok.apply_chat_template(hist + [{"role": "user", "content": r["q"]}], add_generation_prompt=True, tokenize=False) + "<think>\n")
+                else:
+                    sq = r["q_ids"]
+                EX.append({"dialog": did, "turn": r["turn"], "carry": [], "tq": sq, "sq": sq, "gen": r["gen"][:A.maxtok]})
+            hist = hist + [{"role": "user", "content": r["q"]}, {"role": "assistant", "content": (r.get("reply") or "(no reply)")}]
     k0 = sum(1 for e in EX if e["turn"] == 0); k1 = len(EX) - k0
     print(f"[data] ce: {len(EX)} successful turns of the model's own ({k0} first turns, no history; {k1} later turns, history in the prompt)", flush=True)
 random.shuffle(EX)

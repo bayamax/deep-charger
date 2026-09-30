@@ -80,7 +80,7 @@ PSKIP=
 # The raw GitHub copy this box fetches can lag and hand a control run an OLDER version of this file (04:48 on 09-22 it
 # relaunched the online loop under the previous mode while the newer run was merging a checkpoint on the same card).
 # Every edit bumps BOXG_SERIAL; a run that sees a lower serial than one already executed stops here.
-BOXG_SERIAL=2026092691
+BOXG_SERIAL=2026092692
 if [ -f /root/.boxg_serial ] && [ "$(cat /root/.boxg_serial)" -gt "$BOXG_SERIAL" ] 2>/dev/null; then echo "BOXG_STALE $BOXG_SERIAL < $(cat /root/.boxg_serial)"; exit 0; fi
 echo $BOXG_SERIAL > /root/.boxg_serial
 MODE=idle         # 2026-09-29: the side jobs hold the card (multi-turn measurement and training); a finished reeval re-launched on every control run and killed their evaluators
@@ -581,6 +581,70 @@ QK
   echo "QT2_LAUNCHED $(date -u)"
 fi
 
+# mem8 (2026-09-30): the user does not want the quote protocol in the app - the model itself must take a multi-turn
+# chat. Quote is used only to COLLECT: under it the base model gets the switch turn right about twice as often, so the
+# same box time yields twice its own correct trajectories; those are trained into the NATIVE multi-turn prompt
+# (memfit --objective ce --ce-native 1, LoRA only). Four-turn chains, so the history is one to three exchanges deep.
+# Training: 70 chains of 4 unrelated training questions. Measured on 30 held-out chains of 4 (the switch set's 60
+# dialogues joined two by two), native protocol, base and mem8, turn by turn, and the single-turn search held-out.
+if [ ! -e /root/.mem8_swap ]; then touch /root/.mem8_swap; pkill -f "qt2kee[p].sh"; pkill -f "pool_eval.py .*--mt-mode quote"; sleep 3; echo "MEM8_SWAP stopped the quote follow-ups $(date -u)"; fi
+MEM8=${MEM8:-1}
+if [ "$MEM8" = 1 ] && ! pgrep -f "mem8kee[p].sh" >/dev/null && ! grep -q "MEM8_JOB_DONE" /root/mem8.log 2>/dev/null; then
+  cat > /root/mem8keep.sh <<'M8'
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); R=baya1116/hypernet-sp-distill; cd /root/work; T=mem8; B=/root/reeval_g14m_pooler.safetensors
+ENV="SP_BASE=/root/gptq_hf_gq14 SP_RANK=16 SP_NOSYS=1 SP_EPISODIC=1 OMP_NUM_THREADS=1 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True"
+EVARGS="--rw 768 --maxd 384 --samepage 1 --decode plain --temp 0.6 --gen 4000 --stop eos --replycap 600"
+python3 - <<'PY'
+import json, random
+used = set()
+for f in ("/root/work/eval300.jsonl",):
+    for l in open(f): used.add(json.loads(l).get("q", "").strip())
+for f in ("/root/work/mt_train.jsonl", "/root/work/mt_train_sw.jsonl"):
+    for l in open(f):
+        d = json.loads(l); used.add(d.get("seed", "")); used |= {t["q"] for t in d["turns"]}
+seeds = []
+for l in open("/root/work/selfq_all.jsonl"):
+    try: r = json.loads(l)
+    except Exception: continue
+    if r.get("q") and r.get("gold") and r["q"].strip() not in used: seeds.append((r["q"].strip(), r["gold"].strip()))
+seeds = list(dict.fromkeys(seeds)); random.Random(31).shuffle(seeds)
+with open("/root/work/mt_train_chain.jsonl", "w") as fh:
+    for k in range(min(70, len(seeds) // 4)):
+        qs = seeds[4 * k: 4 * k + 4]
+        fh.write(json.dumps({"id": f"tch{k:03d}", "kind": "switch", "turns": [{"q": q, "gold": g, "standalone": q} for q, g in qs]}, ensure_ascii=False) + "\n")
+sw = [json.loads(l) for l in open("/root/work/mt_eval_sw.jsonl")]
+with open("/root/work/mt_eval_chain.jsonl", "w") as fh:
+    for k in range(len(sw) // 2):
+        a, b = sw[2 * k], sw[2 * k + 1]
+        fh.write(json.dumps({"id": f"ech{k:03d}", "kind": "switch", "turns": a["turns"] + b["turns"]}, ensure_ascii=False) + "\n")
+print(f"[mem8] {min(70, len(seeds)//4)} training chains of 4 ({len(seeds)} free seeds), {len(sw)//2} held-out chains of 4")
+PY
+while pgrep -f "pool_eval.py|memfit.py" >/dev/null; do sleep 60; done
+echo "[mem8] collection (quote) start $(date -u +%H:%M)"
+env $ENV python3 /root/work/pool_eval.py $B /root/work/eval300.jsonl /root/work/rft8.jsonl --multiturn /root/work/mt_train_chain.jsonl --mt-mode quote --mt-save-tokens 1 --n 70 $EVARGS --tag "[rft8]" > /root/rft8.log 2>&1
+grep -E "EVAL_DONE|Error|Traceback" /root/rft8.log | tail -1 | cut -c1-300
+hf upload $R /root/work/rft8.jsonl pooler_distill/chatsft/multiturn/rft8.jsonl >/dev/null 2>&1
+echo "[mem8] memfit (ce, native) start $(date -u +%H:%M)"
+env SP_BASE=/root/gptq_hf_gq14 SP_RANK=16 SP_NOSYS=1 SP_EPISODIC=1 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
+  python3 /root/work/memfit.py --objective ce --ce-native 1 --student full --ckpt $B --data /root/work/rft8.jsonl --out /root/pooler_$T.safetensors --log /root/memfit_$T.log --steps 250 --val-every 50 --lr 0 --lr-lora 5e-6 > /root/memfit_${T}_run.log 2>&1
+grep -E "^\[memfit\]|^\[data\]|^val |MEMFIT_DONE|Error|Traceback" /root/memfit_${T}_run.log | tail -12 | cut -c1-200
+[ -s /root/pooler_$T.safetensors ] || { echo "MEM8_ABORT memfit: $(tail -3 /root/memfit_${T}_run.log | tr '\n' ' ' | cut -c1-300)"; exit 1; }
+hf upload $R /root/pooler_$T.safetensors pooler_distill/chatsft/multiturn/pooler_$T.safetensors >/dev/null 2>&1
+ev() { while pgrep -f "pool_eval.py" >/dev/null; do sleep 60; done
+  env $ENV python3 /root/work/pool_eval.py $1 /root/work/eval300.jsonl $3 --multiturn $2 --mt-mode $4 --n $5 $EVARGS --tag "[$6]" > /root/$6.log 2>&1
+  grep -E "EVAL_DONE|Error|Traceback" /root/$6.log | tail -2 | cut -c1-300; hf upload $R $3 pooler_distill/chatsft/multiturn/$(basename $3) >/dev/null 2>&1; }
+ev /root/pooler_$T.safetensors /root/work/mt_eval_chain.jsonl /root/work/${T}_chain.jsonl full 30 ${T}-chain
+for i in 0 1 2; do while pgrep -f "pool_eval.py" >/dev/null; do sleep 60; done
+  env $ENV python3 /root/work/pool_eval.py /root/pooler_$T.safetensors /root/work/ev_$i.jsonl /root/work/${T}st_out_$i.jsonl --n 34 $EVARGS --tag "[${T}st$i]" > /root/${T}st_$i.log 2>&1
+  grep -E "EVAL_DONE|Error|Traceback" /root/${T}st_$i.log | tail -1 | cut -c1-300; hf upload $R /root/work/${T}st_out_$i.jsonl pooler_distill/chatsft/rollouts/${T}st_$i.jsonl >/dev/null 2>&1; done
+ev $B /root/work/mt_eval_chain.jsonl /root/work/base_chain.jsonl full 30 base-chain
+echo "MEM8_JOB_DONE $(date -u)"
+M8
+  chmod +x /root/mem8keep.sh
+  setsid nohup bash -c 'bash /root/mem8keep.sh 2>&1 | tee -a /root/mem8.log' >> /proc/1/fd/1 2>&1 < /dev/null 9>&- &
+  echo "MEM8_LAUNCHED $(date -u)"
+fi
+
 # The device layout of the local search, as a side job on the CPU: the int8 embedder, the IVF layout of the sign
 # index, the memory and time of the search as its own process on the whole store, all uploaded beside the store.
 IVF=${IVF:-1}
@@ -978,6 +1042,7 @@ while :; do
     echo "--- mem6.log (tail) ---"; tail -n 10 /root/mem6.log 2>/dev/null | cut -c1-300; grep -E "^val " /root/memfit_mem6_run.log 2>/dev/null | tail -2
     echo "--- mem7.log (tail) ---"; tail -n 10 /root/mem7.log 2>/dev/null | cut -c1-300; grep -E "^val " /root/memfit_mem7_run.log 2>/dev/null | tail -2
     echo "--- qt.log (tail) ---"; tail -n 4 /root/qt.log 2>/dev/null | cut -c1-300
+    echo "--- mem8.log (tail) ---"; tail -n 10 /root/mem8.log 2>/dev/null | cut -c1-300; grep -E "^val " /root/memfit_mem8_run.log 2>/dev/null | tail -2
     echo "--- mt.log (tail) ---"; tail -n 8 /root/mt.log 2>/dev/null | cut -c1-300; for f in $(ls -t /root/mt*_*.log 2>/dev/null | head -1); do echo "--- $f (tail) ---"; grep -E "^\[mt |EVAL_DONE|Error|Traceback" $f | tail -3 | cut -c1-300; done
     echo "--- ranker.log (tail) ---"; tail -n 8 /root/ranker.log 2>/dev/null | cut -c1-300
     echo "--- release.log (tail) ---"; tail -n 6 /root/release.log 2>/dev/null | cut -c1-200
