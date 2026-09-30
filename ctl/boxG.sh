@@ -80,7 +80,7 @@ PSKIP=
 # The raw GitHub copy this box fetches can lag and hand a control run an OLDER version of this file (04:48 on 09-22 it
 # relaunched the online loop under the previous mode while the newer run was merging a checkpoint on the same card).
 # Every edit bumps BOXG_SERIAL; a run that sees a lower serial than one already executed stops here.
-BOXG_SERIAL=2026092689
+BOXG_SERIAL=2026092690
 if [ -f /root/.boxg_serial ] && [ "$(cat /root/.boxg_serial)" -gt "$BOXG_SERIAL" ] 2>/dev/null; then echo "BOXG_STALE $BOXG_SERIAL < $(cat /root/.boxg_serial)"; exit 0; fi
 echo $BOXG_SERIAL > /root/.boxg_serial
 MODE=idle         # 2026-09-29: the side jobs hold the card (multi-turn measurement and training); a finished reeval re-launched on every control run and killed their evaluators
@@ -538,6 +538,27 @@ M7
   echo "MEM7_LAUNCHED $(date -u)"
 fi
 
+# No-training protocols on the switch set, queued behind mem7 (base model): quote - the earlier exchanges quoted as
+# context inside the one user message; and the base full protocol again (how far a 60-dialogue reading moves by chance).
+QT=${QT:-1}
+if [ "$QT" = 1 ] && ! pgrep -f "qtkee[p].sh" >/dev/null && ! grep -q "QT_JOB_DONE" /root/qt.log 2>/dev/null; then
+  cat > /root/qtkeep.sh <<'QK'
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); R=baya1116/hypernet-sp-distill; cd /root/work
+ENV="SP_BASE=/root/gptq_hf_gq14 SP_RANK=16 SP_NOSYS=1 SP_EPISODIC=1 OMP_NUM_THREADS=1 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True"
+EVARGS="--rw 768 --maxd 384 --samepage 1 --decode plain --temp 0.6 --gen 4000 --stop eos --replycap 600"
+until grep -qE "MEM7_JOB_DONE|MEM7_ABORT" /root/mem7.log 2>/dev/null; do sleep 300; done
+for m in "quote sw0q" "full sw0r"; do set -- $m
+  while pgrep -f "pool_eval.py|memfit.py" >/dev/null; do sleep 60; done
+  env $ENV python3 /root/work/pool_eval.py /root/reeval_g14m_pooler.safetensors /root/work/eval300.jsonl /root/work/$2_full.jsonl --multiturn /root/work/mt_eval_sw.jsonl --mt-mode $1 --n 60 $EVARGS --tag "[$2]" > /root/$2.log 2>&1
+  grep -E "EVAL_DONE|Error|Traceback" /root/$2.log | tail -1 | cut -c1-300; hf upload $R /root/work/$2_full.jsonl pooler_distill/chatsft/multiturn/$2_full.jsonl >/dev/null 2>&1
+done
+echo "QT_JOB_DONE $(date -u)"
+QK
+  chmod +x /root/qtkeep.sh
+  setsid nohup bash -c 'bash /root/qtkeep.sh 2>&1 | tee -a /root/qt.log' >> /proc/1/fd/1 2>&1 < /dev/null 9>&- &
+  echo "QT_LAUNCHED $(date -u)"
+fi
+
 # The device layout of the local search, as a side job on the CPU: the int8 embedder, the IVF layout of the sign
 # index, the memory and time of the search as its own process on the whole store, all uploaded beside the store.
 IVF=${IVF:-1}
@@ -934,6 +955,7 @@ while :; do
     echo "--- mtm.log (tail) ---"; tail -n 6 /root/mtm.log 2>/dev/null | cut -c1-300; grep -E "^val " /root/memfit_mem3m_run.log 2>/dev/null | tail -3
     echo "--- mem6.log (tail) ---"; tail -n 10 /root/mem6.log 2>/dev/null | cut -c1-300; grep -E "^val " /root/memfit_mem6_run.log 2>/dev/null | tail -2
     echo "--- mem7.log (tail) ---"; tail -n 10 /root/mem7.log 2>/dev/null | cut -c1-300; grep -E "^val " /root/memfit_mem7_run.log 2>/dev/null | tail -2
+    echo "--- qt.log (tail) ---"; tail -n 4 /root/qt.log 2>/dev/null | cut -c1-300
     echo "--- mt.log (tail) ---"; tail -n 8 /root/mt.log 2>/dev/null | cut -c1-300; for f in $(ls -t /root/mt*_*.log 2>/dev/null | head -1); do echo "--- $f (tail) ---"; grep -E "^\[mt |EVAL_DONE|Error|Traceback" $f | tail -3 | cut -c1-300; done
     echo "--- ranker.log (tail) ---"; tail -n 8 /root/ranker.log 2>/dev/null | cut -c1-300
     echo "--- release.log (tail) ---"; tail -n 6 /root/release.log 2>/dev/null | cut -c1-200

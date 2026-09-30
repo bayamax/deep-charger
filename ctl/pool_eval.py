@@ -30,7 +30,8 @@ ap.add_argument("--stop", default="answer", choices=["answer", "eos"], help="ans
 ap.add_argument("--replycap", type=int, default=200)
 ap.add_argument("--greedy", type=int, default=0, help="1: argmax decoding (deterministic up to hardware), for evaluator A/B checks")
 ap.add_argument("--multiturn", default="", help="jsonl of dialogues {id, kind, turns: [{q, gold}]}: each dialogue runs turn by turn with --mt-mode carrying the history; one output row per turn")
-ap.add_argument("--mt-mode", default="stream", choices=["none", "full", "stream", "mix"], help="none: no history (each turn alone); full: the previous turns (user + reply, no thinking) in the pinned prompt; stream: only the current question pinned, everything before it (earlier questions, thinking, search results, replies) flows through the pooler; mix: the last exchange pinned as in full, the rest as in stream")
+ap.add_argument("--mt-mode", default="stream", choices=["none", "full", "stream", "mix", "quote"], help="none: no history (each turn alone); full: the previous turns (user + reply, no thinking) in the pinned prompt; stream: only the current question pinned, everything before it (earlier questions, thinking, search results, replies) flows through the pooler; mix: the last exchange pinned as in full, the rest as in stream")
+ap.add_argument("--mt-quote-turns", type=int, default=3, help="quote mode: how many earlier exchanges are quoted")
 ap.add_argument("--mt-standalone", type=int, default=0, help="1 (with --mt-mode none): each turn runs its self-contained version (the turn's 'standalone' field) - memfit's teacher trajectories")
 ap.add_argument("--mt-save-tokens", type=int, default=0, help="1: each multi-turn row also carries the prompt ids and the generated token stream")
 ap.add_argument("--force", default="", help="JSON {question: [local store doc ids]}: one rollout per (question, doc) with the FIRST search served that page (the reward table of a retriever trained against this frozen model); needs SP_LOCAL_STORE")
@@ -340,11 +341,17 @@ def run_multiturn():
             msgs, carry = [], []
             for i, turn in enumerate(d["turns"]):
                 q, g = turn["q"], (turn.get("gold") or "").strip()
-                if A.mt_mode == "none": prefix, seed = None, None
+                qwrap = q
+                if A.mt_mode == "quote" and msgs:
+                    # no training: the earlier exchanges quoted as context INSIDE the one user message, the new message
+                    # marked as the thing to answer - the model only ever saw one user message, so it is given one
+                    ctx = "\n".join(("User: " if m["role"] == "user" else "Assistant: ") + m["content"] for m in msgs[-2 * A.mt_quote_turns:])
+                    qwrap = f"(Earlier in our conversation, for context only:\n{ctx}\n)\n\nMy new message: {q}"
+                if A.mt_mode in ("none", "quote"): prefix, seed = None, None
                 elif A.mt_mode == "full": prefix, seed = msgs, None
                 elif A.mt_mode == "stream": prefix, seed = None, carry
                 else: prefix, seed = msgs[-2:], carry
-                qrun = (turn.get("standalone") or q) if A.mt_standalone else q
+                qrun = (turn.get("standalone") or q) if A.mt_standalone else qwrap
                 txt, ans, ns_, nm, served, queries, landed, dead = rollout(qrun, prefix=prefix, seed_kept=seed)
                 reply = txt.split("</think>")[-1].strip() if landed else ""
                 reply = re.sub(r"<｜end▁of▁sentence｜>.*", "", reply, flags=re.S).strip()
