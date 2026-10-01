@@ -80,7 +80,7 @@ PSKIP=
 # The raw GitHub copy this box fetches can lag and hand a control run an OLDER version of this file (04:48 on 09-22 it
 # relaunched the online loop under the previous mode while the newer run was merging a checkpoint on the same card).
 # Every edit bumps BOXG_SERIAL; a run that sees a lower serial than one already executed stops here.
-BOXG_SERIAL=2026092694
+BOXG_SERIAL=2026092695
 if [ -f /root/.boxg_serial ] && [ "$(cat /root/.boxg_serial)" -gt "$BOXG_SERIAL" ] 2>/dev/null; then echo "BOXG_STALE $BOXG_SERIAL < $(cat /root/.boxg_serial)"; exit 0; fi
 echo $BOXG_SERIAL > /root/.boxg_serial
 MODE=idle         # 2026-09-29: the side jobs hold the card (multi-turn measurement and training); a finished reeval re-launched on every control run and killed their evaluators
@@ -672,6 +672,64 @@ M9
   echo "MEM9_LAUNCHED $(date -u)"
 fi
 
+# mem10 (2026-10-01): mem9's first reading says the history costs the switch turns (turn 2: alone 19, history 10 of 30;
+# turns 2-4: 21 vs 6 discordant), but 30 chains are too few to size it. A held-out of 100 fresh chains of 4 (400
+# questions never trained or evaluated), base with history and alone; and a second training round 4x mem8's size,
+# collected ALONE (each question run by itself - the most successes per box hour; their tokens trained into the native
+# history prompt, ce-native, LoRA only, one success per distinct question, nothing solved twice). Two lanes on the card:
+# the held-out measurements and the collection run side by side.
+MEM10=${MEM10:-1}
+if [ "$MEM10" = 1 ] && grep -q "MEM9_JOB_DONE" /root/mem9.log 2>/dev/null && ! pgrep -f "mem10kee[p].sh" >/dev/null && ! grep -q "MEM10_JOB_DONE" /root/mem10.log 2>/dev/null; then
+  cat > /root/mem10keep.sh <<'M10'
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); R=baya1116/hypernet-sp-distill; cd /root/work; T=mem10; B=/root/reeval_g14m_pooler.safetensors
+ENV="SP_BASE=/root/gptq_hf_gq14 SP_RANK=16 SP_NOSYS=1 SP_EPISODIC=1 OMP_NUM_THREADS=1 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True"
+EVARGS="--rw 768 --maxd 384 --samepage 1 --decode plain --temp 0.6 --gen 4000 --stop eos --replycap 600"
+[ -s /root/work/mt_eval_c100.jsonl ] || python3 - <<'PY2'
+import json, random
+used = set()
+for l in open("/root/work/eval300.jsonl"): used.add(json.loads(l).get("q", "").strip())
+for f in ("/root/work/mt_train.jsonl", "/root/work/mt_train_sw.jsonl", "/root/work/mt_train_chain.jsonl", "/root/work/mt_eval.jsonl", "/root/work/mt_eval_sw.jsonl"):
+    for l in open(f):
+        d = json.loads(l); used.add(d.get("seed", "")); used |= {t["q"].strip() for t in d["turns"]}
+seeds = []
+for l in open("/root/work/selfq_all.jsonl"):
+    try: r = json.loads(l)
+    except Exception: continue
+    if r.get("q") and r.get("gold") and r["q"].strip() not in used: seeds.append((r["q"].strip(), r["gold"].strip()))
+seeds = list(dict.fromkeys(seeds)); random.Random(41).shuffle(seeds)
+ne = min(100, len(seeds) // 12); ch = [seeds[4 * k: 4 * k + 4] for k in range(len(seeds) // 4)]
+def dump(path, chains, pre):
+    with open(path, "w") as fh:
+        for k, qs in enumerate(chains):
+            fh.write(json.dumps({"id": f"{pre}{k:03d}", "kind": "switch", "turns": [{"q": q, "gold": g, "standalone": q} for q, g in qs]}, ensure_ascii=False) + "\n")
+dump("/root/work/mt_eval_c100.jsonl", ch[:ne], "e10_"); dump("/root/work/mt_train_c10.jsonl", ch[ne:], "t10_")
+print(f"[mem10] {len(seeds)} free seeds: {ne} held-out chains of 4, {len(ch) - ne} training chains of 4")
+PY2
+ev() { env $ENV python3 /root/work/pool_eval.py $1 /root/work/eval300.jsonl /root/work/$2.jsonl --multiturn $3 --mt-mode $4 --n $5 $6 $EVARGS --tag "[$2]" > /root/$2.log 2>&1
+  grep -E "EVAL_DONE|Error|Traceback" /root/$2.log | tail -2 | cut -c1-300; hf upload $R /root/work/$2.jsonl pooler_distill/chatsft/multiturn/$2.jsonl >/dev/null 2>&1; }
+while pgrep -f "pool_eval.py|memfit.py" >/dev/null; do sleep 60; done
+echo "[mem10] two lanes start $(date -u +%H:%M)"
+( ev $B base_c100_full /root/work/mt_eval_c100.jsonl full 100 ""; ev $B base_c100_alone /root/work/mt_eval_c100.jsonl none 100 ""; echo "[mem10] lane A done $(date -u +%H:%M)" ) &
+( ev $B rft10 /root/work/mt_train_c10.jsonl none 1000 "--mt-save-tokens 1"; echo "[mem10] lane B done $(date -u +%H:%M)" ) &
+sleep 600; nvidia-smi --query-gpu=memory.used,memory.total,utilization.gpu --format=csv,noheader | sed 's/^/[mem10] gpu /'
+wait
+echo "[mem10] memfit (ce, native) start $(date -u +%H:%M)"
+env SP_BASE=/root/gptq_hf_gq14 SP_RANK=16 SP_NOSYS=1 SP_EPISODIC=1 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
+  python3 /root/work/memfit.py --objective ce --ce-native 1 --student full --ckpt $B --data /root/work/rft10.jsonl --out /root/pooler_$T.safetensors --log /root/memfit_$T.log --steps 600 --val-every 100 --lr 0 --lr-lora 5e-6 > /root/memfit_${T}_run.log 2>&1
+grep -E "^\[memfit\]|^\[data\]|^val |MEMFIT_DONE|Error|Traceback" /root/memfit_${T}_run.log | tail -12 | cut -c1-200
+[ -s /root/pooler_$T.safetensors ] || { echo "MEM10_ABORT memfit: $(tail -3 /root/memfit_${T}_run.log | tr '\n' ' ' | cut -c1-300)"; exit 1; }
+hf upload $R /root/pooler_$T.safetensors pooler_distill/chatsft/multiturn/pooler_$T.safetensors >/dev/null 2>&1
+( ev /root/pooler_$T.safetensors ${T}_c100_full /root/work/mt_eval_c100.jsonl full 100 "" ) &
+( for i in 0 1 2; do env $ENV python3 /root/work/pool_eval.py /root/pooler_$T.safetensors /root/work/ev_$i.jsonl /root/work/${T}st_out_$i.jsonl --n 34 $EVARGS --tag "[${T}st$i]" > /root/${T}st_$i.log 2>&1
+  grep -E "EVAL_DONE|Error|Traceback" /root/${T}st_$i.log | tail -1 | cut -c1-300; hf upload $R /root/work/${T}st_out_$i.jsonl pooler_distill/chatsft/rollouts/${T}st_$i.jsonl >/dev/null 2>&1; done ) &
+wait
+echo "MEM10_JOB_DONE $(date -u)"
+M10
+  chmod +x /root/mem10keep.sh
+  setsid nohup bash -c 'bash /root/mem10keep.sh 2>&1 | tee -a /root/mem10.log' >> /proc/1/fd/1 2>&1 < /dev/null 9>&- &
+  echo "MEM10_LAUNCHED $(date -u)"
+fi
+
 # The device layout of the local search, as a side job on the CPU: the int8 embedder, the IVF layout of the sign
 # index, the memory and time of the search as its own process on the whole store, all uploaded beside the store.
 IVF=${IVF:-1}
@@ -1069,6 +1127,7 @@ while :; do
     echo "--- mem6.log (tail) ---"; tail -n 10 /root/mem6.log 2>/dev/null | cut -c1-300; grep -E "^val " /root/memfit_mem6_run.log 2>/dev/null | tail -2
     echo "--- mem7.log (tail) ---"; tail -n 10 /root/mem7.log 2>/dev/null | cut -c1-300; grep -E "^val " /root/memfit_mem7_run.log 2>/dev/null | tail -2
     echo "--- qt.log (tail) ---"; tail -n 4 /root/qt.log 2>/dev/null | cut -c1-300
+    echo "--- mem10.log (tail) ---"; tail -n 12 /root/mem10.log 2>/dev/null | cut -c1-300; for f in /root/work/base_c100_full.jsonl /root/work/base_c100_alone.jsonl /root/work/rft10.jsonl /root/work/mem10_c100_full.jsonl; do [ -e $f ] && echo "$f $(wc -l < $f) rows"; done
     echo "--- mem9.log (tail) ---"; tail -n 6 /root/mem9.log 2>/dev/null | cut -c1-300
     echo "--- mem8.log (tail) ---"; tail -n 10 /root/mem8.log 2>/dev/null | cut -c1-300; grep -E "^val " /root/memfit_mem8_run.log 2>/dev/null | tail -2
     echo "--- mt.log (tail) ---"; tail -n 8 /root/mt.log 2>/dev/null | cut -c1-300; for f in $(ls -t /root/mt*_*.log 2>/dev/null | head -1); do echo "--- $f (tail) ---"; grep -E "^\[mt |EVAL_DONE|Error|Traceback" $f | tail -3 | cut -c1-300; done

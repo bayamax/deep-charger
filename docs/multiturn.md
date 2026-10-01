@@ -105,3 +105,23 @@ mem8 49.0% (44.1 / 61.8 / 41.2), base 48.0% - no loss, and no gain on the chains
 On these chains the base's turn 3 (a first question after two unrelated exchanges) reads as high as turn 1; the
 drop is on turns 2 and 4, the switch set's second questions. So part of the "switch drop" may be those questions'
 own difficulty. mem9 measures it: each chain question alone (twice, for the spread) and quote on the same chains.
+
+## mem9 (2026-10-01): the history does cost the switch turns (first reading, 30 chains)
+
+Same 30 chains, base model, correct of 30 per turn (turn 1 has no history in any arm - its spread is the noise):
+
+| | turn 1 | turn 2 | turn 3 | turn 4 |
+|---|---|---|---|---|
+| each question alone (no history), run 1 | 20 | 19 | 19 | 11 |
+| native history (base-chain) | 16 | 10 | 16 | 8 |
+| quote | 17 | 13 | 17 | 9 |
+| mem8, native history | 18 | 11 | 14 | 10 |
+
+Paired alone vs history: turn 2 11 vs 2 discordant questions (sign test p ~ 0.02), turns 2-4 21 vs 6 (p < 0.01);
+turn 1, identical prompts, 8 vs 4 (chance). Turn 4's questions are hard on their own (11 alone). So the history costs
+the first switch most; its size is not settled at 30 chains (the alone run's turn 1 reads 4 above the history run's
+identical turn 1). The second alone run finishes the mem9 job.
+
+mem10: a held-out of 100 fresh chains of 4 (400 questions), base with history and alone, side by side with a training
+collection 4x mem8's (about 200 chains, each question run alone, one success per distinct question), then memfit
+ce-native (LoRA only) and the 100-chain held-out and the single-turn 102 on the result.
