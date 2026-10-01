@@ -8,7 +8,7 @@ cd /root
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null)
 R=baya1116/hypernet-sp-distill
 RAW="https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl"
-BOXI_SERIAL=5
+BOXI_SERIAL=6
 if [ -f /root/.boxi_serial ] && [ "$(cat /root/.boxi_serial)" -gt "$BOXI_SERIAL" ] 2>/dev/null; then echo "BOXI_STALE $BOXI_SERIAL"; exit 0; fi
 echo $BOXI_SERIAL > /root/.boxi_serial
 mkdir -p /root/sb /root/work
@@ -96,29 +96,51 @@ RK
   setsid nohup bash -c 'bash /root/run23keep.sh 2>&1 | tee -a /root/sb_run23.log' > /dev/null 2>&1 < /dev/null &
   echo "RUN23_LAUNCHED $(date -u)"
 fi
-# ---- run4 (the goal is the page vector the hidden states give - a search system if it carries enough): a page token
-# in front of the encoder, trained so each hidden sentence finds its own document's vector (--page 1), and measured as
-# page retrieval over 2000 held-out documents (one sentence hidden in each, against the mean of the others' vectors).
-# Data 2 -> 6 shards (5 to train, shard 5 held out), 100k steps.
-if ! pgrep -f "run4kee[p].sh" >/dev/null && ! grep -q "RUN4_JOB_DONE\|RUN4_ABORT" /root/sb_run4.log 2>/dev/null; then
-  cat > /root/run4keep.sh <<'RK'
-export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); R=baya1116/hypernet-sp-distill; cd /root/sb
-while pgrep -f "python3 /root/sb/" >/dev/null; do sleep 60; done
-python3 /root/sb/prep.py --out /root/sb/data/docs --shards 2-5 > /root/sb/prep4.log 2>&1; grep -E "^\[prep\]" /root/sb/prep4.log
-grep -q PREP_DONE /root/sb/prep4.log || { tail -5 /root/sb/prep4.log; echo "RUN4_ABORT prep"; exit 1; }
-python3 /root/sb/embed.py --dir /root/sb/data/docs > /root/sb/embed4.log 2>&1; grep -E "^\[embed\]" /root/sb/embed4.log
-grep -q EMBED_DONE /root/sb/embed4.log || { tail -5 /root/sb/embed4.log; echo "RUN4_ABORT embed"; exit 1; }
-df -h /root | tail -1
-echo "[run4] train start $(date -u +%H:%M)"
+# ---- run4, re-planned 2026-10-01 23:30 JST (the user: "if there is headroom, add data first"): run2 saw its ~120k
+# training documents about 15 times over and flattened, and 60k steps take only 87 min on this card, so data is the
+# limit, not compute. Vectors go int8 with a per-row scale (cosine to fp16 >= 0.9999, half the disk), the text of a
+# shard is deleted once it is embedded (prep.py can rewrite it; only the held-out shard 001 keeps its text), and
+# shards are added one at a time up to 20 while at least 6 GB stay free. Shard 001 stays held out, as in run2/run3,
+# so the numbers line up. Then the page-token model, 200k steps.
+if [ ! -e /root/.run4_swap ]; then touch /root/.run4_swap; pkill -f "run4kee[p].sh"; pkill -f "python3 /root/sb/embed.py"; pkill -f "python3 /root/sb/prep.py"; sleep 5; echo "RUN4_SWAPPED (old 6-shard run4 stopped) $(date -u)"; fi
+if ! pgrep -f "run4bkee[p].sh" >/dev/null && ! grep -q "RUN4B_JOB_DONE\|RUN4B_ABORT" /root/sb_run4b.log 2>/dev/null; then
+  cat > /root/run4bkeep.sh <<'RK'
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); R=baya1116/hypernet-sp-distill; D=/root/sb/data/docs; cd /root/sb
+while pgrep -f "python3 /root/sb/" >/dev/null; do sleep 30; done
+rm -f $D/*.tmp.npy $D/*.part
+# fp16 shards already written -> int8 + scale
+python3 - <<'PY2'
+import glob, os, numpy as np
+for vf in sorted(glob.glob("/root/sb/data/docs/vec_*.npy")):
+    v = np.load(vf, mmap_mode="r")
+    if v.dtype == np.int8: continue
+    k = os.path.basename(vf)[4:-4]; q = np.empty(v.shape, np.int8); sc = np.empty(len(v), np.float16)
+    for i in range(0, len(v), 1 << 20):
+        x = np.asarray(v[i:i + (1 << 20)], np.float32); s = np.abs(x).max(1).clip(1e-6).astype(np.float16)
+        sc[i:i + len(x)] = s; q[i:i + len(x)] = np.round(x / s.astype(np.float32)[:, None] * 127).clip(-127, 127)
+    np.save(f"/root/sb/data/docs/scl_{k}.npy", sc); np.save(vf + ".tmp.npy", q); os.replace(vf + ".tmp.npy", vf)
+    print(f"[int8] {k}: {len(v)} rows", flush=True)
+PY2
+dropt() { for f in $D/docs_*.jsonl; do k=$(basename $f .jsonl); k=${k#docs_}; [ "$k" = 001 ] && continue; [ -e $D/vec_$k.npy ] && rm -f $f; done; rm -rf /root/.cache/huggingface/hub/datasets--wikimedia--wikipedia; }
+python3 /root/sb/embed.py --dir $D --int8 1 2>&1 | grep -E "^\[embed\]|Error|Traceback"; dropt
+for si in $(seq 2 19); do
+  k=$(printf %03d $si); [ -e $D/vec_$k.npy ] && continue
+  fr=$(df -BG --output=avail /root | tail -1 | tr -dc 0-9); [ "$fr" -lt 6 ] && { echo "[data] stop at shard $si: ${fr} GB free"; break; }
+  python3 /root/sb/prep.py --out $D --shards $si-$si 2>&1 | grep -E "^\[prep\] shard|Error"
+  python3 /root/sb/embed.py --dir $D --int8 1 2>&1 | grep -E "^\[embed\] [0-9]|Error|Traceback"; dropt
+done
+ls $D/vec_*.npy | wc -l; du -sh $D; df -h /root | tail -1
+[ -e $D/vec_001.npy ] || { echo "RUN4B_ABORT no held-out shard"; exit 1; }
+echo "[run4b] train start $(date -u +%H:%M)"
 ( while sleep 1800; do hf upload $R /root/sb/run4/train.log sentbart/small_run4/train.log >/dev/null 2>&1; done ) & UP=$!
-python3 /root/sb/train.py --data /root/sb/data/docs --out /root/sb/run4 --steps 100000 --batch 32 --seq 128 --d 512 --layers 4 --heads 8 --ffn 2048 --warmup 1000 --eval-every 5000 --save-every 5000 --page 1 2>&1 | grep -E "^\[data\]|^\[model\]|^\[eval|TRAIN_DONE|Error|Traceback"
+python3 /root/sb/train.py --data $D --out /root/sb/run4 --eval-shard 001 --steps 200000 --batch 32 --seq 128 --d 512 --layers 4 --heads 8 --ffn 2048 --warmup 1000 --eval-every 10000 --save-every 10000 --page 1 2>&1 | grep -E "^\[data\]|^\[model\]|^\[eval|TRAIN_DONE|Error|Traceback"
 kill $UP 2>/dev/null
 hf upload $R /root/sb/run4/train.log sentbart/small_run4/train.log >/dev/null 2>&1
 hf upload $R /root/sb/run4/model_latest.pt sentbart/small_run4/model_latest.pt >/dev/null 2>&1
-echo "RUN4_JOB_DONE $(date -u)"
+echo "RUN4B_JOB_DONE $(date -u)"
 RK
-  setsid nohup bash -c 'bash /root/run4keep.sh 2>&1 | tee -a /root/sb_run4.log' > /dev/null 2>&1 < /dev/null &
-  echo "RUN4_LAUNCHED $(date -u)"
+  setsid nohup bash -c 'bash /root/run4bkeep.sh 2>&1 | tee -a /root/sb_run4b.log' > /dev/null 2>&1 < /dev/null &
+  echo "RUN4B_LAUNCHED $(date -u)"
 fi
 echo "BOXI_OK serial $BOXI_SERIAL $(date -u)"
 # CTL-END

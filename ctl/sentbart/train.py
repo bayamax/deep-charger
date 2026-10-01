@@ -33,6 +33,7 @@ ap.add_argument("--tau", type=float, default=0.05); ap.add_argument("--w-enc", t
 ap.add_argument("--w-cos", type=float, default=1.0, help="weight of the direct reconstruction term, 1 - cosine(predicted, true sentence vector)")
 ap.add_argument("--eval-every", type=int, default=1000); ap.add_argument("--save-every", type=int, default=2000)
 ap.add_argument("--min-sents", type=int, default=8)
+ap.add_argument("--eval-shard", default="", help="the held-out shard's key (e.g. 001); default the last one")
 ap.add_argument("--page", type=int, default=0, help="1: a page token in front of the encoder whose output is the document's vector, trained so each hidden sentence finds its own document's vector among the batch's (sentence -> page retrieval)")
 ap.add_argument("--w-page", type=float, default=1.0)
 ap.add_argument("--prev-skip", type=int, default=0, help="1: the decoder's output is (its head + a learned gate x the previous sentence's vector), normalised")
@@ -43,13 +44,22 @@ torch.manual_seed(0); random.seed(0); np.random.seed(0)
 DEV = "cuda"
 
 # ---- data: memory-mapped vectors, documents as row ranges; the last shard is held out ----
+class Q8:
+    """an int8 shard (embed.py --int8): row i is q[i] * scl[i] / 127, read back as float32 slices"""
+    def __init__(s, q, scl): s.q, s.scl, s.shape = q, scl, q.shape
+    def __getitem__(s, sl): return s.q[sl].astype(np.float32) * (s.scl[sl].astype(np.float32)[:, None] / 127.0)
+
+
 shards = []
 for vf in sorted(glob.glob(os.path.join(A.data, "vec_*.npy"))):
     k = os.path.basename(vf)[4:-4]
     off = np.load(os.path.join(A.data, f"off_{k}.npy"))
-    shards.append((k, np.load(vf, mmap_mode="r"), off))
+    v = np.load(vf, mmap_mode="r"); sf = os.path.join(A.data, f"scl_{k}.npy")
+    if v.dtype == np.int8: v = Q8(v, np.load(sf, mmap_mode="r"))
+    shards.append((k, v, off))
 assert len(shards) >= 2, "need at least two embedded shards (one is held out)"
-train_sh, eval_sh = shards[:-1], shards[-1]
+ei = [k for k, _, _ in shards].index(A.eval_shard) if A.eval_shard else len(shards) - 1
+eval_sh = shards[ei]; train_sh = shards[:ei] + shards[ei + 1:]
 docs = [(si, off[d], off[d + 1]) for si, (_, _, off) in enumerate(train_sh) for d in range(len(off) - 1) if off[d + 1] - off[d] >= A.min_sents]
 eoff = eval_sh[2]
 edocs = [(eoff[d], eoff[d + 1]) for d in range(len(eoff) - 1) if eoff[d + 1] - eoff[d] >= A.min_sents]

@@ -3,6 +3,7 @@
 
 For each docs_XXX.jsonl shard writes, next to it:
   vec_XXX.npy   float16 [n_sentences, 384]  every sentence of every document, in document order
+                (--int8 1: int8, with scl_XXX.npy float16 [n_sentences] the per-row max |x|; row = q * scl / 127)
   off_XXX.npy   int64   [n_docs + 1]        document d's sentences are rows off[d]:off[d+1]
 Sentences are batched by length (sorted) so padding is small; the order on disk is the original one.
 
@@ -17,6 +18,7 @@ ap.add_argument("--dir", required=True)
 ap.add_argument("--model", default="BAAI/bge-small-en-v1.5")
 ap.add_argument("--batch", type=int, default=1024)
 ap.add_argument("--maxlen", type=int, default=128)
+ap.add_argument("--int8", type=int, default=0, help="1: vec_XXX.npy as int8 with a per-row scale in scl_XXX.npy (row = q * scl / 127), half the disk")
 A = ap.parse_args()
 tok = AutoTokenizer.from_pretrained(A.model)
 enc = AutoModel.from_pretrained(A.model, torch_dtype=torch.float16).cuda().eval()
@@ -43,6 +45,10 @@ for path in sorted(glob.glob(os.path.join(A.dir, "docs_*.jsonl"))):
     for line in open(path):
         d = json.loads(line); sents.extend(d["sents"]); off.append(len(sents))
     v = embed(sents)
+    if A.int8:
+        v = v.astype(np.float32); scl = np.abs(v).max(1).clip(1e-6)
+        np.save(os.path.join(A.dir, f"scl_{k}.npy"), scl.astype(np.float16))
+        v = np.round(v / scl.astype(np.float16).astype(np.float32)[:, None] * 127).clip(-127, 127).astype(np.int8)
     np.save(vf + ".tmp.npy", v); os.replace(vf + ".tmp.npy", vf)
     np.save(of, np.array(off, dtype=np.int64))
     dt = time.time() - t0
