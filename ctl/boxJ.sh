@@ -8,7 +8,7 @@ cd /root/work 2>/dev/null || { mkdir -p /root/work; cd /root/work; }
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null)
 R=baya1116/hypernet-sp-distill
 RAW="https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl"
-BOXJ_SERIAL=4
+BOXJ_SERIAL=5
 if [ -f /root/.boxj_serial ] && [ "$(cat /root/.boxj_serial)" -gt "$BOXJ_SERIAL" ] 2>/dev/null; then echo "BOXJ_STALE $BOXJ_SERIAL"; exit 0; fi
 echo $BOXJ_SERIAL > /root/.boxj_serial
 
@@ -49,7 +49,7 @@ done
 
 cp /root/work/web_search.py /root/work/runtime/web_search.py 2>/dev/null   # the evaluator imports it as runtime.web_search
 
-if [ ! -e /root/.mirror_v2 ]; then touch /root/.mirror_v2; pkill -f "mirrorkee[p].sh"; sleep 1; echo "MIRROR_RESTART (pq3 lines) $(date -u)"; fi
+if [ ! -e /root/.mirror_v3 ]; then touch /root/.mirror_v3; pkill -f "mirrorkee[p].sh"; sleep 1; echo "MIRROR_RESTART (pq3 lines) $(date -u)"; fi
 # ---- the mirror: what this box is doing, on the hub every 10 minutes ----
 if ! pgrep -f "mirrorkee[p].sh" >/dev/null; then
   cat > /root/mirrorkeep.sh <<'MK'
@@ -57,6 +57,7 @@ export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); R=baya1116/h
 while :; do
   { echo "=== boxJ $(date -u) ==="; echo "--- ctl.log ---"; tail -n 40 /root/ctl.log 2>/dev/null | cut -c1-300
     echo "--- pq.log ---"; tail -n 8 /root/pq.log 2>/dev/null | cut -c1-300
+    echo "--- pq4.log ---"; tail -n 10 /root/pq4.log 2>/dev/null | cut -c1-300
     echo "--- pq3.log ---"; tail -n 30 /root/pq3.log 2>/dev/null | cut -c1-300; for f in /root/work/pq*_dolphin.jsonl; do [ -e $f ] && echo "$(basename $f) $(wc -l < $f)"; done; grep -h "^\[eval\]" /root/pq*_dolphin.log 2>/dev/null | tail -2
     echo "--- eval progress ---"; for f in /root/work/pq*_out_*.jsonl; do [ -e $f ] && echo "$(basename $f) $(wc -l < $f)"; done
     echo "--- gpu ---"; nvidia-smi --query-gpu=memory.used,memory.total,utilization.gpu --format=csv,noheader
@@ -103,7 +104,7 @@ fi
 # holds the key; g14's settings: temp 0.6, gen 7000, loop-break answer) and the search held-out (102). Arms: float
 # pooler (pqf), GPTQ on the mixed calibration (pqm), round-to-nearest (pqr). pq2's search-only GPTQ arm is dropped.
 if [ ! -e /root/.pq3_swap ]; then touch /root/.pq3_swap; pkill -f "pqkee[p].sh"; pkill -f "pool_eval.p[y]"; sleep 3; echo "PQ3_SWAP stopped pq2 $(date -u)"; fi
-if ! pgrep -f "pq3kee[p].sh" >/dev/null && ! grep -q "PQ3_JOB_DONE" /root/pq3.log 2>/dev/null; then
+if false && ! pgrep -f "pq3kee[p].sh" >/dev/null && ! grep -q "PQ3_JOB_DONE" /root/pq3.log 2>/dev/null; then   # replaced by pq4
   cat > /root/pq3keep.sh <<'PK'
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); R=baya1116/hypernet-sp-distill; cd /root/work
 REL=/root/hfdl/release/g14-4bit-gptq-trained; M=/root/g14q_hf; POOL=$REL/pooler.safetensors
@@ -155,6 +156,38 @@ echo "PQ3_JOB_DONE $(date -u)"
 PK
   setsid nohup bash -c 'bash /root/pq3keep.sh 2>&1 | tee -a /root/pq3.log' > /dev/null 2>&1 < /dev/null &
   echo "PQ3_LAUNCHED $(date -u)"
+fi
+# ---- pq4 (the user: re-use what is already solved). The float pooler on search is already measured for the shipped model
+# on these very questions (q14gx, 300 rollouts, 47.3%; paired per question offline), and round-to-nearest is out on the
+# pooler error alone (14x GPTQ's); so only: the float pooler on the Dolphin held-out (running now - no 4-bit float run
+# of it exists, g14's 53% was the 16-bit model), the mixed-calibration GPTQ pooler on the Dolphin held-out, and that
+# GPTQ pooler on the search held-out (102). pq3's keeper stops; its running evaluation is left to finish and is waited for.
+if [ ! -e /root/.pq4_swap ]; then touch /root/.pq4_swap; pkill -f "pq3kee[p].sh"; sleep 2; echo "PQ4_SWAP stopped the pq3 keeper (its running evaluation continues) $(date -u)"; fi
+if ! pgrep -f "pq4kee[p].sh" >/dev/null && ! grep -q "PQ4_JOB_DONE" /root/pq4.log 2>/dev/null; then
+  cat > /root/pq4keep.sh <<'PK'
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); R=baya1116/hypernet-sp-distill; cd /root/work
+M=/root/g14q_hf; GQ=/root/pq/pooler_gptq_mix_dq.safetensors
+while pgrep -f "evalrun_pqf" >/dev/null; do sleep 60; done
+echo "[pq4] pqf dolphin: $(wc -l < /root/work/pqf_dolphin.jsonl) replies $(date -u +%H:%M)"
+hf upload $R /root/work/pqf_dolphin.jsonl pooler_distill/pooler4bit/pqf_dolphin.jsonl >/dev/null 2>&1
+OMP_NUM_THREADS=1 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python3 /root/work/online_loop.py $M /root/evalrun_pqm \
+  --questions /root/work/eval300.jsonl --dolphin /root/work/dolphin_v1.jsonl --heldout /root/work/eval300.jsonl --pooler-init $GQ \
+  --b 12 --gen 7000 --budget 2400 --temp 0.6 --maxsrch 7 --pooler none --lora-rank 16 --lora-layers 20-27 --stop eos --loop-break answer \
+  --eval-file /root/work/dolphinq.jsonl --eval-out /root/work/pqm_dolphin.jsonl > /root/pqm_dolphin.log 2>&1
+echo "[pq4] pqm dolphin: $(wc -l < /root/work/pqm_dolphin.jsonl) replies $(date -u +%H:%M)"
+hf upload $R /root/work/pqm_dolphin.jsonl pooler_distill/pooler4bit/pqm_dolphin.jsonl >/dev/null 2>&1
+ENV="SP_BASE=$M SP_RANK=16 SP_NOSYS=1 SP_EPISODIC=1 OMP_NUM_THREADS=1 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True"
+EVARGS="--rw 768 --maxd 384 --samepage 1 --decode plain --temp 0.6 --gen 4000 --stop eos --replycap 600"
+for i in 0 1 2; do
+  env $ENV python3 /root/work/pool_eval.py $GQ /root/work/ev_$i.jsonl /root/work/pqm_out_$i.jsonl --n 34 $EVARGS --tag "[pqm$i]" > /root/pqm_$i.log 2>&1
+  echo "[pq4] $(grep -E "EVAL_DONE|Error|Traceback" /root/pqm_$i.log | tail -1 | cut -c1-250)"
+  hf upload $R /root/work/pqm_out_$i.jsonl pooler_distill/pooler4bit/pqm_out_$i.jsonl >/dev/null 2>&1
+done
+for i in 0 1 2; do hf upload $R /root/work/pqg_out_$i.jsonl pooler_distill/pooler4bit/pqg_out_$i.jsonl >/dev/null 2>&1; done
+echo "PQ4_JOB_DONE $(date -u)"
+PK
+  setsid nohup bash -c 'bash /root/pq4keep.sh 2>&1 | tee -a /root/pq4.log' > /dev/null 2>&1 < /dev/null &
+  echo "PQ4_LAUNCHED $(date -u)"
 fi
 echo "BOXJ_OK serial $BOXJ_SERIAL $(date -u)"
 # CTL-END
