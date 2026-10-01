@@ -154,3 +154,19 @@ Same 30 chains, correct of 30 per turn:
 Turns 2-4: base 34, mem10 46 of 90 (23 won, 11 lost; sign test p ~ 0.06). Turn 2, the first switch, goes from 10 to
 17 - most of the way to the alone level (18-19). The single-turn 102 decides whether the multi-turn GRPO (mtg1)
 starts from mem10 (mean of its three shards >= 45) or from the base.
+
+## mtg1 (2026-10-01/02): multi-turn GRPO from mem10, steps 25 and 100
+
+Same 30 chains, correct of 30 per turn; single-turn 102 (shards 0-2):
+
+| | turn 1 | turn 2 | turn 3 | turn 4 | turns 2-4 | single-turn |
+|---|---|---|---|---|---|---|
+| base, history | 16 | 10 | 16 | 8 | 34 | 48.0 |
+| mem10 (the start) | 18 | 17 | 17 | 12 | 46 | 45.1 |
+| mtg1 step 25 | 19 | 15 | 18 | 14 | 47 | 55.9 (shard 0 only) |
+| mtg1 step 100 | 19 | 15 | 14 | 8 | 37 | 51.0 (52.9 / 47.1 / 52.9) |
+
+The training reward did not move over the 100 steps (search pass by 20-step block 26 / 21 / 31 / 23 / 26%, a
+60-step running mean flat at 24-27%). Step 100 is above the base on both screens but below step 25 / mem10 on the
+later turns; with 30 chains these gaps are within noise. The user asked to keep going: mtg1c resumes to 200
+(measured) and 300 (measured), same settings.
