@@ -34,6 +34,9 @@ import q4  # noqa: E402
 ap = argparse.ArgumentParser()
 ap.add_argument("--pooler", required=True); ap.add_argument("--model", required=True); ap.add_argument("--data", required=True)
 ap.add_argument("--out", required=True); ap.add_argument("--method", default="gptq", choices=["gptq", "rtn"])
+ap.add_argument("--data2", default="", help="reasoning records {q, thinking, reply} (the pooler also compresses thinking, not only searches)")
+ap.add_argument("--mix", type=float, default=0.5, help="share of the windows cut from --data2")
+ap.add_argument("--tag", default="", help="suffix of the output names")
 ap.add_argument("--n", type=int, default=512, help="calibration windows"); ap.add_argument("--n-eval", type=int, default=128)
 ap.add_argument("--minlen", type=int, default=32); ap.add_argument("--maxlen", type=int, default=384)
 ap.add_argument("--group", type=int, default=64); ap.add_argument("--bits", type=int, default=4)
@@ -58,12 +61,21 @@ for f in sorted(os.listdir(A.model)):
         sd = load_file(os.path.join(A.model, f))
         if "model.embed_tokens.weight" in sd: emb_w = sd["model.embed_tokens.weight"].float(); break
 assert emb_w is not None, "no embed_tokens in the model directory"
-texts = [json.loads(l)["text"] for l in open(A.data) if l.strip()]
-random.shuffle(texts)
-stream = []
-for t in texts:
-    stream += tok.encode(t, add_special_tokens=False)
-    if len(stream) > (A.n + A.n_eval) * A.maxlen * 3: break
+def make_stream(texts, need):
+    random.shuffle(texts); st = []
+    for t in texts:
+        st += tok.encode(t, add_special_tokens=False)
+        if len(st) > need: break
+    return st
+
+
+n2 = int(round(A.mix * A.n)) if A.data2 else 0; e2 = int(round(A.mix * A.n_eval)) if A.data2 else 0
+stream = make_stream([json.loads(l)["text"] for l in open(A.data) if l.strip()], (A.n - n2 + A.n_eval - e2) * A.maxlen * 3)
+stream2 = []
+if A.data2:
+    recs = [json.loads(l) for l in open(A.data2) if l.strip()]
+    stream2 = make_stream([f"<｜User｜>{r['q']}<｜Assistant｜><think>\n{r.get('thinking', '')}\n</think>\n\n{r['reply']}" for r in recs if r.get("q") and r.get("reply")],
+                          (n2 + e2) * A.maxlen * 3)
 
 
 def pe(L):
@@ -73,18 +85,20 @@ def pe(L):
     return out
 
 
-def windows(n):
+def windows(n, st):
     out = []
     for _ in range(n):
-        L = random.randint(A.minlen, A.maxlen); s0 = random.randint(0, len(stream) - L - 1)
-        ids = torch.tensor(stream[s0:s0 + L])
+        L = random.randint(A.minlen, A.maxlen); s0 = random.randint(0, len(st) - L - 1)
+        ids = torch.tensor(st[s0:s0 + L])
         out.append((emb_w[ids] + pe(L)).to(DEV))
     return out
 
 
-CAL, EVW = windows(A.n), windows(A.n_eval)
+CAL = windows(A.n - n2, stream) + (windows(n2, stream2) if n2 else [])
+EVS = windows(A.n_eval - e2, stream); EVR = windows(e2, stream2) if e2 else []
+EVW = EVS + EVR
 del emb_w
-print(f"[pq] {len(CAL)} calibration + {len(EVW)} held-out windows ({A.minlen}..{A.maxlen} tokens) from {len(stream)} trace tokens; "
+print(f"[pq] {len(CAL)} calibration ({n2} of them reasoning) + {len(EVW)} held-out windows ({len(EVR)} reasoning) ({A.minlen}..{A.maxlen} tokens) from {len(stream)} trace tokens; "
       f"pooler {NB} blocks, d {D}, {A.heads} heads; method {A.method}", flush=True)
 
 
@@ -194,7 +208,7 @@ with torch.no_grad():
         Q_in = [block(qs, past, bi, P) for qs, past in zip(Q_in, CAL)]
         print(f"[pq] block {bi} done ({time.time() - t0:.0f}s)", flush=True)
 
-    def score(W):
+    def score(W, EVW=EVW):
         """the plain cosine is near 1 by construction (most of each output vector is the same whatever the input), so
         the error is also measured against what the input changes: the float outputs' spread around their own mean
         over windows (rel = |b - a| / |a - mean a|; cos_c = cosine of a - mean a and b - mean a)"""
@@ -206,12 +220,16 @@ with torch.no_grad():
         spread = F.cosine_similarity(As, mu.expand_as(As), dim=-1).mean().item()
         return float(cs.mean()), float(cs.min()), rel, cc, spread
     mc, wc, rel, cc, spread = score(P)
+    if EVR:
+        for nm, ev in (("search", EVS), ("reasoning", EVR)):
+            m_, w_, r_, c_, s_ = score(P, ev)
+            print(f"[pq]   {nm} windows only: relative error {r_:.4f}, centred cosine {c_:.4f}", flush=True)
     print(f"[pq] held-out windows: cosine to the float pooler {mc:.5f} (worst window {wc:.5f}); against the input-driven part: "
           f"relative error {rel:.4f}, centred cosine {cc:.4f} (the float outputs sit at cosine {spread:.4f} to their own mean)", flush=True)
 
 # ---- outputs ----
 dq = {k: v.detach().float().cpu().contiguous() for k, v in P.items()}
-save_file(dq, os.path.join(A.out, f"pooler_{A.method}_dq.safetensors"))
+save_file(dq, os.path.join(A.out, f"pooler_{A.method}{A.tag}_dq.safetensors"))
 shifts = torch.arange(0, 32, A.bits, dtype=torch.int64); mx = {}
 for k, v in dq.items():
     if k in PACK:
@@ -221,13 +239,13 @@ for k, v in dq.items():
         mx[k + ".scales"] = s_.to(torch.float16).numpy(); mx[k + ".biases"] = b_.to(torch.float16).numpy()
     else:
         mx[k] = v.to(torch.float16).numpy()
-save_np(mx, os.path.join(A.out, f"pooler_{A.method}_mlx.safetensors"))
+save_np(mx, os.path.join(A.out, f"pooler_{A.method}{A.tag}_mlx.safetensors"))
 # the packed file must reproduce the dequantized one exactly
 bad = 0
 for k in PACK:
     w32 = torch.from_numpy(mx[k].astype(np.int64)); c = ((w32[..., None] >> shifts) & ((1 << A.bits) - 1)).reshape(w32.shape[0], -1).float()
     s_ = torch.from_numpy(mx[k + ".scales"]).float().repeat_interleave(A.group, 1); b_ = torch.from_numpy(mx[k + ".biases"]).float().repeat_interleave(A.group, 1)
     bad += int(((c * s_ + b_) - dq[k]).abs().max() > 1e-3)
-sz = os.path.getsize(os.path.join(A.out, f"pooler_{A.method}_mlx.safetensors")) / 1e6
+sz = os.path.getsize(os.path.join(A.out, f"pooler_{A.method}{A.tag}_mlx.safetensors")) / 1e6
 print(f"[pq] packed {len(PACK)} matrices, {sz:.1f} MB (float32: {sum(v.numel() for v in dq.values()) * 4 / 1e6:.1f} MB); unpack check {'OK' if bad == 0 else f'{bad} MISMATCH'}", flush=True)
 print(f"POOLER_Q_DONE {A.method} cos {mc:.5f} rel {rel:.4f} centred {cc:.4f}", flush=True)

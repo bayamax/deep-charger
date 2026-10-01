@@ -80,7 +80,7 @@ PSKIP=
 # The raw GitHub copy this box fetches can lag and hand a control run an OLDER version of this file (04:48 on 09-22 it
 # relaunched the online loop under the previous mode while the newer run was merging a checkpoint on the same card).
 # Every edit bumps BOXG_SERIAL; a run that sees a lower serial than one already executed stops here.
-BOXG_SERIAL=2026092702
+BOXG_SERIAL=2026092703
 if [ -f /root/.boxg_serial ] && [ "$(cat /root/.boxg_serial)" -gt "$BOXG_SERIAL" ] 2>/dev/null; then echo "BOXG_STALE $BOXG_SERIAL < $(cat /root/.boxg_serial)"; exit 0; fi
 echo $BOXG_SERIAL > /root/.boxg_serial
 MODE=idle         # 2026-09-29: the side jobs hold the card (multi-turn measurement and training); a finished reeval re-launched on every control run and killed their evaluators
@@ -733,6 +733,66 @@ fi
 # +0.5 - the judge now also sees the history and fails a reply that answers or drags in the earlier topic),
 # group-normalised advantage, LoRA all layers r16 at 1e-5, pooler frozen, collapse guard on. Starts from the base when
 # mem10d is done; 100 steps, then the 30 held-out chains and the single-turn screen (shard 0) on the checkpoint.
+# pqjudge (2026-10-01): box J measures the 4-bit pooler on the Dolphin held-out but holds no judge key; this box judges
+# its replies (nano, REASON_SYS, the same judge and held-out as every Dolphin number so far) as each arm's file lands
+# on the hub. CPU and API only - the card stays with the multi-turn work.
+if ! pgrep -f "pqjudgekee[p].sh" >/dev/null && ! grep -q "PQJUDGE_DONE" /root/pqjudge.log 2>/dev/null; then
+  cat > /root/pqjudgekeep.sh <<'PJ'
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); R=baya1116/hypernet-sp-distill; cd /root/work
+for f in dolphin_v1.jsonl dolphin_v2.jsonl; do [ -s /root/hfdl/pooler_distill/chatsft/$f ] || hf download $R --include "pooler_distill/chatsft/$f" --local-dir /root/hfdl >/dev/null 2>&1; done
+python3 - <<'PD'
+import json, random
+v1 = [json.loads(l) for l in open("/root/hfdl/pooler_distill/chatsft/dolphin_v1.jsonl") if l.strip()]
+v1 = [r for r in v1 if r.get("q") and r.get("reply")]
+v2q = set((json.loads(l).get("q") or "").strip() for l in open("/root/hfdl/pooler_distill/chatsft/dolphin_v2.jsonl") if l.strip())
+cand = [r for r in v1 if r["q"].strip() not in v2q]; random.Random(0).shuffle(cand)
+with open("/root/work/dolphin_heldout100_pq.jsonl", "w") as o:
+    for r in cand[:100]: o.write(json.dumps({"q": r["q"], "ref": r["reply"]}, ensure_ascii=False) + "\n")
+PD
+left="pqf pqm pqr"
+while [ -n "$left" ]; do
+  nl=""
+  for T in $left; do
+    hf download $R --include "pooler_distill/pooler4bit/${T}_dolphin.jsonl" --local-dir /root/pqj >/dev/null 2>&1
+    f=/root/pqj/pooler_distill/pooler4bit/${T}_dolphin.jsonl
+    if [ -s $f ] && [ "$(wc -l < $f)" -ge 100 ]; then
+      OAI_KEY=$(cat /root/.oai 2>/dev/null) python3 - "$f" "$T" <<'PYJ'
+import json, os, sys, urllib.request, time
+from concurrent.futures import ThreadPoolExecutor
+src = open("/root/work/online_loop.py").read(); i = src.index("REASON_SYS = "); j = src.index('"""', src.index('"""', i) + 3) + 3
+ns = {}; exec(src[i:j], ns); SYS = ns["REASON_SYS"]
+ref = {json.loads(l)["q"].strip(): json.loads(l)["ref"] for l in open("/root/work/dolphin_heldout100_pq.jsonl") if l.strip()}
+rows = [json.loads(l) for l in open(sys.argv[1]) if l.strip()]
+key = os.environ.get("OAI_KEY", "")
+def judge(r):
+    t = r["text"]; reply = t.split("</think>")[-1].strip() if "</think>" in t else ""
+    if not reply: return 0, "unfinished"
+    body = {"model": "gpt-5-nano", "max_completion_tokens": 2000, "messages": [{"role": "system", "content": SYS},
+            {"role": "user", "content": f"QUESTION:\n{r['q'][:2000]}\n\nREFERENCE ANSWER:\n{ref.get(r['q'].strip(), '')[:3000]}\n\nASSISTANT ANSWER:\n{reply[:3000]}"}]}
+    err = "?"
+    for _ in range(3):
+        try:
+            d = json.load(urllib.request.urlopen(urllib.request.Request("https://api.openai.com/v1/chat/completions", data=json.dumps(body).encode(), headers={"Authorization": "Bearer " + key, "Content-Type": "application/json"}), timeout=180))
+            c = d["choices"][0]["message"].get("content") or ""; v = json.loads(c[c.find("{"): c.rfind("}") + 1])
+            return int(all(bool(v.get(k)) for k in ("solves_it", "follows_the_request", "language_english", "clean"))), v
+        except Exception as e: time.sleep(3); err = type(e).__name__
+    return 0, {"error": err}
+with ThreadPoolExecutor(max_workers=8) as ex: res = list(ex.map(judge, rows))
+ok = sum(a for a, _ in res); unf = sum(1 for _, v in res if v == "unfinished"); errs = sum(1 for _, v in res if isinstance(v, dict) and "error" in v)
+print(f"PQJ {sys.argv[2]} DOLPHIN_ACC {100*ok/max(len(rows),1):.1f}% ({ok}/{len(rows)}) unfinished {unf} judge errors {errs}", flush=True)
+with open(f"/root/work/{sys.argv[2]}_dolphin_judged.jsonl", "w") as o:
+    for r, (a, v) in zip(rows, res): o.write(json.dumps({"q": r["q"], "pass": a, "why": v, "text": r["text"]}, ensure_ascii=False) + "\n")
+PYJ
+      hf upload $R /root/work/${T}_dolphin_judged.jsonl pooler_distill/pooler4bit/${T}_dolphin_judged.jsonl >/dev/null 2>&1
+    else nl="$nl $T"; fi
+  done
+  left=$(echo $nl); [ -n "$left" ] && sleep 600
+done
+echo "PQJUDGE_DONE $(date -u)"
+PJ
+  setsid nohup bash -c 'bash /root/pqjudgekeep.sh 2>&1 | tee -a /root/pqjudge.log' >> /proc/1/fd/1 2>&1 < /dev/null 9>&- &
+  echo "PQJUDGE_LAUNCHED $(date -u)"
+fi
 if [ ! -e /root/.mtg1_swap ]; then touch /root/.mtg1_swap; pkill -f "mtg1kee[p].sh"; sleep 2; echo "MTG1_SWAP restarts the waiting GRPO keeper (init now chosen from mem10's single-turn result) $(date -u)"; fi
 MTG1=${MTG1:-1}
 if [ "$MTG1" = 1 ] && ! pgrep -f "mtg1kee[p].sh" >/dev/null && ! grep -q "MTG1_JOB_DONE" /root/mtg1.log 2>/dev/null; then
@@ -1329,6 +1389,7 @@ while :; do
     echo "--- mem6.log (tail) ---"; tail -n 10 /root/mem6.log 2>/dev/null | cut -c1-300; grep -E "^val " /root/memfit_mem6_run.log 2>/dev/null | tail -2
     echo "--- mem7.log (tail) ---"; tail -n 10 /root/mem7.log 2>/dev/null | cut -c1-300; grep -E "^val " /root/memfit_mem7_run.log 2>/dev/null | tail -2
     echo "--- qt.log (tail) ---"; tail -n 4 /root/qt.log 2>/dev/null | cut -c1-300
+    echo "--- pqjudge.log (tail) ---"; tail -n 5 /root/pqjudge.log 2>/dev/null | cut -c1-200
     echo "--- mtg1.log (tail) ---"; tail -n 10 /root/mtg1.log 2>/dev/null | cut -c1-300; grep -E "^\[step|ONLINE_|\[guard\]|\[warn\]" /root/mtg1_run.log 2>/dev/null | tail -4 | cut -c1-300
     echo "--- mem10d.log (tail) ---"; tail -n 14 /root/mem10d.log 2>/dev/null | cut -c1-300; for f in /root/work/rft10_s0.jsonl /root/work/rft10_s2.jsonl /root/work/mem10_chain.jsonl; do [ -e $f ] && echo "$(basename $f) $(wc -l < $f)"; done | tr "\n" " "; echo
     echo "--- mem10c.log (tail) ---"; tail -n 14 /root/mem10c.log 2>/dev/null | cut -c1-300
