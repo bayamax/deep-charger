@@ -33,6 +33,8 @@ ap.add_argument("--tau", type=float, default=0.05); ap.add_argument("--w-enc", t
 ap.add_argument("--w-cos", type=float, default=1.0, help="weight of the direct reconstruction term, 1 - cosine(predicted, true sentence vector)")
 ap.add_argument("--eval-every", type=int, default=1000); ap.add_argument("--save-every", type=int, default=2000)
 ap.add_argument("--min-sents", type=int, default=8)
+ap.add_argument("--page", type=int, default=0, help="1: a page token in front of the encoder whose output is the document's vector, trained so each hidden sentence finds its own document's vector among the batch's (sentence -> page retrieval)")
+ap.add_argument("--w-page", type=float, default=1.0)
 ap.add_argument("--prev-skip", type=int, default=0, help="1: the decoder's output is (its head + a learned gate x the previous sentence's vector), normalised")
 ap.add_argument("--p-suffix", type=float, default=0.5, help="share of documents whose tail is hidden (continuation) instead of spans")
 A = ap.parse_args()
@@ -70,6 +72,8 @@ def make_batch(items, mode="mix"):
     x = np.zeros((B, L, DIM), np.float32); valid = np.zeros((B, L), bool); masked = np.zeros((B, L), bool); cut = np.full(B, -1)
     for i, v in enumerate(items):
         n = len(v); x[i, :n] = v; valid[i, :n] = True
+        if mode == "one":
+            j = random.randint(1, n - 1); masked[i, j] = True; cut[i] = j; continue
         if mode == "suffix" or (mode == "mix" and random.random() < A.p_suffix):
             k = random.randint(max(1, n // 4), max(1, (3 * n) // 4)); masked[i, k:n] = True; cut[i] = k; continue
         budget = max(1, int(round(A.mask * n)))
@@ -94,6 +98,7 @@ class SentBART(nn.Module):
         super().__init__()
         d = A.d
         s.inp = nn.Linear(DIM, d); s.pos = nn.Embedding(A.seq + 1, d)
+        s.page_tok = nn.Parameter(torch.randn(d) * 0.02); s.page_head = nn.Linear(d, DIM); s.last_page = None
         s.mask_vec = nn.Parameter(torch.randn(d) * 0.02); s.bos = nn.Parameter(torch.randn(d) * 0.02)
         el = nn.TransformerEncoderLayer(d, A.heads, A.ffn, dropout=0.1, activation="gelu", batch_first=True, norm_first=True)
         dl = nn.TransformerDecoderLayer(d, A.heads, A.ffn, dropout=0.1, activation="gelu", batch_first=True, norm_first=True)
@@ -109,7 +114,13 @@ class SentBART(nn.Module):
         h = s.inp(x)
         h = torch.where(masked[..., None], s.mask_vec.to(h.dtype).expand_as(h), h)
         h = h + s.pos(torch.arange(L, device=x.device))[None]
-        return s.enc(h, src_key_padding_mask=~valid)
+        if not A.page:
+            return s.enc(h, src_key_padding_mask=~valid)
+        # the page token reads the whole (corrupted) document; its output, through page_head, is the page vector
+        h = torch.cat([s.page_tok.to(h.dtype).expand(B, 1, -1), h], dim=1)
+        out = s.enc(h, src_key_padding_mask=torch.cat([torch.zeros_like(valid[:, :1]), ~valid], dim=1))
+        s.last_page = F.normalize(s.page_head(out[:, 0]).float(), dim=-1)
+        return out[:, 1:]
 
     def decode(s, mem, valid, x):
         """teacher-forced: position t sees BOS + the true sentences before t"""
@@ -157,7 +168,14 @@ def losses(x, valid, masked):
     pos = torch.zeros_like(valid, dtype=torch.long); pos[valid] = flat
     le, lge = nce(pe[masked], tgt, pos[masked])       # encoder: the masked sentences
     ld, lgd = nce(pd[masked], tgt, pos[masked])       # decoder: the hidden sentences, from the ones before it
+    LP[0] = torch.zeros((), device=DEV)
+    if A.page:                                         # each hidden sentence must find its own document's page vector
+        q = x[masked].float(); doc = torch.nonzero(masked)[:, 0]
+        LP[0] = F.cross_entropy(q @ model.last_page.T / A.tau, doc)
     return le, ld, lge, lgd, pos
+
+
+LP = [None]
 
 
 @torch.no_grad()
@@ -198,8 +216,26 @@ def evaluate():
                     tk = lg_.topk(10, dim=-1).indices
                     r[k + "1"] = r.get(k + "1", 0) + int((tk[:, 0] == want).sum()); r[k + "10"] = r.get(k + "10", 0) + int((tk == want[:, None]).any(-1).sum())
                 r["nnext"] = r.get("nnext", 0) + len(bi2)
+    # page retrieval over all held-out documents: one sentence hidden in each, that sentence's vector is the query,
+    # its document must come first among every held-out page. Baseline: the mean of the document's other sentences.
+    if A.page:
+        random.seed(321); np.random.seed(321); pv, bv, qv = [], [], []
+        for i in range(0, len(edocs), A.batch):
+            items = [crop(eval_sh[1], a, b) for a, b in edocs[i:i + A.batch]]
+            x, valid, masked, cut = make_batch(items, "one")
+            with torch.autocast("cuda", dtype=torch.bfloat16):
+                model(x, valid, masked)
+            pv.append(model.last_page.float()); qv.append(x[masked].float())
+            keep = (valid & ~masked).float()[..., None]
+            bv.append(F.normalize((x.float() * keep).sum(1) / keep.sum(1).clamp_min(1), dim=-1))
+        Pm, Pb, Q = torch.cat(pv), torch.cat(bv), torch.cat(qv); tgt_ = torch.arange(len(Q), device=DEV)
+        for M_, k in ((Pm, "page"), (Pb, "page_base")):
+            tk = (Q @ M_.T).topk(10, dim=-1).indices
+            r[k + "1"] = int((tk[:, 0] == tgt_).sum()) / len(Q); r[k + "10"] = int((tk == tgt_[:, None]).any(-1).sum()) / len(Q)
+        r["npages"] = len(Q)
     random.seed(time.time()); np.random.seed(int(time.time()) % 2**31); model.train()
-    return {"enc_top1": r["enc1"] / r["nenc"], "enc_top10": r["enc10"] / r["nenc"], "dec_top1": r["dec1"] / r["ndec"], "dec_top10": r["dec10"] / r["ndec"],
+    pg = ({"page_top1": r["page1"], "page_top10": r["page10"], "page_base_top1": r["page_base1"], "page_base_top10": r["page_base10"], "pages": r["npages"]} if A.page else {})
+    return {**pg, "enc_top1": r["enc1"] / r["nenc"], "enc_top10": r["enc10"] / r["nenc"], "dec_top1": r["dec1"] / r["ndec"], "dec_top10": r["dec10"] / r["ndec"],
             "next_top1": r["next1"] / r["nnext"], "next_top10": r["next10"] / r["nnext"],
             "next_baseline_top1": r["base1"] / r["nnext"], "next_baseline_top10": r["base10"] / r["nnext"],
             "enc_cos": r["cosenc"] / r["benc"], "dec_cos": r["cosdec"] / r["bdec"],
@@ -218,7 +254,7 @@ for step in range(step0 + 1, A.steps + 1):
     x, valid, masked = train_batch()
     with torch.autocast("cuda", dtype=torch.bfloat16):
         le, ld, _, _, _ = losses(x, valid, masked)
-        loss = A.w_enc * le + ld
+        loss = A.w_enc * le + ld + (A.w_page * LP[0] if A.page else 0.0)
     LAST_COS.clear()
     opt.zero_grad(set_to_none=True); loss.backward()
     gn = float(torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)); opt.step(); sched.step()

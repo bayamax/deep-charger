@@ -8,7 +8,7 @@ cd /root
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null)
 R=baya1116/hypernet-sp-distill
 RAW="https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl"
-BOXI_SERIAL=3
+BOXI_SERIAL=4
 if [ -f /root/.boxi_serial ] && [ "$(cat /root/.boxi_serial)" -gt "$BOXI_SERIAL" ] 2>/dev/null; then echo "BOXI_STALE $BOXI_SERIAL"; exit 0; fi
 echo $BOXI_SERIAL > /root/.boxi_serial
 mkdir -p /root/sb /root/work
@@ -95,6 +95,28 @@ echo "RUN23_JOB_DONE $(date -u)"
 RK
   setsid nohup bash -c 'bash /root/run23keep.sh 2>&1 | tee -a /root/sb_run23.log' > /dev/null 2>&1 < /dev/null &
   echo "RUN23_LAUNCHED $(date -u)"
+fi
+# ---- run4 (the goal is the page vector the hidden states give - a search system if it carries enough): a page token
+# in front of the encoder, trained so each hidden sentence finds its own document's vector (--page 1), and measured as
+# page retrieval over 2000 held-out documents (one sentence hidden in each, against the mean of the others' vectors).
+# Data 2 -> 6 shards (5 to train, shard 5 held out), 100k steps.
+if ! pgrep -f "run4kee[p].sh" >/dev/null && ! grep -q "RUN4_JOB_DONE\|RUN4_ABORT" /root/sb_run4.log 2>/dev/null; then
+  cat > /root/run4keep.sh <<'RK'
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); R=baya1116/hypernet-sp-distill; cd /root/sb
+while pgrep -f "python3 /root/sb/" >/dev/null; do sleep 60; done
+python3 /root/sb/prep.py --out /root/sb/data/docs --shards 2-5 2>&1 | grep -E "^\[prep\]|PREP_DONE|Error" || { echo "RUN4_ABORT prep"; exit 1; }
+python3 /root/sb/embed.py --dir /root/sb/data/docs 2>&1 | grep -E "^\[embed\]|EMBED_DONE|Error" || { echo "RUN4_ABORT embed"; exit 1; }
+df -h /root | tail -1
+echo "[run4] train start $(date -u +%H:%M)"
+( while sleep 1800; do hf upload $R /root/sb/run4/train.log sentbart/small_run4/train.log >/dev/null 2>&1; done ) & UP=$!
+python3 /root/sb/train.py --data /root/sb/data/docs --out /root/sb/run4 --steps 100000 --batch 32 --seq 128 --d 512 --layers 4 --heads 8 --ffn 2048 --warmup 1000 --eval-every 5000 --save-every 5000 --page 1 2>&1 | grep -E "^\[data\]|^\[model\]|^\[eval|TRAIN_DONE|Error|Traceback"
+kill $UP 2>/dev/null
+hf upload $R /root/sb/run4/train.log sentbart/small_run4/train.log >/dev/null 2>&1
+hf upload $R /root/sb/run4/model_latest.pt sentbart/small_run4/model_latest.pt >/dev/null 2>&1
+echo "RUN4_JOB_DONE $(date -u)"
+RK
+  setsid nohup bash -c 'bash /root/run4keep.sh 2>&1 | tee -a /root/sb_run4.log' > /dev/null 2>&1 < /dev/null &
+  echo "RUN4_LAUNCHED $(date -u)"
 fi
 echo "BOXI_OK serial $BOXI_SERIAL $(date -u)"
 # CTL-END
