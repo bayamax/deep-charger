@@ -74,6 +74,19 @@ if A.q4:
     import q4  # noqa: E402
     q4.quantize_model(model, group=A.q4group, bits=A.q4bits,
                       skip=tuple(x for x in A.q4skip.split(",") if x))
+if os.environ.get("SP_LASTLOGIT"):
+    # Every forward here reads only the last position's logits (or none). The full-sequence head - a 152k vocabulary,
+    # upcast to fp32, over a prompt of thousands of tokens with history - was most of the 6.3 GB one process held, so
+    # two did not fit the card. The head on the last position alone gives the same last-position logits.
+    class _LastOnly(torch.nn.Module):
+        def __init__(self, m):
+            super().__init__(); self.m = m
+
+        def forward(self, h):
+            return self.m(h[:, -1:, :])
+    _base = model.get_base_model() if hasattr(model, "get_base_model") else model
+    if hasattr(_base, "lm_head"):
+        _base.lm_head = _LastOnly(_base.lm_head); print("[cfg] last-position logits only", flush=True)
 print(f"[cfg] rw={A.rw} maxd={A.maxd} chunk={A.chunk} temp={A.temp} gen={A.gen} maxs={A.maxs} maxm={A.maxm} decode={A.decode} samepage={A.samepage} q4={A.q4} q4skip={A.q4skip}", flush=True)
 
 # ---- environment: verbatim grpo_ep_more serve() ----
