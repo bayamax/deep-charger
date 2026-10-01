@@ -80,7 +80,7 @@ PSKIP=
 # The raw GitHub copy this box fetches can lag and hand a control run an OLDER version of this file (04:48 on 09-22 it
 # relaunched the online loop under the previous mode while the newer run was merging a checkpoint on the same card).
 # Every edit bumps BOXG_SERIAL; a run that sees a lower serial than one already executed stops here.
-BOXG_SERIAL=2026092697
+BOXG_SERIAL=2026092698
 if [ -f /root/.boxg_serial ] && [ "$(cat /root/.boxg_serial)" -gt "$BOXG_SERIAL" ] 2>/dev/null; then echo "BOXG_STALE $BOXG_SERIAL < $(cat /root/.boxg_serial)"; exit 0; fi
 echo $BOXG_SERIAL > /root/.boxg_serial
 MODE=idle         # 2026-09-29: the side jobs hold the card (multi-turn measurement and training); a finished reeval re-launched on every control run and killed their evaluators
@@ -678,7 +678,51 @@ fi
 # collected ALONE (each question run by itself - the most successes per box hour; their tokens trained into the native
 # history prompt, ce-native, LoRA only, one success per distinct question, nothing solved twice). Two lanes on the card:
 # the held-out measurements and the collection run side by side.
-MEM10=${MEM10:-1}
+MEM10=${MEM10:-0}   # 2026-10-01 02:10: replaced by mem10b (only two processes fit the card: 6.5 GB each)
+# mem10b: mem9's two alone runs agree (turn 2 alone 19 / 18 vs history 10 of 30; turns 2-4 49 / 48 vs 34), so the
+# history's cost is settled enough to act on and the 100-chain base measurement is dropped. Two fixed lanes (all the
+# card holds): the training collection (202 chains, each question alone) in four shards, two at a time; ce-native
+# training (LoRA only); then mem10 on the same 30 chains as base / mem8 and the single-turn 102, split across the lanes.
+if [ ! -e /root/.mem10b_swap ]; then touch /root/.mem10b_swap; pkill -f "mem10kee[p].sh"; pkill -f "pool_eval.py .*base_c100_"; pkill -f "pool_eval.py .*rft10_s"; sleep 3; echo "MEM10B_SWAP stopped mem10 $(date -u)"; fi
+MEM10B=${MEM10B:-1}
+if [ "$MEM10B" = 1 ] && ! pgrep -f "mem10bkee[p].sh" >/dev/null && ! grep -q "MEM10B_JOB_DONE" /root/mem10b.log 2>/dev/null; then
+  cat > /root/mem10bkeep.sh <<'M10'
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); R=baya1116/hypernet-sp-distill; cd /root/work; T=mem10; B=/root/reeval_g14m_pooler.safetensors
+ENV="SP_BASE=/root/gptq_hf_gq14 SP_RANK=16 SP_NOSYS=1 SP_EPISODIC=1 OMP_NUM_THREADS=1 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True"
+EVARGS="--rw 768 --maxd 384 --samepage 1 --decode plain --temp 0.6 --gen 4000 --stop eos --replycap 600"
+python3 - <<'PY3'
+L = open("/root/work/mt_train_c10.jsonl").readlines()
+for i in range(4): open(f"/root/work/mt_train_c10_s{i}.jsonl", "w").writelines(L[i::4])
+L = open("/root/work/mt_eval_chain.jsonl").readlines()
+for i in range(2): open(f"/root/work/mt_eval_chain_h{i}.jsonl", "w").writelines(L[i::2])
+PY3
+mt() { env $ENV python3 /root/work/pool_eval.py $1 /root/work/eval300.jsonl /root/work/$2.jsonl --multiturn $3 --mt-mode $4 --n 1000 $5 $EVARGS --tag "[$2]" > /root/$2.log 2>&1
+  echo "[mem10b] $(grep -E "EVAL_DONE|Error|Traceback" /root/$2.log | tail -1 | cut -c1-250) $(date -u +%H:%M)"; }
+st() { env $ENV python3 /root/work/pool_eval.py /root/pooler_$T.safetensors /root/work/ev_$1.jsonl /root/work/${T}st_out_$1.jsonl --n 34 $EVARGS --tag "[${T}st$1]" > /root/${T}st_$1.log 2>&1
+  echo "[mem10b] $(grep -E "EVAL_DONE|Error|Traceback" /root/${T}st_$1.log | tail -1 | cut -c1-250)"; hf upload $R /root/work/${T}st_out_$1.jsonl pooler_distill/chatsft/rollouts/${T}st_$1.jsonl >/dev/null 2>&1; }
+cat_up() { o=/root/work/$1.jsonl; cat /root/work/$1_$2*.jsonl > $o; echo "[mem10b] $1: $(wc -l < $o) rows"; hf upload $R $o pooler_distill/chatsft/multiturn/$1.jsonl >/dev/null 2>&1; }
+while pgrep -f "pool_eval.p[y]|memfit.p[y]" >/dev/null; do sleep 30; done
+echo "[mem10b] collection start $(date -u +%H:%M) (two lanes)"
+( mt $B rft10_s0 /root/work/mt_train_c10_s0.jsonl none "--mt-save-tokens 1"; mt $B rft10_s2 /root/work/mt_train_c10_s2.jsonl none "--mt-save-tokens 1" ) &
+sleep 120
+( mt $B rft10_s1 /root/work/mt_train_c10_s1.jsonl none "--mt-save-tokens 1"; mt $B rft10_s3 /root/work/mt_train_c10_s3.jsonl none "--mt-save-tokens 1" ) &
+wait; cat_up rft10 s
+echo "[mem10b] memfit (ce, native) start $(date -u +%H:%M)"
+env SP_BASE=/root/gptq_hf_gq14 SP_RANK=16 SP_NOSYS=1 SP_EPISODIC=1 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
+  python3 /root/work/memfit.py --objective ce --ce-native 1 --student full --ckpt $B --data /root/work/rft10.jsonl --out /root/pooler_$T.safetensors --log /root/memfit_$T.log --steps 600 --val-every 100 --lr 0 --lr-lora 5e-6 > /root/memfit_${T}_run.log 2>&1
+grep -E "^\[memfit\]|^\[data\]|^val |MEMFIT_DONE|Error|Traceback" /root/memfit_${T}_run.log | tail -12 | cut -c1-200
+[ -s /root/pooler_$T.safetensors ] || { echo "MEM10B_ABORT memfit: $(tail -3 /root/memfit_${T}_run.log | tr '\n' ' ' | cut -c1-300)"; exit 1; }
+hf upload $R /root/pooler_$T.safetensors pooler_distill/chatsft/multiturn/pooler_$T.safetensors >/dev/null 2>&1
+( mt /root/pooler_$T.safetensors ${T}_chain_h0 /root/work/mt_eval_chain_h0.jsonl full ""; st 0; st 2 ) &
+sleep 120
+( mt /root/pooler_$T.safetensors ${T}_chain_h1 /root/work/mt_eval_chain_h1.jsonl full ""; st 1 ) &
+wait; cat_up ${T}_chain h
+echo "MEM10B_JOB_DONE $(date -u)"
+M10
+  chmod +x /root/mem10bkeep.sh
+  setsid nohup bash -c 'bash /root/mem10bkeep.sh 2>&1 | tee -a /root/mem10b.log' >> /proc/1/fd/1 2>&1 < /dev/null 9>&- &
+  echo "MEM10B_LAUNCHED $(date -u)"
+fi
 if [ "$MEM10" = 1 ] && ! pgrep -f "mem10kee[p].sh" >/dev/null && ! grep -q "MEM10_JOB_DONE" /root/mem10.log 2>/dev/null; then
   cat > /root/mem10keep.sh <<'M10'
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); R=baya1116/hypernet-sp-distill; cd /root/work; T=mem10; B=/root/reeval_g14m_pooler.safetensors
@@ -1144,6 +1188,7 @@ while :; do
     echo "--- mem6.log (tail) ---"; tail -n 10 /root/mem6.log 2>/dev/null | cut -c1-300; grep -E "^val " /root/memfit_mem6_run.log 2>/dev/null | tail -2
     echo "--- mem7.log (tail) ---"; tail -n 10 /root/mem7.log 2>/dev/null | cut -c1-300; grep -E "^val " /root/memfit_mem7_run.log 2>/dev/null | tail -2
     echo "--- qt.log (tail) ---"; tail -n 4 /root/qt.log 2>/dev/null | cut -c1-300
+    echo "--- mem10b.log (tail) ---"; tail -n 14 /root/mem10b.log 2>/dev/null | cut -c1-300; for f in /root/work/rft10_s*.jsonl /root/work/mem10_chain_h*.jsonl; do [ -e $f ] && echo "$(basename $f) $(wc -l < $f)"; done | tr "\n" " "; echo
     echo "--- mem10.log (tail) ---"; tail -n 12 /root/mem10.log 2>/dev/null | cut -c1-300; for f in /root/work/base_c100_*_s*.jsonl /root/work/rft10_s*.jsonl /root/work/mem10_c100_full_s*.jsonl; do [ -e $f ] && echo "$(basename $f) $(wc -l < $f)"; done | tr "\n" " "; echo
     echo "--- mem9.log (tail) ---"; tail -n 6 /root/mem9.log 2>/dev/null | cut -c1-300
     echo "--- mem8.log (tail) ---"; tail -n 10 /root/mem8.log 2>/dev/null | cut -c1-300; grep -E "^val " /root/memfit_mem8_run.log 2>/dev/null | tail -2

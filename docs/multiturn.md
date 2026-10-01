@@ -125,3 +125,9 @@ identical turn 1). The second alone run finishes the mem9 job.
 mem10: a held-out of 100 fresh chains of 4 (400 questions), base with history and alone, side by side with a training
 collection 4x mem8's (about 200 chains, each question run alone, one success per distinct question), then memfit
 ce-native (LoRA only) and the 100-chain held-out and the single-turn 102 on the result.
+
+The second alone run (2026-10-01): 19 / 18 / 21 / 9. The two alone runs agree: turn 2 alone 19 and 18 vs history 10
+(11 vs 2 and 11 vs 3 discordant), turns 2-4 49 and 48 vs 34 of 90. The history costs the switch, most on the first
+one; settled enough to act on. mem10's 100-chain base measurement was dropped after the card proved to hold only two
+processes (about 6.5 GB each): mem10b runs the training collection (202 chains alone) on two lanes, trains, and
+measures mem10 on the same 30 chains as base / mem8 and the single-turn 102.
