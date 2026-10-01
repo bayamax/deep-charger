@@ -80,7 +80,7 @@ PSKIP=
 # The raw GitHub copy this box fetches can lag and hand a control run an OLDER version of this file (04:48 on 09-22 it
 # relaunched the online loop under the previous mode while the newer run was merging a checkpoint on the same card).
 # Every edit bumps BOXG_SERIAL; a run that sees a lower serial than one already executed stops here.
-BOXG_SERIAL=2026092695
+BOXG_SERIAL=2026092696
 if [ -f /root/.boxg_serial ] && [ "$(cat /root/.boxg_serial)" -gt "$BOXG_SERIAL" ] 2>/dev/null; then echo "BOXG_STALE $BOXG_SERIAL < $(cat /root/.boxg_serial)"; exit 0; fi
 echo $BOXG_SERIAL > /root/.boxg_serial
 MODE=idle         # 2026-09-29: the side jobs hold the card (multi-turn measurement and training); a finished reeval re-launched on every control run and killed their evaluators
@@ -705,24 +705,41 @@ def dump(path, chains, pre):
 dump("/root/work/mt_eval_c100.jsonl", ch[:ne], "e10_"); dump("/root/work/mt_train_c10.jsonl", ch[ne:], "t10_")
 print(f"[mem10] {len(seeds)} free seeds: {ne} held-out chains of 4, {len(ch) - ne} training chains of 4")
 PY2
-ev() { env $ENV python3 /root/work/pool_eval.py $1 /root/work/eval300.jsonl /root/work/$2.jsonl --multiturn $3 --mt-mode $4 --n $5 $6 $EVARGS --tag "[$2]" > /root/$2.log 2>&1
-  grep -E "EVAL_DONE|Error|Traceback" /root/$2.log | tail -2 | cut -c1-300; hf upload $R /root/work/$2.jsonl pooler_distill/chatsft/multiturn/$2.jsonl >/dev/null 2>&1; }
-while pgrep -f "pool_eval.py|memfit.py" >/dev/null; do sleep 60; done
-echo "[mem10] two lanes start $(date -u +%H:%M)"
-( ev $B base_c100_full /root/work/mt_eval_c100.jsonl full 100 ""; ev $B base_c100_alone /root/work/mt_eval_c100.jsonl none 100 ""; echo "[mem10] lane A done $(date -u +%H:%M)" ) &
-( ev $B rft10 /root/work/mt_train_c10.jsonl none 1000 "--mt-save-tokens 1"; echo "[mem10] lane B done $(date -u +%H:%M)" ) &
-sleep 600; nvidia-smi --query-gpu=memory.used,memory.total,utilization.gpu --format=csv,noheader | sed 's/^/[mem10] gpu /'
-wait
+# Parallel: one batch-1 decoder leaves the card mostly idle, so the work runs as shards, each its own process, launched
+# one at a time while the card has room (>= 3.5 GB free VRAM, >= 6 GB free RAM, at most MAXP at once); the held-out
+# shards go first. 15 h of serial evaluation becomes a few hours.
+MAXP=8; NS=4
+python3 - <<'PY3'
+import json
+for src, pre in (("/root/work/mt_eval_c100.jsonl", "/root/work/mt_eval_c100_s"), ("/root/work/mt_train_c10.jsonl", "/root/work/mt_train_c10_s")):
+    L = open(src).readlines()
+    for i in range(4): open(f"{pre}{i}.jsonl", "w").writelines(L[i::4])
+PY3
+room() { while :; do n=$(pgrep -fc "pool_eval.p[y]"); fv=$(nvidia-smi --query-gpu=memory.free --format=csv,noheader,nounits | head -1); fr=$(awk '/MemAvailable/{print int($2/1024)}' /proc/meminfo)
+  [ "$n" -lt $MAXP ] && [ "${fv:-0}" -ge 3500 ] && [ "${fr:-0}" -ge 6000 ] && return 0; sleep 30; done; }
+run() { room; env $ENV nohup python3 /root/work/pool_eval.py $1 /root/work/eval300.jsonl /root/work/$2.jsonl --multiturn $3 --mt-mode $4 --n 1000 $5 $EVARGS --tag "[$2]" > /root/$2.log 2>&1 &
+  echo "[mem10] launched $2 $(date -u +%H:%M) (running $(pgrep -fc "pool_eval.p[y]"), free VRAM $(nvidia-smi --query-gpu=memory.free --format=csv,noheader | head -1))"; sleep 150; }
+merge() { o=/root/work/$1.jsonl; : > $o; for i in $(seq 0 $((NS-1))); do cat /root/work/$1_s$i.jsonl >> $o 2>/dev/null; done
+  grep -hE "Error|Traceback" /root/$1_s*.log | tail -2 | cut -c1-200; echo "[mem10] $1 merged: $(wc -l < $o) rows"; hf upload $R $o pooler_distill/chatsft/multiturn/$1.jsonl >/dev/null 2>&1; }
+waitall() { while pgrep -f "pool_eval.p[y]" >/dev/null; do sleep 60; done; }
+waitall
+echo "[mem10] start $(date -u +%H:%M)"
+for i in $(seq 0 $((NS-1))); do run $B base_c100_full_s$i /root/work/mt_eval_c100_s$i.jsonl full ""; run $B base_c100_alone_s$i /root/work/mt_eval_c100_s$i.jsonl none ""; done
+for i in $(seq 0 $((NS-1))); do run $B rft10_s$i /root/work/mt_train_c10_s$i.jsonl none "--mt-save-tokens 1"; done
+nvidia-smi --query-gpu=memory.used,memory.total,utilization.gpu --format=csv,noheader | sed 's/^/[mem10] gpu /'
+while [ $(ls /root/base_c100_*_s*.log 2>/dev/null | xargs grep -l "EVAL_DONE" 2>/dev/null | wc -l) -lt $((2*NS)) ] && pgrep -f "base_c100_.*_s[0-9]" >/dev/null; do sleep 120; done
+merge base_c100_full; merge base_c100_alone; echo "[mem10] held-out base done $(date -u +%H:%M)"
+waitall; merge rft10
 echo "[mem10] memfit (ce, native) start $(date -u +%H:%M)"
 env SP_BASE=/root/gptq_hf_gq14 SP_RANK=16 SP_NOSYS=1 SP_EPISODIC=1 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
   python3 /root/work/memfit.py --objective ce --ce-native 1 --student full --ckpt $B --data /root/work/rft10.jsonl --out /root/pooler_$T.safetensors --log /root/memfit_$T.log --steps 600 --val-every 100 --lr 0 --lr-lora 5e-6 > /root/memfit_${T}_run.log 2>&1
 grep -E "^\[memfit\]|^\[data\]|^val |MEMFIT_DONE|Error|Traceback" /root/memfit_${T}_run.log | tail -12 | cut -c1-200
 [ -s /root/pooler_$T.safetensors ] || { echo "MEM10_ABORT memfit: $(tail -3 /root/memfit_${T}_run.log | tr '\n' ' ' | cut -c1-300)"; exit 1; }
 hf upload $R /root/pooler_$T.safetensors pooler_distill/chatsft/multiturn/pooler_$T.safetensors >/dev/null 2>&1
-( ev /root/pooler_$T.safetensors ${T}_c100_full /root/work/mt_eval_c100.jsonl full 100 "" ) &
-( for i in 0 1 2; do env $ENV python3 /root/work/pool_eval.py /root/pooler_$T.safetensors /root/work/ev_$i.jsonl /root/work/${T}st_out_$i.jsonl --n 34 $EVARGS --tag "[${T}st$i]" > /root/${T}st_$i.log 2>&1
-  grep -E "EVAL_DONE|Error|Traceback" /root/${T}st_$i.log | tail -1 | cut -c1-300; hf upload $R /root/work/${T}st_out_$i.jsonl pooler_distill/chatsft/rollouts/${T}st_$i.jsonl >/dev/null 2>&1; done ) &
-wait
+for i in $(seq 0 $((NS-1))); do run /root/pooler_$T.safetensors ${T}_c100_full_s$i /root/work/mt_eval_c100_s$i.jsonl full ""; done
+for i in 0 1 2; do room; env $ENV nohup python3 /root/work/pool_eval.py /root/pooler_$T.safetensors /root/work/ev_$i.jsonl /root/work/${T}st_out_$i.jsonl --n 34 $EVARGS --tag "[${T}st$i]" > /root/${T}st_$i.log 2>&1 & sleep 150; done
+waitall; merge ${T}_c100_full
+for i in 0 1 2; do grep -E "EVAL_DONE|Error|Traceback" /root/${T}st_$i.log | tail -1 | cut -c1-300; hf upload $R /root/work/${T}st_out_$i.jsonl pooler_distill/chatsft/rollouts/${T}st_$i.jsonl >/dev/null 2>&1; done
 echo "MEM10_JOB_DONE $(date -u)"
 M10
   chmod +x /root/mem10keep.sh
@@ -1127,7 +1144,7 @@ while :; do
     echo "--- mem6.log (tail) ---"; tail -n 10 /root/mem6.log 2>/dev/null | cut -c1-300; grep -E "^val " /root/memfit_mem6_run.log 2>/dev/null | tail -2
     echo "--- mem7.log (tail) ---"; tail -n 10 /root/mem7.log 2>/dev/null | cut -c1-300; grep -E "^val " /root/memfit_mem7_run.log 2>/dev/null | tail -2
     echo "--- qt.log (tail) ---"; tail -n 4 /root/qt.log 2>/dev/null | cut -c1-300
-    echo "--- mem10.log (tail) ---"; tail -n 12 /root/mem10.log 2>/dev/null | cut -c1-300; for f in /root/work/base_c100_full.jsonl /root/work/base_c100_alone.jsonl /root/work/rft10.jsonl /root/work/mem10_c100_full.jsonl; do [ -e $f ] && echo "$f $(wc -l < $f) rows"; done
+    echo "--- mem10.log (tail) ---"; tail -n 12 /root/mem10.log 2>/dev/null | cut -c1-300; for f in /root/work/base_c100_*_s*.jsonl /root/work/rft10_s*.jsonl /root/work/mem10_c100_full_s*.jsonl; do [ -e $f ] && echo "$(basename $f) $(wc -l < $f)"; done | tr "\n" " "; echo
     echo "--- mem9.log (tail) ---"; tail -n 6 /root/mem9.log 2>/dev/null | cut -c1-300
     echo "--- mem8.log (tail) ---"; tail -n 10 /root/mem8.log 2>/dev/null | cut -c1-300; grep -E "^val " /root/memfit_mem8_run.log 2>/dev/null | tail -2
     echo "--- mt.log (tail) ---"; tail -n 8 /root/mt.log 2>/dev/null | cut -c1-300; for f in $(ls -t /root/mt*_*.log 2>/dev/null | head -1); do echo "--- $f (tail) ---"; grep -E "^\[mt |EVAL_DONE|Error|Traceback" $f | tail -3 | cut -c1-300; done
