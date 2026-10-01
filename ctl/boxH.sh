@@ -8,7 +8,7 @@ cd /root
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null)
 R=baya1116/hypernet-sp-distill
 RAW="https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl"
-BOXH_SERIAL=1
+BOXH_SERIAL=2
 if [ -f /root/.boxh_serial ] && [ "$(cat /root/.boxh_serial)" -gt "$BOXH_SERIAL" ] 2>/dev/null; then echo "BOXH_STALE $BOXH_SERIAL"; exit 0; fi
 echo $BOXH_SERIAL > /root/.boxh_serial
 mkdir -p /root/sb /root/work
@@ -46,6 +46,18 @@ done
 MK
   setsid nohup bash /root/mirrorkeep.sh > /dev/null 2>&1 < /dev/null &
   echo "MIRROR_LAUNCHED $(date -u)"
+fi
+# ---- data: 10 of the 41 shards of English Wikipedia (about 1.5M articles) as sentence lists, then their vectors ----
+if ! pgrep -f "datakee[p].sh" >/dev/null && ! grep -q "DATA_JOB_DONE" /root/sb_data.log 2>/dev/null; then
+  cat > /root/datakeep.sh <<'DK'
+cd /root/sb; export HF_HUB_ENABLE_HF_TRANSFER=0
+python3 /root/sb/prep.py --out /root/sb/data/docs --shards 0-9 || { echo "DATA_ABORT prep"; exit 1; }
+python3 /root/sb/embed.py --dir /root/sb/data/docs || { echo "DATA_ABORT embed"; exit 1; }
+du -sh /root/sb/data/docs
+echo "DATA_JOB_DONE $(date -u)"
+DK
+  setsid nohup bash -c 'bash /root/datakeep.sh 2>&1 | tee -a /root/sb_data.log' > /dev/null 2>&1 < /dev/null &
+  echo "DATA_LAUNCHED $(date -u)"
 fi
 echo "BOXH_OK serial $BOXH_SERIAL $(date -u)"
 # CTL-END
