@@ -80,7 +80,7 @@ PSKIP=
 # The raw GitHub copy this box fetches can lag and hand a control run an OLDER version of this file (04:48 on 09-22 it
 # relaunched the online loop under the previous mode while the newer run was merging a checkpoint on the same card).
 # Every edit bumps BOXG_SERIAL; a run that sees a lower serial than one already executed stops here.
-BOXG_SERIAL=2026092708
+BOXG_SERIAL=2026092709
 if [ -f /root/.boxg_serial ] && [ "$(cat /root/.boxg_serial)" -gt "$BOXG_SERIAL" ] 2>/dev/null; then echo "BOXG_STALE $BOXG_SERIAL < $(cat /root/.boxg_serial)"; exit 0; fi
 echo $BOXG_SERIAL > /root/.boxg_serial
 MODE=idle         # 2026-09-29: the side jobs hold the card (multi-turn measurement and training); a finished reeval re-launched on every control run and killed their evaluators
@@ -771,7 +771,7 @@ MB
   setsid nohup bash -c 'bash /root/mtg1bkeep.sh 2>&1 | tee -a /root/mtg1b.log' >> /proc/1/fd/1 2>&1 < /dev/null 9>&- &
   echo "MTG1B_LAUNCHED $(date -u)"
 fi
-if [ ! -e /root/.pqjudge_v4 ]; then touch /root/.pqjudge_v4; pkill -f "pqjudgekee[p].sh"; sed -i "/PQJUDGE_DONE/d" /root/pqjudge.log 2>/dev/null; echo "PQJUDGE_RESTART (second draws) $(date -u)"; fi
+if [ ! -e /root/.pqjudge_v5 ]; then touch /root/.pqjudge_v5; pkill -f "pqjudgekee[p].sh"; sed -i "/PQJUDGE_DONE/d" /root/pqjudge.log 2>/dev/null; echo "PQJUDGE_RESTART (second draws) $(date -u)"; fi
 if ! pgrep -f "pqjudgekee[p].sh" >/dev/null && ! grep -q "PQJUDGE_DONE" /root/pqjudge.log 2>/dev/null; then
   cat > /root/pqjudgekeep.sh <<'PJ'
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); R=baya1116/hypernet-sp-distill; cd /root/work
@@ -785,7 +785,7 @@ cand = [r for r in v1 if r["q"].strip() not in v2q]; random.Random(0).shuffle(ca
 with open("/root/work/dolphin_heldout100_pq.jsonl", "w") as o:
     for r in cand[:100]: o.write(json.dumps({"q": r["q"], "ref": r["reply"]}, ensure_ascii=False) + "\n")
 PD
-left="pqf pqm pqf2 pqm2 pqe"
+left="pqf pqm pqf2 pqm2 pqe pqt"
 while [ -n "$left" ]; do
   nl=""
   for T in $left; do

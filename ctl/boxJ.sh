@@ -8,7 +8,7 @@ cd /root/work 2>/dev/null || { mkdir -p /root/work; cd /root/work; }
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null)
 R=baya1116/hypernet-sp-distill
 RAW="https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl"
-BOXJ_SERIAL=7
+BOXJ_SERIAL=8
 if [ -f /root/.boxj_serial ] && [ "$(cat /root/.boxj_serial)" -gt "$BOXJ_SERIAL" ] 2>/dev/null; then echo "BOXJ_STALE $BOXJ_SERIAL"; exit 0; fi
 echo $BOXJ_SERIAL > /root/.boxj_serial
 
@@ -43,13 +43,13 @@ fi
 [ -f /root/.bootstrapped ] || { echo "bootstrap incomplete - stopping here"; exit 0; }
 
 # the code, fresh from the branch on every control run
-for f in pool_eval.py q4.py pooler_gptq.py mlx2hf.py web_search.py online_loop.py; do
+for f in pool_eval.py q4.py pooler_gptq.py mlx2hf.py web_search.py online_loop.py pooler_gridfit.py; do
   curl -sS -L -o /root/work/$f.new "$RAW/$f?$(date +%s)" && python3 -m py_compile /root/work/$f.new 2>/dev/null && mv /root/work/$f.new /root/work/$f || rm -f /root/work/$f.new
 done
 
 cp /root/work/web_search.py /root/work/runtime/web_search.py 2>/dev/null   # the evaluator imports it as runtime.web_search
 
-if [ ! -e /root/.mirror_v5 ]; then touch /root/.mirror_v5; pkill -f "mirrorkee[p].sh"; sleep 1; echo "MIRROR_RESTART (pq3 lines) $(date -u)"; fi
+if [ ! -e /root/.mirror_v6 ]; then touch /root/.mirror_v6; pkill -f "mirrorkee[p].sh"; sleep 1; echo "MIRROR_RESTART (pq3 lines) $(date -u)"; fi
 # ---- the mirror: what this box is doing, on the hub every 10 minutes ----
 if ! pgrep -f "mirrorkee[p].sh" >/dev/null; then
   cat > /root/mirrorkeep.sh <<'MK'
@@ -57,6 +57,7 @@ export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); R=baya1116/h
 while :; do
   { echo "=== boxJ $(date -u) ==="; echo "--- ctl.log ---"; tail -n 40 /root/ctl.log 2>/dev/null | cut -c1-300
     echo "--- pq.log ---"; tail -n 8 /root/pq.log 2>/dev/null | cut -c1-300
+    echo "--- pq7.log ---"; tail -n 12 /root/pq7.log 2>/dev/null | cut -c1-300; grep -E "^step|^val" /root/pq7_fit.log 2>/dev/null | tail -2
     echo "--- pq6.log ---"; tail -n 3 /root/pq6.log 2>/dev/null | cut -c1-300
     echo "--- pq5.log ---"; tail -n 4 /root/pq5.log 2>/dev/null | cut -c1-300
     echo "--- pq4.log ---"; tail -n 10 /root/pq4.log 2>/dev/null | cut -c1-300
@@ -234,6 +235,35 @@ echo "PQ6_JOB_DONE $(date -u)"
 PK
   setsid nohup bash -c 'bash /root/pq6keep.sh 2>&1 | tee -a /root/pq6.log' > /dev/null 2>&1 < /dev/null &
   echo "PQ6_LAUNCHED $(date -u)"
+fi
+# ---- pq7 (the user: if the reasoning gap holds, train the 4-bit pooler's grid as the model's was trained): GPTQ's codes
+# kept, the fp16 scales and biases (and the float parts) moved so the model's next-token distribution under the 4-bit
+# pooler matches it under the float one, on search and reasoning traces (pooler_gridfit.py). Prepared now, run after
+# pq6 so it never shares the card with an evaluation: a 3-step selftest, the fit, then the Dolphin held-out (pqt).
+if ! pgrep -f "pq7kee[p].sh" >/dev/null && ! grep -q "PQ7_JOB_DONE\|PQ7_ABORT" /root/pq7.log 2>/dev/null; then
+  cat > /root/pq7keep.sh <<'PK'
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); R=baya1116/hypernet-sp-distill; cd /root/work
+M=/root/g14q_hf; REL=/root/hfdl/release/g14-4bit-gptq-trained
+until grep -q "PQ6_JOB_DONE" /root/pq6.log 2>/dev/null; do sleep 60; done
+GF="env SP_BASE=$M SP_RANK=16 SP_NOSYS=1 SP_EPISODIC=1 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python3 /root/work/pooler_gridfit.py --float $REL/pooler.safetensors --codes /root/pq/pooler_gptq_mix_mlx.safetensors --search /root/work/dwq_calib/train.jsonl --reason /root/work/dolphin_calib.jsonl --out /root/pq/pooler_gridfit"
+$GF --selftest 3 > /root/pq7_selftest.log 2>&1
+grep -E "^\[grid\]|^\[data\]|^step|^val|SELFTEST|Error|Traceback|memory" /root/pq7_selftest.log | tail -8 | cut -c1-250
+grep -q GRIDFIT_SELFTEST_DONE /root/pq7_selftest.log || { echo "PQ7_ABORT selftest"; exit 1; }
+$GF --steps 600 > /root/pq7_fit.log 2>&1
+grep -E "^\[grid\]|^val|GRIDFIT_DONE|Error|Traceback" /root/pq7_fit.log | tail -16 | cut -c1-250
+[ -s /root/pq/pooler_gridfit_dq.safetensors ] || { echo "PQ7_ABORT fit"; exit 1; }
+for f in pooler_gridfit_mlx pooler_gridfit_dq; do hf upload $R /root/pq/$f.safetensors pooler_distill/pooler4bit/$f.safetensors >/dev/null 2>&1; done
+T=pqt
+OMP_NUM_THREADS=1 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python3 /root/work/online_loop.py $M /root/evalrun_$T \
+  --questions /root/work/eval300.jsonl --dolphin /root/work/dolphin_v1.jsonl --heldout /root/work/eval300.jsonl --pooler-init /root/pq/pooler_gridfit_dq.safetensors \
+  --b 12 --gen 7000 --budget 2400 --temp 0.6 --maxsrch 7 --pooler none --lora-rank 16 --lora-layers 20-27 --stop eos --loop-break answer \
+  --eval-file /root/work/dolphinq.jsonl --eval-out /root/work/${T}_dolphin.jsonl > /root/${T}_dolphin.log 2>&1
+echo "[pq7] $T dolphin: $(wc -l < /root/work/${T}_dolphin.jsonl) replies $(date -u +%H:%M)"
+hf upload $R /root/work/${T}_dolphin.jsonl pooler_distill/pooler4bit/${T}_dolphin.jsonl >/dev/null 2>&1
+echo "PQ7_JOB_DONE $(date -u)"
+PK
+  setsid nohup bash -c 'bash /root/pq7keep.sh 2>&1 | tee -a /root/pq7.log' > /dev/null 2>&1 < /dev/null &
+  echo "PQ7_LAUNCHED $(date -u)"
 fi
 echo "BOXJ_OK serial $BOXJ_SERIAL $(date -u)"
 # CTL-END
