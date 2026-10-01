@@ -33,6 +33,7 @@ ap.add_argument("--tau", type=float, default=0.05); ap.add_argument("--w-enc", t
 ap.add_argument("--w-cos", type=float, default=1.0, help="weight of the direct reconstruction term, 1 - cosine(predicted, true sentence vector)")
 ap.add_argument("--eval-every", type=int, default=1000); ap.add_argument("--save-every", type=int, default=2000)
 ap.add_argument("--min-sents", type=int, default=8)
+ap.add_argument("--prev-skip", type=int, default=0, help="1: the decoder's output is (its head + a learned gate x the previous sentence's vector), normalised")
 ap.add_argument("--p-suffix", type=float, default=0.5, help="share of documents whose tail is hidden (continuation) instead of spans")
 A = ap.parse_args()
 os.makedirs(A.out, exist_ok=True)
@@ -99,6 +100,9 @@ class SentBART(nn.Module):
         s.enc = nn.TransformerEncoder(el, A.layers, norm=nn.LayerNorm(d), enable_nested_tensor=False)
         s.dec = nn.TransformerDecoder(dl, A.layers, norm=nn.LayerNorm(d))
         s.enc_head = nn.Linear(d, DIM); s.dec_head = nn.Linear(d, DIM)
+        s.prev_gate = nn.Parameter(torch.tensor(1.0))   # --prev-skip: the decoder writes a change to the sentence before
+        if A.prev_skip:   # the head starts at zero, so the decoder starts exactly at the baseline and learns the difference
+            nn.init.zeros_(s.dec_head.weight); nn.init.zeros_(s.dec_head.bias)
 
     def encode(s, x, valid, masked):
         B, L, _ = x.shape
@@ -116,7 +120,11 @@ class SentBART(nn.Module):
 
     def forward(s, x, valid, masked):
         mem = s.encode(x, valid, masked)
-        return F.normalize(s.enc_head(mem).float(), dim=-1), F.normalize(s.dec_head(s.decode(mem, valid, x)).float(), dim=-1)
+        pd = s.dec_head(s.decode(mem, valid, x)).float()
+        if A.prev_skip:   # start from "like the sentence before" (the baseline the first run lost to) and learn the difference
+            prev = torch.cat([torch.zeros_like(x[:, :1]), x[:, :-1]], dim=1).float()
+            pd = pd + s.prev_gate * prev
+        return F.normalize(s.enc_head(mem).float(), dim=-1), F.normalize(pd, dim=-1)
 
 
 def nce(pred, tgt_all, idx):
@@ -176,14 +184,20 @@ def evaluate():
                 first = torch.zeros_like(masked); bi = torch.arange(len(cut), device=DEV)
                 first[bi, cut.clamp(min=0)] = True; first &= masked
                 sel = first[masked]
-                r["next1"] = r.get("next1", 0) + int(hit1[sel].sum()); r["next10"] = r.get("next10", 0) + int(hit10[sel].sum()); r["nnext"] = r.get("nnext", 0) + int(sel.sum())
-                # baseline: the sentence closest to the one just before the cut (itself excluded) - what "similar to the
-                # last thing said" gets without any model
+                # next sentence, model and baseline under the same rule: the sentences already seen (the document's
+                # prefix, the one just before included) are not candidates - "repeat what was just said" is never right
                 ok = cut > 0; bi2 = bi[ok]; c2 = cut[ok]
-                tgt = x[valid].float(); pv = x[bi2, c2 - 1].float()
-                lb = pv @ tgt.T; lb[torch.arange(len(bi2), device=DEV), pos[bi2, c2 - 1]] = -1e9
-                tb = lb.topk(10, dim=-1).indices; want = pos[bi2, c2]
-                r["base1"] = r.get("base1", 0) + int((tb[:, 0] == want).sum()); r["base10"] = r.get("base10", 0) + int((tb == want[:, None]).any(-1).sum())
+                tgt = x[valid].float(); want = pos[bi2, c2]
+                seen = torch.zeros(len(bi2), tgt.shape[0], dtype=torch.bool, device=DEV)
+                for j in range(len(bi2)): seen[j, pos[bi2[j], :c2[j]]] = True
+                rows = torch.nonzero(masked)                       # (b, t) of every hidden sentence, in lgd's row order
+                first_row = {(int(b_), int(t_)): k for k, (b_, t_) in enumerate(rows.tolist())}
+                lm = torch.stack([lgd[first_row[(int(b_), int(c_))]] for b_, c_ in zip(bi2, c2)]).float().masked_fill(seen, -1e9)
+                lb = (x[bi2, c2 - 1].float() @ tgt.T).masked_fill(seen, -1e9)
+                for lg_, k in ((lm, "next"), (lb, "base")):
+                    tk = lg_.topk(10, dim=-1).indices
+                    r[k + "1"] = r.get(k + "1", 0) + int((tk[:, 0] == want).sum()); r[k + "10"] = r.get(k + "10", 0) + int((tk == want[:, None]).any(-1).sum())
+                r["nnext"] = r.get("nnext", 0) + len(bi2)
     random.seed(time.time()); np.random.seed(int(time.time()) % 2**31); model.train()
     return {"enc_top1": r["enc1"] / r["nenc"], "enc_top10": r["enc10"] / r["nenc"], "dec_top1": r["dec1"] / r["ndec"], "dec_top10": r["dec10"] / r["ndec"],
             "next_top1": r["next1"] / r["nnext"], "next_top10": r["next10"] / r["nnext"],

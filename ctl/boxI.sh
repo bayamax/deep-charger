@@ -8,7 +8,7 @@ cd /root
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null)
 R=baya1116/hypernet-sp-distill
 RAW="https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl"
-BOXI_SERIAL=2
+BOXI_SERIAL=3
 if [ -f /root/.boxi_serial ] && [ "$(cat /root/.boxi_serial)" -gt "$BOXI_SERIAL" ] 2>/dev/null; then echo "BOXI_STALE $BOXI_SERIAL"; exit 0; fi
 echo $BOXI_SERIAL > /root/.boxi_serial
 mkdir -p /root/sb /root/work
@@ -76,6 +76,25 @@ echo "RUN1_JOB_DONE $(date -u)"
 RK
   setsid nohup bash -c 'bash /root/run1keep.sh 2>&1 | tee -a /root/sb_run1.log' > /dev/null 2>&1 < /dev/null &
   echo "RUN1_LAUNCHED $(date -u)"
+fi
+# ---- run2 / run3: run1 was still climbing when its learning rate reached zero (10k steps, 15 min), and its next-sentence
+# metric was unfair to it (the baseline alone had the sentences already seen removed from its candidates; both now do).
+# 6x longer, without (run2) and with (run3) the decoder starting from the previous sentence's vector ----
+if ! pgrep -f "run23kee[p].sh" >/dev/null && ! grep -q "RUN23_JOB_DONE" /root/sb_run23.log 2>/dev/null; then
+  cat > /root/run23keep.sh <<'RK'
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); R=baya1116/hypernet-sp-distill
+while pgrep -f "python3 /root/sb/train.py" >/dev/null; do sleep 60; done
+for cfg in "run2:0" "run3:1"; do
+  N=${cfg%%:*}; PS=${cfg#*:}
+  echo "[$N] start $(date -u +%H:%M) prev-skip $PS"
+  python3 /root/sb/train.py --data /root/sb/data/docs --out /root/sb/$N --steps 60000 --batch 32 --seq 128 --d 512 --layers 4 --heads 8 --ffn 2048 --warmup 1000 --eval-every 2000 --save-every 4000 --prev-skip $PS 2>&1 | grep -E "^\[eval|TRAIN_DONE|Error|Traceback"
+  hf upload $R /root/sb/$N/train.log sentbart/small_$N/train.log >/dev/null 2>&1
+  hf upload $R /root/sb/$N/model_latest.pt sentbart/small_$N/model_latest.pt >/dev/null 2>&1
+done
+echo "RUN23_JOB_DONE $(date -u)"
+RK
+  setsid nohup bash -c 'bash /root/run23keep.sh 2>&1 | tee -a /root/sb_run23.log' > /dev/null 2>&1 < /dev/null &
+  echo "RUN23_LAUNCHED $(date -u)"
 fi
 echo "BOXI_OK serial $BOXI_SERIAL $(date -u)"
 # CTL-END
