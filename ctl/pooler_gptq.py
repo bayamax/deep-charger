@@ -195,13 +195,19 @@ with torch.no_grad():
         print(f"[pq] block {bi} done ({time.time() - t0:.0f}s)", flush=True)
 
     def score(W):
-        cs = []
-        for past in EVW:
-            a, b = pooler(past, P0), pooler(past, W)
-            cs.append(F.cosine_similarity(a, b, dim=-1).mean().item())
-        return float(np.mean(cs)), float(np.min(cs))
-    mc, wc = score(P)
-    print(f"[pq] held-out windows: output cosine to the float pooler mean {mc:.5f} (worst window {wc:.5f})", flush=True)
+        """the plain cosine is near 1 by construction (most of each output vector is the same whatever the input), so
+        the error is also measured against what the input changes: the float outputs' spread around their own mean
+        over windows (rel = |b - a| / |a - mean a|; cos_c = cosine of a - mean a and b - mean a)"""
+        As = torch.stack([pooler(past, P0) for past in EVW]); Bs = torch.stack([pooler(past, W) for past in EVW])
+        cs = F.cosine_similarity(As, Bs, dim=-1).mean(-1)
+        mu = As.mean(0, keepdim=True)
+        rel = ((Bs - As).norm(dim=-1) / (As - mu).norm(dim=-1).clamp_min(1e-8)).mean().item()
+        cc = F.cosine_similarity(As - mu, Bs - mu, dim=-1).mean().item()
+        spread = F.cosine_similarity(As, mu.expand_as(As), dim=-1).mean().item()
+        return float(cs.mean()), float(cs.min()), rel, cc, spread
+    mc, wc, rel, cc, spread = score(P)
+    print(f"[pq] held-out windows: cosine to the float pooler {mc:.5f} (worst window {wc:.5f}); against the input-driven part: "
+          f"relative error {rel:.4f}, centred cosine {cc:.4f} (the float outputs sit at cosine {spread:.4f} to their own mean)", flush=True)
 
 # ---- outputs ----
 dq = {k: v.detach().float().cpu().contiguous() for k, v in P.items()}
@@ -224,4 +230,4 @@ for k in PACK:
     bad += int(((c * s_ + b_) - dq[k]).abs().max() > 1e-3)
 sz = os.path.getsize(os.path.join(A.out, f"pooler_{A.method}_mlx.safetensors")) / 1e6
 print(f"[pq] packed {len(PACK)} matrices, {sz:.1f} MB (float32: {sum(v.numel() for v in dq.values()) * 4 / 1e6:.1f} MB); unpack check {'OK' if bad == 0 else f'{bad} MISMATCH'}", flush=True)
-print(f"POOLER_Q_DONE {A.method} cos {mc:.5f}", flush=True)
+print(f"POOLER_Q_DONE {A.method} cos {mc:.5f} rel {rel:.4f} centred {cc:.4f}", flush=True)

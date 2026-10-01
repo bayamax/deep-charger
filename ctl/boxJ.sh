@@ -8,7 +8,7 @@ cd /root/work 2>/dev/null || { mkdir -p /root/work; cd /root/work; }
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null)
 R=baya1116/hypernet-sp-distill
 RAW="https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl"
-BOXJ_SERIAL=1
+BOXJ_SERIAL=2
 if [ -f /root/.boxj_serial ] && [ "$(cat /root/.boxj_serial)" -gt "$BOXJ_SERIAL" ] 2>/dev/null; then echo "BOXJ_STALE $BOXJ_SERIAL"; exit 0; fi
 echo $BOXJ_SERIAL > /root/.boxj_serial
 
@@ -43,9 +43,11 @@ fi
 [ -f /root/.bootstrapped ] || { echo "bootstrap incomplete - stopping here"; exit 0; }
 
 # the code, fresh from the branch on every control run
-for f in pool_eval.py q4.py pooler_gptq.py mlx2hf.py; do
+for f in pool_eval.py q4.py pooler_gptq.py mlx2hf.py web_search.py; do
   curl -sS -L -o /root/work/$f.new "$RAW/$f?$(date +%s)" && python3 -m py_compile /root/work/$f.new 2>/dev/null && mv /root/work/$f.new /root/work/$f || rm -f /root/work/$f.new
 done
+
+cp /root/work/web_search.py /root/work/runtime/web_search.py 2>/dev/null   # the evaluator imports it as runtime.web_search
 
 # ---- the mirror: what this box is doing, on the hub every 10 minutes ----
 if ! pgrep -f "mirrorkee[p].sh" >/dev/null; then
@@ -65,14 +67,16 @@ MK
   echo "MIRROR_LAUNCHED $(date -u)"
 fi
 
+# pq2 (the first run's evaluations all failed on a missing runtime.web_search; the quantization re-runs, deterministic,
+# for the input-driven error measure)
 # ---- pq1: dequantize the shipped model, GPTQ and RTN the pooler, then the 102-rollout held-out three ways ----
-if ! pgrep -f "pqkee[p].sh" >/dev/null && ! grep -q "PQ_JOB_DONE" /root/pq.log 2>/dev/null; then
+if ! pgrep -f "pqkee[p].sh" >/dev/null && ! grep -q "PQ2_JOB_DONE" /root/pq.log 2>/dev/null; then
   cat > /root/pqkeep.sh <<'PK'
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); R=baya1116/hypernet-sp-distill; cd /root/work
 REL=/root/hfdl/release/g14-4bit-gptq-trained; M=/root/g14q_hf; POOL=$REL/pooler.safetensors
 [ -s $M/model.safetensors ] || python3 /root/work/mlx2hf.py --mlx $REL --out $M || { echo "PQ_ABORT mlx2hf"; exit 1; }
 for m in gptq rtn; do
-  [ -s /root/pq/pooler_${m}_dq.safetensors ] || python3 /root/work/pooler_gptq.py --pooler $POOL --model $M --data /root/work/dwq_calib/train.jsonl --out /root/pq --method $m 2>&1 | grep -E "^\[pq\]|POOLER_Q_DONE|Error|Traceback"
+  python3 /root/work/pooler_gptq.py --pooler $POOL --model $M --data /root/work/dwq_calib/train.jsonl --out /root/pq --method $m 2>&1 | grep -E "^\[pq\]|POOLER_Q_DONE|Error|Traceback"
 done
 [ -s /root/pq/pooler_gptq_dq.safetensors ] || { echo "PQ_ABORT gptq"; exit 1; }
 for f in pooler_gptq_mlx pooler_rtn_mlx pooler_gptq_dq; do hf upload $R /root/pq/$f.safetensors pooler_distill/pooler4bit/$f.safetensors >/dev/null 2>&1; done
@@ -86,7 +90,7 @@ for arm in "pqg:/root/pq/pooler_gptq_dq.safetensors" "pqf:$POOL" "pqr:/root/pq/p
     hf upload $R /root/work/${T}_out_$i.jsonl pooler_distill/pooler4bit/${T}_out_$i.jsonl >/dev/null 2>&1
   done
 done
-echo "PQ_JOB_DONE $(date -u)"
+echo "PQ2_JOB_DONE $(date -u)"
 PK
   setsid nohup bash -c 'bash /root/pqkeep.sh 2>&1 | tee -a /root/pq.log' > /dev/null 2>&1 < /dev/null &
   echo "PQ_LAUNCHED $(date -u)"
