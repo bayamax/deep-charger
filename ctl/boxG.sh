@@ -80,7 +80,7 @@ PSKIP=
 # The raw GitHub copy this box fetches can lag and hand a control run an OLDER version of this file (04:48 on 09-22 it
 # relaunched the online loop under the previous mode while the newer run was merging a checkpoint on the same card).
 # Every edit bumps BOXG_SERIAL; a run that sees a lower serial than one already executed stops here.
-BOXG_SERIAL=2026092705
+BOXG_SERIAL=2026092706
 if [ -f /root/.boxg_serial ] && [ "$(cat /root/.boxg_serial)" -gt "$BOXG_SERIAL" ] 2>/dev/null; then echo "BOXG_STALE $BOXG_SERIAL < $(cat /root/.boxg_serial)"; exit 0; fi
 echo $BOXG_SERIAL > /root/.boxg_serial
 MODE=idle         # 2026-09-29: the side jobs hold the card (multi-turn measurement and training); a finished reeval re-launched on every control run and killed their evaluators
@@ -738,6 +738,39 @@ fi
 # on the hub. CPU and API only - the card stays with the multi-turn work.
 # 2026-10-01: mtg1 died at step 50 on "No space left on device" while saving; what fills the 45 GB disk (once per serial)
 if [ ! -e /root/.du_2026092705 ]; then touch /root/.du_2026092705; { echo "DISK_REPORT $(date -u)"; df -h /root | tail -1; du -xsh /root/* /root/.cache 2>/dev/null | sort -h | tail -25; du -xsh /root/work/* 2>/dev/null | sort -h | tail -8; ls -la /root/online_mtg1 2>/dev/null; } > /root/disk_report.txt 2>&1; hf upload baya1116/hypernet-sp-distill /root/disk_report.txt pooler_distill/chatsft/audit/disk_report_G.txt >/dev/null 2>&1; echo "DISK_REPORT uploaded"; fi
+# mtg1b: mtg1 died at step 50 on a full disk (its checkpoints carried the 3.5 GB base each); it resumes from its step-25
+# save with LoRA-and-pooler-only checkpoints, after the mem5-7 poolers (on the hub) are cleared, and is measured again
+if [ ! -e /root/.free_2026092706 ]; then touch /root/.free_2026092706; for n in 5 6 7; do rm -f /root/pooler_mem$n.safetensors; done; echo "FREED mem5-7 poolers (on the hub): $(df -h /root | tail -1)"; fi
+if ! pgrep -f "mtg1bkee[p].sh" >/dev/null && ! grep -q "MTG1B_JOB_DONE" /root/mtg1b.log 2>/dev/null; then
+  cat > /root/mtg1bkeep.sh <<'MB'
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); R=baya1116/hypernet-sp-distill; cd /root/work; OUT=/root/online_mtg1
+ENV="SP_BASE=/root/gptq_hf_gq14 SP_RANK=16 SP_NOSYS=1 SP_EPISODIC=1 OMP_NUM_THREADS=1 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True"
+EVARGS="--rw 768 --maxd 384 --samepage 1 --decode plain --temp 0.6 --gen 4000 --stop eos --replycap 600"
+until grep -qE "MTG1_JOB_DONE|MTG1_ABORT" /root/mtg1.log 2>/dev/null; do sleep 60; done
+while pgrep -f "pool_eval.p[y]|online_loop.p[y]|memfit.p[y]" >/dev/null; do sleep 30; done
+cp /root/work/mtg1_chain.jsonl /root/work/mtg1s25_chain.jsonl 2>/dev/null; cp /root/work/mtg1st_out_0.jsonl /root/work/mtg1s25st_out_0.jsonl 2>/dev/null
+rm -f $OUT/*.tmp; echo "[mtg1b] resume from step $(python3 -c "import json;print(json.load(open('$OUT/state.json'))['step'])") $(date -u +%H:%M); $(df -h /root | tail -1)"
+env SP_BASE=/root/gptq_hf_gq14 SP_NOSYS=1 SP_EPISODIC=1 OAI_KEY=$(cat /root/.oai 2>/dev/null) DSK_KEY=$(cat /root/.dsk 2>/dev/null) PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
+  python3 /root/work/online_loop.py /root/pooler_mem10.safetensors $OUT --pooler none --lora-layers all --lora-rank 16 --save-lora-only 1 \
+  --mt-items /root/work/mtg_items.jsonl --heldout /root/work/eval300.jsonl --reason-g 8 --steps 100 --save-every 25 \
+  --search-lr 1e-5 --search-temp 0.9 --search-gen 2000 --temp 0.6 --gen 2000 --budget 900 --maxsrch 7 --stop eos \
+  --judge-api openai --judge-model gpt-5-nano --w-talk 0.5 --dolphin-min 0 --adv-std 1 --pg-norm mean --kl 0 \
+  --guard 1 --guard-steps 20 >> /root/mtg1_run.log 2>&1
+grep -E "ONLINE_|Error|Traceback" /root/mtg1_run.log | tail -3 | cut -c1-250; grep -E "^\[step" /root/mtg1_run.log | tail -2 | cut -c1-200
+S=$(python3 -c "import json;print(json.load(open('$OUT/state.json'))['step'])")
+[ "$S" -ge 100 ] || { echo "MTG1B_ABORT: stopped at step $S"; exit 1; }
+hf upload $R $OUT/latest.safetensors pooler_distill/chatsft/multiturn/mtg1_s100.safetensors >/dev/null 2>&1
+env $ENV python3 /root/work/pool_eval.py $OUT/latest.safetensors /root/work/eval300.jsonl /root/work/mtg1s100_chain.jsonl --multiturn /root/work/mt_eval_chain.jsonl --mt-mode full --n 1000 $EVARGS --tag "[mtg1s100-chain]" > /root/mtg1s100_chain.log 2>&1
+echo "[mtg1b] $(grep -E "EVAL_DONE|Error|Traceback" /root/mtg1s100_chain.log | tail -1 | cut -c1-250)"; hf upload $R /root/work/mtg1s100_chain.jsonl pooler_distill/chatsft/multiturn/mtg1s100_chain.jsonl >/dev/null 2>&1
+for i in 0 1 2; do
+  env $ENV python3 /root/work/pool_eval.py $OUT/latest.safetensors /root/work/ev_$i.jsonl /root/work/mtg1s100st_out_$i.jsonl --n 34 $EVARGS --tag "[mtg1s100st$i]" > /root/mtg1s100st_$i.log 2>&1
+  echo "[mtg1b] $(grep -E "EVAL_DONE|Error|Traceback" /root/mtg1s100st_$i.log | tail -1 | cut -c1-250)"
+done
+echo "MTG1B_JOB_DONE $(date -u)"
+MB
+  setsid nohup bash -c 'bash /root/mtg1bkeep.sh 2>&1 | tee -a /root/mtg1b.log' >> /proc/1/fd/1 2>&1 < /dev/null 9>&- &
+  echo "MTG1B_LAUNCHED $(date -u)"
+fi
 if [ ! -e /root/.pqjudge_v2 ]; then touch /root/.pqjudge_v2; pkill -f "pqjudgekee[p].sh"; echo "PQJUDGE_RESTART (two arms) $(date -u)"; fi
 if ! pgrep -f "pqjudgekee[p].sh" >/dev/null && ! grep -q "PQJUDGE_DONE" /root/pqjudge.log 2>/dev/null; then
   cat > /root/pqjudgekeep.sh <<'PJ'
@@ -1393,6 +1426,7 @@ while :; do
     echo "--- mem7.log (tail) ---"; tail -n 10 /root/mem7.log 2>/dev/null | cut -c1-300; grep -E "^val " /root/memfit_mem7_run.log 2>/dev/null | tail -2
     echo "--- qt.log (tail) ---"; tail -n 4 /root/qt.log 2>/dev/null | cut -c1-300
     echo "--- pqjudge.log (tail) ---"; tail -n 5 /root/pqjudge.log 2>/dev/null | cut -c1-200
+    echo "--- mtg1b.log (tail) ---"; tail -n 8 /root/mtg1b.log 2>/dev/null | cut -c1-250
     echo "--- mtg1.log (tail) ---"; tail -n 10 /root/mtg1.log 2>/dev/null | cut -c1-300; grep -E "^\[step|ONLINE_|\[guard\]|\[warn\]" /root/mtg1_run.log 2>/dev/null | tail -4 | cut -c1-300
     echo "--- mem10d.log (tail) ---"; tail -n 14 /root/mem10d.log 2>/dev/null | cut -c1-300; for f in /root/work/rft10_s0.jsonl /root/work/rft10_s2.jsonl /root/work/mem10_chain.jsonl; do [ -e $f ] && echo "$(basename $f) $(wc -l < $f)"; done | tr "\n" " "; echo
     echo "--- mem10c.log (tail) ---"; tail -n 14 /root/mem10c.log 2>/dev/null | cut -c1-300

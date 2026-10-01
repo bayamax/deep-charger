@@ -63,6 +63,7 @@ ap.add_argument("--pg-norm", default="mean", choices=["mean", "const"], help="ho
 ap.add_argument("--guard-steps", type=int, default=10, help="search steps per guard window (baseline = the first window). 10 steps = 120 rollouts was noisy enough to trip on hard stretches; 20 halves that")
 ap.add_argument("--guard-halve", type=int, default=1, help="1: a rollback also halves both learning rates. 0: weights only")
 ap.add_argument("--guard-pass", type=float, default=0.5, help="the guard trips only when, besides the unfinished or search-count rise, the window's pass rate has fallen to this fraction of the baseline pass rate (one hard question in a window is not a collapse)")
+ap.add_argument("--save-lora-only", type=int, default=0, help="1: checkpoints hold only the trained parameters (LoRA) and the pooler, not the 3.5 GB of base weights the base directory already has")
 ap.add_argument("--mt-items", default="", help="multi-turn GRPO: jsonl of {q, gold, hist} where hist is the earlier exchanges of a conversation as chat messages (user / assistant, replies without thinking). Every step is a search step on one of these, rolled out with the history in the prompt as the app sends it, scored as a search rollout (the teacher's naturalness check also sees the history)")
 ap.add_argument("--eval-file", default="", help="evaluation only: generate one reply per question in this jsonl ({\"q\": ...}) with the batched rollout, --b questions at a time, write {q, text, ns} to --eval-out and exit")
 ap.add_argument("--eval-out", default="")
@@ -757,7 +758,10 @@ def price(r, gold):
 
 
 def save_ckpt(path):
-    sd = {n: p.detach().to(torch.bfloat16).cpu().contiguous() for n, p in model.named_parameters()}   # full model (base + LoRA): loads standalone like the SFT ckpt
+    if A.save_lora_only:   # the base is the --init directory every loader already has; the LoRA and the pooler are what training changed
+        sd = {n: p.detach().to(torch.bfloat16).cpu().contiguous() for n, p in model.named_parameters() if p.requires_grad}
+    else:
+        sd = {n: p.detach().to(torch.bfloat16).cpu().contiguous() for n, p in model.named_parameters()}   # full model (base + LoRA): loads standalone like the SFT ckpt
     sd.update({"pooler." + k: v.detach().float().cpu().contiguous() for k, v in pooler.A.items()})   # merged
     save_file(sd, path + ".tmp"); os.replace(path + ".tmp", path)
 
