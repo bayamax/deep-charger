@@ -67,6 +67,23 @@ if pl:
     pooler.load_sd(pl); print(f"[load] pooler restored ({len(pl)} tensors)", flush=True)
 else:
     print("[load] WARNING: no pooler tensors in the checkpoint - the harness's fft_out/pooler.pt stays in use", flush=True)
+
+if os.environ.get("SP_EMPTY_FROM"):
+    # The 32 vectors the pooler emits for an EMPTY past are a constant every prompt starts with, long before anything is
+    # compressed; take them from the float pooler (SP_EMPTY_FROM), so a quantized pooler only acts once there is a past.
+    from safetensors.torch import load_file as _lfe
+    _cur = {k: v.detach().clone() for k, v in pooler.A.items()}
+    _fl = {(k[len("pooler."):] if k.startswith("pooler.") else k): v for k, v in _lfe(os.environ["SP_EMPTY_FROM"]).items()
+           if not k.startswith(("model.", "lm_head", "base_model"))}
+    pooler.load_sd(_fl)
+    with torch.no_grad():
+        _E = sp([]).detach().clone()
+    pooler.load_sd(_cur)
+    _sp_inner = sp
+
+    def sp(kept, _E=_E, _inner=_sp_inner):
+        return _E if len(kept) == 0 else _inner(kept)
+    print(f"[load] empty-past soft prompt from {os.environ['SP_EMPTY_FROM']} ({tuple(_E.shape)})", flush=True)
 model.eval()
 if A.q4:
     # What ships is the 4-bit conversion of these weights, so measure that and not the bf16 parent.
