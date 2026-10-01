@@ -80,7 +80,7 @@ PSKIP=
 # The raw GitHub copy this box fetches can lag and hand a control run an OLDER version of this file (04:48 on 09-22 it
 # relaunched the online loop under the previous mode while the newer run was merging a checkpoint on the same card).
 # Every edit bumps BOXG_SERIAL; a run that sees a lower serial than one already executed stops here.
-BOXG_SERIAL=2026092700
+BOXG_SERIAL=2026092701
 if [ -f /root/.boxg_serial ] && [ "$(cat /root/.boxg_serial)" -gt "$BOXG_SERIAL" ] 2>/dev/null; then echo "BOXG_STALE $BOXG_SERIAL < $(cat /root/.boxg_serial)"; exit 0; fi
 echo $BOXG_SERIAL > /root/.boxg_serial
 MODE=idle         # 2026-09-29: the side jobs hold the card (multi-turn measurement and training); a finished reeval re-launched on every control run and killed their evaluators
@@ -725,6 +725,65 @@ M10
   setsid nohup bash -c 'bash /root/mem10dkeep.sh 2>&1 | tee -a /root/mem10d.log' >> /proc/1/fd/1 2>&1 < /dev/null 9>&- &
   echo "MEM10D_LAUNCHED $(date -u)"
 fi
+
+# mtg1 (2026-10-01): multi-turn GRPO with the teacher's naturalness check - the user's next step ("seeds exist, go
+# straight to nano-judged GRPO"). online_loop.py --mt-items: every step is one search turn of a training conversation,
+# rolled out 8 times with the earlier exchanges in the prompt exactly as the app sends them (the model's own replies
+# from the rft8 / rft10 collections), scored as in the search GRPO (grounded-correct 1.5, nano's natural/sound/clean
+# +0.5 - the judge now also sees the history and fails a reply that answers or drags in the earlier topic),
+# group-normalised advantage, LoRA all layers r16 at 1e-5, pooler frozen, collapse guard on. Starts from the base when
+# mem10d is done; 100 steps, then the 30 held-out chains and the single-turn screen (shard 0) on the checkpoint.
+MTG1=${MTG1:-1}
+if [ "$MTG1" = 1 ] && ! pgrep -f "mtg1kee[p].sh" >/dev/null && ! grep -q "MTG1_JOB_DONE" /root/mtg1.log 2>/dev/null; then
+  cat > /root/mtg1keep.sh <<'MG'
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); R=baya1116/hypernet-sp-distill; cd /root/work; B=/root/reeval_g14m_pooler.safetensors; OUT=/root/online_mtg1
+ENV="SP_BASE=/root/gptq_hf_gq14 SP_RANK=16 SP_NOSYS=1 SP_EPISODIC=1 OMP_NUM_THREADS=1 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True"
+EVARGS="--rw 768 --maxd 384 --samepage 1 --decode plain --temp 0.6 --gen 4000 --stop eos --replycap 600"
+until grep -qE "MEM10D_JOB_DONE|MEM10D_ABORT" /root/mem10d.log 2>/dev/null; do sleep 120; done
+while pgrep -f "pool_eval.p[y]|memfit.p[y]|online_loop.p[y]" >/dev/null; do sleep 30; done
+python3 - <<'PY2'
+import json, collections
+held = set()
+for f in ("/root/work/eval300.jsonl", "/root/work/mt_eval_chain.jsonl", "/root/work/mt_eval_sw.jsonl"):
+    for l in open(f):
+        d = json.loads(l); held.add(d.get("q", "").strip()); held |= {t["q"].strip() for t in d.get("turns", [])}
+D = collections.defaultdict(list)
+for f in ("/root/work/rft10.jsonl", "/root/work/rft8.jsonl"):
+    for l in open(f):
+        r = json.loads(l); D[(f, r["dialog"])].append(r)
+n = nh = 0
+with open("/root/work/mtg_items.jsonl", "w") as fh:
+    for rs in D.values():
+        hist = []
+        for r in sorted(rs, key=lambda r: r["turn"]):
+            q = r["q"].strip()
+            if q not in held and r.get("gold"):
+                fh.write(json.dumps({"q": q, "gold": r["gold"], "hist": hist}, ensure_ascii=False) + "\n"); n += 1; nh += bool(hist)
+            hist = hist + [{"role": "user", "content": q}, {"role": "assistant", "content": (r.get("reply") or "").strip() or "(no reply)"}]
+print(f"[mtg1] {n} training turns ({nh} with history) from {len(D)} conversations")
+PY2
+echo "[mtg1] grpo start $(date -u +%H:%M)"
+env SP_BASE=/root/gptq_hf_gq14 SP_NOSYS=1 SP_EPISODIC=1 OAI_KEY=$(cat /root/.oai 2>/dev/null) DSK_KEY=$(cat /root/.dsk 2>/dev/null) PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
+  python3 /root/work/online_loop.py /root/gptq_hf_gq14 $OUT --pooler-init $B --pooler none --lora-layers all --lora-rank 16 \
+  --mt-items /root/work/mtg_items.jsonl --heldout /root/work/eval300.jsonl --reason-g 8 --steps 100 --save-every 25 \
+  --search-lr 1e-5 --search-temp 0.9 --search-gen 2000 --temp 0.6 --gen 2000 --budget 900 --maxsrch 7 --stop eos \
+  --judge-api openai --judge-model gpt-5-nano --w-talk 0.5 --dolphin-min 0 --adv-std 1 --pg-norm mean --kl 0 \
+  --guard 1 --guard-steps 20 > /root/mtg1_run.log 2>&1
+grep -E "^\[data\]|^\[init\]|^\[cfg\]|ONLINE_|Error|Traceback" /root/mtg1_run.log | tail -6 | cut -c1-250
+grep -E "^\[step" /root/mtg1_run.log | tail -3 | cut -c1-250
+[ -s $OUT/latest.safetensors ] || { echo "MTG1_ABORT: $(tail -3 /root/mtg1_run.log | tr '\n' ' ' | cut -c1-300)"; exit 1; }
+hf upload $R $OUT/latest.safetensors pooler_distill/chatsft/multiturn/mtg1_latest.safetensors >/dev/null 2>&1
+hf upload $R $OUT/rollouts.jsonl pooler_distill/chatsft/multiturn/mtg1_rollouts.jsonl >/dev/null 2>&1
+env $ENV python3 /root/work/pool_eval.py $OUT/latest.safetensors /root/work/eval300.jsonl /root/work/mtg1_chain.jsonl --multiturn /root/work/mt_eval_chain.jsonl --mt-mode full --n 1000 $EVARGS --tag "[mtg1-chain]" > /root/mtg1_chain.log 2>&1
+echo "[mtg1] $(grep -E "EVAL_DONE|Error|Traceback" /root/mtg1_chain.log | tail -1 | cut -c1-250)"; hf upload $R /root/work/mtg1_chain.jsonl pooler_distill/chatsft/multiturn/mtg1_chain.jsonl >/dev/null 2>&1
+env $ENV python3 /root/work/pool_eval.py $OUT/latest.safetensors /root/work/ev_0.jsonl /root/work/mtg1st_out_0.jsonl --n 34 $EVARGS --tag "[mtg1st0]" > /root/mtg1st_0.log 2>&1
+echo "[mtg1] $(grep -E "EVAL_DONE|Error|Traceback" /root/mtg1st_0.log | tail -1 | cut -c1-250)"
+echo "MTG1_JOB_DONE $(date -u)"
+MG
+  chmod +x /root/mtg1keep.sh
+  setsid nohup bash -c 'bash /root/mtg1keep.sh 2>&1 | tee -a /root/mtg1.log' >> /proc/1/fd/1 2>&1 < /dev/null 9>&- &
+  echo "MTG1_LAUNCHED $(date -u)"
+fi
 if [ "$MEM10C" = 1 ] && ! pgrep -f "mem10ckee[p].sh" >/dev/null && ! grep -q "MEM10C_JOB_DONE" /root/mem10c.log 2>/dev/null; then
   cat > /root/mem10ckeep.sh <<'M10'
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); R=baya1116/hypernet-sp-distill; cd /root/work; T=mem10; B=/root/reeval_g14m_pooler.safetensors
@@ -1260,6 +1319,7 @@ while :; do
     echo "--- mem6.log (tail) ---"; tail -n 10 /root/mem6.log 2>/dev/null | cut -c1-300; grep -E "^val " /root/memfit_mem6_run.log 2>/dev/null | tail -2
     echo "--- mem7.log (tail) ---"; tail -n 10 /root/mem7.log 2>/dev/null | cut -c1-300; grep -E "^val " /root/memfit_mem7_run.log 2>/dev/null | tail -2
     echo "--- qt.log (tail) ---"; tail -n 4 /root/qt.log 2>/dev/null | cut -c1-300
+    echo "--- mtg1.log (tail) ---"; tail -n 10 /root/mtg1.log 2>/dev/null | cut -c1-300; grep -E "^\[step|ONLINE_|\[guard\]|\[warn\]" /root/mtg1_run.log 2>/dev/null | tail -4 | cut -c1-300
     echo "--- mem10d.log (tail) ---"; tail -n 14 /root/mem10d.log 2>/dev/null | cut -c1-300; for f in /root/work/rft10_s0.jsonl /root/work/rft10_s2.jsonl /root/work/mem10_chain.jsonl; do [ -e $f ] && echo "$(basename $f) $(wc -l < $f)"; done | tr "\n" " "; echo
     echo "--- mem10c.log (tail) ---"; tail -n 14 /root/mem10c.log 2>/dev/null | cut -c1-300
     echo "--- mem10b.log (tail) ---"; tail -n 14 /root/mem10b.log 2>/dev/null | cut -c1-300; for f in /root/work/rft10_s*.jsonl /root/work/mem10_chain_h*.jsonl; do [ -e $f ] && echo "$(basename $f) $(wc -l < $f)"; done | tr "\n" " "; echo

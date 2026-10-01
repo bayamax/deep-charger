@@ -63,6 +63,7 @@ ap.add_argument("--pg-norm", default="mean", choices=["mean", "const"], help="ho
 ap.add_argument("--guard-steps", type=int, default=10, help="search steps per guard window (baseline = the first window). 10 steps = 120 rollouts was noisy enough to trip on hard stretches; 20 halves that")
 ap.add_argument("--guard-halve", type=int, default=1, help="1: a rollback also halves both learning rates. 0: weights only")
 ap.add_argument("--guard-pass", type=float, default=0.5, help="the guard trips only when, besides the unfinished or search-count rise, the window's pass rate has fallen to this fraction of the baseline pass rate (one hard question in a window is not a collapse)")
+ap.add_argument("--mt-items", default="", help="multi-turn GRPO: jsonl of {q, gold, hist} where hist is the earlier exchanges of a conversation as chat messages (user / assistant, replies without thinking). Every step is a search step on one of these, rolled out with the history in the prompt as the app sends it, scored as a search rollout (the teacher's naturalness check also sees the history)")
 ap.add_argument("--eval-file", default="", help="evaluation only: generate one reply per question in this jsonl ({\"q\": ...}) with the batched rollout, --b questions at a time, write {q, text, ns} to --eval-out and exit")
 ap.add_argument("--eval-out", default="")
 ap.add_argument("--loop-break", default="", choices=["", "stop", "answer"], help="a thinking span whose last 256 tokens are under 25%% distinct is a repetition loop (g14 step 400: 22 of 100 held-out replies never finished, tail repetition 0.84). stop: end the row there; answer: close the thinking and let it answer")
@@ -491,7 +492,7 @@ def rollout_batch(question, B):
     model.eval()
     qs = list(question) if isinstance(question, (list, tuple)) else [question] * B
     B = len(qs)
-    QID = [tok.encode(tok.apply_chat_template([{"role": "user", "content": q}], add_generation_prompt=True, tokenize=False) + "<think>\n")
+    QID = [tok.encode(tok.apply_chat_template(chat_msgs(q), add_generation_prompt=True, tokenize=False) + "<think>\n")
            for q in qs]
     MQs = [len(x) for x in QID]; MQ = max(MQs)                       # MQ = cache slots of the question prefix (left-padded)
     PAD = tok.pad_token_id if tok.pad_token_id is not None else eos
@@ -791,6 +792,22 @@ if A.pool_order == "pool3":
 else:
     rng.shuffle(pool)
 rng.shuffle(dol); rng.shuffle(rep)
+HIST = {}
+if A.mt_items:
+    pool = []
+    for line in open(A.mt_items):
+        try: r = json.loads(line)
+        except Exception: continue
+        q, gold = (r.get("q") or "").strip(), (r.get("gold") or "").strip()
+        if q and gold and q not in held:
+            pool.append({"q": q, "gold": gold}); HIST[q] = list(r.get("hist") or [])
+    random.Random(1).shuffle(pool)
+    print(f"[data] multi-turn: {len(pool)} search turns, {sum(1 for x in pool if HIST.get(x['q']))} with history in the prompt", flush=True)
+
+
+def chat_msgs(q):
+    """the prompt as the app sends it: the earlier exchanges of the conversation (if any), then the new question"""
+    return HIST.get(q, []) + [{"role": "user", "content": q}]
 def pool_item(step):
     """the search question of this step: loop order indexes by step (odd slots), pool3 order counts search steps from --pool-offset"""
     if A.pool_order == "pool3":
@@ -866,6 +883,10 @@ SEARCH_SYS = """You are scoring the reply of a small assistant that just searche
 sound means every claim in the reply is the kind of thing the search would have supported, with nothing obviously invented and nothing self-contradictory; natural means it reads as a person speaking, two or three sentences, not a template or a bare fragment; clean means no tool tags, no repetition loop, and nothing left unfinished."""
 
 
+MT_SYS = """
+The question comes after an earlier exchange, shown for context. natural also requires that the reply answers the NEW question as asked: it does not answer or revisit the earlier question, and it does not drag the earlier topic in where the new question does not refer to it."""
+
+
 def ask_teacher(system, user, tag):
     """one scored call to whichever teacher is configured; returns the parsed JSON or an error note"""
     oai = A.judge_api == "openai"
@@ -920,7 +941,12 @@ def score_search(r, gold):
     if A.reason_stub:
         return base + A.w_talk, {**why, "stub": True}
     served = "\n\n".join(r.get("served", []))[-4000:]
-    v = ask_teacher(SEARCH_SYS, f"QUESTION:\n{r.get('q', '')}\n\nWHAT THE SEARCH RETURNED:\n{served}\n\nREPLY:\n{reply[:2000]}", "search")
+    h = HIST.get(r.get("q", ""), [])
+    if h:   # multi-turn: the reply must answer the NEW message on its own terms, not carry the earlier topic over
+        ctx = "\n".join(("USER: " if m["role"] == "user" else "ASSISTANT: ") + m["content"][:600] for m in h)
+        v = ask_teacher(SEARCH_SYS + MT_SYS, f"EARLIER IN THE CONVERSATION:\n{ctx}\n\nNEW QUESTION:\n{r.get('q', '')}\n\nWHAT THE SEARCH RETURNED:\n{served}\n\nREPLY:\n{reply[:2000]}", "search")
+    else:
+        v = ask_teacher(SEARCH_SYS, f"QUESTION:\n{r.get('q', '')}\n\nWHAT THE SEARCH RETURNED:\n{served}\n\nREPLY:\n{reply[:2000]}", "search")
     if "error" in v: return base, {**why, **v}
     talk = A.w_talk if all(bool(v.get(k)) for k in ("sound", "natural", "clean")) else 0.0
     return base + talk, {**why, **v}
@@ -1079,7 +1105,7 @@ if A.eval_file:
             fo.flush(); clear()
             print(f"[eval] {min(k + A.b, len(todo))}/{len(todo)} ({(time.time()-t0)/60:.0f} min)", flush=True)
     print("EVAL_DONE", flush=True); sys.exit(0)
-for step in range(state["step"] + 1, A.steps + 1) if not reason else []:
+for step in range(state["step"] + 1, A.steps + 1) if not (reason or A.mt_items) else []:
     item = pool[(step - 1) % len(pool)]
     if (step - 1) % A.accum == 0: opt.zero_grad(set_to_none=True)
     rolls = []
@@ -1171,7 +1197,7 @@ for step in range(state["step"] + 1, A.steps + 1) if not reason else []:
                 save_ckpt(GOOD)                              # this window still looks like the opening one
     if step % A.save_every == 0 or step == A.steps:
         save_ckpt(LATEST); json.dump({"step": step, "cum": cum, "di": di, "ri": ri, "qi": qi, "base_rate": base_rate, "base_ns": base_ns, "base_cut": base_cut, "rollbacks": nrb, "guard_from": guard_from}, open(STATE_F, "w")); print(f"[save] step {step}", flush=True)
-if not reason: print("ONLINE_LOOP_DONE", flush=True)
+if not (reason or A.mt_items): print("ONLINE_LOOP_DONE", flush=True)
 
 
 # ---- GRPO, on the reasoning problems and on the search pool in turn ----
@@ -1179,7 +1205,7 @@ if not reason: print("ONLINE_LOOP_DONE", flush=True)
 # against the group's own mean, so a sample below the mean is pushed down rather than ignored. A
 # group whose samples all score alike carries no signal; when they all score zero the model cannot
 # do the problem at all, so with --wheels the teacher's own answer is trained on instead.
-for step in range(state["step"] + 1, A.steps + 1) if reason else []:
+for step in range(state["step"] + 1, A.steps + 1) if (reason or A.mt_items) else []:
     if A.sft_only:
         # distillation: the teacher's own thinking and answer, no sampling. The search trace keeps the other side rehearsed.
         opt.zero_grad(set_to_none=True); model.train(); dl = []
@@ -1195,7 +1221,7 @@ for step in range(state["step"] + 1, A.steps + 1) if reason else []:
             if step % 200 == 0:
                 import shutil; shutil.copyfile(LATEST, os.path.join(A.outdir, f"step{step}.safetensors")); shutil.copyfile(STATE_F, os.path.join(A.outdir, f"step{step}.json"))
         continue
-    searching = (step % A.reason_every != 0) if A.reason_every else (bool(A.search_every) and step % A.search_every == 0)
+    searching = True if A.mt_items else (step % A.reason_every != 0) if A.reason_every else (bool(A.search_every) and step % A.search_every == 0)
     if searching:
         item = pool_item(step); qtext, ref = item["q"], None
     else:
@@ -1307,4 +1333,4 @@ for step in range(state["step"] + 1, A.steps + 1) if reason else []:
         save_opt(); print(f"[save] step {step}", flush=True)
         if step % 200 == 0:   # the exact-step snapshot the freeze uploads (the 200-step marks used to get whatever "latest" was when a control run noticed)
             import shutil; shutil.copyfile(LATEST, os.path.join(A.outdir, f"step{step}.safetensors")); shutil.copyfile(STATE_F, os.path.join(A.outdir, f"step{step}.json"))
-if reason: print("ONLINE_LOOP_DONE", flush=True)
+if reason or A.mt_items: print("ONLINE_LOOP_DONE", flush=True)

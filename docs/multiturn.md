@@ -131,3 +131,11 @@ The second alone run (2026-10-01): 19 / 18 / 21 / 9. The two alone runs agree: t
 one; settled enough to act on. mem10's 100-chain base measurement was dropped after the card proved to hold only two
 processes (about 6.5 GB each): mem10b runs the training collection (202 chains alone) on two lanes, trains, and
 measures mem10 on the same 30 chains as base / mem8 and the single-turn 102.
+
+## mtg1 (queued behind mem10d): multi-turn GRPO with nano's naturalness check
+
+online_loop.py --mt-items: each step is one search turn of a training conversation (rft8 / rft10, the model's own
+earlier replies as the history), rolled out 8 times with the history in the prompt exactly as the app sends it,
+scored as in the search GRPO (grounded-correct 1.5; nano's sound / natural / clean +0.5, where natural now also fails
+a reply that answers or drags in the earlier topic), group-normalised advantage, LoRA all layers r16 at 1e-5, pooler
+frozen, collapse guard on. 100 steps from the base, then the 30 held-out chains and the single-turn screen.
