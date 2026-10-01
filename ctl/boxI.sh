@@ -1,4 +1,4 @@
-# box H (RTX 3090 24GB): the sentence-sequence BART - each sentence of a document becomes one vector (a frozen
+# box I (RTX 3060 12GB, the small first try the user asked for: cheap box, small data, small model): the sentence-sequence BART - each sentence of a document becomes one vector (a frozen
 # sentence encoder), and a transformer is trained on the sequence of those vectors: an encoder that reads a
 # corrupted sequence (spans of sentences masked) and a decoder that regenerates it one sentence vector at a time.
 # The encoder's outputs are context-aware sentence / page vectors (search, hierarchy); the decoder generates in
@@ -8,9 +8,9 @@ cd /root
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null)
 R=baya1116/hypernet-sp-distill
 RAW="https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl"
-BOXH_SERIAL=4
-if [ -f /root/.boxh_serial ] && [ "$(cat /root/.boxh_serial)" -gt "$BOXH_SERIAL" ] 2>/dev/null; then echo "BOXH_STALE $BOXH_SERIAL"; exit 0; fi
-echo $BOXH_SERIAL > /root/.boxh_serial
+BOXI_SERIAL=1
+if [ -f /root/.boxi_serial ] && [ "$(cat /root/.boxi_serial)" -gt "$BOXI_SERIAL" ] 2>/dev/null; then echo "BOXI_STALE $BOXI_SERIAL"; exit 0; fi
+echo $BOXI_SERIAL > /root/.boxi_serial
 mkdir -p /root/sb /root/work
 
 # ---- one-time bootstrap ----
@@ -35,27 +35,23 @@ if ! pgrep -f "mirrorkee[p].sh" >/dev/null; then
   cat > /root/mirrorkeep.sh <<'MK'
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); R=baya1116/hypernet-sp-distill
 while :; do
-  { echo "=== boxH $(date -u) ==="; echo "--- ctl.log ---"; tail -n 60 /root/ctl.log 2>/dev/null | cut -c1-300
+  { echo "=== boxI $(date -u) ==="; echo "--- ctl.log ---"; tail -n 60 /root/ctl.log 2>/dev/null | cut -c1-300
     for f in /root/sb_*.log; do [ -e $f ] && { echo "--- $f ---"; tail -n 25 $f | cut -c1-300; }; done
     echo "--- gpu ---"; nvidia-smi --query-gpu=memory.used,memory.total,utilization.gpu --format=csv,noheader
     echo "--- disk ---"; df -h /root | tail -1; du -sh /root/sb/data 2>/dev/null
     echo "--- processes ---"; pgrep -fa "python3 /root/sb/" | cut -c1-160; } > /root/boxlog.txt 2>&1
-  hf upload $R /root/boxlog.txt sentbart/audit/boxlog_H.txt >/dev/null 2>&1
+  hf upload $R /root/boxlog.txt sentbart/audit/boxlog_I.txt >/dev/null 2>&1
   sleep 600
 done
 MK
   setsid nohup bash /root/mirrorkeep.sh > /dev/null 2>&1 < /dev/null &
   echo "MIRROR_LAUNCHED $(date -u)"
 fi
-# 2026-10-01: the user asked for a small first try on a cheap box - the experiment moved to box I (RTX 3060). This box
-# stops its jobs and waits for the user to delete it.
-if [ ! -e /root/.stopped_for_I ]; then touch /root/.stopped_for_I; pkill -f "datakee[p].sh"; pkill -f "run1kee[p].sh"; pkill -f "python3 /root/sb/"; echo "BOXH_STOPPED (moved to box I) $(date -u)"; fi
-exit 0
-# ---- data: 10 of the 41 shards of English Wikipedia (about 1.5M articles) as sentence lists, then their vectors ----
+# ---- data: 2 of the 41 shards of English Wikipedia (about 240k articles, ~10M sentences) as sentence lists, then their vectors ----
 if ! pgrep -f "datakee[p].sh" >/dev/null && ! grep -q "DATA_JOB_DONE" /root/sb_data.log 2>/dev/null; then
   cat > /root/datakeep.sh <<'DK'
 cd /root/sb; export HF_HUB_ENABLE_HF_TRANSFER=0
-python3 /root/sb/prep.py --out /root/sb/data/docs --shards 0-9 || { echo "DATA_ABORT prep"; exit 1; }
+python3 /root/sb/prep.py --out /root/sb/data/docs --shards 0-1 || { echo "DATA_ABORT prep"; exit 1; }
 python3 /root/sb/embed.py --dir /root/sb/data/docs || { echo "DATA_ABORT embed"; exit 1; }
 du -sh /root/sb/data/docs
 echo "DATA_JOB_DONE $(date -u)"
@@ -63,23 +59,23 @@ DK
   setsid nohup bash -c 'bash /root/datakeep.sh 2>&1 | tee -a /root/sb_data.log' > /dev/null 2>&1 < /dev/null &
   echo "DATA_LAUNCHED $(date -u)"
 fi
-# ---- run1: the sentence-sequence BART on shards 0-8 (shard 9 held out), d 768, 6+6 layers, 30k steps ----
+# ---- run1: small - shard 0 to train, shard 1 held out; d 512, 4+4 layers (~30M parameters), batch 32, 10k steps ----
 if ! pgrep -f "run1kee[p].sh" >/dev/null && ! grep -q "RUN1_JOB_DONE" /root/sb_run1.log 2>/dev/null; then
   cat > /root/run1keep.sh <<'RK'
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); R=baya1116/hypernet-sp-distill
 until grep -qE "DATA_JOB_DONE|DATA_ABORT" /root/sb_data.log 2>/dev/null; do sleep 120; done
 grep -q DATA_ABORT /root/sb_data.log && { echo "RUN1_ABORT: data failed"; exit 1; }
 echo "[run1] start $(date -u +%H:%M)"
-( while sleep 1800; do hf upload $R /root/sb/run1/train.log sentbart/run1/train.log >/dev/null 2>&1; done ) &
+( while sleep 1800; do hf upload $R /root/sb/run1/train.log sentbart/small1/train.log >/dev/null 2>&1; done ) &
 UP=$!
-python3 /root/sb/train.py --data /root/sb/data/docs --out /root/sb/run1 --steps 30000 --batch 64 --seq 128 --d 768 --layers 6 --eval-every 1000 --save-every 2000
+python3 /root/sb/train.py --data /root/sb/data/docs --out /root/sb/run1 --steps 10000 --batch 32 --seq 128 --d 512 --layers 4 --heads 8 --ffn 2048 --warmup 500 --eval-every 500 --save-every 1000
 kill $UP 2>/dev/null
-hf upload $R /root/sb/run1/train.log sentbart/run1/train.log >/dev/null 2>&1
-hf upload $R /root/sb/run1/model_latest.pt sentbart/run1/model_latest.pt >/dev/null 2>&1
+hf upload $R /root/sb/run1/train.log sentbart/small1/train.log >/dev/null 2>&1
+hf upload $R /root/sb/run1/model_latest.pt sentbart/small1/model_latest.pt >/dev/null 2>&1
 echo "RUN1_JOB_DONE $(date -u)"
 RK
   setsid nohup bash -c 'bash /root/run1keep.sh 2>&1 | tee -a /root/sb_run1.log' > /dev/null 2>&1 < /dev/null &
   echo "RUN1_LAUNCHED $(date -u)"
 fi
-echo "BOXH_OK serial $BOXH_SERIAL $(date -u)"
+echo "BOXI_OK serial $BOXI_SERIAL $(date -u)"
 # CTL-END
