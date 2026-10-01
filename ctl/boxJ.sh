@@ -8,7 +8,7 @@ cd /root/work 2>/dev/null || { mkdir -p /root/work; cd /root/work; }
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null)
 R=baya1116/hypernet-sp-distill
 RAW="https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl"
-BOXJ_SERIAL=3
+BOXJ_SERIAL=4
 if [ -f /root/.boxj_serial ] && [ "$(cat /root/.boxj_serial)" -gt "$BOXJ_SERIAL" ] 2>/dev/null; then echo "BOXJ_STALE $BOXJ_SERIAL"; exit 0; fi
 echo $BOXJ_SERIAL > /root/.boxj_serial
 
@@ -49,6 +49,7 @@ done
 
 cp /root/work/web_search.py /root/work/runtime/web_search.py 2>/dev/null   # the evaluator imports it as runtime.web_search
 
+if [ ! -e /root/.mirror_v2 ]; then touch /root/.mirror_v2; pkill -f "mirrorkee[p].sh"; sleep 1; echo "MIRROR_RESTART (pq3 lines) $(date -u)"; fi
 # ---- the mirror: what this box is doing, on the hub every 10 minutes ----
 if ! pgrep -f "mirrorkee[p].sh" >/dev/null; then
   cat > /root/mirrorkeep.sh <<'MK'
