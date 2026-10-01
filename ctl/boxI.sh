@@ -8,7 +8,7 @@ cd /root
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null)
 R=baya1116/hypernet-sp-distill
 RAW="https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl"
-BOXI_SERIAL=4
+BOXI_SERIAL=5
 if [ -f /root/.boxi_serial ] && [ "$(cat /root/.boxi_serial)" -gt "$BOXI_SERIAL" ] 2>/dev/null; then echo "BOXI_STALE $BOXI_SERIAL"; exit 0; fi
 echo $BOXI_SERIAL > /root/.boxi_serial
 mkdir -p /root/sb /root/work
@@ -104,8 +104,10 @@ if ! pgrep -f "run4kee[p].sh" >/dev/null && ! grep -q "RUN4_JOB_DONE\|RUN4_ABORT
   cat > /root/run4keep.sh <<'RK'
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); R=baya1116/hypernet-sp-distill; cd /root/sb
 while pgrep -f "python3 /root/sb/" >/dev/null; do sleep 60; done
-python3 /root/sb/prep.py --out /root/sb/data/docs --shards 2-5 2>&1 | grep -E "^\[prep\]|PREP_DONE|Error" || { echo "RUN4_ABORT prep"; exit 1; }
-python3 /root/sb/embed.py --dir /root/sb/data/docs 2>&1 | grep -E "^\[embed\]|EMBED_DONE|Error" || { echo "RUN4_ABORT embed"; exit 1; }
+python3 /root/sb/prep.py --out /root/sb/data/docs --shards 2-5 > /root/sb/prep4.log 2>&1; grep -E "^\[prep\]" /root/sb/prep4.log
+grep -q PREP_DONE /root/sb/prep4.log || { tail -5 /root/sb/prep4.log; echo "RUN4_ABORT prep"; exit 1; }
+python3 /root/sb/embed.py --dir /root/sb/data/docs > /root/sb/embed4.log 2>&1; grep -E "^\[embed\]" /root/sb/embed4.log
+grep -q EMBED_DONE /root/sb/embed4.log || { tail -5 /root/sb/embed4.log; echo "RUN4_ABORT embed"; exit 1; }
 df -h /root | tail -1
 echo "[run4] train start $(date -u +%H:%M)"
 ( while sleep 1800; do hf upload $R /root/sb/run4/train.log sentbart/small_run4/train.log >/dev/null 2>&1; done ) & UP=$!
