@@ -8,7 +8,7 @@ cd /root
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null)
 R=baya1116/hypernet-sp-distill
 RAW="https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl"
-BOXI_SERIAL=7
+BOXI_SERIAL=8
 if [ -f /root/.boxi_serial ] && [ "$(cat /root/.boxi_serial)" -gt "$BOXI_SERIAL" ] 2>/dev/null; then echo "BOXI_STALE $BOXI_SERIAL"; exit 0; fi
 echo $BOXI_SERIAL > /root/.boxi_serial
 mkdir -p /root/sb /root/work
@@ -162,6 +162,29 @@ echo "RUN5_JOB_DONE $(date -u)"
 RK
   setsid nohup bash -c 'bash /root/run5keep.sh 2>&1 | tee -a /root/sb_run5.log' > /dev/null 2>&1 < /dev/null &
   echo "RUN5_LAUNCHED $(date -u)"
+fi
+# ---- run6a / run6b (queued 2026-10-02 09:10 JST, the user: a page vector without the input mean would be more general
+# and the hidden states more essential): run5 changed two things at once (start from the mean, 64 batches of
+# negatives), so the model-only page vector gets the harder negatives too. 6a: the page token alone + the queue
+# (run4 + the queue: is the queue what run4 lacked?). 6b: the mean of the encoder's outputs (contextual states, not
+# the input vectors) through page_head + the queue. 100k steps each, after run5, compared at equal steps.
+if ! pgrep -f "run6kee[p].sh" >/dev/null && ! grep -q "RUN6_JOB_DONE\|RUN6_ABORT" /root/sb_run6.log 2>/dev/null; then
+  cat > /root/run6keep.sh <<'RK'
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); R=baya1116/hypernet-sp-distill; D=/root/sb/data/docs; cd /root/sb
+until grep -qE "RUN5_JOB_DONE|RUN5_ABORT" /root/sb_run5.log 2>/dev/null; do sleep 120; done
+while pgrep -f "python3 /root/sb/" >/dev/null; do sleep 30; done
+for v in "6a:token" "6b:mean"; do n=${v%%:*}; pp=${v#*:}
+  echo "[run$n] train start (page-pool $pp) $(date -u +%H:%M)"
+  ( while sleep 1800; do hf upload $R /root/sb/run$n/train.log sentbart/small_run$n/train.log >/dev/null 2>&1; done ) & UP=$!
+  python3 /root/sb/train.py --data $D --out /root/sb/run$n --eval-shard 001 --steps 100000 --batch 32 --seq 128 --d 512 --layers 4 --heads 8 --ffn 2048 --warmup 1000 --eval-every 10000 --save-every 10000 --page 1 --page-pool $pp --page-queue 64 2>&1 | grep -E "^\[data\]|^\[model\]|^\[eval|TRAIN_DONE|Error|Traceback"
+  kill $UP 2>/dev/null
+  hf upload $R /root/sb/run$n/train.log sentbart/small_run$n/train.log >/dev/null 2>&1
+  hf upload $R /root/sb/run$n/model_latest.pt sentbart/small_run$n/model_latest.pt >/dev/null 2>&1
+done
+echo "RUN6_JOB_DONE $(date -u)"
+RK
+  setsid nohup bash -c 'bash /root/run6keep.sh 2>&1 | tee -a /root/sb_run6.log' > /dev/null 2>&1 < /dev/null &
+  echo "RUN6_LAUNCHED $(date -u)"
 fi
 echo "BOXI_OK serial $BOXI_SERIAL $(date -u)"
 # CTL-END

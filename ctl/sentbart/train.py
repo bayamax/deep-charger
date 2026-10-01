@@ -37,6 +37,7 @@ ap.add_argument("--eval-shard", default="", help="the held-out shard's key (e.g.
 ap.add_argument("--page", type=int, default=0, help="1: a page token in front of the encoder whose output is the document's vector, trained so each hidden sentence finds its own document's vector among the batch's (sentence -> page retrieval)")
 ap.add_argument("--w-page", type=float, default=1.0)
 ap.add_argument("--page-res", type=int, default=0, help="1: page vector = normalise(mean of the visible sentence vectors + page_head(page token)), the head starting at zero - it starts at the mean baseline and learns the difference")
+ap.add_argument("--page-pool", default="token", help="token: the page token's output; mean: the mean of the encoder's outputs over the visible sentences (both through page_head, no input mean)")
 ap.add_argument("--page-queue", type=int, default=0, help="N: the last N batches' page vectors (detached) as extra negatives for the page loss")
 ap.add_argument("--prev-skip", type=int, default=0, help="1: the decoder's output is (its head + a learned gate x the previous sentence's vector), normalised")
 ap.add_argument("--p-suffix", type=float, default=0.5, help="share of documents whose tail is hidden (continuation) instead of spans")
@@ -133,7 +134,11 @@ class SentBART(nn.Module):
         # the page token reads the whole (corrupted) document; its output, through page_head, is the page vector
         h = torch.cat([s.page_tok.to(h.dtype).expand(B, 1, -1), h], dim=1)
         out = s.enc(h, src_key_padding_mask=torch.cat([torch.zeros_like(valid[:, :1]), ~valid], dim=1))
-        pg = s.page_head(out[:, 0]).float()
+        if A.page_pool == "mean":
+            vis = (valid & ~masked).to(out.dtype)[..., None]
+            pg = s.page_head((out[:, 1:] * vis).sum(1) / vis.sum(1).clamp_min(1)).float()
+        else:
+            pg = s.page_head(out[:, 0]).float()
         if A.page_res:
             keep = (valid & ~masked).float()[..., None]
             pg = pg + F.normalize((x.float() * keep).sum(1) / keep.sum(1).clamp_min(1), dim=-1)
