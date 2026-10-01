@@ -8,7 +8,7 @@ cd /root/work 2>/dev/null || { mkdir -p /root/work; cd /root/work; }
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null)
 R=baya1116/hypernet-sp-distill
 RAW="https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl"
-BOXJ_SERIAL=9
+BOXJ_SERIAL=10
 if [ -f /root/.boxj_serial ] && [ "$(cat /root/.boxj_serial)" -gt "$BOXJ_SERIAL" ] 2>/dev/null; then echo "BOXJ_STALE $BOXJ_SERIAL"; exit 0; fi
 echo $BOXJ_SERIAL > /root/.boxj_serial
 
@@ -277,6 +277,20 @@ if [ ! -e /root/.pq_release_v1 ]; then
     hf download $R release/g14-4bit-gptq-trained/pooler_4bit.safetensors --local-dir /root/pq/check >/dev/null 2>&1
     echo "PQ_RELEASE_DONE hub copy sha256 $(sha256sum /root/pq/check/release/g14-4bit-gptq-trained/pooler_4bit.safetensors 2>/dev/null | cut -c1-64) $(date -u)"
   else echo "PQ_RELEASE_ABORT"; fi
+fi
+# ---- final archive before the box is deleted (2026-10-02, the user's OK): logs, the held-out / calibration sets built
+# here, and anything in /root/pq or /root/work not yet on the hub, under pooler_distill/pooler4bit/final/
+if [ ! -e /root/.pq_archive_v1 ]; then
+  touch /root/.pq_archive_v1; A=/root/pq_archive; rm -rf $A; mkdir -p $A/logs $A/data $A/pq $A/work
+  cp /root/ctl.log /root/pq*.log $A/logs/ 2>/dev/null
+  cp /root/work/dolphin_calib.jsonl /root/work/dolphin_heldout100.jsonl /root/work/dolphinq.jsonl $A/data/ 2>/dev/null
+  for f in /root/pq/*.safetensors; do b=$(basename $f); [ "$b" = pooler_4bit.safetensors ] && continue
+    curl -sfI "https://huggingface.co/$R/resolve/main/pooler_distill/pooler4bit/$b" >/dev/null || cp $f $A/pq/; done
+  for f in /root/work/pq*_out_*.jsonl /root/work/pq*_dolphin*.jsonl; do [ -e $f ] || continue; b=$(basename $f)
+    curl -sfI "https://huggingface.co/$R/resolve/main/pooler_distill/pooler4bit/$b" >/dev/null || cp $f $A/work/; done
+  ls -R $A | head -60; du -sh $A
+  for t in 1 2 3; do hf upload $R $A pooler_distill/pooler4bit/final 2>&1 | tail -1 && break; sleep 30; done
+  echo "PQ_ARCHIVE_DONE $(find $A -type f | wc -l) files $(date -u)"
 fi
 echo "BOXJ_OK serial $BOXJ_SERIAL $(date -u)"
 # CTL-END
