@@ -139,3 +139,18 @@ earlier replies as the history), rolled out 8 times with the history in the prom
 scored as in the search GRPO (grounded-correct 1.5; nano's sound / natural / clean +0.5, where natural now also fails
 a reply that answers or drags in the earlier topic), group-normalised advantage, LoRA all layers r16 at 1e-5, pooler
 frozen, collapse guard on. 100 steps from the base, then the 30 held-out chains and the single-turn screen.
+
+## mem10 (2026-10-01): 404 training questions run alone, 141 own successes (106 with history), ce-native, LoRA only
+
+Same 30 chains, correct of 30 per turn:
+
+| | turn 1 | turn 2 | turn 3 | turn 4 |
+|---|---|---|---|---|
+| base, history | 16 | 10 | 16 | 8 |
+| each question alone (two runs) | 20 / 19 | 19 / 18 | 19 / 21 | 11 / 9 |
+| mem8 | 18 | 11 | 14 | 10 |
+| **mem10** | 18 | **17** | 17 | 12 |
+
+Turns 2-4: base 34, mem10 46 of 90 (23 won, 11 lost; sign test p ~ 0.06). Turn 2, the first switch, goes from 10 to
+17 - most of the way to the alone level (18-19). The single-turn 102 decides whether the multi-turn GRPO (mtg1)
+starts from mem10 (mean of its three shards >= 45) or from the base.

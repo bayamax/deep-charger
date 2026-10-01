@@ -80,7 +80,7 @@ PSKIP=
 # The raw GitHub copy this box fetches can lag and hand a control run an OLDER version of this file (04:48 on 09-22 it
 # relaunched the online loop under the previous mode while the newer run was merging a checkpoint on the same card).
 # Every edit bumps BOXG_SERIAL; a run that sees a lower serial than one already executed stops here.
-BOXG_SERIAL=2026092701
+BOXG_SERIAL=2026092702
 if [ -f /root/.boxg_serial ] && [ "$(cat /root/.boxg_serial)" -gt "$BOXG_SERIAL" ] 2>/dev/null; then echo "BOXG_STALE $BOXG_SERIAL < $(cat /root/.boxg_serial)"; exit 0; fi
 echo $BOXG_SERIAL > /root/.boxg_serial
 MODE=idle         # 2026-09-29: the side jobs hold the card (multi-turn measurement and training); a finished reeval re-launched on every control run and killed their evaluators
@@ -733,6 +733,7 @@ fi
 # +0.5 - the judge now also sees the history and fails a reply that answers or drags in the earlier topic),
 # group-normalised advantage, LoRA all layers r16 at 1e-5, pooler frozen, collapse guard on. Starts from the base when
 # mem10d is done; 100 steps, then the 30 held-out chains and the single-turn screen (shard 0) on the checkpoint.
+if [ ! -e /root/.mtg1_swap ]; then touch /root/.mtg1_swap; pkill -f "mtg1kee[p].sh"; sleep 2; echo "MTG1_SWAP restarts the waiting GRPO keeper (init now chosen from mem10's single-turn result) $(date -u)"; fi
 MTG1=${MTG1:-1}
 if [ "$MTG1" = 1 ] && ! pgrep -f "mtg1kee[p].sh" >/dev/null && ! grep -q "MTG1_JOB_DONE" /root/mtg1.log 2>/dev/null; then
   cat > /root/mtg1keep.sh <<'MG'
@@ -762,13 +763,22 @@ with open("/root/work/mtg_items.jsonl", "w") as fh:
             hist = hist + [{"role": "user", "content": q}, {"role": "assistant", "content": (r.get("reply") or "").strip() or "(no reply)"}]
 print(f"[mtg1] {n} training turns ({nh} with history) from {len(D)} conversations")
 PY2
-echo "[mtg1] grpo start $(date -u +%H:%M)"
-env SP_BASE=/root/gptq_hf_gq14 SP_NOSYS=1 SP_EPISODIC=1 OAI_KEY=$(cat /root/.oai 2>/dev/null) DSK_KEY=$(cat /root/.dsk 2>/dev/null) PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
-  python3 /root/work/online_loop.py /root/gptq_hf_gq14 $OUT --pooler-init $B --pooler none --lora-layers all --lora-rank 16 \
+# start from mem10 when it kept the single-turn search (its three shards average >= 45, base 48.0): mem10 closed most
+# of the switch gap on the 30 chains (turn 2: 10 -> 17 of 30, alone 18-19); otherwise from the base
+ST=$(grep -hoE "EVAL_DONE\[mem10st[0-2]\] n=34 correct=[0-9.]+" /root/mem10st_*.log 2>/dev/null | grep -oE "[0-9.]+$" | awk '{s+=$1;n++} END{if(n==3) printf "%.1f", s/n}')
+INIT=/root/gptq_hf_gq14; PI="--pooler-init $B"
+if [ -n "$ST" ] && awk "BEGIN{exit !($ST >= 45.0)}" && [ -s /root/pooler_mem10.safetensors ]; then INIT=/root/pooler_mem10.safetensors; PI=""; fi
+grpo() { env SP_BASE=/root/gptq_hf_gq14 SP_NOSYS=1 SP_EPISODIC=1 OAI_KEY=$(cat /root/.oai 2>/dev/null) DSK_KEY=$(cat /root/.dsk 2>/dev/null) PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
+  python3 /root/work/online_loop.py $1 $OUT $2 --pooler none --lora-layers all --lora-rank 16 \
   --mt-items /root/work/mtg_items.jsonl --heldout /root/work/eval300.jsonl --reason-g 8 --steps 100 --save-every 25 \
   --search-lr 1e-5 --search-temp 0.9 --search-gen 2000 --temp 0.6 --gen 2000 --budget 900 --maxsrch 7 --stop eos \
   --judge-api openai --judge-model gpt-5-nano --w-talk 0.5 --dolphin-min 0 --adv-std 1 --pg-norm mean --kl 0 \
-  --guard 1 --guard-steps 20 > /root/mtg1_run.log 2>&1
+  --guard 1 --guard-steps 20 >> /root/mtg1_run.log 2>&1; }
+echo "[mtg1] grpo start $(date -u +%H:%M), init $INIT (mem10 single-turn mean ${ST:-n/a})"
+grpo $INIT "$PI"
+if [ "$INIT" != /root/gptq_hf_gq14 ] && grep -q "ONLINE_ABORT" /root/mtg1_run.log; then
+  echo "[mtg1] mem10 checkpoint refused ($(grep -m1 ONLINE_ABORT /root/mtg1_run.log | cut -c1-160)); from the base instead"; rm -rf $OUT; grpo /root/gptq_hf_gq14 "--pooler-init $B"
+fi
 grep -E "^\[data\]|^\[init\]|^\[cfg\]|ONLINE_|Error|Traceback" /root/mtg1_run.log | tail -6 | cut -c1-250
 grep -E "^\[step" /root/mtg1_run.log | tail -3 | cut -c1-250
 [ -s $OUT/latest.safetensors ] || { echo "MTG1_ABORT: $(tail -3 /root/mtg1_run.log | tr '\n' ' ' | cut -c1-300)"; exit 1; }
