@@ -8,7 +8,7 @@ cd /root/work 2>/dev/null || { mkdir -p /root/work; cd /root/work; }
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null)
 R=baya1116/hypernet-sp-distill
 RAW="https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl"
-BOXJ_SERIAL=8
+BOXJ_SERIAL=9
 if [ -f /root/.boxj_serial ] && [ "$(cat /root/.boxj_serial)" -gt "$BOXJ_SERIAL" ] 2>/dev/null; then echo "BOXJ_STALE $BOXJ_SERIAL"; exit 0; fi
 echo $BOXJ_SERIAL > /root/.boxj_serial
 
@@ -43,7 +43,7 @@ fi
 [ -f /root/.bootstrapped ] || { echo "bootstrap incomplete - stopping here"; exit 0; }
 
 # the code, fresh from the branch on every control run
-for f in pool_eval.py q4.py pooler_gptq.py mlx2hf.py web_search.py online_loop.py pooler_gridfit.py; do
+for f in pool_eval.py q4.py pooler_gptq.py mlx2hf.py web_search.py online_loop.py pooler_gridfit.py pooler4bit_release.py; do
   curl -sS -L -o /root/work/$f.new "$RAW/$f?$(date +%s)" && python3 -m py_compile /root/work/$f.new 2>/dev/null && mv /root/work/$f.new /root/work/$f || rm -f /root/work/$f.new
 done
 
@@ -264,6 +264,19 @@ echo "PQ7_JOB_DONE $(date -u)"
 PK
   setsid nohup bash -c 'bash /root/pq7keep.sh 2>&1 | tee -a /root/pq7.log' > /dev/null 2>&1 < /dev/null &
   echo "PQ7_LAUNCHED $(date -u)"
+fi
+# ---- release (2026-10-02, the user: "put the 4-bit pooler that matches the float one on Hugging Face, and add it to
+# the app notes"): the GPTQ (search + reasoning calibration) pooler beside the app's model as pooler_4bit.safetensors,
+# its float parts in float32 as evaluated (checked bit-exact before writing), and the release notes with section 1a.
+if [ ! -e /root/.pq_release_v1 ]; then
+  touch /root/.pq_release_v1
+  python3 /root/work/pooler4bit_release.py /root/pq/pooler_gptq_mix_mlx.safetensors /root/pq/pooler_gptq_mix_dq.safetensors /root/pq/pooler_4bit.safetensors 2>&1 | tail -2
+  if [ -s /root/pq/pooler_4bit.safetensors ]; then
+    for t in 1 2 3; do hf upload $R /root/pq/pooler_4bit.safetensors release/g14-4bit-gptq-trained/pooler_4bit.safetensors 2>&1 | tail -1 && break; sleep 20; done
+    for f in USAGE.md README.md; do curl -sSf -o /root/pq/release_$f "$RAW/release/$f?nocache=$(date +%s)" && grep -q "pooler_4bit" /root/pq/release_$f && hf upload $R /root/pq/release_$f release/$f 2>&1 | tail -1; done
+    hf download $R release/g14-4bit-gptq-trained/pooler_4bit.safetensors --local-dir /root/pq/check >/dev/null 2>&1
+    echo "PQ_RELEASE_DONE hub copy sha256 $(sha256sum /root/pq/check/release/g14-4bit-gptq-trained/pooler_4bit.safetensors 2>/dev/null | cut -c1-64) $(date -u)"
+  else echo "PQ_RELEASE_ABORT"; fi
 fi
 echo "BOXJ_OK serial $BOXJ_SERIAL $(date -u)"
 # CTL-END

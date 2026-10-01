@@ -22,6 +22,11 @@ Lineage: chat SFT (s4) -> search GRPO on the pooler-equipped student (g10, layer
 -> distillation of R1 thinking and replies with search-trace replay (g14, 835 steps). Details in the
 repository's `docs/conversational_lineage.md` and `docs/quantization_4bit.md`.
 
+4-bit pooler (2026-10-02): `g14-4bit-gptq-trained/pooler_4bit.safetensors`, the pooler on the model's own
+4-bit grid by GPTQ, 43 MB instead of 302 MB, measured as good as the float pooler on both held-outs
+(search 52.9% at 102 rollouts; reasoning 98 / 200 against the float pooler's 102 / 200 over two draws, a
+gap smaller than the float pooler's own draw-to-draw spread). Format and loading: `USAGE.md` section 1a.
+
 Loading: the 4-bit directories are what the app reads (`SPGenerator` with `QuantizationConfig(groupSize: 64,
 bits: 4)`); `pooler.safetensors` holds the pooler's 64 tensors under bare keys. The 16-bit directory is a
 plain `transformers` model directory; the same `pooler.safetensors` goes with it.

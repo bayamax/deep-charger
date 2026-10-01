@@ -271,3 +271,29 @@ GPTQ's codes with the grid trained on top (q14gx), at the same 300: **47.3%** (4
 66%, searches 4.4. Paired: +2.0 +- 3.6 against bf16 (better on 38 questions, worse on 34, equal on 78),
 +2.3 +- 3.1 against GPTQ alone. Both 4-bit arms are within the noise of the float model; the trained one
 is the app's file (`release/g14-4bit-gptq-trained`).
+
+## The pooler on the 4-bit grid (2026-10-01/02, box J)
+
+`ctl/pooler_gptq.py`: the pooler's 18 matrices (99.9% of its weights) by GPTQ on the model's own grid (affine,
+group 64, fp16 scale / bias), calibrated on the pooler's real inputs - the 4-bit model's embeddings of past trace
+tokens, 512 windows of 32-384 tokens, half from search traces (`dwq_calib`), half from reasoning traces (Dolphin,
+the held-out 100 excluded); the cross attention's in_proj split into its query rows (Hessian of lnq1(q)) and
+its key / value rows (Hessian of lnk(past)). The rest stays float.
+
+| | output error, held-out windows (relative, input-driven part) | size |
+|---|---|---|
+| GPTQ, search + reasoning calibration | 0.36% (search 0.32, reasoning 0.41) | 42.8 MB |
+| round-to-nearest | 5.1% | 42.8 MB |
+| float | - | 302.5 MB |
+
+Measured with the shipped 4-bit model (`release/g14-4bit-gptq-trained`) dequantized to 16-bit, the app's loop:
+
+- Search held-out, 102 rollouts (shards 0-2): 55.9 / 64.7 / 38.2 = 52.9% (the float pooler: 47.3% at 300).
+- Reasoning held-out (Dolphin-R1 100, nano judge, REASON_SYS): float 54 and 48, GPTQ 47 and 51 (102 vs 98 of
+  200). Float against itself disagrees on 24 questions, float against GPTQ on 27 (20 / 18 either way).
+- Two attempts at closing the first draw's gap, 100 questions each: the float pooler's exact empty-past output
+  (`SP_EMPTY_FROM`) 51; the grid's scales and biases trained against the float pooler on the 4-bit model
+  (`ctl/pooler_gridfit.py`, 600 steps, KL on own traces) 52. Neither differs from plain GPTQ.
+
+Shipped as `release/g14-4bit-gptq-trained/pooler_4bit.safetensors` (the MLX-packed GPTQ file, its float parts in
+float32 as evaluated); format and loading in `release/USAGE.md` section 1a.
