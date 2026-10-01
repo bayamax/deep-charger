@@ -80,7 +80,7 @@ PSKIP=
 # The raw GitHub copy this box fetches can lag and hand a control run an OLDER version of this file (04:48 on 09-22 it
 # relaunched the online loop under the previous mode while the newer run was merging a checkpoint on the same card).
 # Every edit bumps BOXG_SERIAL; a run that sees a lower serial than one already executed stops here.
-BOXG_SERIAL=2026092696
+BOXG_SERIAL=2026092697
 if [ -f /root/.boxg_serial ] && [ "$(cat /root/.boxg_serial)" -gt "$BOXG_SERIAL" ] 2>/dev/null; then echo "BOXG_STALE $BOXG_SERIAL < $(cat /root/.boxg_serial)"; exit 0; fi
 echo $BOXG_SERIAL > /root/.boxg_serial
 MODE=idle         # 2026-09-29: the side jobs hold the card (multi-turn measurement and training); a finished reeval re-launched on every control run and killed their evaluators
@@ -679,7 +679,7 @@ fi
 # history prompt, ce-native, LoRA only, one success per distinct question, nothing solved twice). Two lanes on the card:
 # the held-out measurements and the collection run side by side.
 MEM10=${MEM10:-1}
-if [ "$MEM10" = 1 ] && grep -q "MEM9_JOB_DONE" /root/mem9.log 2>/dev/null && ! pgrep -f "mem10kee[p].sh" >/dev/null && ! grep -q "MEM10_JOB_DONE" /root/mem10.log 2>/dev/null; then
+if [ "$MEM10" = 1 ] && ! pgrep -f "mem10kee[p].sh" >/dev/null && ! grep -q "MEM10_JOB_DONE" /root/mem10.log 2>/dev/null; then
   cat > /root/mem10keep.sh <<'M10'
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); R=baya1116/hypernet-sp-distill; cd /root/work; T=mem10; B=/root/reeval_g14m_pooler.safetensors
 ENV="SP_BASE=/root/gptq_hf_gq14 SP_RANK=16 SP_NOSYS=1 SP_EPISODIC=1 OMP_NUM_THREADS=1 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True"
