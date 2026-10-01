@@ -8,7 +8,7 @@ cd /root
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null)
 R=baya1116/hypernet-sp-distill
 RAW="https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl"
-BOXI_SERIAL=6
+BOXI_SERIAL=7
 if [ -f /root/.boxi_serial ] && [ "$(cat /root/.boxi_serial)" -gt "$BOXI_SERIAL" ] 2>/dev/null; then echo "BOXI_STALE $BOXI_SERIAL"; exit 0; fi
 echo $BOXI_SERIAL > /root/.boxi_serial
 mkdir -p /root/sb /root/work
@@ -141,6 +141,27 @@ echo "RUN4B_JOB_DONE $(date -u)"
 RK
   setsid nohup bash -c 'bash /root/run4bkeep.sh 2>&1 | tee -a /root/sb_run4b.log' > /dev/null 2>&1 < /dev/null &
   echo "RUN4B_LAUNCHED $(date -u)"
+fi
+# ---- run5 (queued 2026-10-02 04:45 JST): run4's page vector (page token alone, in-batch negatives) is far below the
+# plain mean of the visible sentences on held-out page retrieval (top-1 0.29 vs 0.57 at 60k). run5 starts the page
+# vector AT that mean and learns a correction (--page-res, head zero-initialised, as --prev-skip did for the decoder),
+# and makes the page loss harder with the last 64 batches' pages as extra negatives (--page-queue 64, ~2000 pages).
+# Same data / held-out / size / steps as run4, after it.
+if ! pgrep -f "run5kee[p].sh" >/dev/null && ! grep -q "RUN5_JOB_DONE\|RUN5_ABORT" /root/sb_run5.log 2>/dev/null; then
+  cat > /root/run5keep.sh <<'RK'
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); R=baya1116/hypernet-sp-distill; D=/root/sb/data/docs; cd /root/sb
+until grep -qE "RUN4B_JOB_DONE|RUN4B_ABORT" /root/sb_run4b.log 2>/dev/null; do sleep 120; done
+while pgrep -f "python3 /root/sb/" >/dev/null; do sleep 30; done
+echo "[run5] train start $(date -u +%H:%M)"
+( while sleep 1800; do hf upload $R /root/sb/run5/train.log sentbart/small_run5/train.log >/dev/null 2>&1; done ) & UP=$!
+python3 /root/sb/train.py --data $D --out /root/sb/run5 --eval-shard 001 --steps 200000 --batch 32 --seq 128 --d 512 --layers 4 --heads 8 --ffn 2048 --warmup 1000 --eval-every 10000 --save-every 10000 --page 1 --page-res 1 --page-queue 64 2>&1 | grep -E "^\[data\]|^\[model\]|^\[eval|TRAIN_DONE|Error|Traceback"
+kill $UP 2>/dev/null
+hf upload $R /root/sb/run5/train.log sentbart/small_run5/train.log >/dev/null 2>&1
+hf upload $R /root/sb/run5/model_latest.pt sentbart/small_run5/model_latest.pt >/dev/null 2>&1
+echo "RUN5_JOB_DONE $(date -u)"
+RK
+  setsid nohup bash -c 'bash /root/run5keep.sh 2>&1 | tee -a /root/sb_run5.log' > /dev/null 2>&1 < /dev/null &
+  echo "RUN5_LAUNCHED $(date -u)"
 fi
 echo "BOXI_OK serial $BOXI_SERIAL $(date -u)"
 # CTL-END

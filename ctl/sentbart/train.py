@@ -36,6 +36,8 @@ ap.add_argument("--min-sents", type=int, default=8)
 ap.add_argument("--eval-shard", default="", help="the held-out shard's key (e.g. 001); default the last one")
 ap.add_argument("--page", type=int, default=0, help="1: a page token in front of the encoder whose output is the document's vector, trained so each hidden sentence finds its own document's vector among the batch's (sentence -> page retrieval)")
 ap.add_argument("--w-page", type=float, default=1.0)
+ap.add_argument("--page-res", type=int, default=0, help="1: page vector = normalise(mean of the visible sentence vectors + page_head(page token)), the head starting at zero - it starts at the mean baseline and learns the difference")
+ap.add_argument("--page-queue", type=int, default=0, help="N: the last N batches' page vectors (detached) as extra negatives for the page loss")
 ap.add_argument("--prev-skip", type=int, default=0, help="1: the decoder's output is (its head + a learned gate x the previous sentence's vector), normalised")
 ap.add_argument("--p-suffix", type=float, default=0.5, help="share of documents whose tail is hidden (continuation) instead of spans")
 A = ap.parse_args()
@@ -118,6 +120,8 @@ class SentBART(nn.Module):
         s.prev_gate = nn.Parameter(torch.tensor(1.0))   # --prev-skip: the decoder writes a change to the sentence before
         if A.prev_skip:   # the head starts at zero, so the decoder starts exactly at the baseline and learns the difference
             nn.init.zeros_(s.dec_head.weight); nn.init.zeros_(s.dec_head.bias)
+        if A.page_res:    # likewise the page vector starts at the mean of the visible sentences (run4's page lost to it)
+            nn.init.zeros_(s.page_head.weight); nn.init.zeros_(s.page_head.bias)
 
     def encode(s, x, valid, masked):
         B, L, _ = x.shape
@@ -129,7 +133,11 @@ class SentBART(nn.Module):
         # the page token reads the whole (corrupted) document; its output, through page_head, is the page vector
         h = torch.cat([s.page_tok.to(h.dtype).expand(B, 1, -1), h], dim=1)
         out = s.enc(h, src_key_padding_mask=torch.cat([torch.zeros_like(valid[:, :1]), ~valid], dim=1))
-        s.last_page = F.normalize(s.page_head(out[:, 0]).float(), dim=-1)
+        pg = s.page_head(out[:, 0]).float()
+        if A.page_res:
+            keep = (valid & ~masked).float()[..., None]
+            pg = pg + F.normalize((x.float() * keep).sum(1) / keep.sum(1).clamp_min(1), dim=-1)
+        s.last_page = F.normalize(pg, dim=-1)
         return out[:, 1:]
 
     def decode(s, mem, valid, x):
@@ -181,11 +189,16 @@ def losses(x, valid, masked):
     LP[0] = torch.zeros((), device=DEV)
     if A.page:                                         # each hidden sentence must find its own document's page vector
         q = x[masked].float(); doc = torch.nonzero(masked)[:, 0]
-        LP[0] = F.cross_entropy(q @ model.last_page.T / A.tau, doc)
+        keys = model.last_page
+        if A.page_queue and PQ:
+            keys = torch.cat([keys, torch.cat(PQ)])     # earlier batches' pages: negatives only (labels index the current batch)
+        LP[0] = F.cross_entropy(q @ keys.T / A.tau, doc)
+        if A.page_queue:
+            PQ.append(model.last_page.detach()); del PQ[:-A.page_queue]
     return le, ld, lge, lgd, pos
 
 
-LP = [None]
+LP = [None]; PQ = []
 
 
 @torch.no_grad()
