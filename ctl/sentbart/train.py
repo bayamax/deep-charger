@@ -30,6 +30,7 @@ ap.add_argument("--heads", type=int, default=12); ap.add_argument("--ffn", type=
 ap.add_argument("--lr", type=float, default=3e-4); ap.add_argument("--warmup", type=int, default=2000)
 ap.add_argument("--mask", type=float, default=0.3); ap.add_argument("--span", type=float, default=3.0)
 ap.add_argument("--tau", type=float, default=0.05); ap.add_argument("--w-enc", type=float, default=1.0)
+ap.add_argument("--w-cos", type=float, default=1.0, help="weight of the direct reconstruction term, 1 - cosine(predicted, true sentence vector)")
 ap.add_argument("--eval-every", type=int, default=1000); ap.add_argument("--save-every", type=int, default=2000)
 ap.add_argument("--min-sents", type=int, default=8)
 ap.add_argument("--p-suffix", type=float, default=0.5, help="share of documents whose tail is hidden (continuation) instead of spans")
@@ -119,9 +120,16 @@ class SentBART(nn.Module):
 
 
 def nce(pred, tgt_all, idx):
-    """pred [N, DIM] for the targets tgt_all[idx]; candidates: every real sentence of the batch (tgt_all)"""
+    """pred [N, DIM] for the targets tgt_all[idx]: the contrastive term (name the right sentence among every real one
+    of the batch) plus --w-cos x (1 - cosine to the true vector) - the head writes the sentence vector itself, it does
+    not pick an ID from a codebook; the contrastive term only keeps it from settling on the average sentence"""
     logits = pred @ tgt_all.T / A.tau
-    return F.cross_entropy(logits, idx), logits
+    cos = (pred * tgt_all[idx]).sum(-1)
+    LAST_COS.append(float(cos.mean().detach()))
+    return F.cross_entropy(logits, idx) + A.w_cos * (1.0 - cos).mean(), logits
+
+
+LAST_COS = []
 
 
 model = SentBART().to(DEV)
@@ -158,6 +166,7 @@ def evaluate():
             with torch.autocast("cuda", dtype=torch.bfloat16):
                 le, ld, lge, lgd, pos = losses(x, valid, masked)
             lg, idx, k = (lge, pos[masked], "enc") if mode == "span" else (lgd, pos[masked], "dec")
+            r["cos" + k] = r.get("cos" + k, 0.0) + (LAST_COS[-2] if mode == "span" else LAST_COS[-1]); LAST_COS.clear()
             top = lg.topk(10, dim=-1).indices
             hit1 = top[:, 0] == idx; hit10 = (top == idx[:, None]).any(-1)
             r[k + "1"] = r.get(k + "1", 0) + int(hit1.sum()); r[k + "10"] = r.get(k + "10", 0) + int(hit10.sum()); r["n" + k] = r.get("n" + k, 0) + len(idx)
@@ -179,6 +188,7 @@ def evaluate():
     return {"enc_top1": r["enc1"] / r["nenc"], "enc_top10": r["enc10"] / r["nenc"], "dec_top1": r["dec1"] / r["ndec"], "dec_top10": r["dec10"] / r["ndec"],
             "next_top1": r["next1"] / r["nnext"], "next_top10": r["next10"] / r["nnext"],
             "next_baseline_top1": r["base1"] / r["nnext"], "next_baseline_top10": r["base10"] / r["nnext"],
+            "enc_cos": r["cosenc"] / r["benc"], "dec_cos": r["cosdec"] / r["bdec"],
             "enc_loss": r["lenc"] / r["benc"], "dec_loss": r["ldec"] / r["bdec"], "candidates_per_batch": int(r["cand"] / (r["benc"] + r["bdec"]))}
 
 
@@ -195,6 +205,7 @@ for step in range(step0 + 1, A.steps + 1):
     with torch.autocast("cuda", dtype=torch.bfloat16):
         le, ld, _, _, _ = losses(x, valid, masked)
         loss = A.w_enc * le + ld
+    LAST_COS.clear()
     opt.zero_grad(set_to_none=True); loss.backward()
     gn = float(torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)); opt.step(); sched.step()
     acc.append((le.item(), ld.item()))
