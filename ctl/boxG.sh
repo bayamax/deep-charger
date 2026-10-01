@@ -80,7 +80,7 @@ PSKIP=
 # The raw GitHub copy this box fetches can lag and hand a control run an OLDER version of this file (04:48 on 09-22 it
 # relaunched the online loop under the previous mode while the newer run was merging a checkpoint on the same card).
 # Every edit bumps BOXG_SERIAL; a run that sees a lower serial than one already executed stops here.
-BOXG_SERIAL=2026092704
+BOXG_SERIAL=2026092705
 if [ -f /root/.boxg_serial ] && [ "$(cat /root/.boxg_serial)" -gt "$BOXG_SERIAL" ] 2>/dev/null; then echo "BOXG_STALE $BOXG_SERIAL < $(cat /root/.boxg_serial)"; exit 0; fi
 echo $BOXG_SERIAL > /root/.boxg_serial
 MODE=idle         # 2026-09-29: the side jobs hold the card (multi-turn measurement and training); a finished reeval re-launched on every control run and killed their evaluators
@@ -736,6 +736,8 @@ fi
 # pqjudge (2026-10-01): box J measures the 4-bit pooler on the Dolphin held-out but holds no judge key; this box judges
 # its replies (nano, REASON_SYS, the same judge and held-out as every Dolphin number so far) as each arm's file lands
 # on the hub. CPU and API only - the card stays with the multi-turn work.
+# 2026-10-01: mtg1 died at step 50 on "No space left on device" while saving; what fills the 45 GB disk (once per serial)
+if [ ! -e /root/.du_2026092705 ]; then touch /root/.du_2026092705; { echo "DISK_REPORT $(date -u)"; df -h /root | tail -1; du -xsh /root/* /root/.cache 2>/dev/null | sort -h | tail -25; du -xsh /root/work/* 2>/dev/null | sort -h | tail -8; ls -la /root/online_mtg1 2>/dev/null; } > /root/disk_report.txt 2>&1; hf upload baya1116/hypernet-sp-distill /root/disk_report.txt pooler_distill/chatsft/audit/disk_report_G.txt >/dev/null 2>&1; echo "DISK_REPORT uploaded"; fi
 if [ ! -e /root/.pqjudge_v2 ]; then touch /root/.pqjudge_v2; pkill -f "pqjudgekee[p].sh"; echo "PQJUDGE_RESTART (two arms) $(date -u)"; fi
 if ! pgrep -f "pqjudgekee[p].sh" >/dev/null && ! grep -q "PQJUDGE_DONE" /root/pqjudge.log 2>/dev/null; then
   cat > /root/pqjudgekeep.sh <<'PJ'
