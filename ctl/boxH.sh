@@ -8,7 +8,7 @@ cd /root
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null)
 R=baya1116/hypernet-sp-distill
 RAW="https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl"
-BOXH_SERIAL=2
+BOXH_SERIAL=3
 if [ -f /root/.boxh_serial ] && [ "$(cat /root/.boxh_serial)" -gt "$BOXH_SERIAL" ] 2>/dev/null; then echo "BOXH_STALE $BOXH_SERIAL"; exit 0; fi
 echo $BOXH_SERIAL > /root/.boxh_serial
 mkdir -p /root/sb /root/work
@@ -58,6 +58,24 @@ echo "DATA_JOB_DONE $(date -u)"
 DK
   setsid nohup bash -c 'bash /root/datakeep.sh 2>&1 | tee -a /root/sb_data.log' > /dev/null 2>&1 < /dev/null &
   echo "DATA_LAUNCHED $(date -u)"
+fi
+# ---- run1: the sentence-sequence BART on shards 0-8 (shard 9 held out), d 768, 6+6 layers, 30k steps ----
+if ! pgrep -f "run1kee[p].sh" >/dev/null && ! grep -q "RUN1_JOB_DONE" /root/sb_run1.log 2>/dev/null; then
+  cat > /root/run1keep.sh <<'RK'
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); R=baya1116/hypernet-sp-distill
+until grep -qE "DATA_JOB_DONE|DATA_ABORT" /root/sb_data.log 2>/dev/null; do sleep 120; done
+grep -q DATA_ABORT /root/sb_data.log && { echo "RUN1_ABORT: data failed"; exit 1; }
+echo "[run1] start $(date -u +%H:%M)"
+( while sleep 1800; do hf upload $R /root/sb/run1/train.log sentbart/run1/train.log >/dev/null 2>&1; done ) &
+UP=$!
+python3 /root/sb/train.py --data /root/sb/data/docs --out /root/sb/run1 --steps 30000 --batch 64 --seq 128 --d 768 --layers 6 --eval-every 1000 --save-every 2000
+kill $UP 2>/dev/null
+hf upload $R /root/sb/run1/train.log sentbart/run1/train.log >/dev/null 2>&1
+hf upload $R /root/sb/run1/model_latest.pt sentbart/run1/model_latest.pt >/dev/null 2>&1
+echo "RUN1_JOB_DONE $(date -u)"
+RK
+  setsid nohup bash -c 'bash /root/run1keep.sh 2>&1 | tee -a /root/sb_run1.log' > /dev/null 2>&1 < /dev/null &
+  echo "RUN1_LAUNCHED $(date -u)"
 fi
 echo "BOXH_OK serial $BOXH_SERIAL $(date -u)"
 # CTL-END
