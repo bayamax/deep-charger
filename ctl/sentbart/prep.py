@@ -15,6 +15,7 @@ ap.add_argument("--min-sents", type=int, default=8)
 ap.add_argument("--max-sents", type=int, default=256)
 ap.add_argument("--min-chars", type=int, default=20, help="shorter pieces (headings, stray tokens) are not sentences")
 ap.add_argument("--max-chars", type=int, default=600)
+ap.add_argument("--ids-only", type=int, default=0, help="1: write only ids_XXX.npy - the page ids of the documents docs_XXX.jsonl holds, in the same order (same filter), and delete the downloaded shard")
 A = ap.parse_args()
 import pyarrow.parquet as pq
 from blingfire import text_to_sentences
@@ -27,13 +28,28 @@ os.makedirs(A.out, exist_ok=True)
 TAIL = re.compile(r"\n(References|See also|External links|Further reading|Notes|Bibliography|Sources|Citations|Footnotes)\s*\n", re.I)
 print(f"[prep] {len(files)} shards in the dump, taking {a}-{b}", flush=True)
 for si in range(a, b + 1):
-    out = os.path.join(A.out, f"docs_{si:03d}.jsonl")
+    out = os.path.join(A.out, f"ids_{si:03d}.npy" if A.ids_only else f"docs_{si:03d}.jsonl")
     if os.path.exists(out):
         print(f"[prep] shard {si} already written", flush=True); continue
     t0 = time.time()
     path = hf_hub_download(REPO, files[si], repo_type="dataset")
     tbl = pq.read_table(path, columns=["id", "title", "text"])
     nd = ns = 0
+    if A.ids_only:
+        import numpy as np
+        keep = []
+        for rid, text in zip(tbl["id"].to_pylist(), tbl["text"].to_pylist()):
+            m = TAIL.search(text)
+            if m: text = text[:m.start()]
+            n = 0
+            for para in text.split("\n"):
+                para = para.strip()
+                if len(para) < A.min_chars: continue
+                for s_ in text_to_sentences(para).split("\n"):
+                    if A.min_chars <= len(s_.strip()) <= A.max_chars: n += 1
+            if n >= A.min_sents: keep.append(int(rid))
+        np.save(out, np.array(keep, dtype=np.int64)); os.remove(os.path.realpath(path))
+        print(f"[prep] shard {si}: {len(keep)} document ids in {time.time() - t0:.0f}s", flush=True); continue
     with open(out + ".part", "w") as fh:
         for rid, title, text in zip(tbl["id"].to_pylist(), tbl["title"].to_pylist(), tbl["text"].to_pylist()):
             m = TAIL.search(text)

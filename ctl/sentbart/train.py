@@ -46,6 +46,8 @@ ap.add_argument("--search-out", default="")
 ap.add_argument("--q-prefix", type=int, default=1, help="1: bge's query instruction in front of each query (bge's recommended use); 0: the query as a plain sentence, as the training saw sentences")
 ap.add_argument("--search-text", default="", help="the held-out shard's text (docs_XXX.jsonl): adds keyword search (BM25 over title + sentences) and its combinations with the vector methods")
 ap.add_argument("--grow", default="", help="a model_*.pt with fewer layers: its layer i becomes layer i*k (k = --layers / its layers), and the layers in between start as the identity (attention / FFN output projections at zero, so each new pre-norm residual layer passes its input through) - the grown model computes exactly what the old one did and training continues from there")
+ap.add_argument("--links", default="", help="links.npz (links.py): the link graph between training documents. Half of each batch is a linked neighbour of the other half (related pages meet as negatives), and the page loss's target is soft: the page itself 1, a linked page --link-w (halved past the first --link-early links of the article), so related pages are pulled nearer than unrelated ones instead of pushed out as hard")
+ap.add_argument("--link-w", type=float, default=0.2); ap.add_argument("--link-early", type=int, default=10)
 ap.add_argument("--page-queue", type=int, default=0, help="N: the last N batches' page vectors (detached) as extra negatives for the page loss")
 ap.add_argument("--prev-skip", type=int, default=0, help="1: the decoder's output is (its head + a learned gate x the previous sentence's vector), normalised")
 ap.add_argument("--p-suffix", type=float, default=0.5, help="share of documents whose tail is hidden (continuation) instead of spans")
@@ -106,11 +108,44 @@ def make_batch(items, mode="mix"):
     return t(x), t(valid), t(masked), t(cut)
 
 
+LK = None
+if A.links:
+    _z = np.load(A.links); LK = (_z["ptr"], _z["nbr"], _z["pos"])
+    assert len(LK[0]) - 1 == len(docs), ("links.npz does not match the training documents", len(LK[0]) - 1, len(docs))
+    _deg = np.diff(LK[0]); print(f"[links] {len(docs)} documents, mean degree {_deg.mean():.1f}, {100 * (_deg == 0).mean():.1f}% without links", flush=True)
+BID = [None]                                       # the global document index of each row of the last training batch
+
+
 def train_batch():
-    items = []
-    for _ in range(A.batch):
-        si, a, b = random.choice(docs); items.append(crop(train_sh[si][1], a, b))
+    items, gid = [], []
+    if LK is None:
+        for _ in range(A.batch):
+            g = random.randrange(len(docs)); gid.append(g)
+    else:                                           # anchors and, for each, one linked neighbour (a random document if it has none)
+        ptr, nbr, _ = LK
+        for _ in range(A.batch // 2):
+            g = random.randrange(len(docs)); gid.append(g)
+            gid.append(int(nbr[random.randrange(ptr[g], ptr[g + 1])]) if ptr[g + 1] > ptr[g] else random.randrange(len(docs)))
+    for g in gid:
+        si, a, b = docs[g]; items.append(crop(train_sh[si][1], a, b))
+    BID[0] = np.array(gid, dtype=np.int64)
     return make_batch(items)[:3]
+
+
+def link_targets(rows_doc, key_ids):
+    """soft target [n_rows, n_keys]: 1 on the row's own document, --link-w on documents it links with (either way)"""
+    ptr, nbr, pos = LK
+    T = np.zeros((len(rows_doc), len(key_ids)), np.float32)
+    for r, g in enumerate(rows_doc):
+        a, b = ptr[g], ptr[g + 1]
+        if b > a:
+            nb, ps = nbr[a:b], pos[a:b]
+            hit = np.isin(key_ids, nb)
+            if hit.any():
+                w = np.where(ps < A.link_early, A.link_w, A.link_w / 2)
+                T[r, hit] = w[np.searchsorted(nb, key_ids[hit])] if np.all(np.diff(nb) >= 0) else A.link_w
+        T[r, key_ids == g] = 1.0
+    return T / T.sum(1, keepdims=True)
 
 
 # ---- model ----
@@ -230,13 +265,19 @@ def losses(x, valid, masked):
         keys = model.last_page
         if A.page_queue and PQ:
             keys = torch.cat([keys, torch.cat(PQ)])     # earlier batches' pages: negatives only (labels index the current batch)
-        LP[0] = F.cross_entropy(q @ keys.T / A.tau, doc)
-        if A.page_queue:
+        if LK is not None and model.training and BID[0] is not None and len(BID[0]) == len(model.last_page):
+            kid = np.concatenate([BID[0]] + PQI) if PQI else BID[0]
+            T = torch.from_numpy(link_targets(BID[0], kid)).to(q.device)[doc]      # one row per batch document, then per hidden sentence
+            LP[0] = -(T * F.log_softmax(q @ keys.T / A.tau, dim=-1)).sum(-1).mean()
+        else:
+            LP[0] = F.cross_entropy(q @ keys.T / A.tau, doc)
+        if A.page_queue and model.training:
             PQ.append(model.last_page.detach()); del PQ[:-A.page_queue]
+            if LK is not None: PQI.append(BID[0].copy()); del PQI[:-A.page_queue]
     return le, ld, lge, lgd, pos
 
 
-LP = [None]; PQ = []; R_CURVE = {}; SKIPPED = [0]; BEST = [-1.0]
+LP = [None]; PQ = []; PQI = []; R_CURVE = {}; SKIPPED = [0]; BEST = [-1.0]
 
 
 @torch.no_grad()

@@ -8,7 +8,7 @@ cd /root
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null)
 R=baya1116/hypernet-sp-distill
 RAW="https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl"
-BOXI_SERIAL=24
+BOXI_SERIAL=25
 if [ -f /root/.boxi_serial ] && [ "$(cat /root/.boxi_serial)" -gt "$BOXI_SERIAL" ] 2>/dev/null; then echo "BOXI_STALE $BOXI_SERIAL"; exit 0; fi
 echo $BOXI_SERIAL > /root/.boxi_serial
 mkdir -p /root/sb /root/work
@@ -25,7 +25,7 @@ if [ ! -f /root/.bootstrapped ]; then
 fi
 
 # the code, fresh from the branch on every control run
-for f in prep.py embed.py train.py evalsb.py; do
+for f in prep.py embed.py train.py evalsb.py links.py; do
   curl -sS -L -o /root/sb/$f.new "$RAW/sentbart/$f?$(date +%s)" && grep -q "^#!/usr/bin/env python3" /root/sb/$f.new && mv /root/sb/$f.new /root/sb/$f || rm -f /root/sb/$f.new
 done
 ls /root/sb
@@ -463,6 +463,53 @@ if [ ! -e /root/.hub_v1 ]; then touch /root/.hub_v1
   [ -s /root/sb/run4d2/model_best.pt ] && hf upload $R /root/sb/run4d2/model_best.pt sentbart/small_run4d2/model_best.pt >/dev/null 2>&1
   curl -sSf -o /root/sb/README_sentbart.md "https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/docs/sentbart.md?$(date +%s)" && hf upload $R /root/sb/README_sentbart.md sentbart/README.md >/dev/null 2>&1
   echo "HUB_UP $(date -u)"
+fi
+# ---- links (2026-10-03 00:50 JST, the user: plain contrast pushes related pages out as hard as unrelated ones - use
+# the link graph to set how near they should be). Now, on the CPU beside the training: the training shards' page ids
+# again (prep.py --ids-only, same filter and order as their vectors), Wikipedia's ordered body links
+# (cgscsystems/wikipedia-ordered-links, nlink_sequences: 18M pages; checked: 399/400 of our page ids are in it), the
+# link graph between the training documents (links.py). When run4g2 ends (~04:00) the grow chain stops and training
+# continues from the best 8+8 weights with link-paired batches and soft targets (a linked page --link-w 0.2, halved
+# past an article's first 10 links); the negatives queue stays at 64 batches so only the links change.
+if ! pgrep -f "linkkee[p].sh" >/dev/null && ! grep -q "LINK_JOB_DONE\|LINK_ABORT" /root/sb_link.log 2>/dev/null; then
+  cat > /root/linkkeep.sh <<'RK'
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); R=baya1116/hypernet-sp-distill; D=/root/sb/data/docs; cd /root/sb
+for k in $(ls $D/vec_*.npy | sed -E 's/.*vec_([0-9]+)\.npy/\1/'); do
+  [ "$k" = 001 ] && continue; [ -s $D/ids_$k.npy ] && continue
+  nice -n 10 python3 /root/sb/prep.py --out $D --shards $((10#$k))-$((10#$k)) --ids-only 1 2>&1 | grep -E "^\[prep\] shard|Error|Traceback"
+done
+rm -rf /root/.cache/huggingface/hub/datasets--wikimedia--wikipedia
+python3 -c "
+import numpy as np, glob, os
+bad = [k for k in sorted(os.path.basename(f)[4:-4] for f in glob.glob('$D/vec_*.npy')) if k != '001' and len(np.load('$D/ids_%s.npy' % k)) != len(np.load('$D/off_%s.npy' % k)) - 1]
+print('[link] id lists vs vectors:', 'all match' if not bad else 'MISMATCH ' + str(bad))" | tee /root/sb/ids_check.txt
+grep -q "all match" /root/sb/ids_check.txt || { echo "LINK_ABORT ids"; exit 1; }
+for t in 1 2 3; do hf download cgscsystems/wikipedia-ordered-links nlink_sequences.parquet --repo-type dataset --local-dir /root/sb/linkdata >/dev/null 2>&1 && break; sleep 30; done
+nice -n 10 python3 /root/sb/links.py --data $D --eval-shard 001 --seq /root/sb/linkdata/nlink_sequences.parquet --out /root/sb/links.npz 2>&1 | grep -vE "row group [1-9][0-9]*/" | tail -4
+[ -s /root/sb/links.npz ] || { echo "LINK_ABORT links"; exit 1; }
+rm -rf /root/sb/linkdata; hf upload $R /root/sb_link.log sentbart/links/link.log >/dev/null 2>&1
+echo "[link] waiting for run4g2 to end $(date -u +%H:%M)"
+until grep -q "\[grow\] run4g2 done" /root/sb_grow.log 2>/dev/null; do sleep 20; done
+pkill -f "growkee[p].sh"; sleep 2; pkill -f "python3 /root/sb/train.py --data /root/sb/data/docs --out /root/sb/run4g3"; echo "GROW_JOB_DONE stopped for links" >> /root/sb_grow.log; sleep 10
+bestof() { grep -h "^\[best\]" /root/sb/$1/train.log 2>/dev/null | tail -1 | sed -E 's/.*page_top1 ([0-9.]+).*/\1/'; }
+src=""; base=0
+for d in /root/sb/run4g1 /root/sb/run4g2; do b=$(bestof $(basename $d)); [ -n "$b" ] && [ -s $d/model_best.pt ] && python3 -c "import sys; sys.exit(0 if float('$b') > float('$base') else 1)" && { src=$d/model_best.pt; base=$b; }; done
+hf upload $R /root/sb/run4g2/train.log sentbart/small_run4g2/train.log >/dev/null 2>&1; hf upload $R $src sentbart/small_link_source.pt >/dev/null 2>&1
+prev=$src
+for i in 1 2 3 4; do
+  n=run4L$i; echo "[link] $n from $prev (top-1 $base) $(date -u +%H:%M)"
+  ( while sleep 1800; do hf upload $R /root/sb/$n/train.log sentbart/small_$n/train.log >/dev/null 2>&1; done ) & UP=$!
+  python3 /root/sb/train.py --data $D --out /root/sb/$n --init $prev --eval-shard 001 --steps 100000 --batch 32 --seq 128 --d 512 --layers 8 --heads 8 --ffn 2048 --lr 1e-4 --warmup 1000 --eval-every 10000 --save-every 10000 --page 1 --page-queue 64 --skip-grad 5 --links /root/sb/links.npz --link-w 0.2 2>&1 | grep -E "^\[links\]|^\[best|TRAIN_DONE|Error|Traceback" | tail -6
+  kill $UP 2>/dev/null; hf upload $R /root/sb/$n/train.log sentbart/small_$n/train.log >/dev/null 2>&1; hf upload $R /root/sb/$n/model_best.pt sentbart/small_$n/model_best.pt >/dev/null 2>&1
+  rm -f /root/sb/$n/state.pt
+  cur=$(bestof $n); cur=${cur:-0}; echo "[link] $n done: best page top-1 $cur (from $base)"
+  python3 -c "import sys; sys.exit(0 if float('$cur') - float('$base') >= 0.01 else 1)" || { echo "PLATEAU_LINK at $n: best $cur vs $base"; break; }
+  prev=/root/sb/$n/model_best.pt; base=$cur
+done
+echo "LINK_JOB_DONE $(date -u)"
+RK
+  setsid nohup bash -c 'bash /root/linkkeep.sh 2>&1 | tee -a /root/sb_link.log' > /dev/null 2>&1 < /dev/null &
+  echo "LINK_LAUNCHED $(date -u)"
 fi
 echo "BOXI_OK serial $BOXI_SERIAL $(date -u)"
 # CTL-END
