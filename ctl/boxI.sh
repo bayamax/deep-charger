@@ -8,7 +8,7 @@ cd /root
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null)
 R=baya1116/hypernet-sp-distill
 RAW="https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl"
-BOXI_SERIAL=10
+BOXI_SERIAL=11
 if [ -f /root/.boxi_serial ] && [ "$(cat /root/.boxi_serial)" -gt "$BOXI_SERIAL" ] 2>/dev/null; then echo "BOXI_STALE $BOXI_SERIAL"; exit 0; fi
 echo $BOXI_SERIAL > /root/.boxi_serial
 mkdir -p /root/sb /root/work
@@ -219,6 +219,15 @@ echo "RUN4C_JOB_DONE $(date -u)"
 RK
   setsid nohup bash -c 'bash /root/run4ckeep.sh 2>&1 | tee -a /root/sb_run4c.log' > /dev/null 2>&1 < /dev/null &
   echo "RUN4C_LAUNCHED $(date -u)"
+fi
+# ---- page recall curve (2026-10-02 09:20 JST, the user: "at which top-k does it reach 90%?"): run4 200k and run5 40k
+# evaluated once on the same 2000 held-out pages, recall at 1..200 and the k that holds 90%, beside the training run
+if [ ! -e /root/.curve_v1 ]; then touch /root/.curve_v1
+  ( cd /root/sb; C="--data /root/sb/data/docs --eval-shard 001 --eval-only 1 --batch 32 --seq 128 --d 512 --layers 4 --heads 8 --ffn 2048 --page 1"
+    python3 /root/sb/train.py $C --out /root/sb/ev4 --init /root/sb/run4/model_latest.pt 2>&1 | grep -E "^\[curve|^\[init|Error|Traceback" | sed 's/^/[run4 200k] /'
+    python3 /root/sb/train.py $C --out /root/sb/ev5 --init /root/sb/run5/model_latest.pt --page-res 1 2>&1 | grep -E "^\[curve|^\[init|Error|Traceback" | sed 's/^/[run5 40k] /'
+  ) > /root/sb_curve.log 2>&1
+  cat /root/sb_curve.log; hf upload $R /root/sb_curve.log sentbart/audit/page_curve.log >/dev/null 2>&1; echo "CURVE_DONE $(date -u)"
 fi
 echo "BOXI_OK serial $BOXI_SERIAL $(date -u)"
 # CTL-END

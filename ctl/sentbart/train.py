@@ -16,7 +16,7 @@
               among all sentences of the eval batch, and a few greedy continuations decoded by nearest neighbour
   usage     : python3 train.py --data /root/sb/data/docs --out /root/sb/run1 [--steps 30000] [--d 768] [--layers 6]
 """
-import argparse, glob, json, math, os, random, time
+import argparse, glob, json, math, os, random, sys, time
 import numpy as np
 import torch
 import torch.nn as nn
@@ -39,6 +39,7 @@ ap.add_argument("--w-page", type=float, default=1.0)
 ap.add_argument("--page-res", type=int, default=0, help="1: page vector = normalise(mean of the visible sentence vectors + page_head(page token)), the head starting at zero - it starts at the mean baseline and learns the difference")
 ap.add_argument("--page-pool", default="token", help="token: the page token's output; mean: the mean of the encoder's outputs over the visible sentences (both through page_head, no input mean)")
 ap.add_argument("--init", default="", help="a model_*.pt to start from (weights only; fresh optimizer and schedule) when --out has no state")
+ap.add_argument("--eval-only", type=int, default=0, help="1: evaluate the --init weights once (with the page recall curve) and exit")
 ap.add_argument("--page-queue", type=int, default=0, help="N: the last N batches' page vectors (detached) as extra negatives for the page loss")
 ap.add_argument("--prev-skip", type=int, default=0, help="1: the decoder's output is (its head + a learned gate x the previous sentence's vector), normalised")
 ap.add_argument("--p-suffix", type=float, default=0.5, help="share of documents whose tail is hidden (continuation) instead of spans")
@@ -207,7 +208,7 @@ def losses(x, valid, masked):
     return le, ld, lge, lgd, pos
 
 
-LP = [None]; PQ = []
+LP = [None]; PQ = []; R_CURVE = {}
 
 
 @torch.no_grad()
@@ -264,7 +265,11 @@ def evaluate():
         for M_, k in ((Pm, "page"), (Pb, "page_base")):
             tk = (Q @ M_.T).topk(10, dim=-1).indices
             r[k + "1"] = int((tk[:, 0] == tgt_).sum()) / len(Q); r[k + "10"] = int((tk == tgt_[:, None]).any(-1).sum()) / len(Q)
+            S_ = Q @ M_.T; rank = (S_ > S_.diagonal()[:, None]).sum(1) + 1     # 1 = first
+            curve = " ".join(f"@{kk} {float((rank <= kk).float().mean()):.3f}" for kk in (1, 5, 10, 20, 50, 100, 200))
+            k90 = int(torch.quantile(rank.float(), 0.9).ceil()); r[k + "_curve"] = f"{curve} | 90% within top {k90}, median rank {int(rank.float().median())}"
         r["npages"] = len(Q)
+        for k in ("page", "page_base"): R_CURVE[k] = r[k + "_curve"]
     random.seed(time.time()); np.random.seed(int(time.time()) % 2**31); model.train()
     pg = ({"page_top1": r["page1"], "page_top10": r["page10"], "page_base_top1": r["page_base1"], "page_base_top10": r["page_base10"], "pages": r["npages"]} if A.page else {})
     return {**pg, "enc_top1": r["enc1"] / r["nenc"], "enc_top10": r["enc10"] / r["nenc"], "dec_top1": r["dec1"] / r["ndec"], "dec_top10": r["dec10"] / r["ndec"],
@@ -280,6 +285,11 @@ def save(tag="latest"):
     torch.save({"model": model.state_dict(), "args": vars(A), "step": step}, os.path.join(A.out, f"model_{tag}.pt"))
 
 
+if A.eval_only:
+    ev = evaluate()
+    print("[eval-only] " + " ".join(f"{k} {v:.3f}" if isinstance(v, float) else f"{k} {v}" for k, v in ev.items()), flush=True)
+    for k in ("page", "page_base"): print(f"[curve] {k}: {R_CURVE[k]}", flush=True)
+    sys.exit(0)
 log = open(os.path.join(A.out, "train.log"), "a")
 model.train(); t0 = time.time(); acc = []
 for step in range(step0 + 1, A.steps + 1):
