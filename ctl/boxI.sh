@@ -8,7 +8,7 @@ cd /root
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null)
 R=baya1116/hypernet-sp-distill
 RAW="https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl"
-BOXI_SERIAL=23
+BOXI_SERIAL=24
 if [ -f /root/.boxi_serial ] && [ "$(cat /root/.boxi_serial)" -gt "$BOXI_SERIAL" ] 2>/dev/null; then echo "BOXI_STALE $BOXI_SERIAL"; exit 0; fi
 echo $BOXI_SERIAL > /root/.boxi_serial
 mkdir -p /root/sb /root/work
@@ -458,5 +458,11 @@ RK
 fi
 # 2026-10-02 19:25 JST (the user: the 2000-page measure is enough): the CPU search test is cancelled too
 if [ ! -e /root/.search6_cancel ]; then touch /root/.search6_cancel; echo "SEARCH6_JOB_DONE cancelled" >> /root/sb_search6.log; pkill -f "search6kee[p].sh"; pkill -f "search-eval"; echo "SEARCH6_CANCELLED $(date -u)"; fi
+# ---- the results so far on the hub (2026-10-02 19:35 JST, the user): run4d2's best weights and the README (docs/sentbart.md)
+if [ ! -e /root/.hub_v1 ]; then touch /root/.hub_v1
+  [ -s /root/sb/run4d2/model_best.pt ] && hf upload $R /root/sb/run4d2/model_best.pt sentbart/small_run4d2/model_best.pt >/dev/null 2>&1
+  curl -sSf -o /root/sb/README_sentbart.md "https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/docs/sentbart.md?$(date +%s)" && hf upload $R /root/sb/README_sentbart.md sentbart/README.md >/dev/null 2>&1
+  echo "HUB_UP $(date -u)"
+fi
 echo "BOXI_OK serial $BOXI_SERIAL $(date -u)"
 # CTL-END
