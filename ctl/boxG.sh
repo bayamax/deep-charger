@@ -80,7 +80,7 @@ PSKIP=
 # The raw GitHub copy this box fetches can lag and hand a control run an OLDER version of this file (04:48 on 09-22 it
 # relaunched the online loop under the previous mode while the newer run was merging a checkpoint on the same card).
 # Every edit bumps BOXG_SERIAL; a run that sees a lower serial than one already executed stops here.
-BOXG_SERIAL=2026092713
+BOXG_SERIAL=2026092714
 if [ -f /root/.boxg_serial ] && [ "$(cat /root/.boxg_serial)" -gt "$BOXG_SERIAL" ] 2>/dev/null; then echo "BOXG_STALE $BOXG_SERIAL < $(cat /root/.boxg_serial)"; exit 0; fi
 echo $BOXG_SERIAL > /root/.boxg_serial
 MODE=idle         # 2026-09-29: the side jobs hold the card (multi-turn measurement and training); a finished reeval re-launched on every control run and killed their evaluators
@@ -842,6 +842,123 @@ fi
 # one-shot (2026-10-02 09:40 JST, the user: is the thinking length being capped? ~1500 tokens incl. served pages should
 # be allowed): why mtg1's unfinished rollouts did not finish - the token cap (--search-gen 2000 model tokens), the
 # 900 s batch budget, the 7-search guard, a loop - and their lengths in tokens with and without the served pages
+# ---- mix0 (2026-10-02 13:00 JST, the user: switch is about enough - add follow-up questions and reasoning, one at a
+# time). The switch-only continuation (mtg1d) is cancelled. Baseline first, on the original model and on GRPO step 300:
+# follow-up (bridge) dialogues, the 40 of mt_eval, and the Dolphin reasoning held-out (100, nano, REASON_SYS). In
+# parallel (API only) more bridge training dialogues are written; then step 300 answers their first turns, which become
+# the history of the follow-up training items (mtg2 trains on switch + ~30% bridge from step 300).
+if [ ! -e /root/.mtg1d_cancel ]; then touch /root/.mtg1d_cancel; touch /root/mtg1d.log; echo "MTG1D_ABORT cancelled for mix0 $(date -u)" >> /root/mtg1d.log
+  pkill -f "mtg1dkee[p].sh"; pkill -f "online_loop.py /root/pooler_mem10.safetensors /root/online_mtg1 .*--steps (400|500)"; echo "MTG1D_CANCELLED $(date -u)"; fi
+if ! pgrep -f "mix0kee[p].sh" >/dev/null && ! grep -q "MIX0_JOB_DONE\|MIX0_ABORT" /root/mix0.log 2>/dev/null; then
+  cat > /root/mix0keep.sh <<'MX'
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); R=baya1116/hypernet-sp-distill; cd /root/work; B=/root/reeval_g14m_pooler.safetensors; S3=/root/mtg1_s300.safetensors
+ENV="SP_BASE=/root/gptq_hf_gq14 SP_RANK=16 SP_NOSYS=1 SP_EPISODIC=1 OMP_NUM_THREADS=1 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True"
+EVARGS="--rw 768 --maxd 384 --samepage 1 --decode plain --temp 0.6 --gen 4000 --stop eos --replycap 600"
+# bridge training dialogues (API, in the background while the card measures)
+( python3 /root/work/mt_gen.py --seeds /root/work/selfq_all.jsonl --exclude /root/work/eval300.jsonl --out /root/work/mt_train_br2.jsonl --n-bridge 320 --n-memory 0 --n-switch 0 --seed 11 2>&1 | grep -E "^\[mtgen\]|MTGEN_DONE|Error" ) &
+GEN=$!
+until grep -qE "MTG1C_JOB_DONE|MTG1C_ABORT" /root/mtg1c.log 2>/dev/null; do sleep 60; done
+while pgrep -f "pool_eval.p[y]|online_loop.p[y]|memfit.p[y]" >/dev/null; do sleep 30; done
+python3 -c "
+import json
+r=[json.loads(l) for l in open('/root/work/mt_eval.jsonl')]
+b=[d for d in r if d['kind']=='bridge']
+open('/root/work/mt_eval_bridge.jsonl','w').write(''.join(json.dumps(d,ensure_ascii=False)+'\n' for d in b)); print('[mix0] bridge held-out', len(b), 'dialogues')"
+for arm in "base:$B" "s300:$S3"; do T=${arm%%:*}; CK=${arm#*:}
+  env $ENV python3 /root/work/pool_eval.py $CK /root/work/eval300.jsonl /root/work/br_$T.jsonl --multiturn /root/work/mt_eval_bridge.jsonl --mt-mode full --n 1000 $EVARGS --tag "[br-$T]" > /root/br_$T.log 2>&1
+  echo "[mix0] $(grep -E "EVAL_DONE|Error|Traceback" /root/br_$T.log | tail -1 | cut -c1-200)"; hf upload $R /root/work/br_$T.jsonl pooler_distill/chatsft/multiturn/br_$T.jsonl >/dev/null 2>&1
+done
+python3 -c "
+import json
+rows=[json.loads(l) for l in open('/root/work/dolphin_heldout100.jsonl') if l.strip()]
+open('/root/work/dolphinq.jsonl','w').write(''.join(json.dumps({'q':r['q']},ensure_ascii=False)+'\n' for r in rows))"
+for arm in "base:/root/gptq_hf_gq14:--pooler-init $B" "s300:$S3:"; do T=${arm%%:*}; r=${arm#*:}; CK=${r%%:*}; PI=${r#*:}
+  env SP_BASE=/root/gptq_hf_gq14 SP_NOSYS=1 SP_EPISODIC=1 OMP_NUM_THREADS=1 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python3 /root/work/online_loop.py $CK /root/evalrun_dl_$T \
+    --questions /root/work/eval300.jsonl --dolphin /root/work/dolphin_v1.jsonl --heldout /root/work/eval300.jsonl $PI \
+    --b 12 --gen 7000 --budget 2400 --temp 0.6 --maxsrch 7 --pooler none --lora-rank 16 --lora-layers all --stop eos --loop-break answer \
+    --eval-file /root/work/dolphinq.jsonl --eval-out /root/work/dl_$T.jsonl > /root/dl_$T.log 2>&1
+  echo "[mix0] dolphin $T: $(wc -l < /root/work/dl_$T.jsonl 2>/dev/null) replies $(grep -E 'EVAL_DONE|Error|Traceback' /root/dl_$T.log | tail -1 | cut -c1-120)"
+  OAI_KEY=$(cat /root/.oai 2>/dev/null) python3 - /root/work/dl_$T.jsonl $T <<'PYJ'
+import json, os, sys, urllib.request, time
+from concurrent.futures import ThreadPoolExecutor
+src = open("/root/work/online_loop.py").read(); i = src.index("REASON_SYS = "); j = src.index('"""', src.index('"""', i) + 3) + 3
+ns = {}; exec(src[i:j], ns); SYS = ns["REASON_SYS"]
+ref = {json.loads(l)["q"].strip(): json.loads(l)["ref"] for l in open("/root/work/dolphin_heldout100.jsonl") if l.strip()}
+rows = [json.loads(l) for l in open(sys.argv[1]) if l.strip()]; key = os.environ.get("OAI_KEY", "")
+def judge(r):
+    t = r["text"]; reply = t.split("</think>")[-1].strip() if "</think>" in t else ""
+    if not reply: return 0, "unfinished"
+    body = {"model": "gpt-5-nano", "max_completion_tokens": 2000, "messages": [{"role": "system", "content": SYS},
+            {"role": "user", "content": f"QUESTION:\n{r['q'][:2000]}\n\nREFERENCE ANSWER:\n{ref.get(r['q'].strip(), '')[:3000]}\n\nASSISTANT ANSWER:\n{reply[:3000]}"}]}
+    err = "?"
+    for _ in range(3):
+        try:
+            d = json.load(urllib.request.urlopen(urllib.request.Request("https://api.openai.com/v1/chat/completions", data=json.dumps(body).encode(), headers={"Authorization": "Bearer " + key, "Content-Type": "application/json"}), timeout=120))
+            c = d["choices"][0]["message"].get("content") or ""; v = json.loads(c[c.find("{"): c.rfind("}") + 1])
+            return int(all(bool(v.get(k)) for k in ("solves_it", "follows_the_request", "language_english", "clean"))), v
+        except Exception as e: time.sleep(3); err = type(e).__name__
+    return 0, {"error": err}
+with ThreadPoolExecutor(max_workers=8) as ex: res = list(ex.map(judge, rows))
+with open(sys.argv[1].replace(".jsonl", "_judged.jsonl"), "w") as o:
+    for r, (a, v) in zip(rows, res): o.write(json.dumps({"q": r["q"], "pass": a, "why": str(v)[:300], "text": r["text"]}, ensure_ascii=False) + "\n")
+ok = sum(a for a, _ in res); unf = sum(1 for _, v in res if v == "unfinished"); errs = sum(1 for _, v in res if isinstance(v, dict) and "error" in v)
+print(f"[mix0] DOLPHIN {sys.argv[2]} {100*ok/max(len(rows),1):.1f}% ({ok}/{len(rows)}) unfinished {unf} judge errors {errs}", flush=True)
+PYJ
+  hf upload $R /root/work/dl_${T}_judged.jsonl pooler_distill/chatsft/multiturn/dl_${T}_judged.jsonl >/dev/null 2>&1
+done
+wait $GEN
+python3 - <<'PY2'
+import json
+held = set()
+for f in ("/root/work/eval300.jsonl", "/root/work/mt_eval.jsonl", "/root/work/mt_eval_chain.jsonl"):
+    for l in open(f):
+        d = json.loads(l); held.add(d.get("q", "").strip()); held |= {t["q"].strip() for t in d.get("turns", [])}; held.add(d.get("seed", ""))
+out = []
+for f in ("/root/work/mt_train.jsonl", "/root/work/mt_train_br2.jsonl"):
+    try:
+        for l in open(f):
+            d = json.loads(l)
+            if d["kind"] == "bridge" and d.get("seed", "") not in held and not any(t["q"].strip() in held for t in d["turns"]): out.append(d)
+    except FileNotFoundError: pass
+seen = set(); out = [d for d in out if not (d["turns"][0]["q"] in seen or seen.add(d["turns"][0]["q"]))]
+open("/root/work/mt_train_bridge.jsonl", "w").write("".join(json.dumps(d, ensure_ascii=False) + "\n" for d in out))
+print(f"[mix0] bridge training dialogues: {len(out)}")
+PY2
+# step 300 answers the first turns (the batched rollout, 12 at a time); a dialogue whose first answer names the bridge
+# entity gives two items: turn 1 alone, and the follow-up with [turn 1, step 300's reply] as its history
+python3 -c "
+import json
+d=[json.loads(l) for l in open('/root/work/mt_train_bridge.jsonl')]
+open('/root/work/br_t1q.jsonl','w').write(''.join(json.dumps({'q':x['turns'][0]['q']},ensure_ascii=False)+'\n' for x in d))"
+env SP_BASE=/root/gptq_hf_gq14 SP_NOSYS=1 SP_EPISODIC=1 OMP_NUM_THREADS=1 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python3 /root/work/online_loop.py $S3 /root/evalrun_brt1 \
+  --questions /root/work/eval300.jsonl --dolphin /root/work/dolphin_v1.jsonl --heldout /root/work/eval300.jsonl \
+  --b 12 --gen 2000 --budget 900 --temp 0.6 --maxsrch 7 --pooler none --lora-rank 16 --lora-layers all --stop eos \
+  --eval-file /root/work/br_t1q.jsonl --eval-out /root/work/br_t1_s300.jsonl > /root/br_t1.log 2>&1
+echo "[mix0] first turns answered: $(wc -l < /root/work/br_t1_s300.jsonl 2>/dev/null) $(grep -E 'EVAL_DONE|Error|Traceback' /root/br_t1.log | tail -1 | cut -c1-120)"
+python3 - <<'PY3'
+import json, random
+d = [json.loads(l) for l in open("/root/work/mt_train_bridge.jsonl")]
+a = {}
+for l in open("/root/work/br_t1_s300.jsonl"):
+    r = json.loads(l); t = r.get("text", ""); a[r["q"].strip()] = t.split("</think>")[-1].strip() if "</think>" in t else ""
+br = []; ok = 0
+for x in d:
+    t1, t2 = x["turns"][0], x["turns"][1]; rep = a.get(t1["q"].strip(), "")
+    br.append({"q": t1["q"], "gold": t1["gold"], "hist": []})
+    if rep and t1["gold"].lower() in rep.lower():
+        ok += 1; br.append({"q": t2["q"], "gold": t2["gold"], "hist": [{"role": "user", "content": t1["q"]}, {"role": "assistant", "content": rep[:1500]}]})
+sw = [json.loads(l) for l in open("/root/work/mtg_items.jsonl")]
+n_sw = int(len(br) * 7 / 3)                 # bridge items ~30% of the mix
+random.Random(5).shuffle(sw); mix = br + sw[:n_sw]; random.Random(6).shuffle(mix)
+open("/root/work/mtg2_items.jsonl", "w").write("".join(json.dumps(m, ensure_ascii=False) + "\n" for m in mix))
+print(f"[mix0] bridge: {len(d)} dialogues, first turn right in {ok}; mtg2 items {len(mix)} = {len(br)} bridge ({sum(1 for b in br if b['hist'])} follow-ups) + {min(n_sw, len(sw))} switch")
+PY3
+hf upload $R /root/work/mtg2_items.jsonl pooler_distill/chatsft/multiturn/mtg2_items.jsonl >/dev/null 2>&1
+echo "MIX0_JOB_DONE $(date -u)"
+MX
+  setsid nohup bash -c 'bash /root/mix0keep.sh 2>&1 | tee -a /root/mix0.log' >> /proc/1/fd/1 2>&1 < /dev/null 9>&- &
+  echo "MIX0_LAUNCHED $(date -u)"
+fi
 if [ ! -e /root/.unfin_v1 ]; then touch /root/.unfin_v1
   python3 - > /root/unfin_report.txt 2>&1 <<'PYU'
 import json, re, statistics, collections
@@ -1543,6 +1660,7 @@ while :; do
     echo "--- mem7.log (tail) ---"; tail -n 10 /root/mem7.log 2>/dev/null | cut -c1-300; grep -E "^val " /root/memfit_mem7_run.log 2>/dev/null | tail -2
     echo "--- qt.log (tail) ---"; tail -n 4 /root/qt.log 2>/dev/null | cut -c1-300
     echo "--- pqjudge.log (tail) ---"; tail -n 5 /root/pqjudge.log 2>/dev/null | cut -c1-200
+    echo "--- mix0.log (tail) ---"; tail -n 14 /root/mix0.log 2>/dev/null | cut -c1-250
     echo "--- mtg1d.log (tail) ---"; tail -n 12 /root/mtg1d.log 2>/dev/null | cut -c1-250
     echo "--- mtg1c.log (tail) ---"; tail -n 12 /root/mtg1c.log 2>/dev/null | cut -c1-250
     echo "--- mtg1b.log (tail) ---"; tail -n 8 /root/mtg1b.log 2>/dev/null | cut -c1-250
