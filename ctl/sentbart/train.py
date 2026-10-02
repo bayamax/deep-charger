@@ -326,7 +326,7 @@ if A.search_eval:
             P["mean_all"].index_add_(0, sid[a:a + CH], v)
         P["mean_all"] = F.normalize(P["mean_all"], dim=-1)
     res = {}
-    for qk in ("q_nat", "q_hard"):
+    for qk in sorted({k for q in qs for k in q if k.startswith("q_")}):
         sub = [q for q in qs if q.get(qk)]
         if not sub: continue
         Q = qvec([q[qk] for q in sub]); gold = torch.tensor([int(q["idx"]) for q in sub], device=DEV)

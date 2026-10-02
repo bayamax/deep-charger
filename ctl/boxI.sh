@@ -8,7 +8,7 @@ cd /root
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null)
 R=baya1116/hypernet-sp-distill
 RAW="https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl"
-BOXI_SERIAL=16
+BOXI_SERIAL=17
 if [ -f /root/.boxi_serial ] && [ "$(cat /root/.boxi_serial)" -gt "$BOXI_SERIAL" ] 2>/dev/null; then echo "BOXI_STALE $BOXI_SERIAL"; exit 0; fi
 echo $BOXI_SERIAL > /root/.boxi_serial
 mkdir -p /root/sb /root/work
@@ -336,6 +336,28 @@ echo "SEARCH_JOB_DONE $(date -u)"
 RK
   setsid nohup bash -c 'bash /root/searchkeep.sh 2>&1 | tee -a /root/sb_search.log' > /dev/null 2>&1 < /dev/null &
   echo "SEARCH_LAUNCHED $(date -u)"
+fi
+# ---- search2 (2026-10-02 17:50 JST, the user: the real input is the query the app model itself writes in <search>):
+# the held-out shard's titles go to the hub; box G collects (query the model wrote -> page it was served) pairs from its
+# rollouts whose page is one of these documents; then the same search over all ~118k held-out documents.
+if ! pgrep -f "search2kee[p].sh" >/dev/null && ! grep -q "SEARCH2_JOB_DONE" /root/sb_search2.log 2>/dev/null; then
+  cat > /root/search2keep.sh <<'RK'
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); R=baya1116/hypernet-sp-distill; D=/root/sb/data/docs; cd /root/sb; mkdir -p /root/sb/se2
+python3 -c "
+import json
+open('/root/sb/se2/titles001.txt','w').write(''.join(json.loads(l)['title'].replace('\n',' ')+'\n' for l in open('/root/sb/data/docs/docs_001.jsonl')))"
+hf upload $R /root/sb/se2/titles001.txt sentbart/searcheval/titles001.txt >/dev/null 2>&1; echo "[search2] $(wc -l < /root/sb/se2/titles001.txt) titles up"
+until hf download $R sentbart/searcheval/dcq.jsonl --local-dir /root/sb/se2/dl >/dev/null 2>&1 && [ -s /root/sb/se2/dl/sentbart/searcheval/dcq.jsonl ]; do sleep 120; done
+echo "[search2] $(wc -l < /root/sb/se2/dl/sentbart/searcheval/dcq.jsonl) app-model queries $(date -u +%H:%M)"
+while pgrep -f "search-eval" >/dev/null; do sleep 30; done
+CK=$(ls -t /root/sb/run4d*/model_best.pt 2>/dev/null | head -1); echo "[search2] weights $CK"
+python3 /root/sb/train.py --data $D --out /root/sb/se2/run --eval-shard 001 --batch 32 --seq 128 --d 512 --layers 4 --heads 8 --ffn 2048 --page 1 --init $CK \
+  --search-eval /root/sb/se2/dl/sentbart/searcheval/dcq.jsonl --search-out /root/sb/se2/result.json 2>&1 | grep -E "^\[search|Error|Traceback"
+hf upload $R /root/sb/se2/result.json sentbart/searcheval/result_dcq.json >/dev/null 2>&1; hf upload $R /root/sb_search2.log sentbart/searcheval/search2.log >/dev/null 2>&1
+echo "SEARCH2_JOB_DONE $(date -u)"
+RK
+  setsid nohup bash -c 'bash /root/search2keep.sh 2>&1 | tee -a /root/sb_search2.log' > /dev/null 2>&1 < /dev/null &
+  echo "SEARCH2_LAUNCHED $(date -u)"
 fi
 echo "BOXI_OK serial $BOXI_SERIAL $(date -u)"
 # CTL-END

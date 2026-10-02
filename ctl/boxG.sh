@@ -80,7 +80,7 @@ PSKIP=
 # The raw GitHub copy this box fetches can lag and hand a control run an OLDER version of this file (04:48 on 09-22 it
 # relaunched the online loop under the previous mode while the newer run was merging a checkpoint on the same card).
 # Every edit bumps BOXG_SERIAL; a run that sees a lower serial than one already executed stops here.
-BOXG_SERIAL=2026092716
+BOXG_SERIAL=2026092717
 if [ -f /root/.boxg_serial ] && [ "$(cat /root/.boxg_serial)" -gt "$BOXG_SERIAL" ] 2>/dev/null; then echo "BOXG_STALE $BOXG_SERIAL < $(cat /root/.boxg_serial)"; exit 0; fi
 echo $BOXG_SERIAL > /root/.boxg_serial
 MODE=idle         # 2026-09-29: the side jobs hold the card (multi-turn measurement and training); a finished reeval re-launched on every control run and killed their evaluators
@@ -1035,6 +1035,51 @@ SQ
   setsid nohup bash -c 'bash /root/searchqkeep.sh 2>&1 | tee -a /root/searchq.log' >> /proc/1/fd/1 2>&1 < /dev/null 9>&- &
   echo "SEARCHQ_LAUNCHED $(date -u)"
 fi
+# ---- dcq (2026-10-02 17:50 JST): (query the app model wrote -> page it was served) from every rollout on this box, kept
+# when the page is one of box I's held-out documents. q_good: the rollout answered right and the page held the gold
+# answer (the page it needed); q_api: any served page (agreement with Wikipedia's own search).
+if ! pgrep -f "dcqkee[p].sh" >/dev/null && ! grep -q "DCQ_DONE" /root/dcq.log 2>/dev/null; then
+  cat > /root/dcqkeep.sh <<'DQ'
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); R=baya1116/hypernet-sp-distill
+until hf download $R sentbart/searcheval/titles001.txt --local-dir /root/dcq >/dev/null 2>&1 && [ -s /root/dcq/sentbart/searcheval/titles001.txt ]; do sleep 120; done
+python3 - <<'PY2'
+import json, glob, re
+T = {}
+for i, t in enumerate(open("/root/dcq/sentbart/searcheval/titles001.txt")):
+    T.setdefault(t.rstrip("\n").strip(), i)
+SR = re.compile(r"<search>(.*?)</search", re.S)
+files = glob.glob("/root/work/*.jsonl") + glob.glob("/root/online_*/rollouts.jsonl") + glob.glob("/root/work/**/*.jsonl", recursive=True)
+good, api, nrows = {}, {}, 0
+for f in sorted(set(files)):
+    try:
+        for l in open(f):
+            try: r = json.loads(l)
+            except Exception: continue
+            t = r.get("text") if isinstance(r, dict) else None
+            if not isinstance(t, str) or "<information>" not in t: continue
+            nrows += 1
+            gold = (r.get("gold") or "").strip().lower()
+            ok = bool(r.get("correct")) and bool(r.get("grounded", True))
+            for m in SR.finditer(t):
+                q = m.group(1).split("||")[0].strip(); rest = t[m.end():m.end() + 3000]
+                j = rest.find("<information>\n")
+                if not q or j < 0 or j > 20: continue
+                body = rest[j + 14:]; title = body.split(": ", 1)[0].strip()
+                if title not in T: continue
+                api[(q, title)] = T[title]
+                chunk = body.split("</information>", 1)[0].lower()
+                if ok and gold and gold in chunk: good[(q, title)] = T[title]
+    except Exception: pass
+rows = [{"idx": i, "q_good": q, "title": t} for (q, t), i in good.items()] + [{"idx": i, "q_api": q, "title": t} for (q, t), i in api.items()]
+open("/root/dcq/dcq.jsonl", "w").write("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in rows))
+print(f"[dcq] {nrows} rollouts with served pages; pairs on held-out pages: {len(good)} needed (right answer, gold on the page), {len(api)} served")
+PY2
+hf upload $R /root/dcq/dcq.jsonl sentbart/searcheval/dcq.jsonl >/dev/null 2>&1; head -3 /root/dcq/dcq.jsonl | cut -c1-200
+echo "DCQ_DONE $(date -u)"
+DQ
+  setsid nohup bash -c 'bash /root/dcqkeep.sh 2>&1 | tee -a /root/dcq.log' >> /proc/1/fd/1 2>&1 < /dev/null 9>&- &
+  echo "DCQ_LAUNCHED $(date -u)"
+fi
 if [ ! -e /root/.unfin_v1 ]; then touch /root/.unfin_v1
   python3 - > /root/unfin_report.txt 2>&1 <<'PYU'
 import json, re, statistics, collections
@@ -1736,6 +1781,7 @@ while :; do
     echo "--- mem7.log (tail) ---"; tail -n 10 /root/mem7.log 2>/dev/null | cut -c1-300; grep -E "^val " /root/memfit_mem7_run.log 2>/dev/null | tail -2
     echo "--- qt.log (tail) ---"; tail -n 4 /root/qt.log 2>/dev/null | cut -c1-300
     echo "--- pqjudge.log (tail) ---"; tail -n 5 /root/pqjudge.log 2>/dev/null | cut -c1-200
+    echo "--- dcq.log (tail) ---"; tail -n 5 /root/dcq.log 2>/dev/null | cut -c1-300
     echo "--- searchq.log (tail) ---"; tail -n 5 /root/searchq.log 2>/dev/null | cut -c1-300
     echo "--- mtg2.log (tail) ---"; tail -n 12 /root/mtg2.log 2>/dev/null | cut -c1-250
     echo "--- mix0.log (tail) ---"; tail -n 14 /root/mix0.log 2>/dev/null | cut -c1-250
