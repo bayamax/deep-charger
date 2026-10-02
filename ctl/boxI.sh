@@ -8,7 +8,7 @@ cd /root
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null)
 R=baya1116/hypernet-sp-distill
 RAW="https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl"
-BOXI_SERIAL=22
+BOXI_SERIAL=23
 if [ -f /root/.boxi_serial ] && [ "$(cat /root/.boxi_serial)" -gt "$BOXI_SERIAL" ] 2>/dev/null; then echo "BOXI_STALE $BOXI_SERIAL"; exit 0; fi
 echo $BOXI_SERIAL > /root/.boxi_serial
 mkdir -p /root/sb /root/work
@@ -456,5 +456,7 @@ RK
   setsid nohup bash -c 'bash /root/search6keep.sh 2>&1 | tee -a /root/sb_search6.log' > /dev/null 2>&1 < /dev/null &
   echo "SEARCH6_LAUNCHED $(date -u)"
 fi
+# 2026-10-02 19:25 JST (the user: the 2000-page measure is enough): the CPU search test is cancelled too
+if [ ! -e /root/.search6_cancel ]; then touch /root/.search6_cancel; echo "SEARCH6_JOB_DONE cancelled" >> /root/sb_search6.log; pkill -f "search6kee[p].sh"; pkill -f "search-eval"; echo "SEARCH6_CANCELLED $(date -u)"; fi
 echo "BOXI_OK serial $BOXI_SERIAL $(date -u)"
 # CTL-END
