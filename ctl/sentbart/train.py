@@ -372,32 +372,41 @@ if A.search_eval:
         o = M.argsort(dim=1, descending=True); r = torch.empty_like(o); r.scatter_(1, o, torch.arange(1, M.shape[1] + 1, device=DEV).expand_as(o)); return r.float()
     res = {}
     for qk in sorted({k for q in qs for k in q if k.startswith("q_")}):
-        sub = [q for q in qs if q.get(qk)]
-        if not sub: continue
-        Q = qvec([q[qk] for q in sub]); gold = torch.tensor([int(q["idx"]) for q in sub], device=DEV)
-        with torch.no_grad():
-            S = {k: Q @ M.T for k, M in P.items()}
-            mx = torch.full((len(sub), ND), -2.0, device=DEV)   # best single sentence of each document
-            for a in range(0, int(off[-1]), CH):
-                v = torch.from_numpy(np.asarray(V[a:a + CH], dtype=np.float32)).to(DEV)
-                mx.scatter_reduce_(1, sid[a:a + CH][None].expand(len(sub), -1), Q @ v.T, reduce="amax")
-            S["maxsent"] = mx
-            S["page+mean"] = S["page"] + S["mean_all"]
-            # the query through the model too: a one-sentence document -> its page vector, against the pages
-            qx = Q[:, None, :]; qv = torch.ones(len(sub), 1, dtype=torch.bool, device=DEV)
-            with torch.autocast("cuda", dtype=torch.bfloat16):
-                model.encode(qx, qv, torch.zeros_like(qv))
-            S["page(q->page)"] = model.last_page.float() @ P["page"].T
-            if BMD is not None:
-                B_ = bm25([q[qk] for q in sub]); S["bm25"] = B_; rb = ranks(B_)
-                for k in ("page", "lead", "mean_all", "maxsent"):
-                    rk = ranks(S[k])
-                    S[f"rrf({k},bm25)"] = 1.0 / (60 + rk) + 1.0 / (60 + rb)          # reciprocal-rank fusion
-                    S[f"{k}100>bm25"] = torch.where(rk <= 100, B_ + 1e-3 / rk, torch.full_like(B_, -1.0))   # the vector's top 100, ordered by keywords
-        for k, M in S.items():
-            rank = (M > M.gather(1, gold[:, None])).sum(1) + 1
-            res[(qk, k)] = {f"@{kk}": float((rank <= kk).float().mean()) for kk in (1, 10, 100)} | {"mrr": float((1.0 / rank.float()).mean())}
-            print(f"[search] {qk} {k:10s} " + " ".join(f"{a} {b:.3f}" for a, b in res[(qk, k)].items()) + f"  (n {len(sub)}, pool {ND})", flush=True)
+        sub_all = [q for q in qs if q.get(qk)]
+        if not sub_all: continue
+        RK = {}                                           # method -> gold ranks, accumulated over query chunks
+        for c0 in range(0, len(sub_all), 64):             # chunks keep the [queries x documents] matrices small
+            sub = sub_all[c0:c0 + 64]
+            Q = qvec([q[qk] for q in sub]); gold = torch.tensor([int(q["idx"]) for q in sub], device=DEV)
+            with torch.no_grad():
+                S = {k: Q @ M.T for k, M in P.items()}
+                mx = torch.full((len(sub), ND), -2.0, device=DEV)   # best single sentence of each document
+                for a in range(0, int(off[-1]), CH):
+                    v = torch.from_numpy(np.asarray(V[a:a + CH], dtype=np.float32)).to(DEV)
+                    mx.scatter_reduce_(1, sid[a:a + CH][None].expand(len(sub), -1), Q @ v.T, reduce="amax")
+                S["maxsent"] = mx
+                S["page+mean"] = S["page"] + S["mean_all"]
+                # the query through the model too: a one-sentence document -> its page vector, against the pages
+                qx = Q[:, None, :]; qv = torch.ones(len(sub), 1, dtype=torch.bool, device=DEV)
+                with torch.autocast("cuda", dtype=torch.bfloat16):
+                    model.encode(qx, qv, torch.zeros_like(qv))
+                S["page(q->page)"] = model.last_page.float() @ P["page"].T
+                if BMD is not None:
+                    B_ = bm25([q[qk] for q in sub]); S["bm25"] = B_; rb = ranks(B_)
+                    for k in ("page", "lead", "mean_all", "maxsent"):
+                        rk = ranks(S[k])
+                        S[f"rrf({k},bm25)"] = 1.0 / (60 + rk) + 1.0 / (60 + rb)          # reciprocal-rank fusion
+                        S[f"{k}100>bm25"] = torch.where(rk <= 100, B_ + 1e-3 / rk, torch.full_like(B_, -1.0))   # the vector's top 100, ordered by keywords
+                        del rk
+                    del rb
+                for k, M in S.items():
+                    RK.setdefault(k, []).append(((M > M.gather(1, gold[:, None])).sum(1) + 1).cpu())
+                del S, mx
+            torch.cuda.empty_cache()
+        for k, rr in RK.items():
+            rank = torch.cat(rr).float()
+            res[(qk, k)] = {f"@{kk}": float((rank <= kk).float().mean()) for kk in (1, 10, 100)} | {"mrr": float((1.0 / rank).mean())}
+            print(f"[search] {qk} {k:10s} " + " ".join(f"{a} {b:.3f}" for a, b in res[(qk, k)].items()) + f"  (n {len(sub_all)}, pool {ND})", flush=True)
     if A.search_out: json.dump({f"{a}|{b}": v for (a, b), v in res.items()}, open(A.search_out, "w"), indent=1)
     sys.exit(0)
 if A.eval_only:

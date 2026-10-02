@@ -8,7 +8,7 @@ cd /root
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null)
 R=baya1116/hypernet-sp-distill
 RAW="https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl"
-BOXI_SERIAL=20
+BOXI_SERIAL=21
 if [ -f /root/.boxi_serial ] && [ "$(cat /root/.boxi_serial)" -gt "$BOXI_SERIAL" ] 2>/dev/null; then echo "BOXI_STALE $BOXI_SERIAL"; exit 0; fi
 echo $BOXI_SERIAL > /root/.boxi_serial
 mkdir -p /root/sb /root/work
@@ -421,6 +421,25 @@ echo "SEARCH4_JOB_DONE $(date -u)"
 RK
   setsid nohup bash -c 'bash /root/search4keep.sh 2>&1 | tee -a /root/sb_search4.log' > /dev/null 2>&1 < /dev/null &
   echo "SEARCH4_LAUNCHED $(date -u)"
+fi
+# ---- search5 (2026-10-02 19:15 JST): search3 printed nothing past the BM25 line (no error caught - the grown model's
+# training holds 5.5 GB, the ~20 [queries x 118k] matrices did not fit beside it); the search now runs 64 queries at a
+# time. With and without bge's query instruction, full output kept.
+if [ ! -e /root/.search5_v1 ]; then touch /root/.search5_v1; pkill -f "search4kee[p].sh"; pkill -f "search-eval"; echo "SEARCH4_JOB_DONE replaced by search5" >> /root/sb_search4.log; fi
+if ! pgrep -f "search5kee[p].sh" >/dev/null && ! grep -q "SEARCH5_JOB_DONE" /root/sb_search5.log 2>/dev/null; then
+  cat > /root/search5keep.sh <<'RK'
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); R=baya1116/hypernet-sp-distill; D=/root/sb/data/docs; cd /root/sb; mkdir -p /root/sb/se5
+for px in 1 0; do
+  python3 /root/sb/train.py --data $D --out /root/sb/se5/run$px --eval-shard 001 --batch 32 --seq 128 --d 512 --layers 4 --heads 8 --ffn 2048 --page 1 --init /root/sb/run4d1/model_best.pt --q-prefix $px \
+    --search-eval /root/sb/se2/dl/sentbart/searcheval/dcq.jsonl --search-text $D/docs_001.jsonl --search-out /root/sb/se5/result_p$px.json > /root/sb/se5/full_p$px.log 2>&1
+  echo "== query instruction $px"; grep -E "^\[search" /root/sb/se5/full_p$px.log; tail -3 /root/sb/se5/full_p$px.log | grep -vE "^\[search" | cut -c1-300
+  hf upload $R /root/sb/se5/result_p$px.json sentbart/searcheval/result_hybrid_p$px.json >/dev/null 2>&1
+done
+hf upload $R /root/sb_search5.log sentbart/searcheval/search5.log >/dev/null 2>&1
+echo "SEARCH5_JOB_DONE $(date -u)"
+RK
+  setsid nohup bash -c 'bash /root/search5keep.sh 2>&1 | tee -a /root/sb_search5.log' > /dev/null 2>&1 < /dev/null &
+  echo "SEARCH5_LAUNCHED $(date -u)"
 fi
 echo "BOXI_OK serial $BOXI_SERIAL $(date -u)"
 # CTL-END
