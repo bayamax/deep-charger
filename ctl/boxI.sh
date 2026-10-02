@@ -8,7 +8,7 @@ cd /root
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null)
 R=baya1116/hypernet-sp-distill
 RAW="https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl"
-BOXI_SERIAL=13
+BOXI_SERIAL=14
 if [ -f /root/.boxi_serial ] && [ "$(cat /root/.boxi_serial)" -gt "$BOXI_SERIAL" ] 2>/dev/null; then echo "BOXI_STALE $BOXI_SERIAL"; exit 0; fi
 echo $BOXI_SERIAL > /root/.boxi_serial
 mkdir -p /root/sb /root/work
@@ -274,6 +274,32 @@ echo "CHAIN_JOB_DONE best $prev $(date -u)"
 RK
   setsid nohup bash -c 'bash /root/chainkeep.sh 2>&1 | tee -a /root/sb_chain.log' > /dev/null 2>&1 < /dev/null &
   echo "CHAIN_LAUNCHED $(date -u)"
+fi
+# ---- chain2 (2026-10-02 14:25 JST): run4c2 diverged at ~40k (gradient norm 1 -> 50 -> 1e10; page top-1 48.3 -> 16.6),
+# so "PLATEAU" above was a blow-up, not a plateau. Restart from run4c's final weights (top-1 49.3) at a third of the
+# learning rate (1e-4: these weights have been through three warm restarts at 3e-4), skip any step whose gradient
+# norm exceeds 5 (healthy steps sit at 0.8-1.2), keep the best weights by held-out top-1, and continue in 100k
+# segments from the best weights while a segment adds at least a point; at most 6.
+if ! pgrep -f "chain2kee[p].sh" >/dev/null && ! grep -q "CHAIN2_JOB_DONE" /root/sb_chain2.log 2>/dev/null; then
+  cat > /root/chain2keep.sh <<'RK'
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); R=baya1116/hypernet-sp-distill; D=/root/sb/data/docs; cd /root/sb
+while pgrep -f "python3 /root/sb/" >/dev/null; do sleep 30; done
+best() { grep "^\[best\]" /root/sb/$1/train.log 2>/dev/null | tail -1 | sed -E 's/.*page_top1 ([0-9.]+).*/\1/'; }
+prev=/root/sb/run4c/model_latest.pt; base=0.493
+for i in 1 2 3 4 5 6; do
+  n=run4d$i; echo "[chain2] $n from $(basename $(dirname $prev))/$(basename $prev) (top-1 $base) $(date -u +%H:%M)"
+  ( while sleep 1800; do hf upload $R /root/sb/$n/train.log sentbart/small_$n/train.log >/dev/null 2>&1; done ) & UP=$!
+  python3 /root/sb/train.py --data $D --out /root/sb/$n --init $prev --eval-shard 001 --steps 100000 --batch 32 --seq 128 --d 512 --layers 4 --heads 8 --ffn 2048 --lr 1e-4 --warmup 1000 --eval-every 10000 --save-every 10000 --page 1 --page-queue 64 --skip-grad 5 2>&1 | grep -E "^\[best|TRAIN_DONE|Error|Traceback" | tail -4
+  kill $UP 2>/dev/null; hf upload $R /root/sb/$n/train.log sentbart/small_$n/train.log >/dev/null 2>&1; hf upload $R /root/sb/$n/model_best.pt sentbart/small_$n/model_best.pt >/dev/null 2>&1
+  rm -f /root/sb/$n/state.pt
+  cur=$(best $n); cur=${cur:-0}; echo "[chain2] $n done: best page top-1 $cur (from $base)"
+  python3 -c "import sys; sys.exit(0 if float('$cur') - float('$base') >= 0.01 else 1)" || { echo "PLATEAU2 at $n: best $cur vs $base"; break; }
+  prev=/root/sb/$n/model_best.pt; base=$cur
+done
+echo "CHAIN2_JOB_DONE $(date -u)"
+RK
+  setsid nohup bash -c 'bash /root/chain2keep.sh 2>&1 | tee -a /root/sb_chain2.log' > /dev/null 2>&1 < /dev/null &
+  echo "CHAIN2_LAUNCHED $(date -u)"
 fi
 echo "BOXI_OK serial $BOXI_SERIAL $(date -u)"
 # CTL-END

@@ -40,6 +40,7 @@ ap.add_argument("--page-res", type=int, default=0, help="1: page vector = normal
 ap.add_argument("--page-pool", default="token", help="token: the page token's output; mean: the mean of the encoder's outputs over the visible sentences (both through page_head, no input mean)")
 ap.add_argument("--init", default="", help="a model_*.pt to start from (weights only; fresh optimizer and schedule) when --out has no state")
 ap.add_argument("--eval-only", type=int, default=0, help="1: evaluate the --init weights once (with the page recall curve) and exit")
+ap.add_argument("--skip-grad", type=float, default=0.0, help=">0: a step whose gradient norm (before clipping) exceeds this is skipped, not applied - a guard against the blow-up run4c2 hit")
 ap.add_argument("--page-queue", type=int, default=0, help="N: the last N batches' page vectors (detached) as extra negatives for the page loss")
 ap.add_argument("--prev-skip", type=int, default=0, help="1: the decoder's output is (its head + a learned gate x the previous sentence's vector), normalised")
 ap.add_argument("--p-suffix", type=float, default=0.5, help="share of documents whose tail is hidden (continuation) instead of spans")
@@ -212,7 +213,7 @@ def losses(x, valid, masked):
     return le, ld, lge, lgd, pos
 
 
-LP = [None]; PQ = []; R_CURVE = {}
+LP = [None]; PQ = []; R_CURVE = {}; SKIPPED = [0]; BEST = [-1.0]
 
 
 @torch.no_grad()
@@ -303,15 +304,22 @@ for step in range(step0 + 1, A.steps + 1):
         loss = A.w_enc * le + ld + (A.w_page * LP[0] if A.page else 0.0)
     LAST_COS.clear()
     opt.zero_grad(set_to_none=True); loss.backward()
-    gn = float(torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)); opt.step(); sched.step()
+    gn = float(torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0))
+    if A.skip_grad > 0 and not (gn < A.skip_grad):       # also catches nan / inf
+        SKIPPED[0] += 1; opt.zero_grad(set_to_none=True)
+    else:
+        opt.step()
+    sched.step()
     acc.append((le.item(), ld.item()))
     if step % 100 == 0:
         e, d_ = np.mean(acc, 0); acc = []
-        line = f"[step {step}] enc_loss {e:.3f} dec_loss {d_:.3f} |grad| {gn:.2f} lr {sched.get_last_lr()[0]:.2e} {(time.time() - t0) / 60:.0f} min"
+        line = f"[step {step}] enc_loss {e:.3f} dec_loss {d_:.3f} |grad| {gn:.2f} lr {sched.get_last_lr()[0]:.2e} skipped {SKIPPED[0]} {(time.time() - t0) / 60:.0f} min"
         print(line, flush=True); log.write(line + "\n"); log.flush()
     if step % A.eval_every == 0 or step == A.steps:
         ev = evaluate(); line = f"[eval {step}] " + " ".join(f"{k} {v:.3f}" if isinstance(v, float) else f"{k} {v}" for k, v in ev.items())
         print(line, flush=True); log.write(line + "\n"); log.flush()
+        if A.page and ev["page_top1"] > BEST[0]:          # the best-so-far weights by held-out page top-1
+            BEST[0] = ev["page_top1"]; save("best"); print(f"[best] step {step} page_top1 {BEST[0]:.3f}", flush=True); log.write(f"[best] step {step} page_top1 {BEST[0]:.3f}\n"); log.flush()
     if step % A.save_every == 0 or step == A.steps:
         save(); print(f"[save] step {step}", flush=True)
 print("TRAIN_DONE", flush=True)
