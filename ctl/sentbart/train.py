@@ -48,6 +48,7 @@ ap.add_argument("--search-text", default="", help="the held-out shard's text (do
 ap.add_argument("--grow", default="", help="a model_*.pt with fewer layers: its layer i becomes layer i*k (k = --layers / its layers), and the layers in between start as the identity (attention / FFN output projections at zero, so each new pre-norm residual layer passes its input through) - the grown model computes exactly what the old one did and training continues from there")
 ap.add_argument("--links", default="", help="links.npz (links.py): the link graph between training documents. Half of each batch is a linked neighbour of the other half (related pages meet as negatives), and the page loss's target is soft: the page itself 1, a linked page --link-w (halved past the first --link-early links of the article), so related pages are pulled nearer than unrelated ones instead of pushed out as hard")
 ap.add_argument("--link-w", type=float, default=0.2); ap.add_argument("--link-early", type=int, default=10)
+ap.add_argument("--link-frac", type=float, default=0.5, help="share of each batch that is a linked neighbour of another document in it")
 ap.add_argument("--page-queue", type=int, default=0, help="N: the last N batches' page vectors (detached) as extra negatives for the page loss")
 ap.add_argument("--prev-skip", type=int, default=0, help="1: the decoder's output is (its head + a learned gate x the previous sentence's vector), normalised")
 ap.add_argument("--p-suffix", type=float, default=0.5, help="share of documents whose tail is hidden (continuation) instead of spans")
@@ -123,9 +124,12 @@ def train_batch():
             g = random.randrange(len(docs)); gid.append(g)
     else:                                           # anchors and, for each, one linked neighbour (a random document if it has none)
         ptr, nbr, _ = LK
-        for _ in range(A.batch // 2):
+        npair = int(round(A.batch * A.link_frac))
+        for _ in range(npair):
             g = random.randrange(len(docs)); gid.append(g)
             gid.append(int(nbr[random.randrange(ptr[g], ptr[g + 1])]) if ptr[g + 1] > ptr[g] else random.randrange(len(docs)))
+        while len(gid) < A.batch: gid.append(random.randrange(len(docs)))
+        gid = gid[:A.batch]
     for g in gid:
         si, a, b = docs[g]; items.append(crop(train_sh[si][1], a, b))
     BID[0] = np.array(gid, dtype=np.int64)

@@ -8,7 +8,7 @@ cd /root
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null)
 R=baya1116/hypernet-sp-distill
 RAW="https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl"
-BOXI_SERIAL=25
+BOXI_SERIAL=26
 if [ -f /root/.boxi_serial ] && [ "$(cat /root/.boxi_serial)" -gt "$BOXI_SERIAL" ] 2>/dev/null; then echo "BOXI_STALE $BOXI_SERIAL"; exit 0; fi
 echo $BOXI_SERIAL > /root/.boxi_serial
 mkdir -p /root/sb /root/work
@@ -510,6 +510,28 @@ echo "LINK_JOB_DONE $(date -u)"
 RK
   setsid nohup bash -c 'bash /root/linkkeep.sh 2>&1 | tee -a /root/sb_link.log' > /dev/null 2>&1 < /dev/null &
   echo "LINK_LAUNCHED $(date -u)"
+fi
+# ---- 2026-10-03 04:50 JST (night check): run4L1 is coming apart - page top-1 54.5 -> 50.3 / 49.7 at 10k / 20k, gradient
+# norm 1 -> 5-10 and 2000+ steps skipped by the guard by 20k (the run4c2 pattern). Linked articles share near-identical
+# sentences, so half-linked batches also make the sentence-level losses fight over near-duplicates. Stop it; restart
+# from the same start (run4g2 best, 54.5) gentler: lr 3e-5, a quarter of each batch linked, same soft targets (0.2).
+if [ ! -e /root/.link_b ]; then touch /root/.link_b
+  echo "LINK_JOB_DONE stopped run4L1 (unstable) $(date -u)" >> /root/sb_link.log
+  pkill -f "linkkee[p].sh"; pkill -f "python3 /root/sb/train.py --data /root/sb/data/docs --out /root/sb/run4L"; sleep 10
+  hf upload $R /root/sb/run4L1/train.log sentbart/small_run4L1/train.log >/dev/null 2>&1; echo "RUN4L1_STOPPED $(date -u)"
+fi
+if ! pgrep -f "linkbkee[p].sh" >/dev/null && ! grep -q "LINKB_JOB_DONE" /root/sb_linkb.log 2>/dev/null; then
+  cat > /root/linkbkeep.sh <<'RK'
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); R=baya1116/hypernet-sp-distill; D=/root/sb/data/docs; cd /root/sb
+while pgrep -f "python3 /root/sb/train.py --data /root/sb/data/docs --out /root/sb/run" >/dev/null; do sleep 20; done
+n=run4L1b; echo "[linkb] $n from run4g2 best (top-1 0.545), lr 3e-5, link-frac 0.25 $(date -u +%H:%M)"
+( while sleep 1800; do hf upload $R /root/sb/$n/train.log sentbart/small_$n/train.log >/dev/null 2>&1; done ) & UP=$!
+python3 /root/sb/train.py --data $D --out /root/sb/$n --init /root/sb/run4g2/model_best.pt --eval-shard 001 --steps 100000 --batch 32 --seq 128 --d 512 --layers 8 --heads 8 --ffn 2048 --lr 3e-5 --warmup 1000 --eval-every 10000 --save-every 10000 --page 1 --page-queue 64 --skip-grad 5 --links /root/sb/links.npz --link-w 0.2 --link-frac 0.25 2>&1 | grep -E "^\[links\]|^\[best|TRAIN_DONE|Error|Traceback" | tail -6
+kill $UP 2>/dev/null; hf upload $R /root/sb/$n/train.log sentbart/small_$n/train.log >/dev/null 2>&1; hf upload $R /root/sb/$n/model_best.pt sentbart/small_$n/model_best.pt >/dev/null 2>&1
+echo "LINKB_JOB_DONE $(date -u)"
+RK
+  setsid nohup bash -c 'bash /root/linkbkeep.sh 2>&1 | tee -a /root/sb_linkb.log' > /dev/null 2>&1 < /dev/null &
+  echo "LINKB_LAUNCHED $(date -u)"
 fi
 echo "BOXI_OK serial $BOXI_SERIAL $(date -u)"
 # CTL-END
