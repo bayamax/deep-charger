@@ -80,7 +80,7 @@ PSKIP=
 # The raw GitHub copy this box fetches can lag and hand a control run an OLDER version of this file (04:48 on 09-22 it
 # relaunched the online loop under the previous mode while the newer run was merging a checkpoint on the same card).
 # Every edit bumps BOXG_SERIAL; a run that sees a lower serial than one already executed stops here.
-BOXG_SERIAL=2026092711
+BOXG_SERIAL=2026092712
 if [ -f /root/.boxg_serial ] && [ "$(cat /root/.boxg_serial)" -gt "$BOXG_SERIAL" ] 2>/dev/null; then echo "BOXG_STALE $BOXG_SERIAL < $(cat /root/.boxg_serial)"; exit 0; fi
 echo $BOXG_SERIAL > /root/.boxg_serial
 MODE=idle         # 2026-09-29: the side jobs hold the card (multi-turn measurement and training); a finished reeval re-launched on every control run and killed their evaluators
@@ -839,6 +839,19 @@ PYU
   grep -c "hit the .*batch budget" /root/mtg1_run.log | sed 's/^/budget warnings in the run log: /' >> /root/unfin_report.txt
   grep "hit the .*batch budget" /root/mtg1_run.log | tail -5 >> /root/unfin_report.txt
   hf upload baya1116/hypernet-sp-distill /root/unfin_report.txt pooler_distill/chatsft/audit/unfin_report.txt >/dev/null 2>&1; echo "UNFIN_REPORT uploaded"
+fi
+if [ ! -e /root/.unfin_v2 ]; then touch /root/.unfin_v2
+  python3 - > /root/unfin_report2.txt 2>&1 <<'PYU'
+import json, collections
+rows = [json.loads(l) for l in open("/root/online_mtg1/rollouts.jsonl") if l.strip()]
+for lo, hi in ((1, 100), (101, 200), (201, 300)):
+    un = [r for r in rows if lo <= r["step"] <= hi and "</think>" not in r["text"]]
+    print(f"steps {lo}-{hi}: unfinished {len(un)}; why {dict(collections.Counter(str(r.get('why'))[:60] for r in un).most_common(6))}; searches {dict(sorted(collections.Counter(r.get('ns') for r in un).items()))}")
+    fin = [r for r in rows if lo <= r["step"] <= hi and "</think>" in r["text"]]
+    print(f"   finished: searches {dict(sorted(collections.Counter(r.get('ns') for r in fin).items()))}")
+r = next(r for r in reversed(rows) if "</think>" not in r["text"]); print("--- one unfinished tail ---"); print(r["text"][-700:])
+PYU
+  hf upload baya1116/hypernet-sp-distill /root/unfin_report2.txt pooler_distill/chatsft/audit/unfin_report2.txt >/dev/null 2>&1; echo "UNFIN_REPORT2 uploaded"
 fi
 if [ ! -e /root/.pqjudge_v5 ]; then touch /root/.pqjudge_v5; pkill -f "pqjudgekee[p].sh"; sed -i "/PQJUDGE_DONE/d" /root/pqjudge.log 2>/dev/null; echo "PQJUDGE_RESTART (second draws) $(date -u)"; fi
 if ! pgrep -f "pqjudgekee[p].sh" >/dev/null && ! grep -q "PQJUDGE_DONE" /root/pqjudge.log 2>/dev/null; then
