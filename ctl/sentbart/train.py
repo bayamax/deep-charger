@@ -43,6 +43,7 @@ ap.add_argument("--eval-only", type=int, default=0, help="1: evaluate the --init
 ap.add_argument("--skip-grad", type=float, default=0.0, help=">0: a step whose gradient norm (before clipping) exceeds this is skipped, not applied - a guard against the blow-up run4c2 hit")
 ap.add_argument("--search-eval", default="", help="queries jsonl ({idx: document index in the held-out shard, q_nat, q_hard}): article search over EVERY document of the held-out shard with full, unmasked documents (index time), run once with the --init weights and exit")
 ap.add_argument("--search-out", default="")
+ap.add_argument("--search-text", default="", help="the held-out shard's text (docs_XXX.jsonl): adds keyword search (BM25 over title + sentences) and its combinations with the vector methods")
 ap.add_argument("--grow", default="", help="a model_*.pt with fewer layers: its layer i becomes layer i*k (k = --layers / its layers), and the layers in between start as the identity (attention / FFN output projections at zero, so each new pre-norm residual layer passes its input through) - the grown model computes exactly what the old one did and training continues from there")
 ap.add_argument("--page-queue", type=int, default=0, help="N: the last N batches' page vectors (detached) as extra negatives for the page loss")
 ap.add_argument("--prev-skip", type=int, default=0, help="1: the decoder's output is (its head + a learned gate x the previous sentence's vector), normalised")
@@ -344,6 +345,30 @@ if A.search_eval:
             v = torch.from_numpy(np.asarray(V[a:a + CH], dtype=np.float32)).to(DEV)
             P["mean_all"].index_add_(0, sid[a:a + CH], v)
         P["mean_all"] = F.normalize(P["mean_all"], dim=-1)
+    TOK = __import__("re").compile(r"[a-z0-9]+")
+    STOP = set("the a an of in on at to for and or is was were are be by with from as that this which who what when where how did does do its it his her their into about".split())
+    BMD = None
+    if A.search_text:                                     # BM25 statistics, only for the words the queries use
+        qterms = {w for q in qs for k, v in q.items() if k.startswith("q_") and v for w in TOK.findall(v.lower()) if w not in STOP}
+        tf = {w: {} for w in qterms}; dl = np.zeros(ND, np.float32)
+        for i, l in enumerate(open(A.search_text)):
+            if i >= ND: break
+            d = json.loads(l); toks = TOK.findall((d["title"] + " " + d["title"] + " " + " ".join(d["sents"])).lower()); dl[i] = len(toks)
+            for w in toks:
+                if w in tf: tf[w][i] = tf[w].get(i, 0) + 1
+        BMD = (tf, dl); print(f"[search] BM25 over {ND} documents, {len(qterms)} query words", flush=True)
+    def bm25(texts):
+        tf, dl = BMD; avg = float(dl.mean()); out = np.zeros((len(texts), ND), np.float32)
+        for r, t in enumerate(texts):
+            for w in set(x for x in TOK.findall(t.lower()) if x not in STOP):
+                post = tf.get(w)
+                if not post: continue
+                idf = math.log(1 + (ND - len(post) + 0.5) / (len(post) + 0.5))
+                ids = np.fromiter(post.keys(), np.int64); f = np.fromiter(post.values(), np.float32)
+                out[r, ids] += idf * f * 2.2 / (f + 1.2 * (0.25 + 0.75 * dl[ids] / avg))
+        return torch.from_numpy(out).to(DEV)
+    def ranks(M):                                         # 1 = best, every document
+        o = M.argsort(dim=1, descending=True); r = torch.empty_like(o); r.scatter_(1, o, torch.arange(1, M.shape[1] + 1, device=DEV).expand_as(o)); return r.float()
     res = {}
     for qk in sorted({k for q in qs for k in q if k.startswith("q_")}):
         sub = [q for q in qs if q.get(qk)]
@@ -362,6 +387,12 @@ if A.search_eval:
             with torch.autocast("cuda", dtype=torch.bfloat16):
                 model.encode(qx, qv, torch.zeros_like(qv))
             S["page(q->page)"] = model.last_page.float() @ P["page"].T
+            if BMD is not None:
+                B_ = bm25([q[qk] for q in sub]); S["bm25"] = B_; rb = ranks(B_)
+                for k in ("page", "lead", "mean_all", "maxsent"):
+                    rk = ranks(S[k])
+                    S[f"rrf({k},bm25)"] = 1.0 / (60 + rk) + 1.0 / (60 + rb)          # reciprocal-rank fusion
+                    S[f"{k}100>bm25"] = torch.where(rk <= 100, B_ + 1e-3 / rk, torch.full_like(B_, -1.0))   # the vector's top 100, ordered by keywords
         for k, M in S.items():
             rank = (M > M.gather(1, gold[:, None])).sum(1) + 1
             res[(qk, k)] = {f"@{kk}": float((rank <= kk).float().mean()) for kk in (1, 10, 100)} | {"mrr": float((1.0 / rank.float()).mean())}

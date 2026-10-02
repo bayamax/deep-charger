@@ -8,7 +8,7 @@ cd /root
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null)
 R=baya1116/hypernet-sp-distill
 RAW="https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl"
-BOXI_SERIAL=18
+BOXI_SERIAL=19
 if [ -f /root/.boxi_serial ] && [ "$(cat /root/.boxi_serial)" -gt "$BOXI_SERIAL" ] 2>/dev/null; then echo "BOXI_STALE $BOXI_SERIAL"; exit 0; fi
 echo $BOXI_SERIAL > /root/.boxi_serial
 mkdir -p /root/sb /root/work
@@ -393,6 +393,20 @@ echo "GROW_JOB_DONE $(date -u)"
 RK
   setsid nohup bash -c 'bash /root/growkeep.sh 2>&1 | tee -a /root/sb_grow.log' > /dev/null 2>&1 < /dev/null &
   echo "GROW_LAUNCHED $(date -u)"
+fi
+# ---- search3 (2026-10-02 18:50 JST, the user: candidates from this model x keyword search): the app model's own queries
+# again, now with BM25 keyword search over the held-out shard (title + text) and the combinations - reciprocal-rank
+# fusion of each vector method with BM25, and each vector method's top 100 ordered by BM25. 4+4 weights (run4d1 best).
+if ! pgrep -f "search3kee[p].sh" >/dev/null && ! grep -q "SEARCH3_JOB_DONE" /root/sb_search3.log 2>/dev/null; then
+  cat > /root/search3keep.sh <<'RK'
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); R=baya1116/hypernet-sp-distill; D=/root/sb/data/docs; cd /root/sb; mkdir -p /root/sb/se3
+python3 /root/sb/train.py --data $D --out /root/sb/se3/run --eval-shard 001 --batch 32 --seq 128 --d 512 --layers 4 --heads 8 --ffn 2048 --page 1 --init /root/sb/run4d1/model_best.pt \
+  --search-eval /root/sb/se2/dl/sentbart/searcheval/dcq.jsonl --search-text $D/docs_001.jsonl --search-out /root/sb/se3/result.json 2>&1 | grep -E "^\[search|Error|Traceback"
+hf upload $R /root/sb/se3/result.json sentbart/searcheval/result_hybrid.json >/dev/null 2>&1; hf upload $R /root/sb_search3.log sentbart/searcheval/search3.log >/dev/null 2>&1
+echo "SEARCH3_JOB_DONE $(date -u)"
+RK
+  setsid nohup bash -c 'bash /root/search3keep.sh 2>&1 | tee -a /root/sb_search3.log' > /dev/null 2>&1 < /dev/null &
+  echo "SEARCH3_LAUNCHED $(date -u)"
 fi
 echo "BOXI_OK serial $BOXI_SERIAL $(date -u)"
 # CTL-END
