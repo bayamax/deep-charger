@@ -41,6 +41,8 @@ ap.add_argument("--page-pool", default="token", help="token: the page token's ou
 ap.add_argument("--init", default="", help="a model_*.pt to start from (weights only; fresh optimizer and schedule) when --out has no state")
 ap.add_argument("--eval-only", type=int, default=0, help="1: evaluate the --init weights once (with the page recall curve) and exit")
 ap.add_argument("--skip-grad", type=float, default=0.0, help=">0: a step whose gradient norm (before clipping) exceeds this is skipped, not applied - a guard against the blow-up run4c2 hit")
+ap.add_argument("--search-eval", default="", help="queries jsonl ({idx: document index in the held-out shard, q_nat, q_hard}): article search over EVERY document of the held-out shard with full, unmasked documents (index time), run once with the --init weights and exit")
+ap.add_argument("--search-out", default="")
 ap.add_argument("--page-queue", type=int, default=0, help="N: the last N batches' page vectors (detached) as extra negatives for the page loss")
 ap.add_argument("--prev-skip", type=int, default=0, help="1: the decoder's output is (its head + a learned gate x the previous sentence's vector), normalised")
 ap.add_argument("--p-suffix", type=float, default=0.5, help="share of documents whose tail is hidden (continuation) instead of spans")
@@ -290,6 +292,58 @@ def save(tag="latest"):
     torch.save({"model": model.state_dict(), "args": vars(A), "step": step}, os.path.join(A.out, f"model_{tag}.pt"))
 
 
+if A.search_eval:
+    # article search at index time: every held-out document whole (its first --seq sentences, nothing masked) -> one vector
+    # per method; the queries are questions written from a passage of one document; bge-small with its query prefix.
+    from transformers import AutoModel, AutoTokenizer
+    model.eval(); V, off = eval_sh[1], eval_sh[2]; ND = len(off) - 1
+    qs = [json.loads(l) for l in open(A.search_eval) if l.strip()]
+    btok = AutoTokenizer.from_pretrained("BAAI/bge-small-en-v1.5"); benc = AutoModel.from_pretrained("BAAI/bge-small-en-v1.5").to(DEV).eval()
+    PFX = "Represent this sentence for searching relevant passages: "
+    @torch.no_grad()
+    def qvec(texts):
+        out = []
+        for i in range(0, len(texts), 128):
+            b = btok([PFX + t for t in texts[i:i + 128]], padding=True, truncation=True, max_length=128, return_tensors="pt").to(DEV)
+            out.append(F.normalize(benc(**b).last_hidden_state[:, 0].float(), dim=-1))
+        return torch.cat(out)
+    P = {k: torch.zeros(ND, DIM, device=DEV) for k in ("page", "mean", "mean_all", "lead")}
+    with torch.no_grad():
+        for i in range(0, ND, 64):
+            items = [np.asarray(V[off[d]:min(off[d + 1], off[d] + A.seq)], dtype=np.float32) for d in range(i, min(i + 64, ND))]
+            L = max(len(t) for t in items); B = len(items)
+            x = torch.zeros(B, L, DIM, device=DEV); valid = torch.zeros(B, L, dtype=torch.bool, device=DEV)
+            for j, t in enumerate(items): x[j, :len(t)] = torch.from_numpy(t).to(DEV); valid[j, :len(t)] = True
+            with torch.autocast("cuda", dtype=torch.bfloat16):
+                model.encode(x, valid, torch.zeros_like(valid))
+            P["page"][i:i + B] = model.last_page.float()
+            P["mean"][i:i + B] = F.normalize((x * valid[..., None]).sum(1) / valid.sum(1, keepdim=True), dim=-1)
+            P["lead"][i:i + B] = x[:, 0]
+        sid = torch.from_numpy(np.repeat(np.arange(ND), np.diff(off))).to(DEV)
+        CH = 1 << 18
+        for a in range(0, int(off[-1]), CH):
+            v = torch.from_numpy(np.asarray(V[a:a + CH], dtype=np.float32)).to(DEV)
+            P["mean_all"].index_add_(0, sid[a:a + CH], v)
+        P["mean_all"] = F.normalize(P["mean_all"], dim=-1)
+    res = {}
+    for qk in ("q_nat", "q_hard"):
+        sub = [q for q in qs if q.get(qk)]
+        if not sub: continue
+        Q = qvec([q[qk] for q in sub]); gold = torch.tensor([int(q["idx"]) for q in sub], device=DEV)
+        with torch.no_grad():
+            S = {k: Q @ M.T for k, M in P.items()}
+            mx = torch.full((len(sub), ND), -2.0, device=DEV)   # best single sentence of each document
+            for a in range(0, int(off[-1]), CH):
+                v = torch.from_numpy(np.asarray(V[a:a + CH], dtype=np.float32)).to(DEV)
+                mx.scatter_reduce_(1, sid[a:a + CH][None].expand(len(sub), -1), Q @ v.T, reduce="amax")
+            S["maxsent"] = mx
+            S["page+mean"] = S["page"] + S["mean_all"]
+        for k, M in S.items():
+            rank = (M > M.gather(1, gold[:, None])).sum(1) + 1
+            res[(qk, k)] = {f"@{kk}": float((rank <= kk).float().mean()) for kk in (1, 10, 100)} | {"mrr": float((1.0 / rank.float()).mean())}
+            print(f"[search] {qk} {k:10s} " + " ".join(f"{a} {b:.3f}" for a, b in res[(qk, k)].items()) + f"  (n {len(sub)}, pool {ND})", flush=True)
+    if A.search_out: json.dump({f"{a}|{b}": v for (a, b), v in res.items()}, open(A.search_out, "w"), indent=1)
+    sys.exit(0)
 if A.eval_only:
     ev = evaluate()
     print("[eval-only] " + " ".join(f"{k} {v:.3f}" if isinstance(v, float) else f"{k} {v}" for k, v in ev.items()), flush=True)

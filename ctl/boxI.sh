@@ -8,7 +8,7 @@ cd /root
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null)
 R=baya1116/hypernet-sp-distill
 RAW="https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl"
-BOXI_SERIAL=15
+BOXI_SERIAL=16
 if [ -f /root/.boxi_serial ] && [ "$(cat /root/.boxi_serial)" -gt "$BOXI_SERIAL" ] 2>/dev/null; then echo "BOXI_STALE $BOXI_SERIAL"; exit 0; fi
 echo $BOXI_SERIAL > /root/.boxi_serial
 mkdir -p /root/sb /root/work
@@ -306,6 +306,36 @@ echo "CHAIN2_JOB_DONE $(date -u)"
 RK
   setsid nohup bash -c 'bash /root/chain2keep.sh 2>&1 | tee -a /root/sb_chain2.log' > /dev/null 2>&1 < /dev/null &
   echo "CHAIN2_LAUNCHED $(date -u)"
+fi
+# ---- article search (2026-10-02 17:00 JST, the user: measure article search before making it bigger): 500 held-out
+# documents (shard 001), a 3-sentence passage from each (not the lead) goes to the hub; box G has DeepSeek write two
+# questions per passage (natural, and one that avoids the article's name); then search over ALL ~118k documents of the
+# shard: the page vector (best weights so far, whole documents, nothing masked) against the mean of the sentence
+# vectors, the lead sentence, the best single sentence, and page + mean. Runs beside the training (small GPU share).
+if ! pgrep -f "searchkee[p].sh" >/dev/null && ! grep -q "SEARCH_JOB_DONE" /root/sb_search.log 2>/dev/null; then
+  cat > /root/searchkeep.sh <<'RK'
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); R=baya1116/hypernet-sp-distill; D=/root/sb/data/docs; cd /root/sb; mkdir -p /root/sb/se
+python3 - <<'PY2'
+import json, random
+rows = []
+for i, l in enumerate(open("/root/sb/data/docs/docs_001.jsonl")):
+    d = json.loads(l); rows.append((i, d["title"], d["sents"]))
+rng = random.Random(7); pick = rng.sample([r for r in rows if len(r[2]) >= 8], 500); out = []
+for i, t, ss in pick:
+    a = rng.randint(1, len(ss) - 3); out.append({"idx": i, "title": t, "passage": " ".join(ss[a:a + 3])})
+open("/root/sb/se/docs500.jsonl", "w").write("".join(json.dumps(o, ensure_ascii=False) + "\n" for o in out)); print("[search] 500 passages from", len(rows), "held-out documents")
+PY2
+hf upload $R /root/sb/se/docs500.jsonl sentbart/searcheval/docs500.jsonl >/dev/null 2>&1
+until hf download $R sentbart/searcheval/queries.jsonl --local-dir /root/sb/se/dl >/dev/null 2>&1 && [ -s /root/sb/se/dl/sentbart/searcheval/queries.jsonl ]; do sleep 120; done
+echo "[search] $(wc -l < /root/sb/se/dl/sentbart/searcheval/queries.jsonl) queries $(date -u +%H:%M)"
+CK=$(ls -t /root/sb/run4d*/model_best.pt 2>/dev/null | head -1); CK=${CK:-/root/sb/run4c/model_latest.pt}; echo "[search] weights $CK"
+python3 /root/sb/train.py --data $D --out /root/sb/se/run --eval-shard 001 --batch 32 --seq 128 --d 512 --layers 4 --heads 8 --ffn 2048 --page 1 --init $CK \
+  --search-eval /root/sb/se/dl/sentbart/searcheval/queries.jsonl --search-out /root/sb/se/result.json 2>&1 | grep -E "^\[search|^\[init|Error|Traceback"
+hf upload $R /root/sb/se/result.json sentbart/searcheval/result.json >/dev/null 2>&1; hf upload $R /root/sb_search.log sentbart/searcheval/search.log >/dev/null 2>&1
+echo "SEARCH_JOB_DONE $(date -u)"
+RK
+  setsid nohup bash -c 'bash /root/searchkeep.sh 2>&1 | tee -a /root/sb_search.log' > /dev/null 2>&1 < /dev/null &
+  echo "SEARCH_LAUNCHED $(date -u)"
 fi
 echo "BOXI_OK serial $BOXI_SERIAL $(date -u)"
 # CTL-END

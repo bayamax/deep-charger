@@ -80,7 +80,7 @@ PSKIP=
 # The raw GitHub copy this box fetches can lag and hand a control run an OLDER version of this file (04:48 on 09-22 it
 # relaunched the online loop under the previous mode while the newer run was merging a checkpoint on the same card).
 # Every edit bumps BOXG_SERIAL; a run that sees a lower serial than one already executed stops here.
-BOXG_SERIAL=2026092715
+BOXG_SERIAL=2026092716
 if [ -f /root/.boxg_serial ] && [ "$(cat /root/.boxg_serial)" -gt "$BOXG_SERIAL" ] 2>/dev/null; then echo "BOXG_STALE $BOXG_SERIAL < $(cat /root/.boxg_serial)"; exit 0; fi
 echo $BOXG_SERIAL > /root/.boxg_serial
 MODE=idle         # 2026-09-29: the side jobs hold the card (multi-turn measurement and training); a finished reeval re-launched on every control run and killed their evaluators
@@ -1001,6 +1001,40 @@ M2
   setsid nohup bash -c 'bash /root/mtg2keep.sh 2>&1 | tee -a /root/mtg2.log' >> /proc/1/fd/1 2>&1 < /dev/null 9>&- &
   echo "MTG2_LAUNCHED $(date -u)"
 fi
+# ---- searchq (2026-10-02 17:00 JST): questions for box I's article-search test - two per held-out passage, written by
+# DeepSeek (natural; and one avoiding the article's name), API only
+if ! pgrep -f "searchqkee[p].sh" >/dev/null && ! grep -q "SEARCHQ_DONE" /root/searchq.log 2>/dev/null; then
+  cat > /root/searchqkeep.sh <<'SQ'
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); R=baya1116/hypernet-sp-distill
+until hf download $R sentbart/searcheval/docs500.jsonl --local-dir /root/sq >/dev/null 2>&1 && [ -s /root/sq/sentbart/searcheval/docs500.jsonl ]; do sleep 120; done
+python3 - <<'PY2'
+import json, time, urllib.request
+from concurrent.futures import ThreadPoolExecutor
+KEY = open("/root/.dsk").read().strip()
+SYS = """You write search questions for testing an article search engine. Given an encyclopedia article's title and a short passage from it, write two questions a curious person might type, each answerable from the passage:
+- "q_nat": a natural question; it may name the subject.
+- "q_hard": a question about the same fact that does NOT use the article's title or any distinctive word of it (describe the subject instead).
+Output JSON: {"q_nat": "...", "q_hard": "..."}"""
+def ask(d):
+    body = {"model": "deepseek-flash", "messages": [{"role": "system", "content": SYS}, {"role": "user", "content": f"TITLE: {d['title']}\nPASSAGE: {d['passage']}"}],
+            "max_tokens": 300, "temperature": 0.7, "response_format": {"type": "json_object"}}
+    for t in range(4):
+        try:
+            r = json.load(urllib.request.urlopen(urllib.request.Request("https://api.deepseek.com/chat/completions", data=json.dumps(body).encode(),
+                headers={"Authorization": "Bearer " + KEY, "Content-Type": "application/json"}), timeout=120))
+            v = json.loads(r["choices"][0]["message"]["content"]); return {"idx": d["idx"], "title": d["title"], "q_nat": v.get("q_nat", ""), "q_hard": v.get("q_hard", "")}
+        except Exception: time.sleep(3 * (t + 1))
+    return None
+docs = [json.loads(l) for l in open("/root/sq/sentbart/searcheval/docs500.jsonl")]
+with ThreadPoolExecutor(8) as ex: out = [o for o in ex.map(ask, docs) if o and o["q_nat"]]
+open("/root/sq/queries.jsonl", "w").write("".join(json.dumps(o, ensure_ascii=False) + "\n" for o in out)); print(f"[searchq] {len(out)} of {len(docs)} passages got questions")
+PY2
+hf upload $R /root/sq/queries.jsonl sentbart/searcheval/queries.jsonl >/dev/null 2>&1; head -3 /root/sq/queries.jsonl | cut -c1-300
+echo "SEARCHQ_DONE $(date -u)"
+SQ
+  setsid nohup bash -c 'bash /root/searchqkeep.sh 2>&1 | tee -a /root/searchq.log' >> /proc/1/fd/1 2>&1 < /dev/null 9>&- &
+  echo "SEARCHQ_LAUNCHED $(date -u)"
+fi
 if [ ! -e /root/.unfin_v1 ]; then touch /root/.unfin_v1
   python3 - > /root/unfin_report.txt 2>&1 <<'PYU'
 import json, re, statistics, collections
@@ -1702,6 +1736,7 @@ while :; do
     echo "--- mem7.log (tail) ---"; tail -n 10 /root/mem7.log 2>/dev/null | cut -c1-300; grep -E "^val " /root/memfit_mem7_run.log 2>/dev/null | tail -2
     echo "--- qt.log (tail) ---"; tail -n 4 /root/qt.log 2>/dev/null | cut -c1-300
     echo "--- pqjudge.log (tail) ---"; tail -n 5 /root/pqjudge.log 2>/dev/null | cut -c1-200
+    echo "--- searchq.log (tail) ---"; tail -n 5 /root/searchq.log 2>/dev/null | cut -c1-300
     echo "--- mtg2.log (tail) ---"; tail -n 12 /root/mtg2.log 2>/dev/null | cut -c1-250
     echo "--- mix0.log (tail) ---"; tail -n 14 /root/mix0.log 2>/dev/null | cut -c1-250
     echo "--- mtg1d.log (tail) ---"; tail -n 12 /root/mtg1d.log 2>/dev/null | cut -c1-250
