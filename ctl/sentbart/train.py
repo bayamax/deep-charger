@@ -43,6 +43,7 @@ ap.add_argument("--eval-only", type=int, default=0, help="1: evaluate the --init
 ap.add_argument("--skip-grad", type=float, default=0.0, help=">0: a step whose gradient norm (before clipping) exceeds this is skipped, not applied - a guard against the blow-up run4c2 hit")
 ap.add_argument("--search-eval", default="", help="queries jsonl ({idx: document index in the held-out shard, q_nat, q_hard}): article search over EVERY document of the held-out shard with full, unmasked documents (index time), run once with the --init weights and exit")
 ap.add_argument("--search-out", default="")
+ap.add_argument("--q-prefix", type=int, default=1, help="1: bge's query instruction in front of each query (bge's recommended use); 0: the query as a plain sentence, as the training saw sentences")
 ap.add_argument("--search-text", default="", help="the held-out shard's text (docs_XXX.jsonl): adds keyword search (BM25 over title + sentences) and its combinations with the vector methods")
 ap.add_argument("--grow", default="", help="a model_*.pt with fewer layers: its layer i becomes layer i*k (k = --layers / its layers), and the layers in between start as the identity (attention / FFN output projections at zero, so each new pre-norm residual layer passes its input through) - the grown model computes exactly what the old one did and training continues from there")
 ap.add_argument("--page-queue", type=int, default=0, help="N: the last N batches' page vectors (detached) as extra negatives for the page loss")
@@ -319,7 +320,7 @@ if A.search_eval:
     model.eval(); V, off = eval_sh[1], eval_sh[2]; ND = len(off) - 1
     qs = [json.loads(l) for l in open(A.search_eval) if l.strip()]
     btok = AutoTokenizer.from_pretrained("BAAI/bge-small-en-v1.5"); benc = AutoModel.from_pretrained("BAAI/bge-small-en-v1.5").to(DEV).eval()
-    PFX = "Represent this sentence for searching relevant passages: "
+    PFX = "Represent this sentence for searching relevant passages: " if A.q_prefix else ""
     @torch.no_grad()
     def qvec(texts):
         out = []

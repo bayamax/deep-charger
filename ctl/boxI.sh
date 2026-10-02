@@ -8,7 +8,7 @@ cd /root
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null)
 R=baya1116/hypernet-sp-distill
 RAW="https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl"
-BOXI_SERIAL=19
+BOXI_SERIAL=20
 if [ -f /root/.boxi_serial ] && [ "$(cat /root/.boxi_serial)" -gt "$BOXI_SERIAL" ] 2>/dev/null; then echo "BOXI_STALE $BOXI_SERIAL"; exit 0; fi
 echo $BOXI_SERIAL > /root/.boxi_serial
 mkdir -p /root/sb /root/work
@@ -407,6 +407,20 @@ echo "SEARCH3_JOB_DONE $(date -u)"
 RK
   setsid nohup bash -c 'bash /root/search3keep.sh 2>&1 | tee -a /root/sb_search3.log' > /dev/null 2>&1 < /dev/null &
   echo "SEARCH3_LAUNCHED $(date -u)"
+fi
+# ---- search4 (2026-10-02 19:00 JST): the same as search3 with the queries embedded WITHOUT bge's query instruction - the
+# page vector was trained against plain sentence vectors, the instruction may have put the queries elsewhere
+if ! pgrep -f "search4kee[p].sh" >/dev/null && ! grep -q "SEARCH4_JOB_DONE" /root/sb_search4.log 2>/dev/null; then
+  cat > /root/search4keep.sh <<'RK'
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); R=baya1116/hypernet-sp-distill; D=/root/sb/data/docs; cd /root/sb; mkdir -p /root/sb/se4
+until grep -q "SEARCH3_JOB_DONE" /root/sb_search3.log 2>/dev/null; do sleep 60; done
+python3 /root/sb/train.py --data $D --out /root/sb/se4/run --eval-shard 001 --batch 32 --seq 128 --d 512 --layers 4 --heads 8 --ffn 2048 --page 1 --init /root/sb/run4d1/model_best.pt --q-prefix 0 \
+  --search-eval /root/sb/se2/dl/sentbart/searcheval/dcq.jsonl --search-text $D/docs_001.jsonl --search-out /root/sb/se4/result.json 2>&1 | grep -E "^\[search|Error|Traceback"
+hf upload $R /root/sb/se4/result.json sentbart/searcheval/result_hybrid_noprefix.json >/dev/null 2>&1; hf upload $R /root/sb_search4.log sentbart/searcheval/search4.log >/dev/null 2>&1
+echo "SEARCH4_JOB_DONE $(date -u)"
+RK
+  setsid nohup bash -c 'bash /root/search4keep.sh 2>&1 | tee -a /root/sb_search4.log' > /dev/null 2>&1 < /dev/null &
+  echo "SEARCH4_LAUNCHED $(date -u)"
 fi
 echo "BOXI_OK serial $BOXI_SERIAL $(date -u)"
 # CTL-END
