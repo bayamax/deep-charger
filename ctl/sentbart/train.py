@@ -338,6 +338,11 @@ if A.search_eval:
                 mx.scatter_reduce_(1, sid[a:a + CH][None].expand(len(sub), -1), Q @ v.T, reduce="amax")
             S["maxsent"] = mx
             S["page+mean"] = S["page"] + S["mean_all"]
+            # the query through the model too: a one-sentence document -> its page vector, against the pages
+            qx = Q[:, None, :]; qv = torch.ones(len(sub), 1, dtype=torch.bool, device=DEV)
+            with torch.autocast("cuda", dtype=torch.bfloat16):
+                model.encode(qx, qv, torch.zeros_like(qv))
+            S["page(q->page)"] = model.last_page.float() @ P["page"].T
         for k, M in S.items():
             rank = (M > M.gather(1, gold[:, None])).sum(1) + 1
             res[(qk, k)] = {f"@{kk}": float((rank <= kk).float().mean()) for kk in (1, 10, 100)} | {"mrr": float((1.0 / rank.float()).mean())}
