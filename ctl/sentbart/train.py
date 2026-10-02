@@ -43,6 +43,7 @@ ap.add_argument("--eval-only", type=int, default=0, help="1: evaluate the --init
 ap.add_argument("--skip-grad", type=float, default=0.0, help=">0: a step whose gradient norm (before clipping) exceeds this is skipped, not applied - a guard against the blow-up run4c2 hit")
 ap.add_argument("--search-eval", default="", help="queries jsonl ({idx: document index in the held-out shard, q_nat, q_hard}): article search over EVERY document of the held-out shard with full, unmasked documents (index time), run once with the --init weights and exit")
 ap.add_argument("--search-out", default="")
+ap.add_argument("--grow", default="", help="a model_*.pt with fewer layers: its layer i becomes layer i*k (k = --layers / its layers), and the layers in between start as the identity (attention / FFN output projections at zero, so each new pre-norm residual layer passes its input through) - the grown model computes exactly what the old one did and training continues from there")
 ap.add_argument("--page-queue", type=int, default=0, help="N: the last N batches' page vectors (detached) as extra negatives for the page loss")
 ap.add_argument("--prev-skip", type=int, default=0, help="1: the decoder's output is (its head + a learned gate x the previous sentence's vector), normalised")
 ap.add_argument("--p-suffix", type=float, default=0.5, help="share of documents whose tail is hidden (continuation) instead of spans")
@@ -188,6 +189,24 @@ npar = sum(p.numel() for p in model.parameters()) / 1e6
 opt = torch.optim.AdamW(model.parameters(), lr=A.lr, betas=(0.9, 0.98), weight_decay=0.01)
 sched = torch.optim.lr_scheduler.LambdaLR(opt, lambda s: min(1.0, (s + 1) / A.warmup) * 0.5 * (1 + math.cos(math.pi * min(1.0, s / A.steps))))
 STATE = os.path.join(A.out, "state.pt"); step0 = 0
+if A.grow and not os.path.exists(STATE):
+    old_sd = torch.load(A.grow, map_location=DEV)["model"]
+    nold = 1 + max(int(k.split(".")[2]) for k in old_sd if k.startswith("enc.layers."))
+    assert A.layers % nold == 0, (A.layers, nold); kk = A.layers // nold
+    new_sd = {}
+    for k, v in old_sd.items():
+        parts = k.split(".")
+        if parts[0] in ("enc", "dec") and parts[1] == "layers":
+            parts[2] = str(int(parts[2]) * kk); new_sd[".".join(parts)] = v
+        else: new_sd[k] = v
+    _miss = model.load_state_dict(new_sd, strict=False)
+    with torch.no_grad():
+        for stack in (model.enc.layers, model.dec.layers):
+            for i, layer in enumerate(stack):
+                if i % kk == 0: continue
+                for n, p_ in layer.named_parameters():
+                    if n.startswith(("self_attn.out_proj", "multihead_attn.out_proj", "linear2")): p_.zero_()
+    print(f"[grow] {nold} -> {A.layers} layers per stack from {A.grow}; new layers start as the identity; missing {len(_miss.missing_keys)} (the new layers), unexpected {list(_miss.unexpected_keys)}", flush=True)
 if A.init and not os.path.exists(STATE):
     _miss = model.load_state_dict(torch.load(A.init, map_location=DEV)["model"], strict=False)
     print(f"[init] weights from {A.init} (missing {list(_miss.missing_keys)}, unexpected {list(_miss.unexpected_keys)})", flush=True)

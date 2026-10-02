@@ -8,7 +8,7 @@ cd /root
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null)
 R=baya1116/hypernet-sp-distill
 RAW="https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl"
-BOXI_SERIAL=17
+BOXI_SERIAL=18
 if [ -f /root/.boxi_serial ] && [ "$(cat /root/.boxi_serial)" -gt "$BOXI_SERIAL" ] 2>/dev/null; then echo "BOXI_STALE $BOXI_SERIAL"; exit 0; fi
 echo $BOXI_SERIAL > /root/.boxi_serial
 mkdir -p /root/sb /root/work
@@ -358,6 +358,41 @@ echo "SEARCH2_JOB_DONE $(date -u)"
 RK
   setsid nohup bash -c 'bash /root/search2keep.sh 2>&1 | tee -a /root/sb_search2.log' > /dev/null 2>&1 < /dev/null &
   echo "SEARCH2_LAUNCHED $(date -u)"
+fi
+# ---- grow (2026-10-02 18:40 JST, the user: if it has topped out, add layers rather than start over): chain2 stops; the
+# best weights so far (by held-out page top-1, any run4d*) grow from 4+4 to 8+8 layers - each old layer keeps its place,
+# a new identity-initialised layer after each (the grown model computes exactly what the old one did, checked) - and
+# training continues at lr 1e-4 with the skip guard, in 100k segments from the best weights while a segment adds a point.
+if [ ! -e /root/.grow_v1 ]; then touch /root/.grow_v1
+  echo "CHAIN2_JOB_DONE stopped for grow $(date -u)" >> /root/sb_chain2.log
+  pkill -f "chain2kee[p].sh"; pkill -f "python3 /root/sb/train.py --data /root/sb/data/docs --out /root/sb/run4d"; sleep 10; echo "CHAIN2_STOPPED $(date -u)"
+fi
+if ! pgrep -f "growkee[p].sh" >/dev/null && ! grep -q "GROW_JOB_DONE" /root/sb_grow.log 2>/dev/null; then
+  cat > /root/growkeep.sh <<'RK'
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); R=baya1116/hypernet-sp-distill; D=/root/sb/data/docs; cd /root/sb
+while pgrep -f "python3 /root/sb/train.py --data /root/sb/data/docs --out /root/sb/run" >/dev/null; do sleep 30; done
+bestof() { grep -h "^\[best\]" /root/sb/$1/train.log 2>/dev/null | tail -1 | sed -E 's/.*page_top1 ([0-9.]+).*/\1/'; }
+src=""; base=0
+for d in /root/sb/run4d*; do b=$(bestof $(basename $d)); [ -n "$b" ] && [ -s $d/model_best.pt ] && python3 -c "import sys; sys.exit(0 if float('$b') > float('$base') else 1)" && { src=$d/model_best.pt; base=$b; }; done
+[ -n "$src" ] || { echo "GROW_JOB_DONE no source"; exit 1; }
+for d in /root/sb/run4d*; do hf upload $R $d/train.log sentbart/small_$(basename $d)/train.log >/dev/null 2>&1; done
+hf upload $R $src sentbart/small_grow_source.pt >/dev/null 2>&1
+prev=""
+for i in 1 2 3 4; do
+  n=run4g$i; echo "[grow] $n $( [ -z "$prev" ] && echo "grown 4->8 from $src" || echo "from $prev" ) (top-1 $base) $(date -u +%H:%M)"
+  SRCARG=$( [ -z "$prev" ] && echo "--grow $src" || echo "--init $prev" )
+  ( while sleep 1800; do hf upload $R /root/sb/$n/train.log sentbart/small_$n/train.log >/dev/null 2>&1; done ) & UP=$!
+  python3 /root/sb/train.py --data $D --out /root/sb/$n $SRCARG --eval-shard 001 --steps 100000 --batch 32 --seq 128 --d 512 --layers 8 --heads 8 --ffn 2048 --lr 1e-4 --warmup 1000 --eval-every 10000 --save-every 10000 --page 1 --page-queue 64 --skip-grad 5 2>&1 | grep -E "^\[grow|^\[model|^\[best|TRAIN_DONE|Error|Traceback" | tail -6
+  kill $UP 2>/dev/null; hf upload $R /root/sb/$n/train.log sentbart/small_$n/train.log >/dev/null 2>&1; hf upload $R /root/sb/$n/model_best.pt sentbart/small_$n/model_best.pt >/dev/null 2>&1
+  rm -f /root/sb/$n/state.pt
+  cur=$(bestof $n); cur=${cur:-0}; echo "[grow] $n done: best page top-1 $cur (from $base)"
+  python3 -c "import sys; sys.exit(0 if float('$cur') - float('$base') >= 0.01 else 1)" || { echo "PLATEAU_GROW at $n: best $cur vs $base"; break; }
+  prev=/root/sb/$n/model_best.pt; base=$cur
+done
+echo "GROW_JOB_DONE $(date -u)"
+RK
+  setsid nohup bash -c 'bash /root/growkeep.sh 2>&1 | tee -a /root/sb_grow.log' > /dev/null 2>&1 < /dev/null &
+  echo "GROW_LAUNCHED $(date -u)"
 fi
 echo "BOXI_OK serial $BOXI_SERIAL $(date -u)"
 # CTL-END
