@@ -170,3 +170,21 @@ The training reward did not move over the 100 steps (search pass by 20-step bloc
 60-step running mean flat at 24-27%). Step 100 is above the base on both screens but below step 25 / mem10 on the
 later turns; with 30 chains these gaps are within noise. The user asked to keep going: mtg1c resumes to 200
 (measured) and 300 (measured), same settings.
+
+## mtg1 continued to 300 (2026-10-02): the app candidate
+
+| | turn 1 | turn 2 | turn 3 | turn 4 | turns 2-4 | single-turn 102 |
+|---|---|---|---|---|---|---|
+| base, history | 16 | 10 | 16 | 8 | 34 | 48.0 |
+| mem10 | 18 | 17 | 17 | 12 | 46 | 45.1 |
+| mtg1 step 200 | 18 | 18 | 18 | 13 | 49 | 56.9 (50.0 / 61.8 / 58.8) |
+| **mtg1 step 300** | **21** | 18 | 17 | **17** | **52** | **57.8** (52.9 / 61.8 / 58.8) |
+
+Step 300 (`pooler_distill/chatsft/multiturn/mtg1_s300.safetensors`, LoRA r16 all layers + pooler, over the 4-bit
+g14 base) is the app candidate: turns 2-4 at the level of each question run alone (49-51), single-turn +10 over the
+base. Unfinished rollouts during training were all the 7-search guard (the model searching on after "no searches
+left"), none a length or time cap; they peaked at 39% around steps 201-240 and fell to 7% by 281-300.
+
+Follow-up (bridge) dialogues, the 40 of mt_eval, turn 1 / turn 2 (the follow-up): base 26 / 19, step 300 23 / 18 -
+the switch training did not cost the follow-ups. Next (mix0 -> mtg2): the Dolphin reasoning baseline, then GRPO from
+step 300 on switch + ~30% bridge items, measured on all four screens.
