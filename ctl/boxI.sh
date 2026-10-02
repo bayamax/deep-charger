@@ -8,7 +8,7 @@ cd /root
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null)
 R=baya1116/hypernet-sp-distill
 RAW="https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl"
-BOXI_SERIAL=26
+BOXI_SERIAL=27
 if [ -f /root/.boxi_serial ] && [ "$(cat /root/.boxi_serial)" -gt "$BOXI_SERIAL" ] 2>/dev/null; then echo "BOXI_STALE $BOXI_SERIAL"; exit 0; fi
 echo $BOXI_SERIAL > /root/.boxi_serial
 mkdir -p /root/sb /root/work
@@ -532,6 +532,36 @@ echo "LINKB_JOB_DONE $(date -u)"
 RK
   setsid nohup bash -c 'bash /root/linkbkeep.sh 2>&1 | tee -a /root/sb_linkb.log' > /dev/null 2>&1 < /dev/null &
   echo "LINKB_LAUNCHED $(date -u)"
+fi
+# ---- 2026-10-03 07:45 JST (the user: links are a means, not the goal - go with plain negatives if they work better):
+# run4L1b (soft link targets) held top-1 at 53.3-53.5 for 50k steps, below its 54.5 start; it stops. Plain negatives
+# again from the best 8+8 weights (run4g2, 54.5), with 4x the queue (256 batches, ~8000 pages - the lever that gave
+# +10 points before), lr 1e-4, skip guard, best kept; 100k segments while each adds a point.
+if [ ! -e /root/.plainq ]; then touch /root/.plainq
+  echo "LINKB_JOB_DONE stopped for plain negatives $(date -u)" >> /root/sb_linkb.log
+  pkill -f "linkbkee[p].sh"; pkill -f "python3 /root/sb/train.py --data /root/sb/data/docs --out /root/sb/run4L1b"; sleep 10
+  hf upload $R /root/sb/run4L1b/train.log sentbart/small_run4L1b/train.log >/dev/null 2>&1; echo "RUN4L1B_STOPPED $(date -u)"
+fi
+if ! pgrep -f "plainqkee[p].sh" >/dev/null && ! grep -q "PLAINQ_JOB_DONE" /root/sb_plainq.log 2>/dev/null; then
+  cat > /root/plainqkeep.sh <<'RK'
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); R=baya1116/hypernet-sp-distill; D=/root/sb/data/docs; cd /root/sb
+while pgrep -f "python3 /root/sb/train.py --data /root/sb/data/docs --out /root/sb/run" >/dev/null; do sleep 20; done
+bestof() { grep -h "^\[best\]" /root/sb/$1/train.log 2>/dev/null | tail -1 | sed -E 's/.*page_top1 ([0-9.]+).*/\1/'; }
+prev=/root/sb/run4g2/model_best.pt; base=0.545
+for i in 1 2 3 4; do
+  n=run4q$i; echo "[plainq] $n from $prev (top-1 $base), queue 256 $(date -u +%H:%M)"
+  ( while sleep 1800; do hf upload $R /root/sb/$n/train.log sentbart/small_$n/train.log >/dev/null 2>&1; done ) & UP=$!
+  python3 /root/sb/train.py --data $D --out /root/sb/$n --init $prev --eval-shard 001 --steps 100000 --batch 32 --seq 128 --d 512 --layers 8 --heads 8 --ffn 2048 --lr 1e-4 --warmup 1000 --eval-every 10000 --save-every 10000 --page 1 --page-queue 256 --skip-grad 5 2>&1 | grep -E "^\[best|TRAIN_DONE|Error|Traceback" | tail -6
+  kill $UP 2>/dev/null; hf upload $R /root/sb/$n/train.log sentbart/small_$n/train.log >/dev/null 2>&1; hf upload $R /root/sb/$n/model_best.pt sentbart/small_$n/model_best.pt >/dev/null 2>&1
+  rm -f /root/sb/$n/state.pt
+  cur=$(bestof $n); cur=${cur:-0}; echo "[plainq] $n done: best page top-1 $cur (from $base)"
+  python3 -c "import sys; sys.exit(0 if float('$cur') - float('$base') >= 0.01 else 1)" || { echo "PLATEAU_PLAINQ at $n: best $cur vs $base"; break; }
+  prev=/root/sb/$n/model_best.pt; base=$cur
+done
+echo "PLAINQ_JOB_DONE $(date -u)"
+RK
+  setsid nohup bash -c 'bash /root/plainqkeep.sh 2>&1 | tee -a /root/sb_plainq.log' > /dev/null 2>&1 < /dev/null &
+  echo "PLAINQ_LAUNCHED $(date -u)"
 fi
 echo "BOXI_OK serial $BOXI_SERIAL $(date -u)"
 # CTL-END
