@@ -80,7 +80,7 @@ PSKIP=
 # The raw GitHub copy this box fetches can lag and hand a control run an OLDER version of this file (04:48 on 09-22 it
 # relaunched the online loop under the previous mode while the newer run was merging a checkpoint on the same card).
 # Every edit bumps BOXG_SERIAL; a run that sees a lower serial than one already executed stops here.
-BOXG_SERIAL=2026092710
+BOXG_SERIAL=2026092711
 if [ -f /root/.boxg_serial ] && [ "$(cat /root/.boxg_serial)" -gt "$BOXG_SERIAL" ] 2>/dev/null; then echo "BOXG_STALE $BOXG_SERIAL < $(cat /root/.boxg_serial)"; exit 0; fi
 echo $BOXG_SERIAL > /root/.boxg_serial
 MODE=idle         # 2026-09-29: the side jobs hold the card (multi-turn measurement and training); a finished reeval re-launched on every control run and killed their evaluators
@@ -804,6 +804,41 @@ echo "MTG1C_JOB_DONE $(date -u)"
 MC
   setsid nohup bash -c 'bash /root/mtg1ckeep.sh 2>&1 | tee -a /root/mtg1c.log' >> /proc/1/fd/1 2>&1 < /dev/null 9>&- &
   echo "MTG1C_LAUNCHED $(date -u)"
+fi
+# one-shot (2026-10-02 09:40 JST, the user: is the thinking length being capped? ~1500 tokens incl. served pages should
+# be allowed): why mtg1's unfinished rollouts did not finish - the token cap (--search-gen 2000 model tokens), the
+# 900 s batch budget, the 7-search guard, a loop - and their lengths in tokens with and without the served pages
+if [ ! -e /root/.unfin_v1 ]; then touch /root/.unfin_v1
+  python3 - > /root/unfin_report.txt 2>&1 <<'PYU'
+import json, re, statistics, collections
+from transformers import AutoTokenizer
+tok = AutoTokenizer.from_pretrained("/root/gptq_hf_gq14")
+INFO = re.compile(r"<information>.*?</information>", re.S)
+rows = [json.loads(l) for l in open("/root/online_mtg1/rollouts.jsonl") if l.strip()]
+print("fields:", sorted(rows[-1].keys()))
+for lo, hi in ((1, 100), (101, 200), (201, 300)):
+    x = [r for r in rows if lo <= r["step"] <= hi]
+    if not x: continue
+    un = [r for r in x if "</think>" not in r["text"]]
+    why = collections.Counter()
+    L_all, L_own = [], []
+    for r in un:
+        t = r["text"]; own = len(tok(INFO.sub("", t)).input_ids); full = len(tok(t).input_ids)
+        L_all.append(full); L_own.append(own)
+        nq = len(r.get("queries") or [])
+        if r.get("dead"): why["loop (dead)"] += 1
+        elif nq >= 7: why["7-search guard"] += 1
+        elif own >= 1950: why["token cap 2000"] += 1
+        else: why["time budget / other"] += 1
+    fin = [r for r in x if "</think>" in r["text"]]
+    fl = [len(tok(r["text"].split("</think>")[0]).input_ids) for r in fin]
+    print(f"steps {lo}-{hi}: {len(x)} rollouts, unfinished {len(un)} ({100*len(un)/len(x):.0f}%) {dict(why)}")
+    if un: print(f"   unfinished length tokens: own median {statistics.median(L_own):.0f} max {max(L_own)} | incl. pages median {statistics.median(L_all):.0f} max {max(L_all)}")
+    if fl: print(f"   finished thinking tokens incl. pages: median {statistics.median(fl):.0f}, 90th pct {sorted(fl)[int(.9*len(fl))]}, max {max(fl)}")
+PYU
+  grep -c "hit the .*batch budget" /root/mtg1_run.log | sed 's/^/budget warnings in the run log: /' >> /root/unfin_report.txt
+  grep "hit the .*batch budget" /root/mtg1_run.log | tail -5 >> /root/unfin_report.txt
+  hf upload baya1116/hypernet-sp-distill /root/unfin_report.txt pooler_distill/chatsft/audit/unfin_report.txt >/dev/null 2>&1; echo "UNFIN_REPORT uploaded"
 fi
 if [ ! -e /root/.pqjudge_v5 ]; then touch /root/.pqjudge_v5; pkill -f "pqjudgekee[p].sh"; sed -i "/PQJUDGE_DONE/d" /root/pqjudge.log 2>/dev/null; echo "PQJUDGE_RESTART (second draws) $(date -u)"; fi
 if ! pgrep -f "pqjudgekee[p].sh" >/dev/null && ! grep -q "PQJUDGE_DONE" /root/pqjudge.log 2>/dev/null; then
