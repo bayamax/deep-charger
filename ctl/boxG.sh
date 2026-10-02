@@ -80,7 +80,7 @@ PSKIP=
 # The raw GitHub copy this box fetches can lag and hand a control run an OLDER version of this file (04:48 on 09-22 it
 # relaunched the online loop under the previous mode while the newer run was merging a checkpoint on the same card).
 # Every edit bumps BOXG_SERIAL; a run that sees a lower serial than one already executed stops here.
-BOXG_SERIAL=2026092714
+BOXG_SERIAL=2026092715
 if [ -f /root/.boxg_serial ] && [ "$(cat /root/.boxg_serial)" -gt "$BOXG_SERIAL" ] 2>/dev/null; then echo "BOXG_STALE $BOXG_SERIAL < $(cat /root/.boxg_serial)"; exit 0; fi
 echo $BOXG_SERIAL > /root/.boxg_serial
 MODE=idle         # 2026-09-29: the side jobs hold the card (multi-turn measurement and training); a finished reeval re-launched on every control run and killed their evaluators
@@ -959,6 +959,48 @@ MX
   setsid nohup bash -c 'bash /root/mix0keep.sh 2>&1 | tee -a /root/mix0.log' >> /proc/1/fd/1 2>&1 < /dev/null 9>&- &
   echo "MIX0_LAUNCHED $(date -u)"
 fi
+[ -s /root/dl_judge.py ] || { awk "/<<'PYJ'/{f=1;next} /^PYJ/{f=0} f" /root/mix0keep.sh > /root/dl_judge.py; echo "DL_JUDGE extracted $(wc -l < /root/dl_judge.py) lines"; }
+# ---- mtg2 (queued 2026-10-02 16:35 JST): GRPO from step 300 on switch + ~30% bridge items (mix0's mtg2_items), same
+# settings as mtg1, 100 steps; then the four screens: the 30 switch chains, the single-turn 102, the 40 bridge
+# dialogues, the Dolphin reasoning 100 (nano, REASON_SYS) - against mix0's baselines for the original model and step 300.
+if ! pgrep -f "mtg2kee[p].sh" >/dev/null && ! grep -q "MTG2_JOB_DONE\|MTG2_ABORT" /root/mtg2.log 2>/dev/null; then
+  cat > /root/mtg2keep.sh <<'M2'
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); R=baya1116/hypernet-sp-distill; cd /root/work; OUT=/root/online_mtg2
+ENV="SP_BASE=/root/gptq_hf_gq14 SP_RANK=16 SP_NOSYS=1 SP_EPISODIC=1 OMP_NUM_THREADS=1 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True"
+EVARGS="--rw 768 --maxd 384 --samepage 1 --decode plain --temp 0.6 --gen 4000 --stop eos --replycap 600"
+until grep -qE "MIX0_JOB_DONE|MIX0_ABORT" /root/mix0.log 2>/dev/null; do sleep 120; done
+[ -s /root/work/mtg2_items.jsonl ] || { echo "MTG2_ABORT no items"; exit 1; }
+while pgrep -f "pool_eval.p[y]|online_loop.p[y]|memfit.p[y]" >/dev/null; do sleep 30; done
+echo "[mtg2] $(wc -l < /root/work/mtg2_items.jsonl) items; start $(date -u +%H:%M); $(df -h /root | tail -1)"
+env SP_BASE=/root/gptq_hf_gq14 SP_NOSYS=1 SP_EPISODIC=1 OAI_KEY=$(cat /root/.oai 2>/dev/null) DSK_KEY=$(cat /root/.dsk 2>/dev/null) PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
+  python3 /root/work/online_loop.py /root/mtg1_s300.safetensors $OUT --pooler none --lora-layers all --lora-rank 16 --save-lora-only 1 \
+  --mt-items /root/work/mtg2_items.jsonl --heldout /root/work/eval300.jsonl --reason-g 8 --steps 100 --save-every 25 \
+  --search-lr 1e-5 --search-temp 0.9 --search-gen 2000 --temp 0.6 --gen 2000 --budget 900 --maxsrch 7 --stop eos \
+  --judge-api openai --judge-model gpt-5-nano --w-talk 0.5 --dolphin-min 0 --adv-std 1 --pg-norm mean --kl 0 \
+  --guard 1 --guard-steps 20 > /root/mtg2_run.log 2>&1
+grep -E "ONLINE_|Error|Traceback" /root/mtg2_run.log | tail -2 | cut -c1-250
+S=$(python3 -c "import json;print(json.load(open('$OUT/state.json'))['step'])"); [ "$S" -ge 100 ] || { echo "MTG2_ABORT: stopped at step $S"; exit 1; }
+cp $OUT/latest.safetensors /root/mtg2_s100.safetensors; hf upload $R /root/mtg2_s100.safetensors pooler_distill/chatsft/multiturn/mtg2_s100.safetensors >/dev/null 2>&1
+CK=/root/mtg2_s100.safetensors
+env $ENV python3 /root/work/pool_eval.py $CK /root/work/eval300.jsonl /root/work/mtg2_chain.jsonl --multiturn /root/work/mt_eval_chain.jsonl --mt-mode full --n 1000 $EVARGS --tag "[mtg2-chain]" > /root/mtg2_chain.log 2>&1
+echo "[mtg2] $(grep -E "EVAL_DONE|Error|Traceback" /root/mtg2_chain.log | tail -1 | cut -c1-200)"; hf upload $R /root/work/mtg2_chain.jsonl pooler_distill/chatsft/multiturn/mtg2_chain.jsonl >/dev/null 2>&1
+env $ENV python3 /root/work/pool_eval.py $CK /root/work/eval300.jsonl /root/work/br_mtg2.jsonl --multiturn /root/work/mt_eval_bridge.jsonl --mt-mode full --n 1000 $EVARGS --tag "[br-mtg2]" > /root/br_mtg2.log 2>&1
+echo "[mtg2] $(grep -E "EVAL_DONE|Error|Traceback" /root/br_mtg2.log | tail -1 | cut -c1-200)"; hf upload $R /root/work/br_mtg2.jsonl pooler_distill/chatsft/multiturn/br_mtg2.jsonl >/dev/null 2>&1
+for i in 0 1 2; do
+  env $ENV python3 /root/work/pool_eval.py $CK /root/work/ev_$i.jsonl /root/work/mtg2st_out_$i.jsonl --n 34 $EVARGS --tag "[mtg2st$i]" > /root/mtg2st_$i.log 2>&1
+  echo "[mtg2] $(grep -E "EVAL_DONE|Error|Traceback" /root/mtg2st_$i.log | tail -1 | cut -c1-200)"
+done
+env SP_BASE=/root/gptq_hf_gq14 SP_NOSYS=1 SP_EPISODIC=1 OMP_NUM_THREADS=1 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python3 /root/work/online_loop.py $CK /root/evalrun_dl_mtg2 \
+  --questions /root/work/eval300.jsonl --dolphin /root/work/dolphin_v1.jsonl --heldout /root/work/eval300.jsonl \
+  --b 12 --gen 7000 --budget 2400 --temp 0.6 --maxsrch 7 --pooler none --lora-rank 16 --lora-layers all --stop eos --loop-break answer \
+  --eval-file /root/work/dolphinq.jsonl --eval-out /root/work/dl_mtg2.jsonl > /root/dl_mtg2.log 2>&1
+[ -s /root/dl_judge.py ] && OAI_KEY=$(cat /root/.oai 2>/dev/null) python3 /root/dl_judge.py /root/work/dl_mtg2.jsonl mtg2 | sed 's/\[mix0\]/[mtg2]/'
+hf upload $R /root/work/dl_mtg2_judged.jsonl pooler_distill/chatsft/multiturn/dl_mtg2_judged.jsonl >/dev/null 2>&1
+echo "MTG2_JOB_DONE $(date -u)"
+M2
+  setsid nohup bash -c 'bash /root/mtg2keep.sh 2>&1 | tee -a /root/mtg2.log' >> /proc/1/fd/1 2>&1 < /dev/null 9>&- &
+  echo "MTG2_LAUNCHED $(date -u)"
+fi
 if [ ! -e /root/.unfin_v1 ]; then touch /root/.unfin_v1
   python3 - > /root/unfin_report.txt 2>&1 <<'PYU'
 import json, re, statistics, collections
@@ -1660,6 +1702,7 @@ while :; do
     echo "--- mem7.log (tail) ---"; tail -n 10 /root/mem7.log 2>/dev/null | cut -c1-300; grep -E "^val " /root/memfit_mem7_run.log 2>/dev/null | tail -2
     echo "--- qt.log (tail) ---"; tail -n 4 /root/qt.log 2>/dev/null | cut -c1-300
     echo "--- pqjudge.log (tail) ---"; tail -n 5 /root/pqjudge.log 2>/dev/null | cut -c1-200
+    echo "--- mtg2.log (tail) ---"; tail -n 12 /root/mtg2.log 2>/dev/null | cut -c1-250
     echo "--- mix0.log (tail) ---"; tail -n 14 /root/mix0.log 2>/dev/null | cut -c1-250
     echo "--- mtg1d.log (tail) ---"; tail -n 12 /root/mtg1d.log 2>/dev/null | cut -c1-250
     echo "--- mtg1c.log (tail) ---"; tail -n 12 /root/mtg1c.log 2>/dev/null | cut -c1-250
