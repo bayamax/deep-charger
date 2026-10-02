@@ -8,7 +8,7 @@ cd /root
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null)
 R=baya1116/hypernet-sp-distill
 RAW="https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl"
-BOXI_SERIAL=14
+BOXI_SERIAL=15
 if [ -f /root/.boxi_serial ] && [ "$(cat /root/.boxi_serial)" -gt "$BOXI_SERIAL" ] 2>/dev/null; then echo "BOXI_STALE $BOXI_SERIAL"; exit 0; fi
 echo $BOXI_SERIAL > /root/.boxi_serial
 mkdir -p /root/sb /root/work
@@ -274,6 +274,12 @@ echo "CHAIN_JOB_DONE best $prev $(date -u)"
 RK
   setsid nohup bash -c 'bash /root/chainkeep.sh 2>&1 | tee -a /root/sb_chain.log' > /dev/null 2>&1 < /dev/null &
   echo "CHAIN_LAUNCHED $(date -u)"
+fi
+# 2026-10-02 15:05 JST: the run4c keeper was relaunched by later control runs (its job marker never got written after
+# pool3 stopped it) and started run4m from scratch, holding the card while chain2 waited. Mark it done, stop run4m.
+if [ ! -e /root/.run4m_stop ]; then touch /root/.run4m_stop
+  echo "RUN4C_ABORT run4m not wanted (pool3 measured the pooled variants without training) $(date -u)" >> /root/sb_run4c.log
+  pkill -f "run4ckee[p].sh"; pkill -f "python3 /root/sb/train.py --data /root/sb/data/docs --out /root/sb/run4m"; echo "RUN4M_STOPPED $(date -u)"
 fi
 # ---- chain2 (2026-10-02 14:25 JST): run4c2 diverged at ~40k (gradient norm 1 -> 50 -> 1e10; page top-1 48.3 -> 16.6),
 # so "PLATEAU" above was a blow-up, not a plateau. Restart from run4c's final weights (top-1 49.3) at a third of the
