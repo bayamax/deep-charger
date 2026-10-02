@@ -8,7 +8,7 @@ cd /root
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null)
 R=baya1116/hypernet-sp-distill
 RAW="https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl"
-BOXI_SERIAL=21
+BOXI_SERIAL=22
 if [ -f /root/.boxi_serial ] && [ "$(cat /root/.boxi_serial)" -gt "$BOXI_SERIAL" ] 2>/dev/null; then echo "BOXI_STALE $BOXI_SERIAL"; exit 0; fi
 echo $BOXI_SERIAL > /root/.boxi_serial
 mkdir -p /root/sb /root/work
@@ -440,6 +440,21 @@ echo "SEARCH5_JOB_DONE $(date -u)"
 RK
   setsid nohup bash -c 'bash /root/search5keep.sh 2>&1 | tee -a /root/sb_search5.log' > /dev/null 2>&1 < /dev/null &
   echo "SEARCH5_LAUNCHED $(date -u)"
+fi
+# ---- 2026-10-02 19:20 JST (the user: training first; the query instruction stays): search5 stops; the hybrid search runs
+# once, with the instruction, on the CPU (SB_DEV=cpu) so the card stays with the grown model's training
+if [ ! -e /root/.search6_v1 ]; then touch /root/.search6_v1; pkill -f "search5kee[p].sh"; pkill -f "search-eval"; echo "SEARCH5_JOB_DONE replaced by search6 (cpu)" >> /root/sb_search5.log; fi
+if ! pgrep -f "search6kee[p].sh" >/dev/null && ! grep -q "SEARCH6_JOB_DONE" /root/sb_search6.log 2>/dev/null; then
+  cat > /root/search6keep.sh <<'RK'
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); R=baya1116/hypernet-sp-distill; D=/root/sb/data/docs; cd /root/sb; mkdir -p /root/sb/se6
+SB_DEV=cpu OMP_NUM_THREADS=4 nice -n 10 python3 /root/sb/train.py --data $D --out /root/sb/se6/run --eval-shard 001 --batch 32 --seq 128 --d 512 --layers 4 --heads 8 --ffn 2048 --page 1 --init /root/sb/run4d1/model_best.pt \
+  --search-eval /root/sb/se2/dl/sentbart/searcheval/dcq.jsonl --search-text $D/docs_001.jsonl --search-out /root/sb/se6/result.json > /root/sb/se6/full.log 2>&1
+grep -E "^\[search" /root/sb/se6/full.log; tail -3 /root/sb/se6/full.log | grep -vE "^\[search" | cut -c1-300
+hf upload $R /root/sb/se6/result.json sentbart/searcheval/result_hybrid.json >/dev/null 2>&1; hf upload $R /root/sb_search6.log sentbart/searcheval/search6.log >/dev/null 2>&1
+echo "SEARCH6_JOB_DONE $(date -u)"
+RK
+  setsid nohup bash -c 'bash /root/search6keep.sh 2>&1 | tee -a /root/sb_search6.log' > /dev/null 2>&1 < /dev/null &
+  echo "SEARCH6_LAUNCHED $(date -u)"
 fi
 echo "BOXI_OK serial $BOXI_SERIAL $(date -u)"
 # CTL-END

@@ -52,7 +52,7 @@ ap.add_argument("--p-suffix", type=float, default=0.5, help="share of documents 
 A = ap.parse_args()
 os.makedirs(A.out, exist_ok=True)
 torch.manual_seed(0); random.seed(0); np.random.seed(0)
-DEV = "cuda"
+DEV = os.environ.get("SB_DEV", "cuda")
 
 # ---- data: memory-mapped vectors, documents as row ranges; the last shard is held out ----
 class Q8:
