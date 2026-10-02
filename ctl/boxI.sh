@@ -8,7 +8,7 @@ cd /root
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null)
 R=baya1116/hypernet-sp-distill
 RAW="https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl"
-BOXI_SERIAL=11
+BOXI_SERIAL=12
 if [ -f /root/.boxi_serial ] && [ "$(cat /root/.boxi_serial)" -gt "$BOXI_SERIAL" ] 2>/dev/null; then echo "BOXI_STALE $BOXI_SERIAL"; exit 0; fi
 echo $BOXI_SERIAL > /root/.boxi_serial
 mkdir -p /root/sb /root/work
@@ -228,6 +228,29 @@ if [ ! -e /root/.curve_v1 ]; then touch /root/.curve_v1
     python3 /root/sb/train.py $C --out /root/sb/ev5 --init /root/sb/run5/model_latest.pt --page-res 1 2>&1 | grep -E "^\[curve|^\[init|Error|Traceback" | sed 's/^/[run5 40k] /'
   ) > /root/sb_curve.log 2>&1
   cat /root/sb_curve.log; hf upload $R /root/sb_curve.log sentbart/audit/page_curve.log >/dev/null 2>&1; echo "CURVE_DONE $(date -u)"
+fi
+# ---- 2026-10-02 11:10 JST (the user: "train it? train what?"): the mean of the encoder's outputs can be measured on
+# run4c's weights with no training at all. When run4c is done, run4m is stopped before it trains, and run4c is
+# evaluated three ways with no new training: the page token (as trained), the mean of the encoder's outputs through
+# page_head, and the mean of the encoder's own sentence reconstructions (enc_head, already in the sentence space).
+# Then run4c simply continues (run4c2, page token, another 100k from its weights) to keep the card busy.
+if ! pgrep -f "pool3kee[p].sh" >/dev/null && ! grep -q "POOL3_JOB_DONE" /root/sb_pool3.log 2>/dev/null; then
+  cat > /root/pool3keep.sh <<'RK'
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); R=baya1116/hypernet-sp-distill; D=/root/sb/data/docs; cd /root/sb
+until grep -q "\[run4m\] train start" /root/sb_run4c.log 2>/dev/null; do sleep 30; done
+sleep 5; pkill -f "run4ckee[p].sh"; pkill -f "python3 /root/sb/train.py --data /root/sb/data/docs --out /root/sb/run4m"; sleep 10
+echo "[pool3] run4m stopped before training; run4c $(python3 -c "import torch;print(torch.load('/root/sb/run4c/model_latest.pt',map_location='cpu')['step'])") evaluated three ways $(date -u +%H:%M)"
+C="--data $D --eval-shard 001 --eval-only 1 --batch 32 --seq 128 --d 512 --layers 4 --heads 8 --ffn 2048 --page 1 --init /root/sb/run4c/model_latest.pt"
+for pp in token mean encmean; do python3 /root/sb/train.py $C --out /root/sb/ev_$pp --page-pool $pp 2>&1 | grep -E "^\[curve\]|Error|Traceback" | sed "s/^/[$pp] /"; done
+hf upload $R /root/sb_pool3.log sentbart/audit/pool3.log >/dev/null 2>&1
+echo "[run4c2] train start $(date -u +%H:%M)"
+( while sleep 1800; do hf upload $R /root/sb/run4c2/train.log sentbart/small_run4c2/train.log >/dev/null 2>&1; done ) & UP=$!
+python3 /root/sb/train.py --data $D --out /root/sb/run4c2 --init /root/sb/run4c/model_latest.pt --eval-shard 001 --steps 100000 --batch 32 --seq 128 --d 512 --layers 4 --heads 8 --ffn 2048 --warmup 1000 --eval-every 10000 --save-every 10000 --page 1 --page-queue 64 2>&1 | grep -E "^\[init\]|^\[eval|^\[curve|TRAIN_DONE|Error|Traceback"
+kill $UP 2>/dev/null; hf upload $R /root/sb/run4c2/train.log sentbart/small_run4c2/train.log >/dev/null 2>&1; hf upload $R /root/sb/run4c2/model_latest.pt sentbart/small_run4c2/model_latest.pt >/dev/null 2>&1
+echo "POOL3_JOB_DONE $(date -u)"
+RK
+  setsid nohup bash -c 'bash /root/pool3keep.sh 2>&1 | tee -a /root/sb_pool3.log' > /dev/null 2>&1 < /dev/null &
+  echo "POOL3_LAUNCHED $(date -u)"
 fi
 echo "BOXI_OK serial $BOXI_SERIAL $(date -u)"
 # CTL-END

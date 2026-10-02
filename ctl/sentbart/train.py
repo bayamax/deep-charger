@@ -136,7 +136,11 @@ class SentBART(nn.Module):
         # the page token reads the whole (corrupted) document; its output, through page_head, is the page vector
         h = torch.cat([s.page_tok.to(h.dtype).expand(B, 1, -1), h], dim=1)
         out = s.enc(h, src_key_padding_mask=torch.cat([torch.zeros_like(valid[:, :1]), ~valid], dim=1))
-        if A.page_pool == "mean":
+        if A.page_pool == "encmean":   # no new parameters: the encoder's own sentence reconstructions (enc_head, already in the sentence-vector space), averaged
+            vis = (valid & ~masked).float()[..., None]
+            rec = F.normalize(s.enc_head(out[:, 1:]).float(), dim=-1)
+            pg = (rec * vis).sum(1) / vis.sum(1).clamp_min(1)
+        elif A.page_pool == "mean":
             vis = (valid & ~masked).to(out.dtype)[..., None]
             pg = s.page_head((out[:, 1:] * vis).sum(1) / vis.sum(1).clamp_min(1)).float()
         else:
