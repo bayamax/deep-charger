@@ -80,7 +80,7 @@ PSKIP=
 # The raw GitHub copy this box fetches can lag and hand a control run an OLDER version of this file (04:48 on 09-22 it
 # relaunched the online loop under the previous mode while the newer run was merging a checkpoint on the same card).
 # Every edit bumps BOXG_SERIAL; a run that sees a lower serial than one already executed stops here.
-BOXG_SERIAL=2026092712
+BOXG_SERIAL=2026092713
 if [ -f /root/.boxg_serial ] && [ "$(cat /root/.boxg_serial)" -gt "$BOXG_SERIAL" ] 2>/dev/null; then echo "BOXG_STALE $BOXG_SERIAL < $(cat /root/.boxg_serial)"; exit 0; fi
 echo $BOXG_SERIAL > /root/.boxg_serial
 MODE=idle         # 2026-09-29: the side jobs hold the card (multi-turn measurement and training); a finished reeval re-launched on every control run and killed their evaluators
@@ -805,6 +805,40 @@ MC
   setsid nohup bash -c 'bash /root/mtg1ckeep.sh 2>&1 | tee -a /root/mtg1c.log' >> /proc/1/fd/1 2>&1 < /dev/null 9>&- &
   echo "MTG1C_LAUNCHED $(date -u)"
 fi
+# mtg1d (2026-10-02 12:30 JST): step 300 is the best on the chains so far (turns 2-4 52/90, turn 4 17/30) and the user
+# asked GRPO to continue: same settings on to 400 and 500, each measured the same way, after mtg1c.
+if ! pgrep -f "mtg1dkee[p].sh" >/dev/null && ! grep -q "MTG1D_JOB_DONE\|MTG1D_ABORT" /root/mtg1d.log 2>/dev/null; then
+  cat > /root/mtg1dkeep.sh <<'MD'
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); R=baya1116/hypernet-sp-distill; cd /root/work; OUT=/root/online_mtg1
+ENV="SP_BASE=/root/gptq_hf_gq14 SP_RANK=16 SP_NOSYS=1 SP_EPISODIC=1 OMP_NUM_THREADS=1 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True"
+EVARGS="--rw 768 --maxd 384 --samepage 1 --decode plain --temp 0.6 --gen 4000 --stop eos --replycap 600"
+until grep -qE "MTG1C_JOB_DONE|MTG1C_ABORT" /root/mtg1c.log 2>/dev/null; do sleep 60; done
+while pgrep -f "pool_eval.p[y]|online_loop.p[y]|memfit.p[y]" >/dev/null; do sleep 30; done
+for T in 400 500; do
+  rm -f $OUT/*.tmp; echo "[mtg1d] resume from step $(python3 -c "import json;print(json.load(open('$OUT/state.json'))['step'])") to $T $(date -u +%H:%M); $(df -h /root | tail -1)"
+  env SP_BASE=/root/gptq_hf_gq14 SP_NOSYS=1 SP_EPISODIC=1 OAI_KEY=$(cat /root/.oai 2>/dev/null) DSK_KEY=$(cat /root/.dsk 2>/dev/null) PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
+    python3 /root/work/online_loop.py /root/pooler_mem10.safetensors $OUT --pooler none --lora-layers all --lora-rank 16 --save-lora-only 1 \
+    --mt-items /root/work/mtg_items.jsonl --heldout /root/work/eval300.jsonl --reason-g 8 --steps $T --save-every 25 \
+    --search-lr 1e-5 --search-temp 0.9 --search-gen 2000 --temp 0.6 --gen 2000 --budget 900 --maxsrch 7 --stop eos \
+    --judge-api openai --judge-model gpt-5-nano --w-talk 0.5 --dolphin-min 0 --adv-std 1 --pg-norm mean --kl 0 \
+    --guard 1 --guard-steps 20 >> /root/mtg1_run.log 2>&1
+  grep -E "^\[init\]" /root/mtg1_run.log | tail -1 | cut -c1-200; grep -E "ONLINE_|Error|Traceback" /root/mtg1_run.log | tail -2 | cut -c1-250
+  S=$(python3 -c "import json;print(json.load(open('$OUT/state.json'))['step'])")
+  [ "$S" -ge $T ] || { echo "MTG1D_ABORT: stopped at step $S"; exit 1; }
+  cp $OUT/latest.safetensors /root/mtg1_s$T.safetensors
+  hf upload $R /root/mtg1_s$T.safetensors pooler_distill/chatsft/multiturn/mtg1_s$T.safetensors >/dev/null 2>&1
+  env $ENV python3 /root/work/pool_eval.py /root/mtg1_s$T.safetensors /root/work/eval300.jsonl /root/work/mtg1s${T}_chain.jsonl --multiturn /root/work/mt_eval_chain.jsonl --mt-mode full --n 1000 $EVARGS --tag "[mtg1s$T-chain]" > /root/mtg1s${T}_chain.log 2>&1
+  echo "[mtg1d] $(grep -E "EVAL_DONE|Error|Traceback" /root/mtg1s${T}_chain.log | tail -1 | cut -c1-250)"; hf upload $R /root/work/mtg1s${T}_chain.jsonl pooler_distill/chatsft/multiturn/mtg1s${T}_chain.jsonl >/dev/null 2>&1
+  for i in 0 1 2; do
+    env $ENV python3 /root/work/pool_eval.py /root/mtg1_s$T.safetensors /root/work/ev_$i.jsonl /root/work/mtg1s${T}st_out_$i.jsonl --n 34 $EVARGS --tag "[mtg1s${T}st$i]" > /root/mtg1s${T}st_$i.log 2>&1
+    echo "[mtg1d] $(grep -E "EVAL_DONE|Error|Traceback" /root/mtg1s${T}st_$i.log | tail -1 | cut -c1-250)"
+  done
+done
+echo "MTG1D_JOB_DONE $(date -u)"
+MD
+  setsid nohup bash -c 'bash /root/mtg1dkeep.sh 2>&1 | tee -a /root/mtg1d.log' >> /proc/1/fd/1 2>&1 < /dev/null 9>&- &
+  echo "MTG1D_LAUNCHED $(date -u)"
+fi
 # one-shot (2026-10-02 09:40 JST, the user: is the thinking length being capped? ~1500 tokens incl. served pages should
 # be allowed): why mtg1's unfinished rollouts did not finish - the token cap (--search-gen 2000 model tokens), the
 # 900 s batch budget, the 7-search guard, a loop - and their lengths in tokens with and without the served pages
@@ -1509,6 +1543,7 @@ while :; do
     echo "--- mem7.log (tail) ---"; tail -n 10 /root/mem7.log 2>/dev/null | cut -c1-300; grep -E "^val " /root/memfit_mem7_run.log 2>/dev/null | tail -2
     echo "--- qt.log (tail) ---"; tail -n 4 /root/qt.log 2>/dev/null | cut -c1-300
     echo "--- pqjudge.log (tail) ---"; tail -n 5 /root/pqjudge.log 2>/dev/null | cut -c1-200
+    echo "--- mtg1d.log (tail) ---"; tail -n 12 /root/mtg1d.log 2>/dev/null | cut -c1-250
     echo "--- mtg1c.log (tail) ---"; tail -n 12 /root/mtg1c.log 2>/dev/null | cut -c1-250
     echo "--- mtg1b.log (tail) ---"; tail -n 8 /root/mtg1b.log 2>/dev/null | cut -c1-250
     echo "--- mtg1.log (tail) ---"; tail -n 10 /root/mtg1.log 2>/dev/null | cut -c1-300; grep -E "^\[step|ONLINE_|\[guard\]|\[warn\]" /root/mtg1_run.log 2>/dev/null | tail -4 | cut -c1-300
