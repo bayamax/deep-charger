@@ -38,6 +38,7 @@ ap.add_argument("--page", type=int, default=0, help="1: a page token in front of
 ap.add_argument("--w-page", type=float, default=1.0)
 ap.add_argument("--page-res", type=int, default=0, help="1: page vector = normalise(mean of the visible sentence vectors + page_head(page token)), the head starting at zero - it starts at the mean baseline and learns the difference")
 ap.add_argument("--page-pool", default="token", help="token: the page token's output; mean: the mean of the encoder's outputs over the visible sentences (both through page_head, no input mean)")
+ap.add_argument("--init", default="", help="a model_*.pt to start from (weights only; fresh optimizer and schedule) when --out has no state")
 ap.add_argument("--page-queue", type=int, default=0, help="N: the last N batches' page vectors (detached) as extra negatives for the page loss")
 ap.add_argument("--prev-skip", type=int, default=0, help="1: the decoder's output is (its head + a learned gate x the previous sentence's vector), normalised")
 ap.add_argument("--p-suffix", type=float, default=0.5, help="share of documents whose tail is hidden (continuation) instead of spans")
@@ -179,6 +180,9 @@ npar = sum(p.numel() for p in model.parameters()) / 1e6
 opt = torch.optim.AdamW(model.parameters(), lr=A.lr, betas=(0.9, 0.98), weight_decay=0.01)
 sched = torch.optim.lr_scheduler.LambdaLR(opt, lambda s: min(1.0, (s + 1) / A.warmup) * 0.5 * (1 + math.cos(math.pi * min(1.0, s / A.steps))))
 STATE = os.path.join(A.out, "state.pt"); step0 = 0
+if A.init and not os.path.exists(STATE):
+    _miss = model.load_state_dict(torch.load(A.init, map_location=DEV)["model"], strict=False)
+    print(f"[init] weights from {A.init} (missing {list(_miss.missing_keys)}, unexpected {list(_miss.unexpected_keys)})", flush=True)
 if os.path.exists(STATE):
     st = torch.load(STATE, map_location=DEV); model.load_state_dict(st["model"]); opt.load_state_dict(st["opt"]); sched.load_state_dict(st["sched"]); step0 = st["step"]
 print(f"[model] {npar:.1f}M parameters, d {A.d}, {A.layers}+{A.layers} layers, seq {A.seq}, batch {A.batch}, resume step {step0}", flush=True)

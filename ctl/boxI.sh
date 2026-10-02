@@ -8,7 +8,7 @@ cd /root
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null)
 R=baya1116/hypernet-sp-distill
 RAW="https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl"
-BOXI_SERIAL=9
+BOXI_SERIAL=10
 if [ -f /root/.boxi_serial ] && [ "$(cat /root/.boxi_serial)" -gt "$BOXI_SERIAL" ] 2>/dev/null; then echo "BOXI_STALE $BOXI_SERIAL"; exit 0; fi
 echo $BOXI_SERIAL > /root/.boxi_serial
 mkdir -p /root/sb /root/work
@@ -193,6 +193,32 @@ echo "RUN6_JOB_DONE $(date -u)"
 RK
   setsid nohup bash -c 'bash /root/run6keep.sh 2>&1 | tee -a /root/sb_run6.log' > /dev/null 2>&1 < /dev/null &
   echo "RUN6_LAUNCHED $(date -u)"
+fi
+# ---- run4c / run4m (2026-10-02 09:10 JST, the user: "why not just continue the one that has been learning from the
+# start?"): instead of run6a/6b from scratch, both start from run4's 200k weights (page top-1 39.0%, still rising when
+# its schedule ran out) with a fresh schedule and the harder negatives (64 batches of pages). 4c: the page token, as
+# run4. 4m: the mean of the encoder's outputs through page_head. No input mean in either. 100k steps each.
+if [ ! -e /root/.run6_swap ]; then touch /root/.run6_swap
+  pkill -f "run6kee[p].sh"; pkill -f "python3 /root/sb/train.py --data /root/sb/data/docs --out /root/sb/run6"; sleep 10
+  echo "RUN6_ABORT replaced by run4c/run4m (continue run4) $(date -u)" >> /root/sb_run6.log; echo "RUN6_REPLACED $(date -u)"
+fi
+if ! pgrep -f "run4ckee[p].sh" >/dev/null && ! grep -q "RUN4C_JOB_DONE\|RUN4C_ABORT" /root/sb_run4c.log 2>/dev/null; then
+  cat > /root/run4ckeep.sh <<'RK'
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); R=baya1116/hypernet-sp-distill; D=/root/sb/data/docs; cd /root/sb
+while pgrep -f "python3 /root/sb/" >/dev/null; do sleep 30; done
+[ -s /root/sb/run4/model_latest.pt ] || { echo "RUN4C_ABORT no run4 weights"; exit 1; }
+for v in "4c:token" "4m:mean"; do n=${v%%:*}; pp=${v#*:}
+  echo "[run$n] train start from run4 200k (page-pool $pp) $(date -u +%H:%M)"
+  ( while sleep 1800; do hf upload $R /root/sb/run$n/train.log sentbart/small_run$n/train.log >/dev/null 2>&1; done ) & UP=$!
+  python3 /root/sb/train.py --data $D --out /root/sb/run$n --init /root/sb/run4/model_latest.pt --eval-shard 001 --steps 100000 --batch 32 --seq 128 --d 512 --layers 4 --heads 8 --ffn 2048 --warmup 1000 --eval-every 10000 --save-every 10000 --page 1 --page-pool $pp --page-queue 64 2>&1 | grep -E "^\[data\]|^\[model\]|^\[init\]|^\[eval|TRAIN_DONE|Error|Traceback"
+  kill $UP 2>/dev/null
+  hf upload $R /root/sb/run$n/train.log sentbart/small_run$n/train.log >/dev/null 2>&1
+  hf upload $R /root/sb/run$n/model_latest.pt sentbart/small_run$n/model_latest.pt >/dev/null 2>&1
+done
+echo "RUN4C_JOB_DONE $(date -u)"
+RK
+  setsid nohup bash -c 'bash /root/run4ckeep.sh 2>&1 | tee -a /root/sb_run4c.log' > /dev/null 2>&1 < /dev/null &
+  echo "RUN4C_LAUNCHED $(date -u)"
 fi
 echo "BOXI_OK serial $BOXI_SERIAL $(date -u)"
 # CTL-END
