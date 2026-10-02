@@ -8,7 +8,7 @@ cd /root
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null)
 R=baya1116/hypernet-sp-distill
 RAW="https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl"
-BOXI_SERIAL=8
+BOXI_SERIAL=9
 if [ -f /root/.boxi_serial ] && [ "$(cat /root/.boxi_serial)" -gt "$BOXI_SERIAL" ] 2>/dev/null; then echo "BOXI_STALE $BOXI_SERIAL"; exit 0; fi
 echo $BOXI_SERIAL > /root/.boxi_serial
 mkdir -p /root/sb /root/work
@@ -162,6 +162,14 @@ echo "RUN5_JOB_DONE $(date -u)"
 RK
   setsid nohup bash -c 'bash /root/run5keep.sh 2>&1 | tee -a /root/sb_run5.log' > /dev/null 2>&1 < /dev/null &
   echo "RUN5_LAUNCHED $(date -u)"
+fi
+# 2026-10-02 09:00 JST: run5 stops at its 40k+ checkpoint (it answered its question: the residual page beats the mean,
+# top-10 81.8 vs 78.8) so the model-only page vectors (run6a/6b, the user's priority) start now instead of at 12:40.
+if [ ! -e /root/.run5_stop ]; then touch /root/.run5_stop
+  pkill -f "run5kee[p].sh"; pkill -f "python3 /root/sb/train.py --data /root/sb/data/docs --out /root/sb/run5"; sleep 10
+  hf upload $R /root/sb/run5/train.log sentbart/small_run5/train.log >/dev/null 2>&1
+  hf upload $R /root/sb/run5/model_latest.pt sentbart/small_run5/model_latest.pt >/dev/null 2>&1
+  echo "RUN5_ABORT stopped early for run6 (model-only page vectors first) $(date -u)" >> /root/sb_run5.log; echo "RUN5_STOPPED $(date -u)"
 fi
 # ---- run6a / run6b (queued 2026-10-02 09:10 JST, the user: a page vector without the input mean would be more general
 # and the hidden states more essential): run5 changed two things at once (start from the mean, 64 batches of
