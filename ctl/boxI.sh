@@ -8,7 +8,7 @@ cd /root
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null)
 R=baya1116/hypernet-sp-distill
 RAW="https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl"
-BOXI_SERIAL=12
+BOXI_SERIAL=13
 if [ -f /root/.boxi_serial ] && [ "$(cat /root/.boxi_serial)" -gt "$BOXI_SERIAL" ] 2>/dev/null; then echo "BOXI_STALE $BOXI_SERIAL"; exit 0; fi
 echo $BOXI_SERIAL > /root/.boxi_serial
 mkdir -p /root/sb /root/work
@@ -251,6 +251,29 @@ echo "POOL3_JOB_DONE $(date -u)"
 RK
   setsid nohup bash -c 'bash /root/pool3keep.sh 2>&1 | tee -a /root/sb_pool3.log' > /dev/null 2>&1 < /dev/null &
   echo "POOL3_LAUNCHED $(date -u)"
+fi
+# ---- train until it stops improving (2026-10-02 12:00 JST, the user: "keep training until the gains run out"): after
+# run4c2, 100k-step segments continue from the latest weights (fresh schedule, same settings) for as long as a
+# segment adds at least 1 point of page top-1 over the segment before it; at most 6 segments. PLATEAU when it stops.
+if ! pgrep -f "chainkee[p].sh" >/dev/null && ! grep -q "CHAIN_JOB_DONE" /root/sb_chain.log 2>/dev/null; then
+  cat > /root/chainkeep.sh <<'RK'
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); R=baya1116/hypernet-sp-distill; D=/root/sb/data/docs; cd /root/sb
+until grep -q "POOL3_JOB_DONE" /root/sb_pool3.log 2>/dev/null; do sleep 60; done
+last() { grep "^\[eval" /root/sb/$1/train.log | tail -1 | sed -E 's/.*page_top1 ([0-9.]+).*/\1/'; }
+prev=run4c2; base=0.493; cur=$(last run4c2); echo "[chain] run4c -> run4c2: page top-1 $base -> $cur"
+for i in 3 4 5 6 7 8; do
+  python3 -c "import sys; sys.exit(0 if float('$cur') - float('$base') >= 0.01 else 1)" || { echo "PLATEAU after $prev: top-1 $base -> $cur (< 1 point per 100k)"; break; }
+  n=run4c$i; echo "[chain] $n from $prev (top-1 $cur) $(date -u +%H:%M)"
+  ( while sleep 1800; do hf upload $R /root/sb/$n/train.log sentbart/small_$n/train.log >/dev/null 2>&1; done ) & UP=$!
+  python3 /root/sb/train.py --data $D --out /root/sb/$n --init /root/sb/$prev/model_latest.pt --eval-shard 001 --steps 100000 --batch 32 --seq 128 --d 512 --layers 4 --heads 8 --ffn 2048 --warmup 1000 --eval-every 10000 --save-every 10000 --page 1 --page-queue 64 2>&1 | grep -E "^\[eval|^\[curve|TRAIN_DONE|Error|Traceback" | tail -3
+  kill $UP 2>/dev/null; hf upload $R /root/sb/$n/train.log sentbart/small_$n/train.log >/dev/null 2>&1; hf upload $R /root/sb/$n/model_latest.pt sentbart/small_$n/model_latest.pt >/dev/null 2>&1
+  rm -f /root/sb/$prev/state.pt
+  base=$cur; cur=$(last $n); prev=$n; echo "[chain] $n done: page top-1 $base -> $cur"
+done
+echo "CHAIN_JOB_DONE best $prev $(date -u)"
+RK
+  setsid nohup bash -c 'bash /root/chainkeep.sh 2>&1 | tee -a /root/sb_chain.log' > /dev/null 2>&1 < /dev/null &
+  echo "CHAIN_LAUNCHED $(date -u)"
 fi
 echo "BOXI_OK serial $BOXI_SERIAL $(date -u)"
 # CTL-END
