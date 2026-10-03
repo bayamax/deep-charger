@@ -30,8 +30,9 @@ ap.add_argument("--stop", default="answer", choices=["answer", "eos"], help="ans
 ap.add_argument("--replycap", type=int, default=200)
 ap.add_argument("--greedy", type=int, default=0, help="1: argmax decoding (deterministic up to hardware), for evaluator A/B checks")
 ap.add_argument("--multiturn", default="", help="jsonl of dialogues {id, kind, turns: [{q, gold}]}: each dialogue runs turn by turn with --mt-mode carrying the history; one output row per turn")
-ap.add_argument("--mt-mode", default="stream", choices=["none", "full", "stream", "mix", "quote"], help="none: no history (each turn alone); full: the previous turns (user + reply, no thinking) in the pinned prompt; stream: only the current question pinned, everything before it (earlier questions, thinking, search results, replies) flows through the pooler; mix: the last exchange pinned as in full, the rest as in stream")
+ap.add_argument("--mt-mode", default="stream", choices=["none", "full", "stream", "mix", "quote", "phist"], help="none: no history (each turn alone); full: the previous turns (user + reply, no thinking) in the pinned prompt; stream: only the current question pinned, everything before it (earlier questions, thinking, search results, replies) flows through the pooler; mix: the last exchange pinned as in full, the rest as in stream")
 ap.add_argument("--mt-quote-turns", type=int, default=3, help="quote mode: how many earlier exchanges are quoted")
+ap.add_argument("--mt-hist-cap", type=int, default=0, help="phist: >0 keeps only the last N tokens of the older exchanges for the pooler (0: all, the pooler's own eviction bounds it)")
 ap.add_argument("--mt-keep", type=int, default=0, help=">0 (with --mt-mode full): only the last K exchanges pinned in the prompt, older ones dropped - a fixed memory bound for long conversations")
 ap.add_argument("--mt-standalone", type=int, default=0, help="1 (with --mt-mode none): each turn runs its self-contained version (the turn's 'standalone' field) - memfit's teacher trajectories")
 ap.add_argument("--mt-save-tokens", type=int, default=0, help="1: each multi-turn row also carries the prompt ids and the generated token stream")
@@ -381,6 +382,16 @@ def run_multiturn():
                 if A.mt_mode in ("none", "quote"): prefix, seed = None, None
                 elif A.mt_mode == "full": prefix, seed = (msgs[-2 * A.mt_keep:] if A.mt_keep > 0 else msgs), None
                 elif A.mt_mode == "stream": prefix, seed = None, carry
+                elif A.mt_mode == "phist":   # the conversation only (questions + replies, no thinking, no served pages): the last
+                    # --mt-keep exchanges pinned, every older one handed to the pooler as tokens - bounded like stream
+                    k = 2 * A.mt_keep
+                    pin, old = (msgs[-k:], msgs[:-k]) if k else ([], msgs)
+                    seed = []
+                    if old:
+                        seed = tok.encode(tok.apply_chat_template(old, tokenize=False), add_special_tokens=False)
+                        if seed and seed[0] == tok.bos_token_id: seed = seed[1:]
+                        if A.mt_hist_cap > 0: seed = seed[-A.mt_hist_cap:]
+                    prefix = pin or None
                 else: prefix, seed = msgs[-2:], carry
                 qrun = (turn.get("standalone") or q) if A.mt_standalone else qwrap
                 txt, ans, ns_, nm, served, queries, landed, dead = rollout(qrun, prefix=prefix, seed_kept=seed)
