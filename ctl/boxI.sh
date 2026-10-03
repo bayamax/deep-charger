@@ -8,7 +8,7 @@ cd /root
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null)
 R=baya1116/hypernet-sp-distill
 RAW="https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl"
-BOXI_SERIAL=30
+BOXI_SERIAL=31
 if [ -f /root/.boxi_serial ] && [ "$(cat /root/.boxi_serial)" -gt "$BOXI_SERIAL" ] 2>/dev/null; then echo "BOXI_STALE $BOXI_SERIAL"; exit 0; fi
 echo $BOXI_SERIAL > /root/.boxi_serial
 mkdir -p /root/sb /root/work
@@ -651,6 +651,12 @@ echo "GROW16_JOB_DONE $(date -u)"
 RK
   setsid nohup bash -c 'bash /root/grow16keep.sh 2>&1 | tee -a /root/sb_grow16.log' > /dev/null 2>&1 < /dev/null &
   echo "GROW16_LAUNCHED $(date -u)"
+fi
+# ---- 2026-10-03 18:05 JST (the user: save this result): run4h1's best (55.1) and the README on the hub again
+if [ ! -e /root/.hub_v2 ]; then touch /root/.hub_v2
+  [ -s /root/sb/run4h1/model_best.pt ] && hf upload $R /root/sb/run4h1/model_best.pt sentbart/small_run4h1/model_best.pt >/dev/null 2>&1 && echo "HUB_V2 weights up"
+  curl -sSf -o /root/sb/README_sentbart.md "https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/docs/sentbart.md?$(date +%s)" && hf upload $R /root/sb/README_sentbart.md sentbart/README.md >/dev/null 2>&1 && echo "HUB_V2 readme up"
+  echo "HUB_V2 $(date -u)"
 fi
 echo "BOXI_OK serial $BOXI_SERIAL $(date -u)"
 # CTL-END
