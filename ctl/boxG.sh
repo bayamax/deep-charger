@@ -80,7 +80,7 @@ PSKIP=
 # The raw GitHub copy this box fetches can lag and hand a control run an OLDER version of this file (04:48 on 09-22 it
 # relaunched the online loop under the previous mode while the newer run was merging a checkpoint on the same card).
 # Every edit bumps BOXG_SERIAL; a run that sees a lower serial than one already executed stops here.
-BOXG_SERIAL=2026100305
+BOXG_SERIAL=2026100306
 if [ -f /root/.boxg_serial ] && [ "$(cat /root/.boxg_serial)" -gt "$BOXG_SERIAL" ] 2>/dev/null; then echo "BOXG_STALE $BOXG_SERIAL < $(cat /root/.boxg_serial)"; exit 0; fi
 echo $BOXG_SERIAL > /root/.boxg_serial
 MODE=idle         # 2026-09-29: the side jobs hold the card (multi-turn measurement and training); a finished reeval re-launched on every control run and killed their evaluators
@@ -1122,6 +1122,37 @@ if [ ! -e /root/.memwin_cut ]; then touch /root/.memwin_cut
   HF_TOKEN=$(tr -d "[:space:]" < /root/.hf_token 2>/dev/null) hf upload baya1116/hypernet-sp-distill /root/work/mc_win.jsonl pooler_distill/chatsft/multiturn/mc_win_partial.jsonl >/dev/null 2>&1
   echo "MEMWIN_CUT $(date -u)"
 fi
+# ---- memwin4 (2026-10-03 12:40 JST, the user: success means the past comes back THROUGH THE POOLER alone - stream:
+# only the new question pinned, the raw window starts empty, every earlier token (questions, thinking, pages, replies)
+# is in the pooler). Bridge order now: (win, already running) -> stream -> none -> win2. Totals from the files.
+if [ ! -e /root/.memwin4_swap ]; then touch /root/.memwin4_swap
+  pkill -f "memwin2kee[p].sh"; pkill -f "memwin3kee[p].sh"; sleep 2
+  echo "MEMWIN2_JOB_DONE MEMWIN3_JOB_DONE replaced by memwin4 $(date -u)" >> /root/memwin.log; echo "MEMWIN4_SWAP $(date -u)"
+fi
+if ! pgrep -f "memwin4kee[p].sh" >/dev/null && ! grep -q "MEMWIN4_JOB_DONE" /root/memwin.log 2>/dev/null; then
+  cat > /root/memwin4keep.sh <<'MW'
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); R=baya1116/hypernet-sp-distill; cd /root/work; CK=/root/mtg1_s300.safetensors
+ENV="SP_BASE=/root/gptq_hf_gq14 SP_RANK=16 SP_NOSYS=1 SP_EPISODIC=1 OMP_NUM_THREADS=1 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True"
+EVARGS="--rw 768 --maxd 384 --samepage 1 --decode plain --temp 0.6 --gen 4000 --stop eos --replycap 600"
+tally() { python3 - /root/work/br_$1.jsonl $1 <<'PY2'
+import json, sys
+r = [json.loads(l) for l in open(sys.argv[1])]
+t1 = [x for x in r if x["turn"] == 0]; t2 = [x for x in r if x["turn"] == 1]
+print(f"[memwin4] bridge {sys.argv[2]}: turn 1 {sum(x['correct'] for x in t1)}/{len(t1)}, follow-up {sum(x['correct'] for x in t2)}/{len(t2)} (full history: follow-up 18/40 = 45.0%)", flush=True)
+PY2
+hf upload $R /root/work/br_$1.jsonl pooler_distill/chatsft/multiturn/br_$1.jsonl >/dev/null 2>&1; }
+while pgrep -f "pool_eval.p[y]|online_loop.p[y]|memfit.p[y]" >/dev/null; do sleep 30; done
+tally win
+for v in stream:stream none:none win2:win; do T=${v%%:*}; M=${v#*:}
+  env $ENV python3 /root/work/pool_eval.py $CK /root/work/eval300.jsonl /root/work/br_$T.jsonl --multiturn /root/work/mt_eval_bridge.jsonl --mt-mode $M --n 1000 $EVARGS --tag "[br-$T]" > /root/br_$T.log 2>&1
+  grep -E "Error|Traceback" /root/br_$T.log | tail -2 | cut -c1-200
+  tally $T
+done
+echo "MEMWIN4_JOB_DONE $(date -u)"
+MW
+  setsid nohup bash -c 'bash /root/memwin4keep.sh 2>&1 | tee -a /root/memwin.log' >> /proc/1/fd/1 2>&1 < /dev/null 9>&- &
+  echo "MEMWIN4_LAUNCHED $(date -u)"
+fi
 # ---- memwin2 (2026-10-03 11:55 JST): the switch chains' later questions stand on their own (no history at all scored
 # 36.7% last / 64.4% mid), so a right answer there does not show the memory works. The 40 held-out bridge dialogues
 # (turn 2 is a follow-up that needs turn 1): win, and none (no history) as the floor. Full history: last 45.0%.
@@ -1940,7 +1971,7 @@ while :; do
     echo "--- mem7.log (tail) ---"; tail -n 10 /root/mem7.log 2>/dev/null | cut -c1-300; grep -E "^val " /root/memfit_mem7_run.log 2>/dev/null | tail -2
     echo "--- qt.log (tail) ---"; tail -n 4 /root/qt.log 2>/dev/null | cut -c1-300
     echo "--- pqjudge.log (tail) ---"; tail -n 5 /root/pqjudge.log 2>/dev/null | cut -c1-200
-    echo "--- memwin.log (tail) ---"; tail -n 4 /root/memwin.log 2>/dev/null | cut -c1-250; for f in /root/br_win.log /root/br_none.log /root/br_win2.log; do grep "dialog" $f 2>/dev/null | tail -n 1 | cut -c1-250; done
+    echo "--- memwin.log (tail) ---"; tail -n 4 /root/memwin.log 2>/dev/null | cut -c1-250; for f in /root/br_win.log /root/br_stream.log /root/br_none.log /root/br_win2.log; do grep "dialog" $f 2>/dev/null | tail -n 1 | cut -c1-250; done
     echo "--- memcap2.log (tail) ---"; tail -n 4 /root/memcap2.log 2>/dev/null | cut -c1-250
     echo "--- mixcol.log (tail) ---"; tail -n 4 /root/mixcol.log 2>/dev/null | cut -c1-250
     echo "--- memcap.log (tail) ---"; tail -n 6 /root/memcap.log 2>/dev/null | cut -c1-250
