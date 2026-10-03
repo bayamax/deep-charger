@@ -8,7 +8,7 @@ cd /root
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null)
 R=baya1116/hypernet-sp-distill
 RAW="https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl"
-BOXI_SERIAL=31
+BOXI_SERIAL=32
 if [ -f /root/.boxi_serial ] && [ "$(cat /root/.boxi_serial)" -gt "$BOXI_SERIAL" ] 2>/dev/null; then echo "BOXI_STALE $BOXI_SERIAL"; exit 0; fi
 echo $BOXI_SERIAL > /root/.boxi_serial
 mkdir -p /root/sb /root/work
@@ -657,6 +657,20 @@ if [ ! -e /root/.hub_v2 ]; then touch /root/.hub_v2
   [ -s /root/sb/run4h1/model_best.pt ] && hf upload $R /root/sb/run4h1/model_best.pt sentbart/small_run4h1/model_best.pt >/dev/null 2>&1 && echo "HUB_V2 weights up"
   curl -sSf -o /root/sb/README_sentbart.md "https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/docs/sentbart.md?$(date +%s)" && hf upload $R /root/sb/README_sentbart.md sentbart/README.md >/dev/null 2>&1 && echo "HUB_V2 readme up"
   echo "HUB_V2 $(date -u)"
+fi
+# ---- 2026-10-03 23:15 JST: run4k1 (16+16) is stuck at ~54 with 10905 of 57800 steps skipped. The skip guard drops a
+# step whose PRE-clip gradient norm is >= 5, but the step is clipped to norm 1 anyway; the norm drifts up to 5-11 as the
+# contrast sharpens, so the guard ends up discarding most updates (run4g3 and run4q1 "went unstable" the same way: the
+# losses never blew up). Restart the growth from run4h1's best with the guard only for real blow-ups (>= 100, nan/inf).
+if [ ! -e /root/.grow16b ]; then touch /root/.grow16b
+  echo "GROW16_JOB_DONE stopped (skip guard starved it) $(date -u)" >> /root/sb_grow16.log
+  pkill -f "grow16kee[p].sh"; pkill -f "python3 /root/sb/train.py --data /root/sb/data/docs --out /root/sb/run4k1"; sleep 10
+  hf upload $R /root/sb/run4k1/train.log sentbart/small_run4k1/train.log >/dev/null 2>&1; echo "RUN4K1_STOPPED $(date -u)"
+fi
+if ! pgrep -f "grow16bkee[p].sh" >/dev/null && ! grep -q "GROW16B_JOB_DONE" /root/sb_grow16b.log 2>/dev/null; then
+  sed -e 's/run4k\$i/run4n$i/; s/--skip-grad 5/--skip-grad 100/; s/\[grow16\]/[grow16b]/g; s/PLATEAU_GROW16/PLATEAU_GROW16B/; s/GROW16_JOB_DONE/GROW16B_JOB_DONE/g' /root/grow16keep.sh > /root/grow16bkeep.sh
+  grep -q "run4n\$i" /root/grow16bkeep.sh && grep -q "skip-grad 100" /root/grow16bkeep.sh || { echo "GROW16B_JOB_DONE bad script" >> /root/sb_grow16b.log; }
+  grep -q "GROW16B_JOB_DONE bad" /root/sb_grow16b.log 2>/dev/null || { setsid nohup bash -c 'bash /root/grow16bkeep.sh 2>&1 | tee -a /root/sb_grow16b.log' > /dev/null 2>&1 < /dev/null & echo "GROW16B_LAUNCHED $(date -u)"; }
 fi
 echo "BOXI_OK serial $BOXI_SERIAL $(date -u)"
 # CTL-END
