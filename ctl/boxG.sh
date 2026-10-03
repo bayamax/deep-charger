@@ -80,7 +80,7 @@ PSKIP=
 # The raw GitHub copy this box fetches can lag and hand a control run an OLDER version of this file (04:48 on 09-22 it
 # relaunched the online loop under the previous mode while the newer run was merging a checkpoint on the same card).
 # Every edit bumps BOXG_SERIAL; a run that sees a lower serial than one already executed stops here.
-BOXG_SERIAL=2026100314
+BOXG_SERIAL=2026100315
 if [ -f /root/.boxg_serial ] && [ "$(cat /root/.boxg_serial)" -gt "$BOXG_SERIAL" ] 2>/dev/null; then echo "BOXG_STALE $BOXG_SERIAL < $(cat /root/.boxg_serial)"; exit 0; fi
 echo $BOXG_SERIAL > /root/.boxg_serial
 MODE=idle         # 2026-09-29: the side jobs hold the card (multi-turn measurement and training); a finished reeval re-launched on every control run and killed their evaluators
@@ -1140,6 +1140,25 @@ if [ ! -e /root/.mtg3_snap1 ]; then touch /root/.mtg3_snap1
     hf upload $RR /root/mtg2_run.log pooler_distill/chatsft/multiturn/analysis/mtg2_run.log >/dev/null 2>&1
     hf upload $RR /root/mtg1_run.log pooler_distill/chatsft/multiturn/analysis/mtg1_run.log >/dev/null 2>&1
     echo "MTG3_SNAP_UP $(date -u)" >> /root/mtg3.log ) > /dev/null 2>&1 &
+fi
+# ---- dl100 (2026-10-04 08:40 JST): step 100 is mtg3's best screen (64/102, 19/40) and the candidate; it lacks the
+# Dolphin reasoning screen (only 200 got it). Run it after mtg3chk.
+if ! pgrep -f "dl100kee[p].sh" >/dev/null && ! grep -q "DL100_JOB_DONE" /root/dl100.log 2>/dev/null; then
+  cat > /root/dl100keep.sh <<'DL'
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); R=baya1116/hypernet-sp-distill; cd /root/work; CK=/root/mtg3_s100.safetensors
+until grep -q "MTG3CHK_JOB_DONE" /root/mtg3chk.log 2>/dev/null; do sleep 60; done
+while pgrep -f "pool_eval.p[y]|online_loop.p[y]|memfit.p[y]" >/dev/null; do sleep 30; done
+[ -s $CK ] || { echo "DL100_JOB_DONE no checkpoint"; exit 1; }
+env SP_BASE=/root/gptq_hf_gq14 SP_NOSYS=1 SP_EPISODIC=1 OMP_NUM_THREADS=1 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python3 /root/work/online_loop.py $CK /root/evalrun_dl_mtg3s100 \
+  --questions /root/work/eval300.jsonl --dolphin /root/work/dolphin_v1.jsonl --heldout /root/work/eval300.jsonl \
+  --b 12 --gen 7000 --budget 2400 --temp 0.6 --maxsrch 7 --pooler none --lora-rank 16 --lora-layers all --stop eos --loop-break answer \
+  --eval-file /root/work/dolphinq.jsonl --eval-out /root/work/dl_mtg3s100.jsonl > /root/dl_mtg3s100.log 2>&1
+[ -s /root/dl_judge.py ] && OAI_KEY=$(cat /root/.oai 2>/dev/null) python3 /root/dl_judge.py /root/work/dl_mtg3s100.jsonl mtg3s100 | sed 's/\[mix0\]/[dl100]/'
+hf upload $R /root/work/dl_mtg3s100_judged.jsonl pooler_distill/chatsft/multiturn/dl_mtg3s100_judged.jsonl >/dev/null 2>&1
+echo "DL100_JOB_DONE $(date -u)"
+DL
+  setsid nohup bash -c 'bash /root/dl100keep.sh 2>&1 | tee -a /root/dl100.log' >> /proc/1/fd/1 2>&1 < /dev/null 9>&- &
+  echo "DL100_LAUNCHED $(date -u)"
 fi
 # ---- mtg3b (2026-10-04 01:05 JST, the user asleep: keep the card busy). After mtg3chk screens step 200, continue
 # to 300 when 200 still holds step 300's level (single >= 59/102 and follow-ups >= 17/40, i.e. no worse than s300),
@@ -2277,6 +2296,7 @@ while :; do
     echo "--- qt.log (tail) ---"; tail -n 4 /root/qt.log 2>/dev/null | cut -c1-300
     echo "--- pqjudge.log (tail) ---"; tail -n 5 /root/pqjudge.log 2>/dev/null | cut -c1-200
     echo "--- du_list ---"; cat /root/du_list.txt 2>/dev/null | head -42
+    echo "--- dl100.log (tail) ---"; tail -n 3 /root/dl100.log 2>/dev/null | cut -c1-250
     echo "--- mtg3b.log (tail) ---"; tail -n 6 /root/mtg3b.log 2>/dev/null | cut -c1-250
     echo "--- mtg3chk.log (tail) ---"; tail -n 24 /root/mtg3chk.log 2>/dev/null | cut -c1-250; grep -E "^\[step|ONLINE_" /root/mtg4_run.log 2>/dev/null | tail -n 3 | cut -c1-250
     echo "--- mtg3.log (tail) ---"; tail -n 8 /root/mtg3.log 2>/dev/null | cut -c1-250; grep -E "^\[step|^\[guard|ONLINE_" /root/mtg3_run.log 2>/dev/null | tail -n 4 | cut -c1-250

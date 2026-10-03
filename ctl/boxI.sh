@@ -8,7 +8,7 @@ cd /root
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null)
 R=baya1116/hypernet-sp-distill
 RAW="https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl"
-BOXI_SERIAL=32
+BOXI_SERIAL=33
 if [ -f /root/.boxi_serial ] && [ "$(cat /root/.boxi_serial)" -gt "$BOXI_SERIAL" ] 2>/dev/null; then echo "BOXI_STALE $BOXI_SERIAL"; exit 0; fi
 echo $BOXI_SERIAL > /root/.boxi_serial
 mkdir -p /root/sb /root/work
@@ -671,6 +671,40 @@ if ! pgrep -f "grow16bkee[p].sh" >/dev/null && ! grep -q "GROW16B_JOB_DONE" /roo
   sed -e 's/run4k\$i/run4n$i/; s/--skip-grad 5/--skip-grad 100/; s/\[grow16\]/[grow16b]/g; s/PLATEAU_GROW16/PLATEAU_GROW16B/; s/GROW16_JOB_DONE/GROW16B_JOB_DONE/g' /root/grow16keep.sh > /root/grow16bkeep.sh
   grep -q "run4n\$i" /root/grow16bkeep.sh && grep -q "skip-grad 100" /root/grow16bkeep.sh || { echo "GROW16B_JOB_DONE bad script" >> /root/sb_grow16b.log; }
   grep -q "GROW16B_JOB_DONE bad" /root/sb_grow16b.log 2>/dev/null || { setsid nohup bash -c 'bash /root/grow16bkeep.sh 2>&1 | tee -a /root/sb_grow16b.log' > /dev/null 2>&1 < /dev/null & echo "GROW16B_LAUNCHED $(date -u)"; }
+fi
+# ---- meth (2026-10-04 08:40 JST): the 16+16 growth (run4n1, guard fixed) ended at 54.1 - below the 8+8 it started
+# from (55.1): size is not the ceiling. The training method is: the page vector was learned from a document with 30%
+# of its sentences hidden, but it is measured on one with a single sentence hidden; and each step saw 32 documents.
+# run4p*: 8+8 from run4h1's best, --page-input one (a second encoder pass, one sentence hidden, that sentence queries),
+# batch 64 (32 if the card runs out), lr 3e-5, guard 100; chained while a 100k segment adds a point over 55.1.
+if ! pgrep -f "methkee[p].sh" >/dev/null && ! grep -q "METH_JOB_DONE" /root/sb_meth.log 2>/dev/null; then
+  cat > /root/methkeep.sh <<'RK'
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); R=baya1116/hypernet-sp-distill; D=/root/sb/data/docs; cd /root/sb
+while pgrep -f "python3 /root/sb/train.py --data /root/sb/data/docs --out /root/sb/run" >/dev/null; do sleep 30; done
+curl -sSf -o /root/sb/train.py "https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl/sentbart/train.py?$(date +%s)" || echo "[meth] train.py fetch failed, using the box copy"
+grep -q "page-input" /root/sb/train.py || { echo "METH_JOB_DONE train.py has no --page-input"; exit 1; }
+bestof() { grep -h "^\[best\]" /root/sb/$1/train.log 2>/dev/null | tail -1 | sed -E 's/.*page_top1 ([0-9.]+).*/\1/'; }
+prev=/root/sb/run4h1/model_best.pt; base=0.551; BS=64
+for i in 1 2 3 4; do
+  n=run4p$i; rm -rf /root/sb/$n; echo "[meth] $n from $prev (top-1 $base), page-input one, batch $BS, lr 3e-5 $(date -u +%H:%M)"
+  ( while sleep 1800; do hf upload $R /root/sb/$n/train.log sentbart/small_$n/train.log >/dev/null 2>&1; done ) & UP=$!
+  python3 /root/sb/train.py --data $D --out /root/sb/$n --init $prev --eval-shard 001 --steps 100000 --batch $BS --seq 128 --d 512 --layers 8 --heads 8 --ffn 2048 --lr 3e-5 --warmup 1000 --eval-every 10000 --save-every 10000 --page 1 --page-queue 64 --page-input one --skip-grad 100 2>&1 | grep -E "^\[model|^\[best|TRAIN_DONE|Error|Traceback|out of memory" | tee /root/sb/meth_$n.out
+  kill $UP 2>/dev/null
+  if grep -q "out of memory" /root/sb/meth_$n.out && [ $BS -gt 32 ]; then BS=32; echo "[meth] $n: out of memory at batch 64, again at 32"; rm -rf /root/sb/$n
+    ( while sleep 1800; do hf upload $R /root/sb/$n/train.log sentbart/small_$n/train.log >/dev/null 2>&1; done ) & UP=$!
+    python3 /root/sb/train.py --data $D --out /root/sb/$n --init $prev --eval-shard 001 --steps 100000 --batch $BS --seq 128 --d 512 --layers 8 --heads 8 --ffn 2048 --lr 3e-5 --warmup 1000 --eval-every 10000 --save-every 10000 --page 1 --page-queue 64 --page-input one --skip-grad 100 2>&1 | grep -E "^\[model|^\[best|TRAIN_DONE|Error|Traceback|out of memory"
+    kill $UP 2>/dev/null
+  fi
+  hf upload $R /root/sb/$n/train.log sentbart/small_$n/train.log >/dev/null 2>&1; hf upload $R /root/sb/$n/model_best.pt sentbart/small_$n/model_best.pt >/dev/null 2>&1
+  rm -f /root/sb/$n/state.pt
+  cur=$(bestof $n); cur=${cur:-0}; echo "[meth] $n done: best page top-1 $cur (from $base)"
+  python3 -c "import sys; sys.exit(0 if float('$cur') - float('$base') >= 0.01 else 1)" || { echo "PLATEAU_METH at $n: best $cur vs $base"; break; }
+  prev=/root/sb/$n/model_best.pt; base=$cur
+done
+echo "METH_JOB_DONE $(date -u)"
+RK
+  setsid nohup bash -c 'bash /root/methkeep.sh 2>&1 | tee -a /root/sb_meth.log' > /dev/null 2>&1 < /dev/null &
+  echo "METH_LAUNCHED $(date -u)"
 fi
 echo "BOXI_OK serial $BOXI_SERIAL $(date -u)"
 # CTL-END

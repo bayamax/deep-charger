@@ -37,6 +37,7 @@ ap.add_argument("--eval-shard", default="", help="the held-out shard's key (e.g.
 ap.add_argument("--page", type=int, default=0, help="1: a page token in front of the encoder whose output is the document's vector, trained so each hidden sentence finds its own document's vector among the batch's (sentence -> page retrieval)")
 ap.add_argument("--w-page", type=float, default=1.0)
 ap.add_argument("--page-res", type=int, default=0, help="1: page vector = normalise(mean of the visible sentence vectors + page_head(page token)), the head starting at zero - it starts at the mean baseline and learns the difference")
+ap.add_argument("--page-input", default="mask", choices=["mask", "one"], help="what the page token reads while training. mask: the same 30%%-hidden document the sentence losses use (so the page vector is learned from a document a third of which is missing); one: a second encoder pass over the document with exactly ONE sentence hidden - the condition the retrieval is measured in - and that sentence is the query")
 ap.add_argument("--page-pool", default="token", help="token: the page token's output; mean: the mean of the encoder's outputs over the visible sentences (both through page_head, no input mean)")
 ap.add_argument("--init", default="", help="a model_*.pt to start from (weights only; fresh optimizer and schedule) when --out has no state")
 ap.add_argument("--eval-only", type=int, default=0, help="1: evaluate the --init weights once (with the page recall curve) and exit")
@@ -266,6 +267,11 @@ def losses(x, valid, masked):
     LP[0] = torch.zeros((), device=DEV)
     if A.page:                                         # each hidden sentence must find its own document's page vector
         q = x[masked].float(); doc = torch.nonzero(masked)[:, 0]
+        if A.page_input == "one" and model.training:   # the page vector from the measured condition: one sentence hidden, that sentence asks
+            n = valid.sum(1); j = torch.where(n > 1, 1 + (torch.rand(len(n), device=DEV) * (n - 1).clamp_min(1)).long().clamp(max=(n - 1).clamp_min(1)), torch.zeros_like(n))
+            one = torch.zeros_like(masked); one[torch.arange(len(n), device=DEV), j] = True; one &= valid
+            model.encode(x, valid, one)                 # sets model.last_page
+            q = x[one].float(); doc = torch.nonzero(one)[:, 0]
         keys = model.last_page
         if A.page_queue and PQ:
             keys = torch.cat([keys, torch.cat(PQ)])     # earlier batches' pages: negatives only (labels index the current batch)
