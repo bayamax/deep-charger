@@ -80,7 +80,7 @@ PSKIP=
 # The raw GitHub copy this box fetches can lag and hand a control run an OLDER version of this file (04:48 on 09-22 it
 # relaunched the online loop under the previous mode while the newer run was merging a checkpoint on the same card).
 # Every edit bumps BOXG_SERIAL; a run that sees a lower serial than one already executed stops here.
-BOXG_SERIAL=2026092720
+BOXG_SERIAL=2026100301
 if [ -f /root/.boxg_serial ] && [ "$(cat /root/.boxg_serial)" -gt "$BOXG_SERIAL" ] 2>/dev/null; then echo "BOXG_STALE $BOXG_SERIAL < $(cat /root/.boxg_serial)"; exit 0; fi
 echo $BOXG_SERIAL > /root/.boxg_serial
 MODE=idle         # 2026-09-29: the side jobs hold the card (multi-turn measurement and training); a finished reeval re-launched on every control run and killed their evaluators
@@ -1080,6 +1080,39 @@ DQ
   setsid nohup bash -c 'bash /root/dcqkeep.sh 2>&1 | tee -a /root/dcq.log' >> /proc/1/fd/1 2>&1 < /dev/null 9>&- &
   echo "DCQ_LAUNCHED $(date -u)"
 fi
+# ---- memwin (2026-10-03 11:45 JST, the user: measure the plain spec - the newest raw-window tokens stay exposed,
+# everything older goes into the pooler, turn boundaries or not; pinning the last exchange is not the spec). --mt-mode
+# win: one stream across turns exactly as within a reply (only the new question pinned), memory bounded by
+# question + 32 soft tokens + 768 raw. Replaces memcap/memcap2 (cancelled); mixcol held until the spec is chosen.
+if [ ! -e /root/.memwin_swap ]; then
+  touch /root/.memwin_swap
+  pkill -f "memcapkee[p].sh"; pkill -f "memcap2kee[p].sh"; pkill -f "mixcolkee[p].sh"; pkill -f "pool_eval.py .*mc_"; sleep 5
+  echo "MEMCAP_JOB_DONE cancelled for memwin $(date -u)" >> /root/memcap.log
+  echo "MEMCAP2_JOB_DONE cancelled for memwin $(date -u)" >> /root/memcap2.log
+  echo "MEMWIN_SWAP memcap/memcap2 cancelled, mixcol held $(date -u)"
+fi
+if ! pgrep -f "memwinkee[p].sh" >/dev/null && ! grep -q "MEMWIN_JOB_DONE" /root/memwin.log 2>/dev/null; then
+  cat > /root/memwinkeep.sh <<'MW'
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); R=baya1116/hypernet-sp-distill; cd /root/work; CK=/root/mtg1_s300.safetensors
+ENV="SP_BASE=/root/gptq_hf_gq14 SP_RANK=16 SP_NOSYS=1 SP_EPISODIC=1 OMP_NUM_THREADS=1 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True"
+EVARGS="--rw 768 --maxd 384 --samepage 1 --decode plain --temp 0.6 --gen 4000 --stop eos --replycap 600"
+while pgrep -f "pool_eval.p[y]|online_loop.p[y]|memfit.p[y]" >/dev/null; do sleep 30; done
+T=win
+env $ENV python3 /root/work/pool_eval.py $CK /root/work/eval300.jsonl /root/work/mc_$T.jsonl --multiturn /root/work/mt_eval_chain.jsonl --mt-mode win --n 1000 $EVARGS --tag "[mc-$T]" > /root/mc_$T.log 2>&1
+python3 - /root/work/mc_$T.jsonl $T <<'PY2'
+import json, sys
+c = [0] * 4
+for l in open(sys.argv[1]):
+    r = json.loads(l); c[r["turn"]] += bool(r["correct"])
+print(f"[memwin] {sys.argv[2]}: per turn {c}, turns 2-4 {sum(c[1:])}/90 (full history: 21 18 17 17 -> 52)", flush=True)
+PY2
+grep -E "EVAL_DONE|Error|Traceback" /root/mc_$T.log | tail -2 | cut -c1-200
+hf upload $R /root/work/mc_$T.jsonl pooler_distill/chatsft/multiturn/mc_$T.jsonl >/dev/null 2>&1
+echo "MEMWIN_JOB_DONE $(date -u)"
+MW
+  setsid nohup bash -c 'bash /root/memwinkeep.sh 2>&1 | tee -a /root/memwin.log' >> /proc/1/fd/1 2>&1 < /dev/null 9>&- &
+  echo "MEMWIN_LAUNCHED $(date -u)"
+fi
 # ---- memcap (2026-10-03 10:30 JST, the user: priority over GRPO - the app's memory must stay bounded; the pooler bounds
 # one reply, but the multi-turn history sits in the prompt and grows every turn). GRPO step 300 (the app candidate) on
 # the 30 held-out switch chains with the history bounded two ways: only the last K exchanges pinned (--mt-keep 1, 2),
@@ -1145,7 +1178,7 @@ if ! pgrep -f "mixcolkee[p].sh" >/dev/null && ! grep -q "MIXCOL_JOB_DONE" /root/
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); R=baya1116/hypernet-sp-distill; cd /root/work; CK=/root/mtg1_s300.safetensors
 ENV="SP_BASE=/root/gptq_hf_gq14 SP_RANK=16 SP_NOSYS=1 SP_EPISODIC=1 OMP_NUM_THREADS=1 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True"
 EVARGS="--rw 768 --maxd 384 --samepage 1 --decode plain --temp 0.6 --gen 4000 --stop eos --replycap 600"
-until grep -q "MEMCAP2_JOB_DONE" /root/memcap2.log 2>/dev/null; do sleep 60; done
+until [ -e /root/.mixcol_go ]; do sleep 60; done   # held: started by hand once memwin shows the spec
 while pgrep -f "pool_eval.p[y]|online_loop.p[y]|memfit.p[y]" >/dev/null; do sleep 30; done
 head -200 /root/work/mt_train_bridge.jsonl > /root/work/mt_train_bridge200.jsonl
 for v in "ch:/root/work/mt_train_chain.jsonl:70" "br:/root/work/mt_train_bridge200.jsonl:200"; do T=${v%%:*}; r=${v#*:}; F=${r%%:*}; N=${r#*:}
@@ -1860,6 +1893,7 @@ while :; do
     echo "--- mem7.log (tail) ---"; tail -n 10 /root/mem7.log 2>/dev/null | cut -c1-300; grep -E "^val " /root/memfit_mem7_run.log 2>/dev/null | tail -2
     echo "--- qt.log (tail) ---"; tail -n 4 /root/qt.log 2>/dev/null | cut -c1-300
     echo "--- pqjudge.log (tail) ---"; tail -n 5 /root/pqjudge.log 2>/dev/null | cut -c1-200
+    echo "--- memwin.log (tail) ---"; tail -n 4 /root/memwin.log 2>/dev/null | cut -c1-250; grep "dialog" /root/mc_win.log 2>/dev/null | tail -n 2 | cut -c1-250
     echo "--- memcap2.log (tail) ---"; tail -n 4 /root/memcap2.log 2>/dev/null | cut -c1-250
     echo "--- mixcol.log (tail) ---"; tail -n 4 /root/mixcol.log 2>/dev/null | cut -c1-250
     echo "--- memcap.log (tail) ---"; tail -n 6 /root/memcap.log 2>/dev/null | cut -c1-250
