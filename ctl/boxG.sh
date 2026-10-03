@@ -1125,7 +1125,7 @@ fi
 # ---- memwin5 (2026-10-03 12:40 JST, the user: no more win runs; the pooler-only test now). Stop the bridge win run
 # and memwin4; run stream (pooler only) then none (floor).
 if [ ! -e /root/.memwin5_swap ]; then touch /root/.memwin5_swap
-  pkill -f "memwin4kee[p].sh"; pkill -f "pool_eval.py .*br_win"; sleep 5
+  pkill -f "memwin2kee[p].sh"; pkill -f "memwin3kee[p].sh"; pkill -f "memwin4kee[p].sh"; sleep 2; pkill -f "pool_eval.py .*br_"; sleep 5
   echo "MEMWIN4_JOB_DONE replaced by memwin5 $(date -u)" >> /root/memwin.log; echo "MEMWIN5_SWAP $(date -u)"
 fi
 if ! pgrep -f "memwin5kee[p].sh" >/dev/null && ! grep -q "MEMWIN5_JOB_DONE" /root/memwin.log 2>/dev/null; then
