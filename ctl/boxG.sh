@@ -80,7 +80,7 @@ PSKIP=
 # The raw GitHub copy this box fetches can lag and hand a control run an OLDER version of this file (04:48 on 09-22 it
 # relaunched the online loop under the previous mode while the newer run was merging a checkpoint on the same card).
 # Every edit bumps BOXG_SERIAL; a run that sees a lower serial than one already executed stops here.
-BOXG_SERIAL=2026100304
+BOXG_SERIAL=2026100305
 if [ -f /root/.boxg_serial ] && [ "$(cat /root/.boxg_serial)" -gt "$BOXG_SERIAL" ] 2>/dev/null; then echo "BOXG_STALE $BOXG_SERIAL < $(cat /root/.boxg_serial)"; exit 0; fi
 echo $BOXG_SERIAL > /root/.boxg_serial
 MODE=idle         # 2026-09-29: the side jobs hold the card (multi-turn measurement and training); a finished reeval re-launched on every control run and killed their evaluators
@@ -1142,6 +1142,24 @@ MW
   setsid nohup bash -c 'bash /root/memwin2keep.sh 2>&1 | tee -a /root/memwin.log' >> /proc/1/fd/1 2>&1 < /dev/null 9>&- &
   echo "MEMWIN2_LAUNCHED $(date -u)"
 fi
+# ---- memwin3 (2026-10-03 12:35 JST): in win the first turn's question sat only in that turn's pinned prompt and never
+# entered the stream (later questions did). Fixed in pool_eval; the bridge runs again in win after memwin2 (br_win2).
+if ! pgrep -f "memwin3kee[p].sh" >/dev/null && ! grep -q "MEMWIN3_JOB_DONE" /root/memwin.log 2>/dev/null; then
+  cat > /root/memwin3keep.sh <<'MW'
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); R=baya1116/hypernet-sp-distill; cd /root/work; CK=/root/mtg1_s300.safetensors
+ENV="SP_BASE=/root/gptq_hf_gq14 SP_RANK=16 SP_NOSYS=1 SP_EPISODIC=1 OMP_NUM_THREADS=1 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True"
+EVARGS="--rw 768 --maxd 384 --samepage 1 --decode plain --temp 0.6 --gen 4000 --stop eos --replycap 600"
+until grep -q "MEMWIN2_JOB_DONE" /root/memwin.log 2>/dev/null; do sleep 60; done
+while pgrep -f "pool_eval.p[y]|online_loop.p[y]|memfit.p[y]" >/dev/null; do sleep 30; done
+M=win2
+env $ENV python3 /root/work/pool_eval.py $CK /root/work/eval300.jsonl /root/work/br_$M.jsonl --multiturn /root/work/mt_eval_bridge.jsonl --mt-mode win --n 1000 $EVARGS --tag "[br-$M]" > /root/br_$M.log 2>&1
+echo "[memwin3] bridge $M: $(grep -E 'EVAL_DONE|Error|Traceback' /root/br_$M.log | tail -1 | cut -c1-200) (full history: last 45.0% mid 57.5%)"
+hf upload $R /root/work/br_$M.jsonl pooler_distill/chatsft/multiturn/br_$M.jsonl >/dev/null 2>&1
+echo "MEMWIN3_JOB_DONE $(date -u)"
+MW
+  setsid nohup bash -c 'bash /root/memwin3keep.sh 2>&1 | tee -a /root/memwin.log' >> /proc/1/fd/1 2>&1 < /dev/null 9>&- &
+  echo "MEMWIN3_LAUNCHED $(date -u)"
+fi
 # ---- memcap (2026-10-03 10:30 JST, the user: priority over GRPO - the app's memory must stay bounded; the pooler bounds
 # one reply, but the multi-turn history sits in the prompt and grows every turn). GRPO step 300 (the app candidate) on
 # the 30 held-out switch chains with the history bounded two ways: only the last K exchanges pinned (--mt-keep 1, 2),
@@ -1922,7 +1940,7 @@ while :; do
     echo "--- mem7.log (tail) ---"; tail -n 10 /root/mem7.log 2>/dev/null | cut -c1-300; grep -E "^val " /root/memfit_mem7_run.log 2>/dev/null | tail -2
     echo "--- qt.log (tail) ---"; tail -n 4 /root/qt.log 2>/dev/null | cut -c1-300
     echo "--- pqjudge.log (tail) ---"; tail -n 5 /root/pqjudge.log 2>/dev/null | cut -c1-200
-    echo "--- memwin.log (tail) ---"; tail -n 4 /root/memwin.log 2>/dev/null | cut -c1-250; for f in /root/mc_win.log /root/br_win.log /root/br_none.log; do grep "dialog" $f 2>/dev/null | tail -n 1 | cut -c1-250; done
+    echo "--- memwin.log (tail) ---"; tail -n 4 /root/memwin.log 2>/dev/null | cut -c1-250; for f in /root/br_win.log /root/br_none.log /root/br_win2.log; do grep "dialog" $f 2>/dev/null | tail -n 1 | cut -c1-250; done
     echo "--- memcap2.log (tail) ---"; tail -n 4 /root/memcap2.log 2>/dev/null | cut -c1-250
     echo "--- mixcol.log (tail) ---"; tail -n 4 /root/mixcol.log 2>/dev/null | cut -c1-250
     echo "--- memcap.log (tail) ---"; tail -n 6 /root/memcap.log 2>/dev/null | cut -c1-250

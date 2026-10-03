@@ -430,6 +430,9 @@ def run_multiturn():
                     carry = old_part + q_part + this_part + L["gen"][L["absorbed"]:] + EOS_IDS
                 # win: the pooler's kept tokens as they stand, the unabsorbed tail stays the stream (raw next turn as far as --rw reaches)
                 wkept, wgen = list(L["kept"]), L["gen"][L["absorbed"]:] + EOS_IDS
+                if L["g0"] == 0:   # the first turn's question was only in its pinned prompt: put it in the stream where it came
+                    if L["absorbed"]: wkept = q_part + wkept
+                    else: wgen = q_part + wgen
             el = time.time() - t0
             print(f"[mt {A.mt_mode}] dialog {d['id']} done | " + " ".join(f"{k[:-2]}={100*stat[k[:-2]+':c']/stat[k]:.0f}%({stat[k]})" for k in sorted(stat) if k.endswith(':n')) + f" | {el/60:.0f} min", flush=True)
     print(f"EVAL_DONE{A.tag} multiturn mode={A.mt_mode} " + " ".join(f"{k[:-2]}={100*stat[k[:-2]+':c']/stat[k]:.1f}%({stat[k]})" for k in sorted(stat) if k.endswith(':n')), flush=True)
