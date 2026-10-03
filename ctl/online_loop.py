@@ -1242,7 +1242,9 @@ for step in range(state["step"] + 1, A.steps + 1) if (reason or A.mt_items) else
             if step % 200 == 0:
                 import shutil; shutil.copyfile(LATEST, os.path.join(A.outdir, f"step{step}.safetensors")); shutil.copyfile(STATE_F, os.path.join(A.outdir, f"step{step}.json"))
         continue
-    searching = True if A.mt_items else (step % A.reason_every != 0) if A.reason_every else (bool(A.search_every) and step % A.search_every == 0)
+    # --mt-items alone: every step is a search turn; with --reason and --reason-every, every Nth step is a reasoning problem instead
+    searching = ((step % A.reason_every != 0) if (A.reason_every and reason) else True) if A.mt_items \
+        else (step % A.reason_every != 0) if A.reason_every else (bool(A.search_every) and step % A.search_every == 0)
     if searching:
         item = pool_item(step); qtext, ref = item["q"], None
     else:

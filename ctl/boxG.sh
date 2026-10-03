@@ -80,7 +80,7 @@ PSKIP=
 # The raw GitHub copy this box fetches can lag and hand a control run an OLDER version of this file (04:48 on 09-22 it
 # relaunched the online loop under the previous mode while the newer run was merging a checkpoint on the same card).
 # Every edit bumps BOXG_SERIAL; a run that sees a lower serial than one already executed stops here.
-BOXG_SERIAL=2026100309
+BOXG_SERIAL=2026100310
 if [ -f /root/.boxg_serial ] && [ "$(cat /root/.boxg_serial)" -gt "$BOXG_SERIAL" ] 2>/dev/null; then echo "BOXG_STALE $BOXG_SERIAL < $(cat /root/.boxg_serial)"; exit 0; fi
 echo $BOXG_SERIAL > /root/.boxg_serial
 MODE=idle         # 2026-09-29: the side jobs hold the card (multi-turn measurement and training); a finished reeval re-launched on every control run and killed their evaluators
@@ -1122,6 +1122,81 @@ if [ ! -e /root/.memwin_cut ]; then touch /root/.memwin_cut
   HF_TOKEN=$(tr -d "[:space:]" < /root/.hf_token 2>/dev/null) hf upload baya1116/hypernet-sp-distill /root/work/mc_win.jsonl pooler_distill/chatsft/multiturn/mc_win_partial.jsonl >/dev/null 2>&1
   echo "MEMWIN_CUT $(date -u)"
 fi
+# ---- mtg3 (2026-10-03 15:00 JST, the user: GRPO with reasoning mixed in, mtg2's failure fixed). mtg2 (step 300 on
+# switch + bridge, every step a search turn, lr 1e-5) rolled back at step 56 (unfinished 22% vs 7%, searches 3.2 vs
+# 2.1, pass 15% vs 39%) and lost Dolphin 54 -> 49. mtg3, from step 300: one step in four is a Dolphin reasoning
+# problem (dolphin_rft, the held-out hundred excluded; 8 samples, nano against the R1 reference, up to 3000 tokens),
+# the other three mtg2's search turns; both rates 5e-6 (where mtg2 ran stably after its rollback); 200 steps.
+# Screens at 100 and 200 under the app's memory spec (win): the 40 bridge dialogues (step 300: follow-ups 17/40),
+# the single-turn 102 (58/102), Dolphin 100 (54).
+if ! pgrep -f "mtg3kee[p].sh" >/dev/null && ! grep -q "MTG3_JOB_DONE\|MTG3_ABORT" /root/mtg3.log 2>/dev/null; then
+  cat > /root/mtg3keep.sh <<'M3'
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); R=baya1116/hypernet-sp-distill; cd /root/work; OUT=/root/online_mtg3
+ENV="SP_BASE=/root/gptq_hf_gq14 SP_RANK=16 SP_NOSYS=1 SP_EPISODIC=1 OMP_NUM_THREADS=1 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True"
+EVARGS="--rw 768 --maxd 384 --samepage 1 --decode plain --temp 0.6 --gen 4000 --stop eos --replycap 600"
+[ -s /root/work/mtg2_items.jsonl ] && [ -s /root/work/dolphin_rft.jsonl ] || { echo "MTG3_ABORT data missing"; exit 1; }
+# what mtg2's first 60 steps looked like, by item kind (bridge first turn / bridge follow-up / switch)
+python3 - <<'PYD'
+import json, collections
+items = {}
+for l in open("/root/work/mtg2_items.jsonl"):
+    r = json.loads(l); items[r["q"].strip()] = r
+br = set()
+for l in open("/root/work/mt_train_bridge.jsonl"):
+    d = json.loads(l); br |= {t["q"].strip() for t in d["turns"]}
+st = collections.defaultdict(lambda: [0, 0, 0, 0])
+try:
+    for l in open("/root/online_mtg2/rollouts.jsonl"):
+        r = json.loads(l)
+        if r["step"] > 60: continue
+        q = r["q"].strip(); it = items.get(q, {})
+        k = ("bridge-follow" if it.get("hist") else "bridge-first") if q in br else "switch"
+        k += " 1-40" if r["step"] <= 40 else " 41-60"
+        w = r.get("why") or {}; s = st[k]; s[0] += 1; s[1] += r["reward"] >= 1.0; s[2] += bool(w.get("unfinished")); s[3] += r.get("ns", 0)
+    for k in sorted(st): n, p, u, ns = st[k]; print(f"[mtg3] mtg2 {k}: {n} rollouts, pass {100*p/n:.0f}%, unfinished {100*u/n:.0f}%, searches {ns/n:.1f}")
+except FileNotFoundError: print("[mtg3] no mtg2 rollouts on disk")
+PYD
+while pgrep -f "pool_eval.p[y]|online_loop.p[y]|memfit.p[y]" >/dev/null; do sleep 30; done
+echo "[mtg3] start $(date -u +%H:%M); $(df -h /root | tail -1)"
+env SP_BASE=/root/gptq_hf_gq14 SP_NOSYS=1 SP_EPISODIC=1 OAI_KEY=$(cat /root/.oai 2>/dev/null) DSK_KEY=$(cat /root/.dsk 2>/dev/null) PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
+  python3 /root/work/online_loop.py /root/mtg1_s300.safetensors $OUT --pooler none --lora-layers all --lora-rank 16 --save-lora-only 1 \
+  --mt-items /root/work/mtg2_items.jsonl --heldout /root/work/eval300.jsonl --reason /root/work/dolphin_rft.jsonl --reason-every 4 --reason-g 8 \
+  --steps 200 --save-every 25 --lr 5e-6 --search-lr 5e-6 --search-temp 0.9 --search-gen 2000 --temp 0.6 --gen 3000 --budget 900 --maxsrch 7 --stop eos \
+  --judge-api openai --judge-model gpt-5-nano --w-talk 0.5 --dolphin-min 0 --adv-std 1 --pg-norm mean --kl 0 \
+  --guard 1 --guard-steps 20 > /root/mtg3_run.log 2>&1 &
+LP=$!
+( while kill -0 $LP 2>/dev/null; do sleep 60; [ -s $OUT/step100.safetensors ] || { S=$(python3 -c "import json;print(json.load(open('$OUT/state.json'))['step'])" 2>/dev/null); [ "${S:-0}" -ge 100 ] && cp $OUT/latest.safetensors $OUT/step100.safetensors; }; done ) &
+wait $LP
+grep -E "^\[data\]|ONLINE_|Error|Traceback" /root/mtg3_run.log | tail -4 | cut -c1-250
+S=$(python3 -c "import json;print(json.load(open('$OUT/state.json'))['step'])" 2>/dev/null); echo "[mtg3] stopped at step ${S:-0} $(date -u +%H:%M)"
+hf upload $R $OUT/rollouts.jsonl pooler_distill/chatsft/multiturn/mtg3_rollouts.jsonl >/dev/null 2>&1
+[ "${S:-0}" -ge 100 ] || { echo "MTG3_ABORT: stopped at step ${S:-0}"; exit 1; }
+for T in 100 200; do
+  CK=$OUT/step$T.safetensors; [ $T = 200 ] && CK=$OUT/latest.safetensors; [ $T = 200 ] && [ "${S:-0}" -lt 200 ] && continue
+  [ -s $CK ] || continue
+  cp $CK /root/mtg3_s$T.safetensors; hf upload $R /root/mtg3_s$T.safetensors pooler_distill/chatsft/multiturn/mtg3_s$T.safetensors >/dev/null 2>&1; CK=/root/mtg3_s$T.safetensors
+  env $ENV python3 /root/work/pool_eval.py $CK /root/work/eval300.jsonl /root/work/br_mtg3s$T.jsonl --multiturn /root/work/mt_eval_bridge.jsonl --mt-mode win --n 1000 $EVARGS --tag "[br-mtg3s$T]" > /root/br_mtg3s$T.log 2>&1
+  python3 - /root/work/br_mtg3s$T.jsonl $T <<'PY2'
+import json, sys
+r = [json.loads(l) for l in open(sys.argv[1])]
+t1 = [x for x in r if x["turn"] == 0]; t2 = [x for x in r if x["turn"] == 1]
+print(f"[mtg3] s{sys.argv[2]} bridge (win): turn 1 {sum(x['correct'] for x in t1)}/{len(t1)}, follow-up {sum(x['correct'] for x in t2)}/{len(t2)} (step 300: 25/40, 17/40)", flush=True)
+PY2
+  hf upload $R /root/work/br_mtg3s$T.jsonl pooler_distill/chatsft/multiturn/br_mtg3s$T.jsonl >/dev/null 2>&1
+  for i in 0 1 2; do env $ENV python3 /root/work/pool_eval.py $CK /root/work/ev_$i.jsonl /root/work/mtg3s${T}st_$i.jsonl --n 34 $EVARGS --tag "[mtg3s${T}st$i]" > /root/mtg3s${T}st_$i.log 2>&1; done
+  echo "[mtg3] s$T single-turn: $(grep -hoE 'correct=[0-9.]+%' /root/mtg3s${T}st_*.log | tr '\n' ' ') (step 300: 52.9 61.8 58.8)"
+  env SP_BASE=/root/gptq_hf_gq14 SP_NOSYS=1 SP_EPISODIC=1 OMP_NUM_THREADS=1 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python3 /root/work/online_loop.py $CK /root/evalrun_dl_mtg3s$T \
+    --questions /root/work/eval300.jsonl --dolphin /root/work/dolphin_v1.jsonl --heldout /root/work/eval300.jsonl \
+    --b 12 --gen 7000 --budget 2400 --temp 0.6 --maxsrch 7 --pooler none --lora-rank 16 --lora-layers all --stop eos --loop-break answer \
+    --eval-file /root/work/dolphinq.jsonl --eval-out /root/work/dl_mtg3s$T.jsonl > /root/dl_mtg3s$T.log 2>&1
+  [ -s /root/dl_judge.py ] && OAI_KEY=$(cat /root/.oai 2>/dev/null) python3 /root/dl_judge.py /root/work/dl_mtg3s$T.jsonl mtg3s$T | sed 's/\[mix0\]/[mtg3]/'
+  hf upload $R /root/work/dl_mtg3s${T}_judged.jsonl pooler_distill/chatsft/multiturn/dl_mtg3s${T}_judged.jsonl >/dev/null 2>&1
+done
+echo "MTG3_JOB_DONE $(date -u)"
+M3
+  setsid nohup bash -c 'bash /root/mtg3keep.sh 2>&1 | tee -a /root/mtg3.log' >> /proc/1/fd/1 2>&1 < /dev/null 9>&- &
+  echo "MTG3_LAUNCHED $(date -u)"
+fi
 # ---- 2026-10-03 13:35 JST, the user: the no-history floor is not needed. Stop it; the GPU is free.
 if [ ! -e /root/.brnone_stop ]; then touch /root/.brnone_stop
   pkill -f "memwin6kee[p].sh"; sleep 2; pkill -f "pool_eval.py .*br_none"
@@ -2037,6 +2112,7 @@ while :; do
     echo "--- mem7.log (tail) ---"; tail -n 10 /root/mem7.log 2>/dev/null | cut -c1-300; grep -E "^val " /root/memfit_mem7_run.log 2>/dev/null | tail -2
     echo "--- qt.log (tail) ---"; tail -n 4 /root/qt.log 2>/dev/null | cut -c1-300
     echo "--- pqjudge.log (tail) ---"; tail -n 5 /root/pqjudge.log 2>/dev/null | cut -c1-200
+    echo "--- mtg3.log (tail) ---"; tail -n 8 /root/mtg3.log 2>/dev/null | cut -c1-250; grep -E "^\[step|^\[guard|ONLINE_" /root/mtg3_run.log 2>/dev/null | tail -n 4 | cut -c1-250
     echo "--- memwin.log (tail) ---"; tail -n 4 /root/memwin.log 2>/dev/null | cut -c1-250; for f in /root/br_win2.log /root/br_none.log; do grep "dialog" $f 2>/dev/null | tail -n 1 | cut -c1-250; done
     echo "--- memcap2.log (tail) ---"; tail -n 4 /root/memcap2.log 2>/dev/null | cut -c1-250
     echo "--- mixcol.log (tail) ---"; tail -n 4 /root/mixcol.log 2>/dev/null | cut -c1-250
