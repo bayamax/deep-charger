@@ -80,7 +80,7 @@ PSKIP=
 # The raw GitHub copy this box fetches can lag and hand a control run an OLDER version of this file (04:48 on 09-22 it
 # relaunched the online loop under the previous mode while the newer run was merging a checkpoint on the same card).
 # Every edit bumps BOXG_SERIAL; a run that sees a lower serial than one already executed stops here.
-BOXG_SERIAL=2026100310
+BOXG_SERIAL=2026100311
 if [ -f /root/.boxg_serial ] && [ "$(cat /root/.boxg_serial)" -gt "$BOXG_SERIAL" ] 2>/dev/null; then echo "BOXG_STALE $BOXG_SERIAL < $(cat /root/.boxg_serial)"; exit 0; fi
 echo $BOXG_SERIAL > /root/.boxg_serial
 MODE=idle         # 2026-09-29: the side jobs hold the card (multi-turn measurement and training); a finished reeval re-launched on every control run and killed their evaluators
@@ -1122,6 +1122,10 @@ if [ ! -e /root/.memwin_cut ]; then touch /root/.memwin_cut
   HF_TOKEN=$(tr -d "[:space:]" < /root/.hf_token 2>/dev/null) hf upload baya1116/hypernet-sp-distill /root/work/mc_win.jsonl pooler_distill/chatsft/multiturn/mc_win_partial.jsonl >/dev/null 2>&1
   echo "MEMWIN_CUT $(date -u)"
 fi
+# ---- 2026-10-03 16:50 JST: disk at 94%; list the biggest items once (no deletion here)
+if [ ! -e /root/.du_list1 ]; then touch /root/.du_list1
+  { echo "DU_LIST $(date -u)"; du -xsh /root/* /root/work/* 2>/dev/null | sort -rh | head -40; } > /root/du_list.txt 2>&1
+fi
 # ---- mtg3 (2026-10-03 15:00 JST, the user: GRPO with reasoning mixed in, mtg2's failure fixed). mtg2 (step 300 on
 # switch + bridge, every step a search turn, lr 1e-5) rolled back at step 56 (unfinished 22% vs 7%, searches 3.2 vs
 # 2.1, pass 15% vs 39%) and lost Dolphin 54 -> 49. mtg3, from step 300: one step in four is a Dolphin reasoning
@@ -2112,6 +2116,7 @@ while :; do
     echo "--- mem7.log (tail) ---"; tail -n 10 /root/mem7.log 2>/dev/null | cut -c1-300; grep -E "^val " /root/memfit_mem7_run.log 2>/dev/null | tail -2
     echo "--- qt.log (tail) ---"; tail -n 4 /root/qt.log 2>/dev/null | cut -c1-300
     echo "--- pqjudge.log (tail) ---"; tail -n 5 /root/pqjudge.log 2>/dev/null | cut -c1-200
+    echo "--- du_list ---"; cat /root/du_list.txt 2>/dev/null | head -42
     echo "--- mtg3.log (tail) ---"; tail -n 8 /root/mtg3.log 2>/dev/null | cut -c1-250; grep -E "^\[step|^\[guard|ONLINE_" /root/mtg3_run.log 2>/dev/null | tail -n 4 | cut -c1-250
     echo "--- memwin.log (tail) ---"; tail -n 4 /root/memwin.log 2>/dev/null | cut -c1-250; for f in /root/br_win2.log /root/br_none.log; do grep "dialog" $f 2>/dev/null | tail -n 1 | cut -c1-250; done
     echo "--- memcap2.log (tail) ---"; tail -n 4 /root/memcap2.log 2>/dev/null | cut -c1-250
