@@ -80,7 +80,7 @@ PSKIP=
 # The raw GitHub copy this box fetches can lag and hand a control run an OLDER version of this file (04:48 on 09-22 it
 # relaunched the online loop under the previous mode while the newer run was merging a checkpoint on the same card).
 # Every edit bumps BOXG_SERIAL; a run that sees a lower serial than one already executed stops here.
-BOXG_SERIAL=2026100302
+BOXG_SERIAL=2026100303
 if [ -f /root/.boxg_serial ] && [ "$(cat /root/.boxg_serial)" -gt "$BOXG_SERIAL" ] 2>/dev/null; then echo "BOXG_STALE $BOXG_SERIAL < $(cat /root/.boxg_serial)"; exit 0; fi
 echo $BOXG_SERIAL > /root/.boxg_serial
 MODE=idle         # 2026-09-29: the side jobs hold the card (multi-turn measurement and training); a finished reeval re-launched on every control run and killed their evaluators
@@ -1112,6 +1112,15 @@ echo "MEMWIN_JOB_DONE $(date -u)"
 MW
   setsid nohup bash -c 'bash /root/memwinkeep.sh 2>&1 | tee -a /root/memwin.log' >> /proc/1/fd/1 2>&1 < /dev/null 9>&- &
   echo "MEMWIN_LAUNCHED $(date -u)"
+fi
+# ---- 2026-10-03 12:00 JST, the user: the topic-switch chains are settled; only the follow-ups matter. Stop the win
+# chains where they are (partial file kept) so the bridge runs now.
+if [ ! -e /root/.memwin_cut ]; then touch /root/.memwin_cut
+  pkill -f "memwinkee[p].sh"; pkill -f "pool_eval.py .*mc_win"; sleep 5
+  echo "[memwin] chains cut at $(wc -l < /root/work/mc_win.jsonl 2>/dev/null) turns: $(grep 'dialog' /root/mc_win.log | tail -1 | cut -c1-160)"  >> /root/memwin.log
+  echo "MEMWIN_JOB_DONE cut for the bridge $(date -u)" >> /root/memwin.log
+  HF_TOKEN=$(tr -d "[:space:]" < /root/.hf_token 2>/dev/null) hf upload baya1116/hypernet-sp-distill /root/work/mc_win.jsonl pooler_distill/chatsft/multiturn/mc_win_partial.jsonl >/dev/null 2>&1
+  echo "MEMWIN_CUT $(date -u)"
 fi
 # ---- memwin2 (2026-10-03 11:55 JST): the switch chains' later questions stand on their own (no history at all scored
 # 36.7% last / 64.4% mid), so a right answer there does not show the memory works. The 40 held-out bridge dialogues
