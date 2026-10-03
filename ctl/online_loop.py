@@ -84,6 +84,7 @@ ap.add_argument("--search-gen", type=int, default=0, help=">0: generation cap fo
 ap.add_argument("--pg-norm-len", type=int, default=1024, help="the fixed divisor for --pg-norm const")
 ap.add_argument("--adv-std", type=int, default=1, help="1: advantage = (r - mean) / std within the group. 0: r - mean only, so an all-wrong group with one slightly-less-wrong rollout does not get blown up into a +3 sigma push toward that rollout.")
 ap.add_argument("--accum", type=int, default=1, help="steps whose gradients are accumulated before one optimizer update (both the search-side and the Dolphin part)")
+ap.add_argument("--judge-correct", type=int, default=0, help="1: a search reply the gold string does not match is also shown to the teacher with the gold; when it gives the same answer in another form (Claire for Claire Casey, Jamie Dornan for James \"Jamie\" Dornan) it counts as correct - all or nothing, no partial credit. The evaluation keeps the strict string match.")
 ap.add_argument("--samepage", type=int, default=1, help="1: a search whose top page was already shown in this rollout serves the NEXT chunk of that page (and says so when the page is used up); 0: teacher environment (always the head)")
 A = ap.parse_args()
 os.makedirs(A.outdir, exist_ok=True)
@@ -904,6 +905,11 @@ SEARCH_SYS = """You are scoring the reply of a small assistant that just searche
 sound means every claim in the reply is the kind of thing the search would have supported, with nothing obviously invented and nothing self-contradictory; natural means it reads as a person speaking, two or three sentences, not a template or a bare fragment; clean means no tool tags, no repetition loop, and nothing left unfinished."""
 
 
+CORRECT_SYS = """You check whether a small assistant's reply gives the same answer as a reference answer. Reply with JSON only:
+{"same_answer": true/false, "on_the_pages": true/false}
+same_answer is true only when the reply commits to one answer and that answer is the same entity, date, number or fact as the reference: a shorter or longer form of the same name, another spelling, the same date or quantity written differently all count. A different person, place, title, year or number does not; an answer that hedges between candidates or does not commit does not; a reply that only repeats the question does not. on_the_pages is true when the search results shown state that answer in some form."""
+
+
 MT_SYS = """
 The question comes after an earlier exchange, shown for context. natural also requires that the reply answers the NEW question as asked: it does not answer or revisit the earlier question, and it does not drag the earlier topic in where the new question does not refer to it."""
 
@@ -946,6 +952,13 @@ def score_search(r, gold):
     reply = r["text"].split("</think>")[-1].strip() if "</think>" in r["text"] else ""
     landed = bool(r["landed"] and reply)
     _, correct, grounded = price(r, gold)
+    judged = False
+    if A.judge_correct and not correct and landed and not any(t in reply for t in TAGS):
+        h0 = HIST.get(r.get("q", ""), [])
+        ctx0 = ("EARLIER IN THE CONVERSATION:\n" + "\n".join(("USER: " if m["role"] == "user" else "ASSISTANT: ") + m["content"][:600] for m in h0) + "\n\n") if h0 else ""
+        v0 = ask_teacher(CORRECT_SYS, f"{ctx0}QUESTION:\n{r.get('q', '')}\n\nREFERENCE ANSWER:\n{gold}\n\nWHAT THE SEARCH RETURNED:\n" + "\n\n".join(r.get("served", []))[-4000:] + f"\n\nREPLY:\n{reply[:2000]}", "correct")
+        if "error" not in v0 and v0.get("same_answer"):
+            correct, judged = True, True; grounded = grounded or bool(v0.get("on_the_pages"))
     # which search first surfaced the fact, and how many came after it
     hit = next((i for i, sv in enumerate(r.get("served", [])) if has(sv, gold)), None)
     late = (len(r.get("served", [])) - 1 - hit) if hit is not None else 0
@@ -955,7 +968,7 @@ def score_search(r, gold):
     else:
         base = -W_WRONG + W_RETR * (1.0 if info_hit else 0.0) * (ATTEMPT_T if landed else 0.5)
     base -= W_LATE * min(late, LATECAP)
-    why = {"correct": int(correct), "grounded": int(grounded), "late": late,
+    why = {"correct": int(correct), "judged": int(judged), "grounded": int(grounded), "late": late,
            "unfinished": not landed, "tags": any(t in reply for t in TAGS)}
     if not (correct and grounded and landed) or why["tags"]:
         return base, why

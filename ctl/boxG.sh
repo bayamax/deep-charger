@@ -80,7 +80,7 @@ PSKIP=
 # The raw GitHub copy this box fetches can lag and hand a control run an OLDER version of this file (04:48 on 09-22 it
 # relaunched the online loop under the previous mode while the newer run was merging a checkpoint on the same card).
 # Every edit bumps BOXG_SERIAL; a run that sees a lower serial than one already executed stops here.
-BOXG_SERIAL=2026100312
+BOXG_SERIAL=2026100313
 if [ -f /root/.boxg_serial ] && [ "$(cat /root/.boxg_serial)" -gt "$BOXG_SERIAL" ] 2>/dev/null; then echo "BOXG_STALE $BOXG_SERIAL < $(cat /root/.boxg_serial)"; exit 0; fi
 echo $BOXG_SERIAL > /root/.boxg_serial
 MODE=idle         # 2026-09-29: the side jobs hold the card (multi-turn measurement and training); a finished reeval re-launched on every control run and killed their evaluators
@@ -1141,6 +1141,108 @@ if [ ! -e /root/.mtg3_snap1 ]; then touch /root/.mtg3_snap1
     hf upload $RR /root/mtg1_run.log pooler_distill/chatsft/multiturn/analysis/mtg1_run.log >/dev/null 2>&1
     echo "MTG3_SNAP_UP $(date -u)" >> /root/mtg3.log ) > /dev/null 2>&1 &
 fi
+# ---- mtg3chk (2026-10-03 21:40 JST, the user: if mtg3 has bottomed out keep going, if not switch now). The training
+# pass rate cannot say (mtg2 and mtg3 draw the same questions at the same steps and match there: the dips are hard
+# stretches of the list), so mtg3 pauses at step 100 and step 100 is screened: the 40 bridge dialogues under win and
+# the single-turn 102. Keep going (resume to 200) when it holds step 300's level within noise (single >= 56/102 and
+# follow-ups >= 15/40; step 300: 59/102, 17/40), else switch to mtg4: the same recipe with the teacher also checking
+# correctness (--judge-correct 1: Claire for Claire Casey counts; the evaluation stays strict). Before either, the
+# teacher's correctness check is tried on mtg3's wrong replies so its verdicts can be read.
+if ! pgrep -f "mtg3chkkee[p].sh" >/dev/null && ! grep -q "MTG3CHK_JOB_DONE" /root/mtg3chk.log 2>/dev/null; then
+  cat > /root/mtg3chkkeep.sh <<'MC'
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); R=baya1116/hypernet-sp-distill; cd /root/work; OUT=/root/online_mtg3
+ENV="SP_BASE=/root/gptq_hf_gq14 SP_RANK=16 SP_NOSYS=1 SP_EPISODIC=1 OMP_NUM_THREADS=1 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True"
+EVARGS="--rw 768 --maxd 384 --samepage 1 --decode plain --temp 0.6 --gen 4000 --stop eos --replycap 600"
+step() { python3 -c "import json;print(json.load(open('$OUT/state.json'))['step'])" 2>/dev/null || echo 0; }
+until [ "$(step)" -ge 100 ] || grep -q "MTG3_JOB_DONE\|MTG3_ABORT" /root/mtg3.log 2>/dev/null; do sleep 30; done
+pkill -f "mtg3kee[p].sh"; pkill -f "online_loop.py /root/mtg1_s300.safetensors /root/online_mtg3"; sleep 15
+S=$(step); cp $OUT/latest.safetensors /root/mtg3_s$S.safetensors; echo "[mtg3chk] mtg3 paused at step $S $(date -u +%H:%M)"
+echo "MTG3_JOB_DONE paused by mtg3chk at $S $(date -u)" >> /root/mtg3.log
+hf upload $R /root/mtg3_s$S.safetensors pooler_distill/chatsft/multiturn/mtg3_s$S.safetensors >/dev/null 2>&1
+# the teacher's correctness check on mtg3's wrong replies (API only, beside the screens)
+OAI_KEY=$(cat /root/.oai 2>/dev/null) python3 - <<'PYJ' &
+import json, os, re, urllib.request, random
+from concurrent.futures import ThreadPoolExecutor
+src = open("/root/work/online_loop.py").read(); i = src.index("CORRECT_SYS = "); j = src.index('"""', src.index('"""', i) + 3) + 3
+ns = {}; exec(src[i:j], ns); SYS = ns["CORRECT_SYS"]
+gold = {json.loads(l)["q"].strip(): json.loads(l)["gold"] for l in open("/root/work/mtg2_items.jsonl")}
+rows = []
+for l in open("/root/online_mtg3/rollouts.jsonl"):
+    r = json.loads(l)
+    if r.get("kind") == "reason" or r["reward"] >= 1.0 or "</think>" not in r["text"]: continue
+    rep = r["text"].split("</think>")[-1].strip()
+    if rep and r["q"].strip() in gold: rows.append((r["q"].strip(), rep[:2000], r["text"]))
+random.Random(0).shuffle(rows); rows = rows[:150]; key = os.environ.get("OAI_KEY", "")
+INFO = re.compile(r"<information>(.*?)</information>", re.S)
+def ask(x):
+    q, rep, t = x; served = "\n\n".join(INFO.findall(t))[-4000:]
+    body = {"model": "gpt-5-nano", "max_completion_tokens": 2000, "messages": [{"role": "system", "content": SYS},
+            {"role": "user", "content": f"QUESTION:\n{q}\n\nREFERENCE ANSWER:\n{gold[q]}\n\nWHAT THE SEARCH RETURNED:\n{served}\n\nREPLY:\n{rep}"}]}
+    for _ in range(3):
+        try:
+            d = json.load(urllib.request.urlopen(urllib.request.Request("https://api.openai.com/v1/chat/completions", data=json.dumps(body).encode(), headers={"Authorization": "Bearer " + key, "Content-Type": "application/json"}), timeout=120))
+            c = d["choices"][0]["message"].get("content") or ""; return json.loads(c[c.find("{"): c.rfind("}") + 1])
+        except Exception: pass
+    return {"error": 1}
+with ThreadPoolExecutor(max_workers=8) as ex: V = list(ex.map(ask, rows))
+ok = [(x, v) for x, v in zip(rows, V) if v.get("same_answer")]
+print(f"[mtg3chk] teacher check on {len(rows)} wrong mtg3 replies: {len(ok)} judged the same answer, {sum(1 for v in V if 'error' in v)} errors", flush=True)
+for (q, rep, _), v in ok[:15]: print(f"[mtg3chk]   gold {gold[q][:40]!r} | reply {rep[:110]!r}", flush=True)
+PYJ
+JP=$!
+env $ENV python3 /root/work/pool_eval.py /root/mtg3_s$S.safetensors /root/work/eval300.jsonl /root/work/br_mtg3s$S.jsonl --multiturn /root/work/mt_eval_bridge.jsonl --mt-mode win --n 1000 $EVARGS --tag "[br-mtg3s$S]" > /root/br_mtg3s$S.log 2>&1
+read T1 F <<< $(python3 -c "
+import json; r=[json.loads(l) for l in open('/root/work/br_mtg3s$S.jsonl')]
+print(sum(x['correct'] for x in r if x['turn']==0), sum(x['correct'] for x in r if x['turn']==1))")
+echo "[mtg3chk] s$S bridge (win): turn 1 $T1/40, follow-up $F/40 (step 300: 25, 17)"
+SN=0; for i in 0 1 2; do env $ENV python3 /root/work/pool_eval.py /root/mtg3_s$S.safetensors /root/work/ev_$i.jsonl /root/work/mtg3s${S}st_$i.jsonl --n 34 $EVARGS --tag "[mtg3s${S}st$i]" > /root/mtg3s${S}st_$i.log 2>&1
+  c=$(python3 -c "import json;print(sum(bool(json.loads(l).get('correct')) for l in open('/root/work/mtg3s${S}st_$i.jsonl')))" 2>/dev/null || echo 0); SN=$((SN + c)); done
+echo "[mtg3chk] s$S single-turn: $SN/102 (step 300: 59)"
+wait $JP
+hf upload $R /root/work/br_mtg3s$S.jsonl pooler_distill/chatsft/multiturn/br_mtg3s$S.jsonl >/dev/null 2>&1
+if [ "$SN" -ge 56 ] && [ "$F" -ge 15 ]; then
+  echo "[mtg3chk] holding step 300's level: mtg3 resumes to 200 $(date -u +%H:%M)"; echo "MTG3_CONTINUE"
+  while pgrep -f "pool_eval.p[y]|online_loop.p[y]|memfit.p[y]" >/dev/null; do sleep 30; done
+  env SP_BASE=/root/gptq_hf_gq14 SP_NOSYS=1 SP_EPISODIC=1 OAI_KEY=$(cat /root/.oai 2>/dev/null) DSK_KEY=$(cat /root/.dsk 2>/dev/null) PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
+    python3 /root/work/online_loop.py /root/mtg1_s300.safetensors $OUT --pooler none --lora-layers all --lora-rank 16 --save-lora-only 1 \
+    --mt-items /root/work/mtg2_items.jsonl --heldout /root/work/eval300.jsonl --reason /root/work/dolphin_rft.jsonl --reason-every 4 --reason-g 8 \
+    --steps 200 --save-every 25 --lr 5e-6 --search-lr 5e-6 --search-temp 0.9 --search-gen 2000 --temp 0.6 --gen 3000 --budget 900 --maxsrch 7 --stop eos \
+    --judge-api openai --judge-model gpt-5-nano --w-talk 0.5 --dolphin-min 0 --adv-std 1 --pg-norm mean --kl 0 \
+    --guard 1 --guard-steps 20 >> /root/mtg3_run.log 2>&1
+  TAG=mtg3; CK=$OUT/latest.safetensors; S2=$(step)
+else
+  echo "[mtg3chk] below step 300's level: switch to mtg4 (teacher-checked correctness) $(date -u +%H:%M)"; echo "MTG3_SWITCH"
+  while pgrep -f "pool_eval.p[y]|online_loop.p[y]|memfit.p[y]" >/dev/null; do sleep 30; done
+  env SP_BASE=/root/gptq_hf_gq14 SP_NOSYS=1 SP_EPISODIC=1 OAI_KEY=$(cat /root/.oai 2>/dev/null) DSK_KEY=$(cat /root/.dsk 2>/dev/null) PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
+    python3 /root/work/online_loop.py /root/mtg1_s300.safetensors /root/online_mtg4 --pooler none --lora-layers all --lora-rank 16 --save-lora-only 1 \
+    --mt-items /root/work/mtg2_items.jsonl --heldout /root/work/eval300.jsonl --reason /root/work/dolphin_rft.jsonl --reason-every 4 --reason-g 8 \
+    --steps 200 --save-every 25 --lr 5e-6 --search-lr 5e-6 --search-temp 0.9 --search-gen 2000 --temp 0.6 --gen 3000 --budget 900 --maxsrch 7 --stop eos \
+    --judge-api openai --judge-model gpt-5-nano --judge-correct 1 --w-talk 0.5 --dolphin-min 0 --adv-std 1 --pg-norm mean --kl 0 \
+    --guard 1 --guard-steps 20 > /root/mtg4_run.log 2>&1
+  TAG=mtg4; OUT=/root/online_mtg4; CK=$OUT/latest.safetensors; S2=$(step)
+fi
+grep -E "ONLINE_|Error|Traceback" /root/${TAG}_run.log | tail -2 | cut -c1-250
+echo "[mtg3chk] $TAG stopped at step $S2 $(date -u +%H:%M)"
+[ -s $CK ] || { echo "MTG3CHK_JOB_DONE no checkpoint"; exit 1; }
+cp $CK /root/${TAG}_s$S2.safetensors; CK=/root/${TAG}_s$S2.safetensors; hf upload $R $CK pooler_distill/chatsft/multiturn/${TAG}_s$S2.safetensors >/dev/null 2>&1
+hf upload $R $OUT/rollouts.jsonl pooler_distill/chatsft/multiturn/${TAG}_rollouts.jsonl >/dev/null 2>&1
+env $ENV python3 /root/work/pool_eval.py $CK /root/work/eval300.jsonl /root/work/br_${TAG}s$S2.jsonl --multiturn /root/work/mt_eval_bridge.jsonl --mt-mode win --n 1000 $EVARGS --tag "[br-${TAG}s$S2]" > /root/br_${TAG}s$S2.log 2>&1
+echo "[mtg3chk] $TAG s$S2 bridge (win): $(python3 -c "
+import json; r=[json.loads(l) for l in open('/root/work/br_${TAG}s$S2.jsonl')]
+print('turn 1', sum(x['correct'] for x in r if x['turn']==0), '/40, follow-up', sum(x['correct'] for x in r if x['turn']==1), '/40')") (step 300: 25, 17)"
+SN=0; for i in 0 1 2; do env $ENV python3 /root/work/pool_eval.py $CK /root/work/ev_$i.jsonl /root/work/${TAG}s${S2}st_$i.jsonl --n 34 $EVARGS --tag "[${TAG}s${S2}st$i]" > /root/${TAG}s${S2}st_$i.log 2>&1
+  c=$(python3 -c "import json;print(sum(bool(json.loads(l).get('correct')) for l in open('/root/work/${TAG}s${S2}st_$i.jsonl')))" 2>/dev/null || echo 0); SN=$((SN + c)); done
+echo "[mtg3chk] $TAG s$S2 single-turn: $SN/102 (step 300: 59)"
+env SP_BASE=/root/gptq_hf_gq14 SP_NOSYS=1 SP_EPISODIC=1 OMP_NUM_THREADS=1 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python3 /root/work/online_loop.py $CK /root/evalrun_dl_${TAG}s$S2 \
+  --questions /root/work/eval300.jsonl --dolphin /root/work/dolphin_v1.jsonl --heldout /root/work/eval300.jsonl \
+  --b 12 --gen 7000 --budget 2400 --temp 0.6 --maxsrch 7 --pooler none --lora-rank 16 --lora-layers all --stop eos --loop-break answer \
+  --eval-file /root/work/dolphinq.jsonl --eval-out /root/work/dl_${TAG}s$S2.jsonl > /root/dl_${TAG}s$S2.log 2>&1
+[ -s /root/dl_judge.py ] && OAI_KEY=$(cat /root/.oai 2>/dev/null) python3 /root/dl_judge.py /root/work/dl_${TAG}s$S2.jsonl ${TAG}s$S2 | sed 's/\[mix0\]/[mtg3chk]/'
+echo "MTG3CHK_JOB_DONE $(date -u)"
+MC
+  setsid nohup bash -c 'bash /root/mtg3chkkeep.sh 2>&1 | tee -a /root/mtg3chk.log' >> /proc/1/fd/1 2>&1 < /dev/null 9>&- &
+  echo "MTG3CHK_LAUNCHED $(date -u)"
+fi
 # ---- mtg3 (2026-10-03 15:00 JST, the user: GRPO with reasoning mixed in, mtg2's failure fixed). mtg2 (step 300 on
 # switch + bridge, every step a search turn, lr 1e-5) rolled back at step 56 (unfinished 22% vs 7%, searches 3.2 vs
 # 2.1, pass 15% vs 39%) and lost Dolphin 54 -> 49. mtg3, from step 300: one step in four is a Dolphin reasoning
@@ -2132,6 +2234,7 @@ while :; do
     echo "--- qt.log (tail) ---"; tail -n 4 /root/qt.log 2>/dev/null | cut -c1-300
     echo "--- pqjudge.log (tail) ---"; tail -n 5 /root/pqjudge.log 2>/dev/null | cut -c1-200
     echo "--- du_list ---"; cat /root/du_list.txt 2>/dev/null | head -42
+    echo "--- mtg3chk.log (tail) ---"; tail -n 24 /root/mtg3chk.log 2>/dev/null | cut -c1-250; grep -E "^\[step|ONLINE_" /root/mtg4_run.log 2>/dev/null | tail -n 3 | cut -c1-250
     echo "--- mtg3.log (tail) ---"; tail -n 8 /root/mtg3.log 2>/dev/null | cut -c1-250; grep -E "^\[step|^\[guard|ONLINE_" /root/mtg3_run.log 2>/dev/null | tail -n 4 | cut -c1-250
     echo "--- memwin.log (tail) ---"; tail -n 4 /root/memwin.log 2>/dev/null | cut -c1-250; for f in /root/br_win2.log /root/br_none.log; do grep "dialog" $f 2>/dev/null | tail -n 1 | cut -c1-250; done
     echo "--- memcap2.log (tail) ---"; tail -n 4 /root/memcap2.log 2>/dev/null | cut -c1-250
