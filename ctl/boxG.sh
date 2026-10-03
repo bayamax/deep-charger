@@ -80,7 +80,7 @@ PSKIP=
 # The raw GitHub copy this box fetches can lag and hand a control run an OLDER version of this file (04:48 on 09-22 it
 # relaunched the online loop under the previous mode while the newer run was merging a checkpoint on the same card).
 # Every edit bumps BOXG_SERIAL; a run that sees a lower serial than one already executed stops here.
-BOXG_SERIAL=2026100311
+BOXG_SERIAL=2026100312
 if [ -f /root/.boxg_serial ] && [ "$(cat /root/.boxg_serial)" -gt "$BOXG_SERIAL" ] 2>/dev/null; then echo "BOXG_STALE $BOXG_SERIAL < $(cat /root/.boxg_serial)"; exit 0; fi
 echo $BOXG_SERIAL > /root/.boxg_serial
 MODE=idle         # 2026-09-29: the side jobs hold the card (multi-turn measurement and training); a finished reeval re-launched on every control run and killed their evaluators
@@ -1125,6 +1125,21 @@ fi
 # ---- 2026-10-03 16:50 JST: disk at 94%; list the biggest items once (no deletion here)
 if [ ! -e /root/.du_list1 ]; then touch /root/.du_list1
   { echo "DU_LIST $(date -u)"; du -xsh /root/* /root/work/* 2>/dev/null | sort -rh | head -40; } > /root/du_list.txt 2>&1
+fi
+# ---- 2026-10-03 20:20 JST (the user: is mtg3 failing? find out why): mtg3's rollouts and run log so far, plus mtg1's
+# and mtg2's rollouts, on the hub for the analysis (once)
+if [ ! -e /root/.mtg3_snap1 ]; then touch /root/.mtg3_snap1
+  ( HF_TOKEN=$(tr -d "[:space:]" < /root/.hf_token 2>/dev/null); export HF_TOKEN; RR=baya1116/hypernet-sp-distill
+    cp /root/online_mtg3/rollouts.jsonl /root/mtg3_roll_snap.jsonl; cp /root/mtg3_run.log /root/mtg3_run_snap.log
+    hf upload $RR /root/mtg3_roll_snap.jsonl pooler_distill/chatsft/multiturn/analysis/mtg3_rollouts_snap.jsonl >/dev/null 2>&1
+    hf upload $RR /root/mtg3_run_snap.log pooler_distill/chatsft/multiturn/analysis/mtg3_run_snap.log >/dev/null 2>&1
+    [ -s /root/online_mtg2/rollouts.jsonl ] && hf upload $RR /root/online_mtg2/rollouts.jsonl pooler_distill/chatsft/multiturn/analysis/mtg2_rollouts.jsonl >/dev/null 2>&1
+    [ -s /root/online_mtg1/rollouts.jsonl ] && hf upload $RR /root/online_mtg1/rollouts.jsonl pooler_distill/chatsft/multiturn/analysis/mtg1_rollouts.jsonl >/dev/null 2>&1
+    hf upload $RR /root/work/mtg2_items.jsonl pooler_distill/chatsft/multiturn/analysis/mtg2_items.jsonl >/dev/null 2>&1
+    hf upload $RR /root/work/mt_train_bridge.jsonl pooler_distill/chatsft/multiturn/analysis/mt_train_bridge.jsonl >/dev/null 2>&1
+    hf upload $RR /root/mtg2_run.log pooler_distill/chatsft/multiturn/analysis/mtg2_run.log >/dev/null 2>&1
+    hf upload $RR /root/mtg1_run.log pooler_distill/chatsft/multiturn/analysis/mtg1_run.log >/dev/null 2>&1
+    echo "MTG3_SNAP_UP $(date -u)" >> /root/mtg3.log ) > /dev/null 2>&1 &
 fi
 # ---- mtg3 (2026-10-03 15:00 JST, the user: GRPO with reasoning mixed in, mtg2's failure fixed). mtg2 (step 300 on
 # switch + bridge, every step a search turn, lr 1e-5) rolled back at step 56 (unfinished 22% vs 7%, searches 3.2 vs
