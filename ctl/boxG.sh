@@ -80,7 +80,7 @@ PSKIP=
 # The raw GitHub copy this box fetches can lag and hand a control run an OLDER version of this file (04:48 on 09-22 it
 # relaunched the online loop under the previous mode while the newer run was merging a checkpoint on the same card).
 # Every edit bumps BOXG_SERIAL; a run that sees a lower serial than one already executed stops here.
-BOXG_SERIAL=2026100315
+BOXG_SERIAL=2026100316
 if [ -f /root/.boxg_serial ] && [ "$(cat /root/.boxg_serial)" -gt "$BOXG_SERIAL" ] 2>/dev/null; then echo "BOXG_STALE $BOXG_SERIAL < $(cat /root/.boxg_serial)"; exit 0; fi
 echo $BOXG_SERIAL > /root/.boxg_serial
 MODE=idle         # 2026-09-29: the side jobs hold the card (multi-turn measurement and training); a finished reeval re-launched on every control run and killed their evaluators
@@ -1140,6 +1140,86 @@ if [ ! -e /root/.mtg3_snap1 ]; then touch /root/.mtg3_snap1
     hf upload $RR /root/mtg2_run.log pooler_distill/chatsft/multiturn/analysis/mtg2_run.log >/dev/null 2>&1
     hf upload $RR /root/mtg1_run.log pooler_distill/chatsft/multiturn/analysis/mtg1_run.log >/dev/null 2>&1
     echo "MTG3_SNAP_UP $(date -u)" >> /root/mtg3.log ) > /dev/null 2>&1 &
+fi
+# ---- moreq (2026-10-04 09:30 JST, the user: screen the GRPO candidate on more questions). mtg3 step 100 against
+# step 300 (the current app candidate), both under the app's memory spec (win): (1) 100 NEW held-out follow-up
+# dialogues written from eval300 seeds not used by mt_eval (API); (2) all 30 switch chains (s300's win file resumes
+# from its 12); (3) the full single-turn 300 (the 102-question files resume, so only the other 198 run). After dl100.
+if ! pgrep -f "moreqkee[p].sh" >/dev/null && ! grep -q "MOREQ_JOB_DONE" /root/moreq.log 2>/dev/null; then
+  cat > /root/moreqkeep.sh <<'MQ'
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); R=baya1116/hypernet-sp-distill; cd /root/work
+ENV="SP_BASE=/root/gptq_hf_gq14 SP_RANK=16 SP_NOSYS=1 SP_EPISODIC=1 OMP_NUM_THREADS=1 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True"
+EVARGS="--rw 768 --maxd 384 --samepage 1 --decode plain --temp 0.6 --gen 4000 --stop eos --replycap 600"
+# (1) new follow-up dialogues, API only, started now
+( python3 - <<'PYX'
+import json
+ex = set()
+for f in ("/root/work/mt_eval.jsonl", "/root/work/mt_eval_chain.jsonl", "/root/work/mt_train.jsonl", "/root/work/mt_train_br2.jsonl", "/root/work/mt_train_bridge.jsonl"):
+    try:
+        for l in open(f):
+            d = json.loads(l); ex.add((d.get("seed") or "").strip()); ex |= {t["q"].strip() for t in d.get("turns", [])}
+    except FileNotFoundError: pass
+open("/root/work/mt_exclude2.jsonl", "w").write("".join(json.dumps({"q": q}) + "\n" for q in ex if q))
+print(f"[moreq] {len(ex)} questions excluded as seeds")
+PYX
+  DSK_KEY=$(cat /root/.dsk 2>/dev/null) OAI_KEY=$(cat /root/.oai 2>/dev/null) python3 /root/work/mt_gen.py --seeds /root/work/eval300.jsonl --exclude /root/work/mt_exclude2.jsonl --out /root/work/mt_eval_bridge2_raw.jsonl --n-bridge 100 --n-memory 0 --n-switch 0 --seed 21 2>&1 | grep -E "^\[mtgen\]|MTGEN_DONE|Error|Traceback"
+  python3 - <<'PYY'
+import json
+old = set()
+for l in open("/root/work/mt_eval.jsonl"):
+    d = json.loads(l); old |= {t["q"].strip() for t in d["turns"]}; old.add((d.get("seed") or "").strip())
+out = []
+try:
+    for l in open("/root/work/mt_eval_bridge2_raw.jsonl"):
+        d = json.loads(l)
+        if d.get("kind") == "bridge" and len(d.get("turns", [])) == 2 and not any(t["q"].strip() in old for t in d["turns"]): out.append(d)
+except FileNotFoundError: pass
+open("/root/work/mt_eval_bridge2.jsonl", "w").write("".join(json.dumps(d, ensure_ascii=False) + "\n" for d in out))
+print(f"[moreq] bridge2: {len(out)} new held-out follow-up dialogues")
+PYY
+  hf upload $R /root/work/mt_eval_bridge2.jsonl pooler_distill/chatsft/multiturn/mt_eval_bridge2.jsonl >/dev/null 2>&1 ) &
+GEN=$!
+until grep -q "DL100_JOB_DONE" /root/dl100.log 2>/dev/null; do sleep 60; done
+while pgrep -f "pool_eval.p[y]|online_loop.p[y]|memfit.p[y]" >/dev/null; do sleep 30; done
+wait $GEN
+tally() { python3 - "$1" "$2" <<'PY2'
+import json, sys
+r = [json.loads(l) for l in open(sys.argv[1])]
+t1 = [x for x in r if x["turn"] == 0]; t2 = [x for x in r if x["turn"] == 1]
+print(f"[moreq] {sys.argv[2]}: turn 1 {sum(x['correct'] for x in t1)}/{len(t1)}, follow-up {sum(x['correct'] for x in t2)}/{len(t2)}", flush=True)
+PY2
+}
+for arm in "s100:/root/mtg3_s100.safetensors" "s300:/root/mtg1_s300.safetensors"; do T=${arm%%:*}; CK=${arm#*:}
+  [ -s /root/work/mt_eval_bridge2.jsonl ] && {
+  env $ENV python3 /root/work/pool_eval.py $CK /root/work/eval300.jsonl /root/work/br2_$T.jsonl --multiturn /root/work/mt_eval_bridge2.jsonl --mt-mode win --n 1000 $EVARGS --tag "[br2-$T]" > /root/br2_$T.log 2>&1
+  grep -E "Traceback|Error" /root/br2_$T.log | tail -1 | cut -c1-160; tally /root/work/br2_$T.jsonl "bridge2 (win) $T"
+  hf upload $R /root/work/br2_$T.jsonl pooler_distill/chatsft/multiturn/br2_$T.jsonl >/dev/null 2>&1; }
+done
+for arm in "s100:/root/mtg3_s100.safetensors:/root/work/mc_win_s100.jsonl" "s300:/root/mtg1_s300.safetensors:/root/work/mc_win.jsonl"; do T=${arm%%:*}; r=${arm#*:}; CK=${r%%:*}; F=${r#*:}
+  env $ENV python3 /root/work/pool_eval.py $CK /root/work/eval300.jsonl $F --multiturn /root/work/mt_eval_chain.jsonl --mt-mode win --n 1000 $EVARGS --tag "[chain-win-$T]" > /root/chainwin_$T.log 2>&1
+  echo "[moreq] chains (win) $T: $(grep -E 'EVAL_DONE|Traceback' /root/chainwin_$T.log | tail -1 | cut -c1-160); $(python3 -c "
+import json; c=[0]*4
+for l in open('$F'):
+    r=json.loads(l); c[r['turn']]+=bool(r['correct'])
+print('per turn', c, 'turns 2-4', sum(c[1:]), '/90 (full-history s300: 21 18 17 17 -> 52)')")"
+  hf upload $R $F pooler_distill/chatsft/multiturn/$(basename $F) >/dev/null 2>&1
+done
+for arm in "s100:/root/mtg3_s100.safetensors:mtg3s100st" "s300:/root/mtg1_s300.safetensors:mtg1s300st"; do T=${arm%%:*}; r=${arm#*:}; CK=${r%%:*}; P=${r#*:}
+  SN=0; NN=0
+  for i in 0 1 2; do
+    F=$(ls /root/work/${P}_$i.jsonl /root/work/${P}_out_$i.jsonl 2>/dev/null | head -1); [ -n "$F" ] || F=/root/work/${P}_full_$i.jsonl
+    env $ENV python3 /root/work/pool_eval.py $CK /root/work/ev_$i.jsonl $F --n 100 $EVARGS --tag "[${P}full$i]" > /root/${P}full_$i.log 2>&1
+    read c n <<< $(python3 -c "
+import json; r=[json.loads(l) for l in open('$F')]; print(sum(bool(x.get('correct')) for x in r), len(r))"); SN=$((SN + c)); NN=$((NN + n))
+    echo "[moreq] single $T shard $i: $c/$n ($(grep -E 'EVAL_DONE|Traceback' /root/${P}full_$i.log | tail -1 | cut -c1-120))"
+    hf upload $R $F pooler_distill/chatsft/multiturn/${P}_full_$i.jsonl >/dev/null 2>&1
+  done
+  echo "[moreq] single-turn $T: $SN/$NN"
+done
+echo "MOREQ_JOB_DONE $(date -u)"
+MQ
+  setsid nohup bash -c 'bash /root/moreqkeep.sh 2>&1 | tee -a /root/moreq.log' >> /proc/1/fd/1 2>&1 < /dev/null 9>&- &
+  echo "MOREQ_LAUNCHED $(date -u)"
 fi
 # ---- dl100 (2026-10-04 08:40 JST): step 100 is mtg3's best screen (64/102, 19/40) and the candidate; it lacks the
 # Dolphin reasoning screen (only 200 got it). Run it after mtg3chk.
@@ -2296,6 +2376,7 @@ while :; do
     echo "--- qt.log (tail) ---"; tail -n 4 /root/qt.log 2>/dev/null | cut -c1-300
     echo "--- pqjudge.log (tail) ---"; tail -n 5 /root/pqjudge.log 2>/dev/null | cut -c1-200
     echo "--- du_list ---"; cat /root/du_list.txt 2>/dev/null | head -42
+    echo "--- moreq.log (tail) ---"; tail -n 14 /root/moreq.log 2>/dev/null | cut -c1-250
     echo "--- dl100.log (tail) ---"; tail -n 3 /root/dl100.log 2>/dev/null | cut -c1-250
     echo "--- mtg3b.log (tail) ---"; tail -n 6 /root/mtg3b.log 2>/dev/null | cut -c1-250
     echo "--- mtg3chk.log (tail) ---"; tail -n 24 /root/mtg3chk.log 2>/dev/null | cut -c1-250; grep -E "^\[step|ONLINE_" /root/mtg4_run.log 2>/dev/null | tail -n 3 | cut -c1-250
