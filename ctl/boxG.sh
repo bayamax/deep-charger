@@ -80,7 +80,7 @@ PSKIP=
 # The raw GitHub copy this box fetches can lag and hand a control run an OLDER version of this file (04:48 on 09-22 it
 # relaunched the online loop under the previous mode while the newer run was merging a checkpoint on the same card).
 # Every edit bumps BOXG_SERIAL; a run that sees a lower serial than one already executed stops here.
-BOXG_SERIAL=2026100316
+BOXG_SERIAL=2026100317
 if [ -f /root/.boxg_serial ] && [ "$(cat /root/.boxg_serial)" -gt "$BOXG_SERIAL" ] 2>/dev/null; then echo "BOXG_STALE $BOXG_SERIAL < $(cat /root/.boxg_serial)"; exit 0; fi
 echo $BOXG_SERIAL > /root/.boxg_serial
 MODE=idle         # 2026-09-29: the side jobs hold the card (multi-turn measurement and training); a finished reeval re-launched on every control run and killed their evaluators
@@ -1140,6 +1140,58 @@ if [ ! -e /root/.mtg3_snap1 ]; then touch /root/.mtg3_snap1
     hf upload $RR /root/mtg2_run.log pooler_distill/chatsft/multiturn/analysis/mtg2_run.log >/dev/null 2>&1
     hf upload $RR /root/mtg1_run.log pooler_distill/chatsft/multiturn/analysis/mtg1_run.log >/dev/null 2>&1
     echo "MTG3_SNAP_UP $(date -u)" >> /root/mtg3.log ) > /dev/null 2>&1 &
+fi
+# ---- moreq2 (2026-10-04 12:50 JST): mt_gen wrote 0 of the 100 new follow-up dialogues (every DeepSeek call failed;
+# searchq got 1/500 the same way on 10-02). Check the DeepSeek key once (status only), and write the dialogues with
+# the OpenAI model instead (mt_gen --api openai). Their evaluation (s100, s300 under win) runs once moreq's chains are
+# done, beside its single-turn pass when the card has room.
+if [ ! -e /root/.dsk_check ]; then touch /root/.dsk_check
+  echo "DSK_CHECK http $(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $(tr -d '[:space:]' < /root/.dsk 2>/dev/null)" https://api.deepseek.com/user/balance) $(date -u)"
+fi
+if ! pgrep -f "moreq2kee[p].sh" >/dev/null && ! grep -q "MOREQ2_JOB_DONE" /root/moreq2.log 2>/dev/null; then
+  cat > /root/moreq2keep.sh <<'MQ'
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); R=baya1116/hypernet-sp-distill; cd /root/work
+ENV="SP_BASE=/root/gptq_hf_gq14 SP_RANK=16 SP_NOSYS=1 SP_EPISODIC=1 OMP_NUM_THREADS=1 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True"
+EVARGS="--rw 768 --maxd 384 --samepage 1 --decode plain --temp 0.6 --gen 4000 --stop eos --replycap 600"
+curl -sSf -o /root/work/mt_gen.py "https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl/mt_gen.py?$(date +%s)"
+grep -q -- "--api" /root/work/mt_gen.py || { echo "MOREQ2_JOB_DONE mt_gen has no --api"; exit 1; }
+[ -s /root/work/mt_exclude2.jsonl ] || { until [ -s /root/work/mt_exclude2.jsonl ]; do sleep 30; done; }
+python3 /root/work/mt_gen.py --api openai --model gpt-5-nano --seeds /root/work/eval300.jsonl --exclude /root/work/mt_exclude2.jsonl --out /root/work/mt_eval_bridge2_raw.jsonl --n-bridge 100 --n-memory 0 --n-switch 0 --seed 21 2>&1 | grep -E "^\[mtgen\]|MTGEN_DONE|Error|Traceback" | cut -c1-200
+python3 - <<'PYY'
+import json
+old = set()
+for l in open("/root/work/mt_eval.jsonl"):
+    d = json.loads(l); old |= {t["q"].strip() for t in d["turns"]}; old.add((d.get("seed") or "").strip())
+out = []
+try:
+    for l in open("/root/work/mt_eval_bridge2_raw.jsonl"):
+        d = json.loads(l)
+        if d.get("kind") == "bridge" and len(d.get("turns", [])) == 2 and not any(t["q"].strip() in old for t in d["turns"]): out.append(d)
+except FileNotFoundError: pass
+open("/root/work/mt_eval_bridge2.jsonl", "w").write("".join(json.dumps(d, ensure_ascii=False) + "\n" for d in out))
+print(f"[moreq2] bridge2: {len(out)} new held-out follow-up dialogues", flush=True)
+for d in out[:3]: print("[moreq2]   " + " -> ".join(t["q"][:70] for t in d["turns"]), flush=True)
+PYY
+hf upload $R /root/work/mt_eval_bridge2.jsonl pooler_distill/chatsft/multiturn/mt_eval_bridge2.jsonl >/dev/null 2>&1
+[ -s /root/work/mt_eval_bridge2.jsonl ] || { echo "MOREQ2_JOB_DONE no dialogues"; exit 1; }
+until grep -q "chains (win) s300" /root/moreq.log 2>/dev/null || grep -q "MOREQ_JOB_DONE" /root/moreq.log 2>/dev/null; do sleep 60; done
+until [ "$(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits | head -1)" -lt 8500 ]; do sleep 60; done
+tally() { python3 - "$1" "$2" <<'PY2'
+import json, sys
+r = [json.loads(l) for l in open(sys.argv[1])]
+t1 = [x for x in r if x["turn"] == 0]; t2 = [x for x in r if x["turn"] == 1]
+print(f"[moreq2] {sys.argv[2]}: turn 1 {sum(x['correct'] for x in t1)}/{len(t1)}, follow-up {sum(x['correct'] for x in t2)}/{len(t2)}", flush=True)
+PY2
+}
+for arm in "s100:/root/mtg3_s100.safetensors" "s300:/root/mtg1_s300.safetensors"; do T=${arm%%:*}; CK=${arm#*:}
+  env $ENV python3 /root/work/pool_eval.py $CK /root/work/eval300.jsonl /root/work/br2_$T.jsonl --multiturn /root/work/mt_eval_bridge2.jsonl --mt-mode win --n 1000 $EVARGS --tag "[br2-$T]" > /root/br2_$T.log 2>&1
+  grep -E "Traceback|Error" /root/br2_$T.log | tail -1 | cut -c1-160; tally /root/work/br2_$T.jsonl "bridge2 (win) $T"
+  hf upload $R /root/work/br2_$T.jsonl pooler_distill/chatsft/multiturn/br2_$T.jsonl >/dev/null 2>&1
+done
+echo "MOREQ2_JOB_DONE $(date -u)"
+MQ
+  setsid nohup bash -c 'bash /root/moreq2keep.sh 2>&1 | tee -a /root/moreq2.log' >> /proc/1/fd/1 2>&1 < /dev/null 9>&- &
+  echo "MOREQ2_LAUNCHED $(date -u)"
 fi
 # ---- moreq (2026-10-04 09:30 JST, the user: screen the GRPO candidate on more questions). mtg3 step 100 against
 # step 300 (the current app candidate), both under the app's memory spec (win): (1) 100 NEW held-out follow-up
@@ -2376,6 +2428,7 @@ while :; do
     echo "--- qt.log (tail) ---"; tail -n 4 /root/qt.log 2>/dev/null | cut -c1-300
     echo "--- pqjudge.log (tail) ---"; tail -n 5 /root/pqjudge.log 2>/dev/null | cut -c1-200
     echo "--- du_list ---"; cat /root/du_list.txt 2>/dev/null | head -42
+    echo "--- moreq2.log (tail) ---"; tail -n 8 /root/moreq2.log 2>/dev/null | cut -c1-250
     echo "--- moreq.log (tail) ---"; tail -n 14 /root/moreq.log 2>/dev/null | cut -c1-250
     echo "--- dl100.log (tail) ---"; tail -n 3 /root/dl100.log 2>/dev/null | cut -c1-250
     echo "--- mtg3b.log (tail) ---"; tail -n 6 /root/mtg3b.log 2>/dev/null | cut -c1-250
