@@ -8,7 +8,7 @@ cd /root
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null)
 R=baya1116/hypernet-sp-distill
 RAW="https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl"
-BOXI_SERIAL=36
+BOXI_SERIAL=37
 if [ -f /root/.boxi_serial ] && [ "$(cat /root/.boxi_serial)" -gt "$BOXI_SERIAL" ] 2>/dev/null; then echo "BOXI_STALE $BOXI_SERIAL"; exit 0; fi
 echo $BOXI_SERIAL > /root/.boxi_serial
 mkdir -p /root/sb /root/work
@@ -765,5 +765,50 @@ if [ ! -e /root/.cos1 ]; then touch /root/.cos1
 fi
 # the cosine log in full (the mirror cuts long lines)
 if [ ! -e /root/.cos1_up ] && grep -q COS_DONE /root/sb_cos.log 2>/dev/null; then touch /root/.cos1_up; hf upload $R /root/sb_cos.log sentbart/audit/cos.log >/dev/null 2>&1; echo "COS_UP $(date -u)"; fi
+# ---- abl2 (2026-10-04 15:10 JST, the user: the page vector suffered because it was measured unlike it was trained, not
+# because 30% hidden is wrong to train on - widen it step by step). Once abl's four arms are in ("best arm"), abl's
+# 100k stage is stopped and two more 30k arms run from the same 55.1 start:
+#   ramp     page pass: one sentence hidden at first, widening to 30% over 20k steps (every hidden sentence queries)
+#   maskcur  one32 + the sentence losses' hidden share growing 15% -> 50% over 20k
+# then the best of all six arms runs 100k from its own best weights, chained while a segment adds a point.
+if ! pgrep -f "abl2kee[p].sh" >/dev/null && ! grep -q "ABL2_JOB_DONE" /root/sb_abl2.log 2>/dev/null; then
+  cat > /root/abl2keep.sh <<'RK'
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); R=baya1116/hypernet-sp-distill; D=/root/sb/data/docs; cd /root/sb
+until grep -qE "best arm|ABL_JOB_DONE" /root/sb_abl.log 2>/dev/null; do sleep 60; done
+pkill -f "ablkee[p].sh"; pkill -f "python3 /root/sb/train.py --data /root/sb/data/docs --init /root/sb/abl_"; pkill -f "python3 /root/sb/train.py .*--out /root/sb/run4r"; sleep 10
+echo "ABL_JOB_DONE stopped by abl2 before its 100k stage $(date -u)" >> /root/sb_abl.log
+curl -sSf -o /root/sb/train.py "https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl/sentbart/train.py?$(date +%s)" || echo "[abl2] train.py fetch failed"
+grep -q "page-ramp-max" /root/sb/train.py || { echo "ABL2_JOB_DONE train.py has no ramp"; exit 1; }
+bestof() { grep -h "^\[best\]" /root/sb/$1/train.log 2>/dev/null | tail -1 | sed -E 's/.*page_top1 ([0-9.]+).*/\1/'; }
+evals() { grep -hoE "^\[eval [0-9]+\] page_top1 [0-9.]+" /root/sb/$1/train.log 2>/dev/null | sed -E 's/\[eval ([0-9]+)\] page_top1 ([0-9.]+)/\1:\2/' | tr '\n' ' '; }
+COMMON="--data $D --eval-shard 001 --seq 128 --d 512 --layers 8 --heads 8 --ffn 2048 --warmup 1000 --eval-every 10000 --save-every 10000 --page 1 --page-queue 64 --skip-grad 100"
+declare -A CFG=( [one32]="--batch 32 --lr 3e-5 --page-input one" [one64]="--batch 64 --lr 3e-5 --page-input one" [lr1e4]="--batch 32 --lr 1e-4" [one32w2]="--batch 32 --lr 3e-5 --page-input one --w-page 2" \
+                 [ramp]="--batch 32 --lr 3e-5 --page-input ramp --page-ramp-max 0.3 --page-ramp-steps 20000" [maskcur]="--batch 32 --lr 3e-5 --page-input one --mask-start 0.15 --mask 0.5 --mask-ramp-steps 20000" )
+for a in ramp maskcur; do
+  n=abl_$a; rm -rf /root/sb/$n; echo "[abl2] $a: ${CFG[$a]} $(date -u +%H:%M)"
+  python3 /root/sb/train.py $COMMON --init /root/sb/run4h1/model_best.pt --out /root/sb/$n --steps 30000 ${CFG[$a]} 2>&1 | grep -E "^\[model|TRAIN_DONE|Error|Traceback|out of memory"
+  hf upload $R /root/sb/$n/train.log sentbart/abl/$a/train.log >/dev/null 2>&1; rm -f /root/sb/$n/state.pt
+  echo "[abl2] $a done: $(evals $n)| best $(bestof $n) (control run4h1: 10000:0.537 20000:0.540 30000:0.543; one32 best 0.581)"
+done
+best=""; bestv=0
+for a in one32 one64 lr1e4 one32w2 ramp maskcur; do v=$(bestof abl_$a); [ -n "$v" ] && [ -s /root/sb/abl_$a/model_best.pt ] && python3 -c "import sys; sys.exit(0 if float('$v') > float('$bestv') else 1)" && { best=$a; bestv=$v; }; done
+echo "[abl2] best of six: $best at $bestv"
+[ -n "$best" ] || { echo "ABL2_JOB_DONE no arm"; exit 1; }
+prev=/root/sb/abl_$best/model_best.pt; base=$bestv
+for i in 1 2 3; do
+  n=run4s$i; rm -rf /root/sb/$n; echo "[abl2] $n: $best recipe 100k from $prev (top-1 $base) $(date -u +%H:%M)"
+  ( while sleep 1800; do hf upload $R /root/sb/$n/train.log sentbart/small_$n/train.log >/dev/null 2>&1; done ) & UP=$!
+  python3 /root/sb/train.py $COMMON --init $prev --out /root/sb/$n --steps 100000 ${CFG[$best]} 2>&1 | grep -E "^\[model|^\[best|TRAIN_DONE|Error|Traceback|out of memory"
+  kill $UP 2>/dev/null; hf upload $R /root/sb/$n/train.log sentbart/small_$n/train.log >/dev/null 2>&1; hf upload $R /root/sb/$n/model_best.pt sentbart/small_$n/model_best.pt >/dev/null 2>&1
+  rm -f /root/sb/$n/state.pt
+  cur=$(bestof $n); cur=${cur:-0}; echo "[abl2] $n done: best page top-1 $cur (from $base)"
+  python3 -c "import sys; sys.exit(0 if float('$cur') - float('$base') >= 0.01 else 1)" || { echo "PLATEAU_ABL2 at $n: best $cur vs $base"; break; }
+  prev=/root/sb/$n/model_best.pt; base=$cur
+done
+echo "ABL2_JOB_DONE $(date -u)"
+RK
+  setsid nohup bash -c 'bash /root/abl2keep.sh 2>&1 | tee -a /root/sb_abl2.log' > /dev/null 2>&1 < /dev/null &
+  echo "ABL2_LAUNCHED $(date -u)"
+fi
 echo "BOXI_OK serial $BOXI_SERIAL $(date -u)"
 # CTL-END

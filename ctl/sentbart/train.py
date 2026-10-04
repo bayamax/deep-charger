@@ -37,7 +37,11 @@ ap.add_argument("--eval-shard", default="", help="the held-out shard's key (e.g.
 ap.add_argument("--page", type=int, default=0, help="1: a page token in front of the encoder whose output is the document's vector, trained so each hidden sentence finds its own document's vector among the batch's (sentence -> page retrieval)")
 ap.add_argument("--w-page", type=float, default=1.0)
 ap.add_argument("--page-res", type=int, default=0, help="1: page vector = normalise(mean of the visible sentence vectors + page_head(page token)), the head starting at zero - it starts at the mean baseline and learns the difference")
-ap.add_argument("--page-input", default="mask", choices=["mask", "one"], help="what the page token reads while training. mask: the same 30%%-hidden document the sentence losses use (so the page vector is learned from a document a third of which is missing); one: a second encoder pass over the document with exactly ONE sentence hidden - the condition the retrieval is measured in - and that sentence is the query")
+ap.add_argument("--page-ramp-max", type=float, default=0.3, help="--page-input ramp: the share of sentences hidden from the page pass at the end of the ramp")
+ap.add_argument("--page-ramp-steps", type=int, default=20000, help="--page-input ramp: steps over which the hidden share grows from one sentence to --page-ramp-max")
+ap.add_argument("--mask-start", type=float, default=-1.0, help=">=0: curriculum for the sentence losses - the hidden share grows from this to --mask over --mask-ramp-steps (span mode)")
+ap.add_argument("--mask-ramp-steps", type=int, default=20000)
+ap.add_argument("--page-input", default="mask", choices=["mask", "one", "ramp"], help="what the page token reads while training. mask: the same 30%%-hidden document the sentence losses use (so the page vector is learned from a document a third of which is missing); one: a second encoder pass over the document with exactly ONE sentence hidden - the condition the retrieval is measured in - and that sentence is the query")
 ap.add_argument("--page-pool", default="token", help="token: the page token's output; mean: the mean of the encoder's outputs over the visible sentences (both through page_head, no input mean)")
 ap.add_argument("--init", default="", help="a model_*.pt to start from (weights only; fresh optimizer and schedule) when --out has no state")
 ap.add_argument("--eval-only", type=int, default=0, help="1: evaluate the --init weights once (with the page recall curve) and exit")
@@ -101,7 +105,8 @@ def make_batch(items, mode="mix"):
             j = random.randint(1, n - 1); masked[i, j] = True; cut[i] = j; continue
         if mode == "suffix" or (mode == "mix" and random.random() < A.p_suffix):
             k = random.randint(max(1, n // 4), max(1, (3 * n) // 4)); masked[i, k:n] = True; cut[i] = k; continue
-        budget = max(1, int(round(A.mask * n)))
+        mfrac = A.mask if (A.mask_start < 0 or mode != "mix") else A.mask_start + (A.mask - A.mask_start) * min(1.0, STEP[0] / max(1, A.mask_ramp_steps))
+        budget = max(1, int(round(mfrac * n)))
         tries = 0
         while masked[i, :n].sum() < budget and tries < 100:
             ln = max(1, np.random.poisson(A.span)); st = random.randint(0, max(0, n - ln))
@@ -267,6 +272,13 @@ def losses(x, valid, masked):
     LP[0] = torch.zeros((), device=DEV)
     if A.page:                                         # each hidden sentence must find its own document's page vector
         q = x[masked].float(); doc = torch.nonzero(masked)[:, 0]
+        if A.page_input == "ramp" and model.training:  # one sentence hidden at first, widening to --page-ramp-max of the document
+            n = valid.sum(1); frac = A.page_ramp_max * min(1.0, STEP[0] / max(1, A.page_ramp_steps))
+            k = torch.clamp((frac * n.float()).round().long(), min=1); k = torch.minimum(k, (n - 1).clamp_min(1))
+            rr = torch.rand(valid.shape, device=DEV).masked_fill(~valid, 2.0); rank = rr.argsort(1).argsort(1)
+            hide = (rank < k[:, None]) & valid
+            model.encode(x, valid, hide)
+            q = x[hide].float(); doc = torch.nonzero(hide)[:, 0]
         if A.page_input == "one" and model.training:   # the page vector from the measured condition: one sentence hidden, that sentence asks
             n = valid.sum(1); j = torch.where(n > 1, 1 + (torch.rand(len(n), device=DEV) * (n - 1).clamp_min(1)).long().clamp(max=(n - 1).clamp_min(1)), torch.zeros_like(n))
             one = torch.zeros_like(masked); one[torch.arange(len(n), device=DEV), j] = True; one &= valid
@@ -287,7 +299,7 @@ def losses(x, valid, masked):
     return le, ld, lge, lgd, pos
 
 
-LP = [None]; PQ = []; PQI = []; R_CURVE = {}; SKIPPED = [0]; BEST = [-1.0]
+LP = [None]; PQ = []; PQI = []; R_CURVE = {}; SKIPPED = [0]; BEST = [-1.0]; STEP = [0]
 
 
 @torch.no_grad()
@@ -476,6 +488,7 @@ if A.eval_only:
 log = open(os.path.join(A.out, "train.log"), "a")
 model.train(); t0 = time.time(); acc = []
 for step in range(step0 + 1, A.steps + 1):
+    STEP[0] = step
     x, valid, masked = train_batch()
     with torch.autocast("cuda", dtype=torch.bfloat16):
         le, ld, _, _, _ = losses(x, valid, masked)
