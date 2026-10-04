@@ -8,7 +8,7 @@ cd /root
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null)
 R=baya1116/hypernet-sp-distill
 RAW="https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl"
-BOXI_SERIAL=37
+BOXI_SERIAL=38
 if [ -f /root/.boxi_serial ] && [ "$(cat /root/.boxi_serial)" -gt "$BOXI_SERIAL" ] 2>/dev/null; then echo "BOXI_STALE $BOXI_SERIAL"; exit 0; fi
 echo $BOXI_SERIAL > /root/.boxi_serial
 mkdir -p /root/sb /root/work
@@ -809,6 +809,42 @@ echo "ABL2_JOB_DONE $(date -u)"
 RK
   setsid nohup bash -c 'bash /root/abl2keep.sh 2>&1 | tee -a /root/sb_abl2.log' > /dev/null 2>&1 < /dev/null &
   echo "ABL2_LAUNCHED $(date -u)"
+fi
+# ---- 2026-10-05 07:20 JST: the disk filled (40G, 687M left) and run4s1 died writing its 20k checkpoint at 22:45; the
+# card has been idle since. Free it: upload the two 58.1 arms' best weights, then delete the checkpoints of every
+# finished run except the kept bests (run4h1, abl_one32, abl_maskcur - all on the hub). Then continue from abl_one32's
+# best at lr 1e-5 (3e-5 restarts knocked every continuation back a point first), 100k, chained while +1 point.
+if [ ! -e /root/.diskfree1 ]; then touch /root/.diskfree1
+  echo "DISK_BEFORE $(df -h / | tail -1)"
+  hf upload $R /root/sb/abl_one32/model_best.pt sentbart/abl/one32/model_best.pt >/dev/null 2>&1 && echo "UP one32 best"
+  hf upload $R /root/sb/abl_maskcur/model_best.pt sentbart/abl/maskcur/model_best.pt >/dev/null 2>&1 && echo "UP maskcur best"
+  for d in /root/sb/run* /root/sb/abl_* /root/sb/ev*; do [ -d "$d" ] || continue
+    case "$(basename $d)" in run4h1|abl_one32|abl_maskcur) find "$d" -name "*.pt" ! -name "model_best.pt" -delete ;; *) find "$d" -name "*.pt" -delete ;; esac
+  done
+  rm -f /root/sb/train_cos.py
+  echo "DISK_AFTER $(df -h / | tail -1)"; du -sh /root/sb/* 2>/dev/null | sort -rh | head -8
+fi
+if [ -e /root/.diskfree1 ] && ! pgrep -f "cont58kee[p].sh" >/dev/null && ! grep -q "CONT58_JOB_DONE" /root/sb_cont58.log 2>/dev/null; then
+  cat > /root/cont58keep.sh <<'RK'
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); R=baya1116/hypernet-sp-distill; D=/root/sb/data/docs; cd /root/sb
+while pgrep -f "python3 /root/sb/train.py --data /root/sb/data/docs" >/dev/null; do sleep 30; done
+bestof() { grep -h "^\[best\]" /root/sb/$1/train.log 2>/dev/null | tail -1 | sed -E 's/.*page_top1 ([0-9.]+).*/\1/'; }
+prev=/root/sb/abl_one32/model_best.pt; base=0.581
+for i in 1 2 3; do
+  n=run4t$i; rm -rf /root/sb/$n; echo "[cont58] $n from $prev (top-1 $base), one32 recipe, lr 1e-5 $(date -u +%H:%M); $(df -h / | tail -1 | awk '{print $4}') free"
+  ( while sleep 1800; do hf upload $R /root/sb/$n/train.log sentbart/small_$n/train.log >/dev/null 2>&1; done ) & UP=$!
+  python3 /root/sb/train.py --data $D --init $prev --eval-shard 001 --seq 128 --d 512 --layers 8 --heads 8 --ffn 2048 --warmup 1000 --eval-every 10000 --save-every 10000 --page 1 --page-queue 64 --skip-grad 100 \
+    --out /root/sb/$n --steps 100000 --batch 32 --lr 1e-5 --page-input one 2>&1 | grep -E "^\[model|^\[best|TRAIN_DONE|Error|Traceback|out of memory|write failed"
+  kill $UP 2>/dev/null; hf upload $R /root/sb/$n/train.log sentbart/small_$n/train.log >/dev/null 2>&1; hf upload $R /root/sb/$n/model_best.pt sentbart/small_$n/model_best.pt >/dev/null 2>&1
+  rm -f /root/sb/$n/state.pt /root/sb/$n/model_latest.pt
+  cur=$(bestof $n); cur=${cur:-0}; echo "[cont58] $n done: best page top-1 $cur (from $base)"
+  python3 -c "import sys; sys.exit(0 if float('$cur') - float('$base') >= 0.01 else 1)" || { echo "PLATEAU_CONT58 at $n: best $cur vs $base"; break; }
+  prev=/root/sb/$n/model_best.pt; base=$cur
+done
+echo "CONT58_JOB_DONE $(date -u)"
+RK
+  setsid nohup bash -c 'bash /root/cont58keep.sh 2>&1 | tee -a /root/sb_cont58.log' > /dev/null 2>&1 < /dev/null &
+  echo "CONT58_LAUNCHED $(date -u)"
 fi
 echo "BOXI_OK serial $BOXI_SERIAL $(date -u)"
 # CTL-END
