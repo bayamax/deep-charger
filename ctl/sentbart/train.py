@@ -37,6 +37,9 @@ ap.add_argument("--eval-shard", default="", help="the held-out shard's key (e.g.
 ap.add_argument("--page", type=int, default=0, help="1: a page token in front of the encoder whose output is the document's vector, trained so each hidden sentence finds its own document's vector among the batch's (sentence -> page retrieval)")
 ap.add_argument("--w-page", type=float, default=1.0)
 ap.add_argument("--page-res", type=int, default=0, help="1: page vector = normalise(mean of the visible sentence vectors + page_head(page token)), the head starting at zero - it starts at the mean baseline and learns the difference")
+ap.add_argument("--cluster", type=int, default=0, help=">0: hard negatives - k-means (this many clusters) over the training documents' mean sentence vectors; --cluster-frac of each batch is drawn from one cluster (the rest at random), so the page loss and the sentence losses meet look-alike documents in the batch")
+ap.add_argument("--cluster-frac", type=float, default=0.5)
+ap.add_argument("--cluster-cache", default="/root/sb/doc_clusters")
 ap.add_argument("--page-ramp-max", type=float, default=0.3, help="--page-input ramp: the share of sentences hidden from the page pass at the end of the ramp")
 ap.add_argument("--page-ramp-steps", type=int, default=20000, help="--page-input ramp: steps over which the hidden share grows from one sentence to --page-ramp-max")
 ap.add_argument("--mask-start", type=float, default=-1.0, help=">=0: curriculum for the sentence losses - the hidden share grows from this to --mask over --mask-ramp-steps (span mode)")
@@ -87,6 +90,36 @@ DIM = train_sh[0][1].shape[1]
 print(f"[data] {len(docs)} training documents in {len(train_sh)} shards, {len(edocs)} held-out documents (shard {eval_sh[0]}), dim {DIM}", flush=True)
 
 
+CL = None
+if A.cluster:
+    os.makedirs(A.cluster_cache, exist_ok=True)
+    lf = os.path.join(A.cluster_cache, f"labels_{A.cluster}_{len(docs)}.npy")
+    if os.path.exists(lf):
+        lab = np.load(lf)
+    else:
+        mf = os.path.join(A.cluster_cache, f"means_{len(docs)}.npy")
+        if os.path.exists(mf): M = np.load(mf)
+        else:
+            t_ = time.time(); M = np.zeros((len(docs), DIM), np.float16); i = 0
+            while i < len(docs):
+                si = docs[i][0]; j = i
+                while j < len(docs) and docs[j][0] == si and j - i < 4000: j += 1
+                a0, b0 = docs[i][1], docs[j - 1][2]; V = np.asarray(train_sh[si][1][a0:b0], dtype=np.float32)
+                S = np.stack([V[d[1] - a0:d[2] - a0].sum(0) for d in docs[i:j]])
+                S = S / np.linalg.norm(S, axis=1, keepdims=True).clip(1e-6); M[i:j] = S.astype(np.float16); i = j
+            np.save(mf, M); print(f"[cluster] {len(docs)} document means in {(time.time()-t_)/60:.1f} min", flush=True)
+        Mt = torch.from_numpy(M).to(DEV).float(); g_ = torch.Generator(device="cpu").manual_seed(0)
+        Cn = Mt[torch.randperm(len(Mt), generator=g_)[:A.cluster].to(DEV)].clone()
+        for it in range(15):
+            lab_t = torch.cat([(Mt[k:k + 65536] @ Cn.T).argmax(1) for k in range(0, len(Mt), 65536)])
+            Cn = torch.zeros_like(Cn).index_add_(0, lab_t, Mt); Cn = F.normalize(Cn, dim=-1)
+        lab = lab_t.cpu().numpy().astype(np.int32); del Mt
+        np.save(lf, lab)
+    order = np.argsort(lab, kind="stable"); bounds = np.searchsorted(lab[order], np.arange(A.cluster + 1))
+    CL = (lab, order, bounds)
+    sz = np.diff(bounds); print(f"[cluster] {A.cluster} clusters: median {int(np.median(sz))} documents, max {sz.max()}, empty {(sz == 0).sum()}", flush=True)
+
+
 def crop(vec, a, b):
     n = b - a
     if n > A.seq:
@@ -125,7 +158,15 @@ BID = [None]                                       # the global document index o
 
 def train_batch():
     items, gid = [], []
-    if LK is None:
+    if CL is not None:                              # hard negatives: a block of one cluster, the rest at random
+        lab, order, bounds = CL; nk = int(round(A.batch * A.cluster_frac))
+        g0 = random.randrange(len(docs)); c = lab[g0]; mem = [int(m) for m in order[bounds[c]:bounds[c + 1]] if m != g0]
+        gid = [g0] + random.sample(mem, min(nk - 1, len(mem)))
+        seen_ = set(gid)
+        while len(gid) < A.batch:
+            g = random.randrange(len(docs))
+            if g not in seen_: gid.append(g); seen_.add(g)
+    elif LK is None:
         for _ in range(A.batch):
             g = random.randrange(len(docs)); gid.append(g)
     else:                                           # anchors and, for each, one linked neighbour (a random document if it has none)

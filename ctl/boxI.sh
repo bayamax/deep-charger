@@ -8,7 +8,7 @@ cd /root
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null)
 R=baya1116/hypernet-sp-distill
 RAW="https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl"
-BOXI_SERIAL=38
+BOXI_SERIAL=39
 if [ -f /root/.boxi_serial ] && [ "$(cat /root/.boxi_serial)" -gt "$BOXI_SERIAL" ] 2>/dev/null; then echo "BOXI_STALE $BOXI_SERIAL"; exit 0; fi
 echo $BOXI_SERIAL > /root/.boxi_serial
 mkdir -p /root/sb /root/work
@@ -845,6 +845,53 @@ echo "CONT58_JOB_DONE $(date -u)"
 RK
   setsid nohup bash -c 'bash /root/cont58keep.sh 2>&1 | tee -a /root/sb_cont58.log' > /dev/null 2>&1 < /dev/null &
   echo "CONT58_LAUNCHED $(date -u)"
+fi
+# ---- hn (2026-10-05 09:10 JST): continuing the 58.1 arm does not add (run4t1 at lr 1e-5: 57.5, 57.3 at 10k/20k), so
+# stop it and try the next method lever: hard negatives. k-means (4096 clusters) over the training documents' mean
+# sentence vectors; half of each batch from one cluster, so the page loss (and the sentence losses) see look-alike
+# documents instead of 31 random ones. From run4h1 (55.1) with the one32 recipe, 30k, against one32 (58.1 at 20k):
+# hn50 (half the batch one cluster), hn100 (the whole batch); the better one, if it beats 58.1 by half a point,
+# runs 100k from its best.
+if [ ! -e /root/.hn_swap ]; then touch /root/.hn_swap
+  echo "CONT58_JOB_DONE stopped for hn (no gain) $(date -u)" >> /root/sb_cont58.log
+  pkill -f "cont58kee[p].sh"; pkill -f "python3 /root/sb/train.py .*--out /root/sb/run4t1"; sleep 10
+  hf upload $R /root/sb/run4t1/train.log sentbart/small_run4t1/train.log >/dev/null 2>&1; rm -f /root/sb/run4t1/*.pt; echo "RUN4T1_STOPPED $(date -u)"
+fi
+if ! pgrep -f "hnkee[p].sh" >/dev/null && ! grep -q "HN_JOB_DONE" /root/sb_hn.log 2>/dev/null; then
+  cat > /root/hnkeep.sh <<'RK'
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); R=baya1116/hypernet-sp-distill; D=/root/sb/data/docs; cd /root/sb
+while pgrep -f "python3 /root/sb/train.py --data /root/sb/data/docs" >/dev/null; do sleep 30; done
+curl -sSf -o /root/sb/train.py "https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl/sentbart/train.py?$(date +%s)" || echo "[hn] train.py fetch failed"
+grep -q "cluster-frac" /root/sb/train.py || { echo "HN_JOB_DONE train.py has no --cluster"; exit 1; }
+bestof() { grep -h "^\[best\]" /root/sb/$1/train.log 2>/dev/null | tail -1 | sed -E 's/.*page_top1 ([0-9.]+).*/\1/'; }
+evals() { grep -hoE "^\[eval [0-9]+\] page_top1 [0-9.]+" /root/sb/$1/train.log 2>/dev/null | sed -E 's/\[eval ([0-9]+)\] page_top1 ([0-9.]+)/\1:\2/' | tr '\n' ' '; }
+COMMON="--data $D --eval-shard 001 --seq 128 --d 512 --layers 8 --heads 8 --ffn 2048 --warmup 1000 --eval-every 10000 --save-every 10000 --page 1 --page-queue 64 --skip-grad 100 --batch 32 --lr 3e-5 --page-input one --cluster 4096"
+best=""; bestv=0
+for f in 0.5 1.0; do a=hn$(python3 -c "print(int($f*100))")
+  n=abl_$a; rm -rf /root/sb/$n; echo "[hn] $a: cluster-frac $f $(date -u +%H:%M); $(df -h / | tail -1 | awk '{print $4}') free"
+  python3 /root/sb/train.py $COMMON --cluster-frac $f --init /root/sb/run4h1/model_best.pt --out /root/sb/$n --steps 30000 2>&1 | grep -E "^\[model|^\[cluster|TRAIN_DONE|Error|Traceback|out of memory|write failed"
+  hf upload $R /root/sb/$n/train.log sentbart/abl/$a/train.log >/dev/null 2>&1; rm -f /root/sb/$n/state.pt /root/sb/$n/model_latest.pt
+  v=$(bestof $n); echo "[hn] $a done: $(evals $n)| best ${v:-?} (one32: 10000:0.574 20000:0.581 30000:0.579)"
+  [ -n "$v" ] && python3 -c "import sys; sys.exit(0 if float('$v') > float('$bestv') else 1)" && { best=$a; bestv=$v; }
+done
+echo "[hn] best $best at $bestv"
+python3 -c "import sys; sys.exit(0 if float('$bestv') >= 0.586 else 1)" || { echo "HN_JOB_DONE no gain over one32 (best $best $bestv)"; exit 0; }
+F=$( [ "$best" = hn100 ] && echo 1.0 || echo 0.5 ); prev=/root/sb/abl_$best/model_best.pt; base=$bestv
+hf upload $R $prev sentbart/abl/$best/model_best.pt >/dev/null 2>&1
+for i in 1 2 3; do
+  n=run4u$i; rm -rf /root/sb/$n; echo "[hn] $n: $best recipe 100k from $prev (top-1 $base) $(date -u +%H:%M)"
+  ( while sleep 1800; do hf upload $R /root/sb/$n/train.log sentbart/small_$n/train.log >/dev/null 2>&1; done ) & UP=$!
+  python3 /root/sb/train.py $COMMON --cluster-frac $F --init $prev --out /root/sb/$n --steps 100000 2>&1 | grep -E "^\[model|^\[best|TRAIN_DONE|Error|Traceback|out of memory|write failed"
+  kill $UP 2>/dev/null; hf upload $R /root/sb/$n/train.log sentbart/small_$n/train.log >/dev/null 2>&1; hf upload $R /root/sb/$n/model_best.pt sentbart/small_$n/model_best.pt >/dev/null 2>&1
+  rm -f /root/sb/$n/state.pt /root/sb/$n/model_latest.pt
+  cur=$(bestof $n); cur=${cur:-0}; echo "[hn] $n done: best page top-1 $cur (from $base)"
+  python3 -c "import sys; sys.exit(0 if float('$cur') - float('$base') >= 0.01 else 1)" || { echo "PLATEAU_HN at $n: best $cur vs $base"; break; }
+  prev=/root/sb/$n/model_best.pt; base=$cur
+done
+echo "HN_JOB_DONE $(date -u)"
+RK
+  setsid nohup bash -c 'bash /root/hnkeep.sh 2>&1 | tee -a /root/sb_hn.log' > /dev/null 2>&1 < /dev/null &
+  echo "HN_LAUNCHED $(date -u)"
 fi
 echo "BOXI_OK serial $BOXI_SERIAL $(date -u)"
 # CTL-END
