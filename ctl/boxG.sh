@@ -80,7 +80,7 @@ PSKIP=
 # The raw GitHub copy this box fetches can lag and hand a control run an OLDER version of this file (04:48 on 09-22 it
 # relaunched the online loop under the previous mode while the newer run was merging a checkpoint on the same card).
 # Every edit bumps BOXG_SERIAL; a run that sees a lower serial than one already executed stops here.
-BOXG_SERIAL=2026100319
+BOXG_SERIAL=2026100320
 if [ -f /root/.boxg_serial ] && [ "$(cat /root/.boxg_serial)" -gt "$BOXG_SERIAL" ] 2>/dev/null; then echo "BOXG_STALE $BOXG_SERIAL < $(cat /root/.boxg_serial)"; exit 0; fi
 echo $BOXG_SERIAL > /root/.boxg_serial
 MODE=idle         # 2026-09-29: the side jobs hold the card (multi-turn measurement and training); a finished reeval re-launched on every control run and killed their evaluators
@@ -1140,6 +1140,32 @@ if [ ! -e /root/.mtg3_snap1 ]; then touch /root/.mtg3_snap1
     hf upload $RR /root/mtg2_run.log pooler_distill/chatsft/multiturn/analysis/mtg2_run.log >/dev/null 2>&1
     hf upload $RR /root/mtg1_run.log pooler_distill/chatsft/multiturn/analysis/mtg1_run.log >/dev/null 2>&1
     echo "MTG3_SNAP_UP $(date -u)" >> /root/mtg3.log ) > /dev/null 2>&1 &
+fi
+# ---- moreq4 (2026-10-04 19:10 JST): moreq3's two bridge3 runs died of CUDA OOM at 14:18 - they started beside the
+# single-turn pass (the card is 11.6 GB, two evaluators do not fit). Run them now, one at a time, card otherwise idle.
+if ! pgrep -f "moreq4kee[p].sh" >/dev/null && ! grep -q "MOREQ4_JOB_DONE" /root/moreq4.log 2>/dev/null; then
+  cat > /root/moreq4keep.sh <<'MQ'
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); R=baya1116/hypernet-sp-distill; cd /root/work
+ENV="SP_BASE=/root/gptq_hf_gq14 SP_RANK=16 SP_NOSYS=1 SP_EPISODIC=1 OMP_NUM_THREADS=1 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True"
+EVARGS="--rw 768 --maxd 384 --samepage 1 --decode plain --temp 0.6 --gen 4000 --stop eos --replycap 600"
+[ -s /root/work/mt_eval_bridge3.jsonl ] || { echo "MOREQ4_JOB_DONE no dialogues"; exit 1; }
+for arm in "s100:/root/mtg3_s100.safetensors" "s300:/root/mtg1_s300.safetensors"; do T=${arm%%:*}; CK=${arm#*:}
+  while pgrep -f "pool_eval.p[y]|online_loop.p[y]|memfit.p[y]" >/dev/null; do sleep 30; done
+  rm -f /root/work/br3_$T.jsonl
+  env $ENV python3 /root/work/pool_eval.py $CK /root/work/eval300.jsonl /root/work/br3_$T.jsonl --multiturn /root/work/mt_eval_bridge3.jsonl --mt-mode win --n 1000 $EVARGS --tag "[br3-$T]" > /root/br3_$T.log 2>&1
+  grep -E "Traceback|Error" /root/br3_$T.log | tail -1 | cut -c1-160
+  python3 - /root/work/br3_$T.jsonl $T <<'PY2'
+import json, sys
+r = [json.loads(l) for l in open(sys.argv[1])]
+t1 = [x for x in r if x["turn"] == 0]; t2 = [x for x in r if x["turn"] == 1]
+print(f"[moreq4] bridge3 (win) {sys.argv[2]}: turn 1 {sum(x['correct'] for x in t1)}/{len(t1)}, follow-up {sum(x['correct'] for x in t2)}/{len(t2)}", flush=True)
+PY2
+  hf upload $R /root/work/br3_$T.jsonl pooler_distill/chatsft/multiturn/br3_$T.jsonl >/dev/null 2>&1
+done
+echo "MOREQ4_JOB_DONE $(date -u)"
+MQ
+  setsid nohup bash -c 'bash /root/moreq4keep.sh 2>&1 | tee -a /root/moreq4.log' >> /proc/1/fd/1 2>&1 < /dev/null 9>&- &
+  echo "MOREQ4_LAUNCHED $(date -u)"
 fi
 # ---- 2026-10-04 17:45 JST: why do DeepSeek chat calls fail (balance answers 200)? One tiny call per model name; status
 # code and the error text only (never the key).
@@ -2498,6 +2524,7 @@ while :; do
     echo "--- qt.log (tail) ---"; tail -n 4 /root/qt.log 2>/dev/null | cut -c1-300
     echo "--- pqjudge.log (tail) ---"; tail -n 5 /root/pqjudge.log 2>/dev/null | cut -c1-200
     echo "--- du_list ---"; cat /root/du_list.txt 2>/dev/null | head -42
+    echo "--- moreq4.log (tail) ---"; tail -n 4 /root/moreq4.log 2>/dev/null | cut -c1-250
     echo "--- moreq3.log (tail) ---"; tail -n 10 /root/moreq3.log 2>/dev/null | cut -c1-250
     echo "--- moreq2.log (tail) ---"; tail -n 8 /root/moreq2.log 2>/dev/null | cut -c1-250
     echo "--- moreq.log (tail) ---"; tail -n 14 /root/moreq.log 2>/dev/null | cut -c1-250
