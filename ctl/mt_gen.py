@@ -15,9 +15,9 @@ import argparse, json, random, re, sys, time, urllib.request, urllib.error, conc
 ap = argparse.ArgumentParser()
 ap.add_argument("--seeds", required=True); ap.add_argument("--exclude", default=""); ap.add_argument("--out", required=True)
 ap.add_argument("--n-bridge", type=int, default=40); ap.add_argument("--n-memory", type=int, default=30); ap.add_argument("--n-switch", type=int, default=20)
-ap.add_argument("--seed", type=int, default=0); ap.add_argument("--workers", type=int, default=8); ap.add_argument("--model", default="deepseek-flash"); ap.add_argument("--api", default="deepseek", choices=["deepseek", "openai"], help="openai: the OpenAI endpoint with the key in /root/.oai (gpt-5 models take max_completion_tokens and no temperature)")
+ap.add_argument("--seed", type=int, default=0); ap.add_argument("--workers", type=int, default=8); ap.add_argument("--model", default="gpt-5-nano"); ap.add_argument("--api", default="openai", choices=["deepseek", "openai"], help="openai: the OpenAI endpoint with the key in /root/.oai (gpt-5 models take max_completion_tokens and no temperature)")
 A = ap.parse_args()
-KEY = open("/root/.oai" if A.api == "openai" else "/root/.dsk").read().strip()
+KEY = open("/root/.oai" if A.api == "openai" else "/root/.dsk").read().strip()   # 2026-10-04, the user: nano by default (cheaper); DeepSeek only on request
 URL = "https://api.openai.com/v1/chat/completions" if A.api == "openai" else "https://api.deepseek.com/chat/completions"
 ERR = [0]
 def chat(system, user, tries=4):
