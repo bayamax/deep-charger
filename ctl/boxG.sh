@@ -80,7 +80,7 @@ PSKIP=
 # The raw GitHub copy this box fetches can lag and hand a control run an OLDER version of this file (04:48 on 09-22 it
 # relaunched the online loop under the previous mode while the newer run was merging a checkpoint on the same card).
 # Every edit bumps BOXG_SERIAL; a run that sees a lower serial than one already executed stops here.
-BOXG_SERIAL=2026100322
+BOXG_SERIAL=2026100323
 if [ -f /root/.boxg_serial ] && [ "$(cat /root/.boxg_serial)" -gt "$BOXG_SERIAL" ] 2>/dev/null; then echo "BOXG_STALE $BOXG_SERIAL < $(cat /root/.boxg_serial)"; exit 0; fi
 echo $BOXG_SERIAL > /root/.boxg_serial
 MODE=idle         # 2026-09-29: the side jobs hold the card (multi-turn measurement and training); a finished reeval re-launched on every control run and killed their evaluators
@@ -1141,9 +1141,9 @@ if [ ! -e /root/.mtg3_snap1 ]; then touch /root/.mtg3_snap1
     hf upload $RR /root/mtg1_run.log pooler_distill/chatsft/multiturn/analysis/mtg1_run.log >/dev/null 2>&1
     echo "MTG3_SNAP_UP $(date -u)" >> /root/mtg3.log ) > /dev/null 2>&1 &
 fi
-# ---- r1smoke (2026-10-04 19:25 JST): r1_traj.py on 6 training items now (API only, CPU) so the format and the
+# ---- r1smoke (2026-10-04 19:25 JST; again 19:40 after R1 searched for answers it already knew - such trajectories are dropped now): r1_traj.py on 6 training items now (API only, CPU) so the format and the
 # verification are checked before the probe hands it the real set.
-if [ ! -e /root/.r1smoke ]; then touch /root/.r1smoke
+if [ ! -e /root/.r1smoke2 ]; then touch /root/.r1smoke2
   ( cd /root/work; python3 -c "
 import json, random
 it=[json.loads(l) for l in open('/root/work/mtg2_items.jsonl')]; random.Random(1).shuffle(it)

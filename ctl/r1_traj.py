@@ -91,7 +91,9 @@ SYS = """You are answering a user's question in a chat by searching Wikipedia st
 thought: one or two plain sentences on what the last result showed and what to look up next (the first step may leave it empty).
 answer: two or three conversational sentences that answer the user's latest message, stating the answer plainly and only what the results support.
 Each search returns about 250 tokens of the best-matching page; searching the same query again returns the next part of that page.
-If the latest message refers to something earlier in the conversation ("that film", "he", "it"), search for the thing it refers to by name."""
+If the latest message refers to something earlier in the conversation ("that film", "he", "it"), search for the thing it refers to by name.
+Search the way someone who does NOT know the answer would: build each query only from the conversation and from what the results so far have shown. Never put the answer you expect into a query - find it.
+Keep thoughts short and about the results ("The page names X but not Y; search Y."), not about the user."""
 
 
 def r1(messages, tries=3):
@@ -126,6 +128,7 @@ def solve(it):
             return {"q": q, "gold": gold, "hist": hist, "traj": traj, "reply": reply, "ns": ns} if ok else None
         kw = (v.get("search") or "").strip()
         if not kw or ns >= A.maxsrch: return None
+        if has(kw, gold) and not has(conv, gold) and not any(has(c, gold) for c in served): return None   # searched for the answer before finding it: not a demonstration
         ns += 1
         pg = get_page(kw)
         if not pg: chunk = "(no results)"
