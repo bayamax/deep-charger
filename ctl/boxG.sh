@@ -80,7 +80,7 @@ PSKIP=
 # The raw GitHub copy this box fetches can lag and hand a control run an OLDER version of this file (04:48 on 09-22 it
 # relaunched the online loop under the previous mode while the newer run was merging a checkpoint on the same card).
 # Every edit bumps BOXG_SERIAL; a run that sees a lower serial than one already executed stops here.
-BOXG_SERIAL=2026100323
+BOXG_SERIAL=2026100324
 if [ -f /root/.boxg_serial ] && [ "$(cat /root/.boxg_serial)" -gt "$BOXG_SERIAL" ] 2>/dev/null; then echo "BOXG_STALE $BOXG_SERIAL < $(cat /root/.boxg_serial)"; exit 0; fi
 echo $BOXG_SERIAL > /root/.boxg_serial
 MODE=idle         # 2026-09-29: the side jobs hold the card (multi-turn measurement and training); a finished reeval re-launched on every control run and killed their evaluators
@@ -1140,6 +1140,18 @@ if [ ! -e /root/.mtg3_snap1 ]; then touch /root/.mtg3_snap1
     hf upload $RR /root/mtg2_run.log pooler_distill/chatsft/multiturn/analysis/mtg2_run.log >/dev/null 2>&1
     hf upload $RR /root/mtg1_run.log pooler_distill/chatsft/multiturn/analysis/mtg1_run.log >/dev/null 2>&1
     echo "MTG3_SNAP_UP $(date -u)" >> /root/mtg3.log ) > /dev/null 2>&1 &
+fi
+# ---- 2026-10-05 08:05 JST: the disk filled during teach (its SFT/screens died "No space left on device"). Upload the
+# teach logs for the post-mortem, then free space: finished GRPO run dirs (their checkpoints were copied out and are on
+# the hub), the old SFT states, superseded local search stores and old pooler checkpoints. Nothing a running job reads.
+if [ ! -e /root/.diskfree_g1 ]; then touch /root/.diskfree_g1
+  echo "GDISK_BEFORE $(df -h /root | tail -1)"
+  for f in /root/teach.log /root/probe_s100.log /root/teach1_run.log; do [ -s $f ] && HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token) hf upload baya1116/hypernet-sp-distill $f pooler_distill/chatsft/teach/logs/$(basename $f) >/dev/null 2>&1; done
+  for f in /root/work/probe_s100.jsonl /root/work/r1_traj.jsonl /root/work/own_traces_s100.jsonl; do [ -s $f ] && HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token) hf upload baya1116/hypernet-sp-distill $f pooler_distill/chatsft/teach/$(basename $f) >/dev/null 2>&1; done
+  rm -rf /root/online_mtg1 /root/online_mtg2 /root/sft /root/wiki_store6 /root/wiki_store_ft1 /root/reeval_hf_g14m /root/teach1/state.pt /root/probe_s100/latest.safetensors
+  rm -f /root/gptq_state_gq14.pt /root/pooler_sft_q14.safetensors /root/pooler_sft_q14b.safetensors /root/pooler_sft_q14c.safetensors /root/pooler_sft_q14d.safetensors /root/pooler_sft_q14g.safetensors /root/pooler_eval_q14c.safetensors /root/pooler_mem8.safetensors
+  echo "GDISK_AFTER $(df -h /root | tail -1)"
+  du -xsh /root/* 2>/dev/null | sort -rh | head -12 | tr '\n' ';'; echo
 fi
 # ---- r1smoke (2026-10-04 19:25 JST; again 19:40 after R1 searched for answers it already knew - such trajectories are dropped now): r1_traj.py on 6 training items now (API only, CPU) so the format and the
 # verification are checked before the probe hands it the real set.
