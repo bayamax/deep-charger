@@ -67,6 +67,10 @@ ap.add_argument("--save-lora-only", type=int, default=0, help="1: checkpoints ho
 ap.add_argument("--mt-items", default="", help="multi-turn GRPO: jsonl of {q, gold, hist} where hist is the earlier exchanges of a conversation as chat messages (user / assistant, replies without thinking). Every step is a search step on one of these, rolled out with the history in the prompt as the app sends it, scored as a search rollout (the teacher's naturalness check also sees the history)")
 ap.add_argument("--eval-file", default="", help="evaluation only: generate one reply per question in this jsonl ({\"q\": ...}) with the batched rollout, --b questions at a time, write {q, text, ns} to --eval-out and exit")
 ap.add_argument("--eval-out", default="")
+ap.add_argument("--probe-out", default="", help="with --mt-items: no training - every item (or the first --probe-n) is rolled out --probe-g times in the batched rollout (several items per batch), scored by the gold string only, and written as {q, gold, hist, n, pass, texts of the passing samples}; then exit")
+ap.add_argument("--probe-g", type=int, default=4); ap.add_argument("--probe-n", type=int, default=0)
+ap.add_argument("--demo-sft", default="", help="jsonl of {q, hist, traj}: supervised steps on teacher trajectories (thinking and searches trained, information blocks and the reply masked), --demo-per-step a step, beside --replay-per-step of the model's own verified traces {q, hist, text}")
+ap.add_argument("--demo-per-step", type=int, default=4)
 ap.add_argument("--loop-break", default="", choices=["", "stop", "answer"], help="a thinking span whose last 256 tokens are under 25%% distinct is a repetition loop (g14 step 400: 22 of 100 held-out replies never finished, tail repetition 0.84). stop: end the row there; answer: close the thinking and let it answer")
 ap.add_argument("--rft", type=int, default=0, help="1: rejection-sampling fine-tuning instead of the policy gradient on reasoning steps: of the G samples the teacher passes, the one with the shortest thinking is trained on as plain SFT; none passing falls back to --wheels. No advantage, no std, no length pressure.")
 ap.add_argument("--sft-only", type=int, default=0, help=">0: pure distillation, no rollouts and no judge: each step trains this many reasoning records (their R1 thinking and reply) as plain SFT, plus one verified search trace at --rft-replay weight")
@@ -861,7 +865,7 @@ def ce_backward(h, tgt, tm, coef, slice_len=256):
 
 def replay_backward(rec, coef):
     """a verified search trace as plain SFT: prompt masked, information blocks masked, EOS trained"""
-    head_t = tok.apply_chat_template([{"role": "user", "content": rec["q"]}], add_generation_prompt=True, tokenize=False)
+    head_t = tok.apply_chat_template(list(rec.get("hist") or []) + [{"role": "user", "content": rec["q"]}], add_generation_prompt=True, tokenize=False)
     if not head_t.rstrip().endswith("<think>"): head_t += "<think>\n"
     ids = tok.encode(head_t, add_special_tokens=False); msk = [0] * len(ids)
     body = rec["text"]; body = body[len("<think>"):].lstrip("\n") if body.startswith("<think>") else body
@@ -986,13 +990,13 @@ def score_search(r, gold):
     return base + talk, {**why, **v}
 
 
-def demo_backward(q, traj, coef):
+def demo_backward(q, traj, coef, hist=None):
     """the teacher's trajectory as a demonstration of the searching, not of the reply.
 
     2829 of the 2857 trajectories end "The answer is X.", the register this lineage was fine-tuned
     out of, so everything after </think> is masked along with the information blocks: the model is
     shown which queries reach the page, and nothing about how to word the answer."""
-    head_t = tok.apply_chat_template([{"role": "user", "content": q}], add_generation_prompt=True, tokenize=False)
+    head_t = tok.apply_chat_template(list(hist if hist is not None else HIST.get(q, [])) + [{"role": "user", "content": q}], add_generation_prompt=True, tokenize=False)
     if not head_t.rstrip().endswith("<think>"): head_t += "<think>\n"
     ids = tok.encode(head_t, add_special_tokens=False); msk = [0] * len(ids)
     body = traj.split("</think>")[0]
@@ -1120,6 +1124,49 @@ def reload_good():
             for g in opt_s.param_groups: g["lr"] = g["lr"] / 2
     return len(missing.unexpected_keys)
 
+if A.probe_out:
+    # triage: which items does this model solve sometimes, always, never (gold string only, no teacher)
+    items = pool[:A.probe_n] if A.probe_n else pool
+    done_q = set()
+    if os.path.exists(A.probe_out):
+        done_q = set(json.loads(l)["q"] for l in open(A.probe_out) if l.strip())
+    todo = [it for it in items if it["q"] not in done_q]
+    per = max(1, A.b // A.probe_g)
+    print(f"[probe] {len(items)} items, {len(todo)} to go, {A.probe_g} samples each, {per} items a batch", flush=True)
+    with open(A.probe_out, "a") as fo:
+        for k in range(0, len(todo), per):
+            chunk = todo[k:k + per]
+            try: outs = rollout_batch([it["q"] for it in chunk for _ in range(A.probe_g)], per * A.probe_g if len(chunk) == per else len(chunk) * A.probe_g)
+            except Exception as e:
+                print(f"[probe] batch {k} failed: {type(e).__name__}: {str(e)[:120]}", flush=True); clear(); continue
+            for j, it in enumerate(chunk):
+                rs = outs[j * A.probe_g:(j + 1) * A.probe_g]
+                ok = [o for o in rs if price({**o, "answer": o.get("answer", "")}, it["gold"])[0] >= 1.0]
+                fo.write(json.dumps({"q": it["q"], "gold": it["gold"], "hist": HIST.get(it["q"], []), "n": len(rs), "pass": len(ok),
+                                     "texts": [o["text"] for o in ok][:2]}, ensure_ascii=False) + "\n")
+            fo.flush(); clear()
+            print(f"[probe] {min(k + per, len(todo))}/{len(todo)} ({(time.time()-t0)/60:.0f} min)", flush=True)
+    print("PROBE_DONE", flush=True); sys.exit(0)
+if A.demo_sft:
+    # supervised steps: teacher trajectories for what the model never solves, its own verified traces for the rest
+    DM = [json.loads(l) for l in open(A.demo_sft) if l.strip()]
+    random.Random(3).shuffle(DM); random.Random(4).shuffle(rep)
+    print(f"[demo-sft] {len(DM)} teacher trajectories, {len(rep)} own traces, {A.demo_per_step} + {A.replay_per_step} a step, {A.steps} steps", flush=True)
+    for step in range(state["step"] + 1, A.steps + 1):
+        opt.zero_grad(set_to_none=True); model.train(); dl, rl_ = [], []
+        for k in range(A.demo_per_step):
+            d = DM[((step - 1) * A.demo_per_step + k) % len(DM)]
+            dl.append(guarded(demo_backward, d["q"], d["traj"], 1.0 / (A.demo_per_step + A.replay_per_step), d.get("hist") or [])); clear()
+        for k in range(A.replay_per_step if rep else 0):
+            rl_.append(guarded(replay_backward, rep[((step - 1) * A.replay_per_step + k) % len(rep)], 1.0 / (A.demo_per_step + A.replay_per_step))); clear()
+        opt.step(); opt.zero_grad(set_to_none=True); clear()
+        line = f"[step {step}] demo ce={sum(dl)/max(len(dl),1):.3f} own ce={sum(rl_)/max(len(rl_),1):.3f} | epoch {step * A.demo_per_step / max(len(DM),1):.2f} | {(time.time()-t0)/60:.0f} min"
+        print(line, flush=True); log.write(line + "\n"); log.flush()
+        if step % A.save_every == 0 or step == A.steps:
+            save_ckpt(LATEST); json.dump({"step": step, "cum": cum, "di": di, "ri": ri, "qi": qi}, open(STATE_F, "w")); save_opt()
+            import shutil; shutil.copyfile(LATEST, os.path.join(A.outdir, f"step{step}.safetensors"))
+            print(f"[save] step {step}", flush=True)
+    print("ONLINE_LOOP_DONE", flush=True); sys.exit(0)
 if A.eval_file:
     # the batched rollout that training uses, so a 100-question evaluation costs minutes instead of hours
     evq = [json.loads(l) for l in open(A.eval_file) if l.strip()]
