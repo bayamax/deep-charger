@@ -8,7 +8,7 @@ cd /root
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null)
 R=baya1116/hypernet-sp-distill
 RAW="https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl"
-BOXI_SERIAL=35
+BOXI_SERIAL=36
 if [ -f /root/.boxi_serial ] && [ "$(cat /root/.boxi_serial)" -gt "$BOXI_SERIAL" ] 2>/dev/null; then echo "BOXI_STALE $BOXI_SERIAL"; exit 0; fi
 echo $BOXI_SERIAL > /root/.boxi_serial
 mkdir -p /root/sb /root/work
@@ -763,5 +763,7 @@ if [ ! -e /root/.cos1 ]; then touch /root/.cos1
     SB_DEV=cpu OMP_NUM_THREADS=4 python3 /root/sb/train_cos.py $C --layers 4 --out /root/sb/evcos4 --init /root/sb/run4d1/model_best.pt 2>&1 | grep -E "^\[eval-only|Error|Traceback" | sed 's/^/[cos run4d1 4+4] /'
     echo "COS_DONE $(date -u)" ) > /root/sb_cos.log 2>&1 &
 fi
+# the cosine log in full (the mirror cuts long lines)
+if [ ! -e /root/.cos1_up ] && grep -q COS_DONE /root/sb_cos.log 2>/dev/null; then touch /root/.cos1_up; hf upload $R /root/sb_cos.log sentbart/audit/cos.log >/dev/null 2>&1; echo "COS_UP $(date -u)"; fi
 echo "BOXI_OK serial $BOXI_SERIAL $(date -u)"
 # CTL-END
