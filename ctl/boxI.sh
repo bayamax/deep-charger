@@ -8,7 +8,7 @@ cd /root
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null)
 R=baya1116/hypernet-sp-distill
 RAW="https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl"
-BOXI_SERIAL=34
+BOXI_SERIAL=35
 if [ -f /root/.boxi_serial ] && [ "$(cat /root/.boxi_serial)" -gt "$BOXI_SERIAL" ] 2>/dev/null; then echo "BOXI_STALE $BOXI_SERIAL"; exit 0; fi
 echo $BOXI_SERIAL > /root/.boxi_serial
 mkdir -p /root/sb /root/work
@@ -752,6 +752,16 @@ echo "ABL_JOB_DONE $(date -u)"
 RK
   setsid nohup bash -c 'bash /root/ablkeep.sh 2>&1 | tee -a /root/sb_abl.log' > /dev/null 2>&1 < /dev/null &
   echo "ABL_LAUNCHED $(date -u)"
+fi
+# ---- 2026-10-04 10:00 JST (the user: the next-sentence accuracy as cosine): the eval now also reports the cosine of the
+# predicted next-sentence vector to the true one, with the previous sentence and a random sentence as the no-model
+# readings. Measured once on the CPU beside the training, on the 55.1 model (run4h1) and the 4+4 (run4d1).
+if [ ! -e /root/.cos1 ]; then touch /root/.cos1
+  ( curl -sSf -o /root/sb/train_cos.py "https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl/sentbart/train.py?$(date +%s)"
+    cd /root/sb; C="--data /root/sb/data/docs --eval-shard 001 --eval-only 1 --batch 32 --seq 128 --d 512 --heads 8 --ffn 2048 --page 1"
+    SB_DEV=cpu OMP_NUM_THREADS=4 python3 /root/sb/train_cos.py $C --layers 8 --out /root/sb/evcos8 --init /root/sb/run4h1/model_best.pt 2>&1 | grep -E "^\[eval-only|Error|Traceback" | sed 's/^/[cos run4h1 8+8] /'
+    SB_DEV=cpu OMP_NUM_THREADS=4 python3 /root/sb/train_cos.py $C --layers 4 --out /root/sb/evcos4 --init /root/sb/run4d1/model_best.pt 2>&1 | grep -E "^\[eval-only|Error|Traceback" | sed 's/^/[cos run4d1 4+4] /'
+    echo "COS_DONE $(date -u)" ) > /root/sb_cos.log 2>&1 &
 fi
 echo "BOXI_OK serial $BOXI_SERIAL $(date -u)"
 # CTL-END

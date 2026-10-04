@@ -328,6 +328,13 @@ def evaluate():
                     tk = lg_.topk(10, dim=-1).indices
                     r[k + "1"] = r.get(k + "1", 0) + int((tk[:, 0] == want).sum()); r[k + "10"] = r.get(k + "10", 0) + int((tk == want[:, None]).any(-1).sum())
                 r["nnext"] = r.get("nnext", 0) + len(bi2)
+                # cosine of the predicted next-sentence vector to the true one, against two no-model readings:
+                # the sentence just before it, and a random sentence of the batch
+                _, pdv = model(x, valid, masked)
+                tv = F.normalize(x[bi2, c2].float(), dim=-1); pv_ = F.normalize(pdv[bi2, c2].float(), dim=-1)
+                prv = F.normalize(x[bi2, c2 - 1].float(), dim=-1); rnd = tgt[torch.randperm(tgt.shape[0], device=DEV)[:len(bi2)]]
+                r["cnext"] = r.get("cnext", 0.0) + float((pv_ * tv).sum(-1).sum()); r["cprev"] = r.get("cprev", 0.0) + float((prv * tv).sum(-1).sum())
+                r["crand"] = r.get("crand", 0.0) + float((F.normalize(rnd, dim=-1) * tv).sum(-1).sum())
     # page retrieval over all held-out documents: one sentence hidden in each, that sentence's vector is the query,
     # its document must come first among every held-out page. Baseline: the mean of the document's other sentences.
     if A.page:
@@ -354,6 +361,7 @@ def evaluate():
     return {**pg, "enc_top1": r["enc1"] / r["nenc"], "enc_top10": r["enc10"] / r["nenc"], "dec_top1": r["dec1"] / r["ndec"], "dec_top10": r["dec10"] / r["ndec"],
             "next_top1": r["next1"] / r["nnext"], "next_top10": r["next10"] / r["nnext"],
             "next_baseline_top1": r["base1"] / r["nnext"], "next_baseline_top10": r["base10"] / r["nnext"],
+            "next_cos": r["cnext"] / r["nnext"], "next_cos_prev": r["cprev"] / r["nnext"], "next_cos_rand": r["crand"] / r["nnext"],
             "enc_cos": r["cosenc"] / r["benc"], "dec_cos": r["cosdec"] / r["bdec"],
             "enc_loss": r["lenc"] / r["benc"], "dec_loss": r["ldec"] / r["bdec"], "candidates_per_batch": int(r["cand"] / (r["benc"] + r["bdec"]))}
 
