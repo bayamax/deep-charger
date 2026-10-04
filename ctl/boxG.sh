@@ -80,7 +80,7 @@ PSKIP=
 # The raw GitHub copy this box fetches can lag and hand a control run an OLDER version of this file (04:48 on 09-22 it
 # relaunched the online loop under the previous mode while the newer run was merging a checkpoint on the same card).
 # Every edit bumps BOXG_SERIAL; a run that sees a lower serial than one already executed stops here.
-BOXG_SERIAL=2026100317
+BOXG_SERIAL=2026100318
 if [ -f /root/.boxg_serial ] && [ "$(cat /root/.boxg_serial)" -gt "$BOXG_SERIAL" ] 2>/dev/null; then echo "BOXG_STALE $BOXG_SERIAL < $(cat /root/.boxg_serial)"; exit 0; fi
 echo $BOXG_SERIAL > /root/.boxg_serial
 MODE=idle         # 2026-09-29: the side jobs hold the card (multi-turn measurement and training); a finished reeval re-launched on every control run and killed their evaluators
@@ -1140,6 +1140,67 @@ if [ ! -e /root/.mtg3_snap1 ]; then touch /root/.mtg3_snap1
     hf upload $RR /root/mtg2_run.log pooler_distill/chatsft/multiturn/analysis/mtg2_run.log >/dev/null 2>&1
     hf upload $RR /root/mtg1_run.log pooler_distill/chatsft/multiturn/analysis/mtg1_run.log >/dev/null 2>&1
     echo "MTG3_SNAP_UP $(date -u)" >> /root/mtg3.log ) > /dev/null 2>&1 &
+fi
+# ---- moreq3 (2026-10-04 13:15 JST): the DeepSeek key answers (balance 200) but its chat calls fail; nano wrote only 25
+# dialogues from the 123 eval300 seeds left over, and they are poor ("So, what's that company?") - those leftovers are
+# the seeds DeepSeek had already rejected as single-hop when mt_eval was written. Seeds now from selfq_all minus every
+# question in any training or evaluation file (the single-turn GRPO saw selfq_all questions, so these follow-ups are
+# held out for the dialogue but not for the final fact - the same holds for the training follow-ups, so s100 vs s300
+# stays a fair comparison), written by gpt-5-mini, 100 of them. moreq2 is stopped before it evaluates its 25.
+if [ ! -e /root/.moreq2_stop ]; then touch /root/.moreq2_stop; pkill -f "moreq2kee[p].sh"; echo "MOREQ2_JOB_DONE replaced by moreq3 $(date -u)" >> /root/moreq2.log; fi
+if ! pgrep -f "moreq3kee[p].sh" >/dev/null && ! grep -q "MOREQ3_JOB_DONE" /root/moreq3.log 2>/dev/null; then
+  cat > /root/moreq3keep.sh <<'MQ'
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); R=baya1116/hypernet-sp-distill; cd /root/work
+ENV="SP_BASE=/root/gptq_hf_gq14 SP_RANK=16 SP_NOSYS=1 SP_EPISODIC=1 OMP_NUM_THREADS=1 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True"
+EVARGS="--rw 768 --maxd 384 --samepage 1 --decode plain --temp 0.6 --gen 4000 --stop eos --replycap 600"
+curl -sSf -o /root/work/mt_gen.py "https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl/mt_gen.py?$(date +%s)"
+grep -q "6000" /root/work/mt_gen.py || { echo "MOREQ3_JOB_DONE stale mt_gen"; exit 1; }
+python3 - <<'PYX'
+import json
+ex = set()
+for f in ("/root/work/eval300.jsonl", "/root/work/mt_eval.jsonl", "/root/work/mt_eval_chain.jsonl", "/root/work/mt_eval_bridge2.jsonl", "/root/work/mt_train.jsonl", "/root/work/mt_train_br2.jsonl", "/root/work/mt_train_bridge.jsonl", "/root/work/mtg2_items.jsonl", "/root/work/mtg_items.jsonl"):
+    try:
+        for l in open(f):
+            d = json.loads(l); ex.add((d.get("q") or "").strip()); ex.add((d.get("seed") or "").strip()); ex |= {t["q"].strip() for t in d.get("turns", [])}
+            for m in d.get("hist") or []: ex.add((m.get("content") or "").strip())
+    except FileNotFoundError: pass
+open("/root/work/mt_exclude3.jsonl", "w").write("".join(json.dumps({"q": q}) + "\n" for q in ex if q))
+print(f"[moreq3] {len(ex)} questions excluded as seeds")
+PYX
+python3 /root/work/mt_gen.py --api openai --model gpt-5-mini --seeds /root/work/selfq_all.jsonl --exclude /root/work/mt_exclude3.jsonl --out /root/work/mt_eval_bridge3_raw.jsonl --n-bridge 100 --n-memory 0 --n-switch 0 --seed 33 2>&1 | grep -E "^\[mtgen\]|MTGEN_DONE|Error|Traceback" | cut -c1-200
+python3 - <<'PYY'
+import json
+ex = {json.loads(l)["q"] for l in open("/root/work/mt_exclude3.jsonl")}
+out = []
+try:
+    for l in open("/root/work/mt_eval_bridge3_raw.jsonl"):
+        d = json.loads(l)
+        if d.get("kind") == "bridge" and len(d.get("turns", [])) == 2 and not any(t["q"].strip() in ex for t in d["turns"]): out.append(d)
+except FileNotFoundError: pass
+open("/root/work/mt_eval_bridge3.jsonl", "w").write("".join(json.dumps(d, ensure_ascii=False) + "\n" for d in out))
+print(f"[moreq3] bridge3: {len(out)} new follow-up dialogues", flush=True)
+for d in out[:6]: print("[moreq3]   " + " -> ".join(t["q"][:60] for t in d["turns"]) + " | " + " / ".join(t["gold"][:20] for t in d["turns"]), flush=True)
+PYY
+hf upload $R /root/work/mt_eval_bridge3.jsonl pooler_distill/chatsft/multiturn/mt_eval_bridge3.jsonl >/dev/null 2>&1
+[ -s /root/work/mt_eval_bridge3.jsonl ] || { echo "MOREQ3_JOB_DONE no dialogues"; exit 1; }
+until grep -q "chains (win) s300" /root/moreq.log 2>/dev/null || grep -q "MOREQ_JOB_DONE" /root/moreq.log 2>/dev/null; do sleep 60; done
+until [ "$(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits | head -1)" -lt 8500 ]; do sleep 60; done
+tally() { python3 - "$1" "$2" <<'PY2'
+import json, sys
+r = [json.loads(l) for l in open(sys.argv[1])]
+t1 = [x for x in r if x["turn"] == 0]; t2 = [x for x in r if x["turn"] == 1]
+print(f"[moreq3] {sys.argv[2]}: turn 1 {sum(x['correct'] for x in t1)}/{len(t1)}, follow-up {sum(x['correct'] for x in t2)}/{len(t2)}", flush=True)
+PY2
+}
+for arm in "s100:/root/mtg3_s100.safetensors" "s300:/root/mtg1_s300.safetensors"; do T=${arm%%:*}; CK=${arm#*:}
+  env $ENV python3 /root/work/pool_eval.py $CK /root/work/eval300.jsonl /root/work/br3_$T.jsonl --multiturn /root/work/mt_eval_bridge3.jsonl --mt-mode win --n 1000 $EVARGS --tag "[br3-$T]" > /root/br3_$T.log 2>&1
+  grep -E "Traceback|Error" /root/br3_$T.log | tail -1 | cut -c1-160; tally /root/work/br3_$T.jsonl "bridge3 (win) $T"
+  hf upload $R /root/work/br3_$T.jsonl pooler_distill/chatsft/multiturn/br3_$T.jsonl >/dev/null 2>&1
+done
+echo "MOREQ3_JOB_DONE $(date -u)"
+MQ
+  setsid nohup bash -c 'bash /root/moreq3keep.sh 2>&1 | tee -a /root/moreq3.log' >> /proc/1/fd/1 2>&1 < /dev/null 9>&- &
+  echo "MOREQ3_LAUNCHED $(date -u)"
 fi
 # ---- moreq2 (2026-10-04 12:50 JST): mt_gen wrote 0 of the 100 new follow-up dialogues (every DeepSeek call failed;
 # searchq got 1/500 the same way on 10-02). Check the DeepSeek key once (status only), and write the dialogues with
@@ -2428,6 +2489,7 @@ while :; do
     echo "--- qt.log (tail) ---"; tail -n 4 /root/qt.log 2>/dev/null | cut -c1-300
     echo "--- pqjudge.log (tail) ---"; tail -n 5 /root/pqjudge.log 2>/dev/null | cut -c1-200
     echo "--- du_list ---"; cat /root/du_list.txt 2>/dev/null | head -42
+    echo "--- moreq3.log (tail) ---"; tail -n 10 /root/moreq3.log 2>/dev/null | cut -c1-250
     echo "--- moreq2.log (tail) ---"; tail -n 8 /root/moreq2.log 2>/dev/null | cut -c1-250
     echo "--- moreq.log (tail) ---"; tail -n 14 /root/moreq.log 2>/dev/null | cut -c1-250
     echo "--- dl100.log (tail) ---"; tail -n 3 /root/dl100.log 2>/dev/null | cut -c1-250

@@ -22,7 +22,7 @@ URL = "https://api.openai.com/v1/chat/completions" if A.api == "openai" else "ht
 ERR = [0]
 def chat(system, user, tries=4):
     body = {"model": A.model, "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}], "response_format": {"type": "json_object"}}
-    if A.model.startswith("gpt-5"): body["max_completion_tokens"] = 2000
+    if A.model.startswith("gpt-5"): body["max_completion_tokens"] = 6000   # the reasoning tokens count against it; 2000 left the content empty
     else: body["max_tokens"] = 800; body["temperature"] = 0.7
     for t in range(tries):
         try:
@@ -65,6 +65,8 @@ def make_bridge(qg):
     if not r or r.get("skip") or not r.get("turn1") or not r.get("turn2") or not r.get("bridge"): return None
     b = r["bridge"].strip()
     if b.lower() in r["turn2"].lower(): return None   # the follow-up must not name the bridge
+    if b.lower() == g.lower() or b.lower() in q.lower(): return None   # the bridge is the final answer, or is already named in the seed: no hop
+    if not any(ch.isalpha() for ch in g): return None
     return {"kind": "bridge", "seed": q, "turns": [{"q": r["turn1"].strip(), "gold": b, "standalone": r["turn1"].strip()},
                                                    {"q": r["turn2"].strip(), "gold": g, "standalone": q}]}
 def make_memory(args):
