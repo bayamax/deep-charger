@@ -80,7 +80,7 @@ PSKIP=
 # The raw GitHub copy this box fetches can lag and hand a control run an OLDER version of this file (04:48 on 09-22 it
 # relaunched the online loop under the previous mode while the newer run was merging a checkpoint on the same card).
 # Every edit bumps BOXG_SERIAL; a run that sees a lower serial than one already executed stops here.
-BOXG_SERIAL=2026100318
+BOXG_SERIAL=2026100319
 if [ -f /root/.boxg_serial ] && [ "$(cat /root/.boxg_serial)" -gt "$BOXG_SERIAL" ] 2>/dev/null; then echo "BOXG_STALE $BOXG_SERIAL < $(cat /root/.boxg_serial)"; exit 0; fi
 echo $BOXG_SERIAL > /root/.boxg_serial
 MODE=idle         # 2026-09-29: the side jobs hold the card (multi-turn measurement and training); a finished reeval re-launched on every control run and killed their evaluators
@@ -1140,6 +1140,15 @@ if [ ! -e /root/.mtg3_snap1 ]; then touch /root/.mtg3_snap1
     hf upload $RR /root/mtg2_run.log pooler_distill/chatsft/multiturn/analysis/mtg2_run.log >/dev/null 2>&1
     hf upload $RR /root/mtg1_run.log pooler_distill/chatsft/multiturn/analysis/mtg1_run.log >/dev/null 2>&1
     echo "MTG3_SNAP_UP $(date -u)" >> /root/mtg3.log ) > /dev/null 2>&1 &
+fi
+# ---- 2026-10-04 17:45 JST: why do DeepSeek chat calls fail (balance answers 200)? One tiny call per model name; status
+# code and the error text only (never the key).
+if [ ! -e /root/.dsk_chat_check ]; then touch /root/.dsk_chat_check
+  for m in deepseek-chat deepseek-reasoner deepseek-flash; do
+    out=$(curl -s -m 60 -w ' HTTP%{http_code}' -H "Authorization: Bearer $(tr -d '[:space:]' < /root/.dsk 2>/dev/null)" -H "Content-Type: application/json" \
+      -d "{\"model\":\"$m\",\"messages\":[{\"role\":\"user\",\"content\":\"Say OK.\"}],\"max_tokens\":20}" https://api.deepseek.com/chat/completions)
+    echo "DSK_CHAT $m: $(echo "$out" | tr '\n' ' ' | sed -E 's/"content":"[^"]*"/"content":"..."/g' | cut -c1-220)"
+  done
 fi
 # ---- moreq3 (2026-10-04 13:15 JST): the DeepSeek key answers (balance 200) but its chat calls fail; nano wrote only 25
 # dialogues from the 123 eval300 seeds left over, and they are poor ("So, what's that company?") - those leftovers are
