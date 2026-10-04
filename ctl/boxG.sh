@@ -80,7 +80,7 @@ PSKIP=
 # The raw GitHub copy this box fetches can lag and hand a control run an OLDER version of this file (04:48 on 09-22 it
 # relaunched the online loop under the previous mode while the newer run was merging a checkpoint on the same card).
 # Every edit bumps BOXG_SERIAL; a run that sees a lower serial than one already executed stops here.
-BOXG_SERIAL=2026100321
+BOXG_SERIAL=2026100322
 if [ -f /root/.boxg_serial ] && [ "$(cat /root/.boxg_serial)" -gt "$BOXG_SERIAL" ] 2>/dev/null; then echo "BOXG_STALE $BOXG_SERIAL < $(cat /root/.boxg_serial)"; exit 0; fi
 echo $BOXG_SERIAL > /root/.boxg_serial
 MODE=idle         # 2026-09-29: the side jobs hold the card (multi-turn measurement and training); a finished reeval re-launched on every control run and killed their evaluators
@@ -1140,6 +1140,21 @@ if [ ! -e /root/.mtg3_snap1 ]; then touch /root/.mtg3_snap1
     hf upload $RR /root/mtg2_run.log pooler_distill/chatsft/multiturn/analysis/mtg2_run.log >/dev/null 2>&1
     hf upload $RR /root/mtg1_run.log pooler_distill/chatsft/multiturn/analysis/mtg1_run.log >/dev/null 2>&1
     echo "MTG3_SNAP_UP $(date -u)" >> /root/mtg3.log ) > /dev/null 2>&1 &
+fi
+# ---- r1smoke (2026-10-04 19:25 JST): r1_traj.py on 6 training items now (API only, CPU) so the format and the
+# verification are checked before the probe hands it the real set.
+if [ ! -e /root/.r1smoke ]; then touch /root/.r1smoke
+  ( cd /root/work; python3 -c "
+import json, random
+it=[json.loads(l) for l in open('/root/work/mtg2_items.jsonl')]; random.Random(1).shuffle(it)
+open('/root/work/r1smoke_in.jsonl','w').write(''.join(json.dumps({**x,'pass':0},ensure_ascii=False)+'\n' for x in it[:6]))"
+    rm -f /root/work/r1smoke_out.jsonl
+    timeout 1800 python3 /root/work/r1_traj.py --probe /root/work/r1smoke_in.jsonl --out /root/work/r1smoke_out.jsonl --workers 6 2>&1 | grep -E "^\[r1\]|R1_TRAJ|Error|Traceback" | tail -3
+    python3 -c "
+import json
+for l in open('/root/work/r1smoke_out.jsonl'):
+    x=json.loads(l); print('[r1smoke]', x['q'][:60], '| gold', x['gold'][:30], '| ns', x['ns'], '|', x['traj'][:500].replace(chr(10),' / '))" 2>&1 | head -4
+    echo "R1SMOKE_DONE $(date -u)" ) > /root/r1smoke.log 2>&1 &
 fi
 # ---- teach (2026-10-04 19:40 JST, the user: supervised from R1 for what GRPO cannot reach; DeepSeek topped up). From
 # mtg3 step 100 (s100): (1) probe 600 training items (every bridge follow-up + the rest at random), 4 samples each at
@@ -2601,6 +2616,7 @@ while :; do
     echo "--- qt.log (tail) ---"; tail -n 4 /root/qt.log 2>/dev/null | cut -c1-300
     echo "--- pqjudge.log (tail) ---"; tail -n 5 /root/pqjudge.log 2>/dev/null | cut -c1-200
     echo "--- du_list ---"; cat /root/du_list.txt 2>/dev/null | head -42
+    echo "--- r1smoke.log ---"; cat /root/r1smoke.log 2>/dev/null | cut -c1-700
     echo "--- teach.log (tail) ---"; tail -n 16 /root/teach.log 2>/dev/null | cut -c1-250; tail -n 1 /root/probe_s100.log 2>/dev/null | cut -c1-200
     echo "--- moreq4.log (tail) ---"; tail -n 4 /root/moreq4.log 2>/dev/null | cut -c1-250
     echo "--- moreq3.log (tail) ---"; tail -n 10 /root/moreq3.log 2>/dev/null | cut -c1-250
