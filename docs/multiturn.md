@@ -188,3 +188,35 @@ left"), none a length or time cap; they peaked at 39% around steps 201-240 and f
 Follow-up (bridge) dialogues, the 40 of mt_eval, turn 1 / turn 2 (the follow-up): base 26 / 19, step 300 23 / 18 -
 the switch training did not cost the follow-ups. Next (mix0 -> mtg2): the Dolphin reasoning baseline, then GRPO from
 step 300 on switch + ~30% bridge items, measured on all four screens.
+
+## Bounded memory: the history through the pooler (2026-10-03, "win")
+
+The app's memory must not grow with the conversation. `pool_eval.py --mt-mode win` runs the dialogue as one stream,
+exactly as one reply runs: the newest 768 tokens (the end of the previous turn - its pages, thinking, reply - and the
+new question) stay raw, everything older is in the pooler's 32 soft tokens (from at most 384 kept tokens), only the
+new question is pinned. KV is bounded by question + 32 + 768 (+ the 128-token chunk) whatever the number of turns.
+Step 300, 40 follow-up dialogues: follow-ups 17/40 under win against 18/40 with the whole history in the prompt; the
+30 switch chains turns 2-4: 51/90 under win against 52/90. Win is the spec; the app keeps no history in the prompt.
+
+## mtg2 / mtg3 (2026-10-02/04): GRPO with reasoning mixed in
+
+mtg2 (step 300 on switch + bridge, every step a search turn, lr 1e-5) rolled back at step 56 and lost Dolphin 54 -> 49.
+mtg3: one step in four a Dolphin reasoning problem (nano against the R1 reference), both rates 5e-6, from step 300.
+The dips in the training pass rate were mostly hard stretches of the item list (mtg2 and mtg3 draw the same items at
+the same steps and match there), but past step 100 the run did drift (rollback at 150; step 200 below step 300 on
+search). Half of the search groups carry no signal (all eight samples alike, nearly always all wrong); nano judged only
+6 of 150 wrong replies "the same answer in another form", so the misses are real, not gold-string strictness.
+
+| screen (win where multi-turn) | step 300 | **mtg3 step 100** | mtg3 step 200 |
+|---|---|---|---|
+| single-turn, all 300 | 144 | **160** (54 / 54 / 52) | - |
+| single-turn, first 102 | 59 | 64 | 55 |
+| follow-ups, 40 of mt_eval (turn 1 / follow-up) | 25 / 17 | 23 / 19 | 27 / 14 |
+| follow-ups, 97 new (gpt-5-mini, selfq_all seeds) | 39 / 21 | **43 / 31** | - |
+| switch chains, turns 2-4 of 30 | 51 | 52 | - |
+| Dolphin reasoning 100 (nano) | 54 | 56 | 61 |
+
+**mtg3 step 100 is the app candidate** (`pooler_distill/chatsft/multiturn/mtg3_s100.safetensors`, LoRA r16 all
+layers + pooler over the 4-bit g14 base): no screen below step 300, single-turn +16/300, new follow-ups +10/97.
+Next (teach): probe 600 training items with step 100, R1 solves the never-solved ones in the student's search
+environment (verified, no answer-first queries), supervised steps on those trajectories beside the model's own.
