@@ -80,7 +80,7 @@ PSKIP=
 # The raw GitHub copy this box fetches can lag and hand a control run an OLDER version of this file (04:48 on 09-22 it
 # relaunched the online loop under the previous mode while the newer run was merging a checkpoint on the same card).
 # Every edit bumps BOXG_SERIAL; a run that sees a lower serial than one already executed stops here.
-BOXG_SERIAL=2026100324
+BOXG_SERIAL=2026100325
 if [ -f /root/.boxg_serial ] && [ "$(cat /root/.boxg_serial)" -gt "$BOXG_SERIAL" ] 2>/dev/null; then echo "BOXG_STALE $BOXG_SERIAL < $(cat /root/.boxg_serial)"; exit 0; fi
 echo $BOXG_SERIAL > /root/.boxg_serial
 MODE=idle         # 2026-09-29: the side jobs hold the card (multi-turn measurement and training); a finished reeval re-launched on every control run and killed their evaluators
@@ -1167,6 +1167,48 @@ import json
 for l in open('/root/work/r1smoke_out.jsonl'):
     x=json.loads(l); print('[r1smoke]', x['q'][:60], '| gold', x['gold'][:30], '| ns', x['ns'], '|', x['traj'][:500].replace(chr(10),' / '))" 2>&1 | head -4
     echo "R1SMOKE_DONE $(date -u)" ) > /root/r1smoke.log 2>&1 &
+fi
+# ---- teach2 (2026-10-05 08:20 JST): teach's probe and R1 stages finished (600 probed: 316 never solved, 59/44/57
+# sometimes, 124 always; R1 verified 99 trajectories, 81 with history; 284 own traces) but the supervised step died at
+# its first save (disk full) and the screens with it. Rerun stage 3 and 4 from the saved files once the disk is freed:
+# 50 steps (two epochs over the 99), one save at the end.
+if [ -e /root/.diskfree_g1 ] && ! pgrep -f "teach2kee[p].sh" >/dev/null && ! grep -q "TEACH2_JOB_DONE" /root/teach2.log 2>/dev/null; then
+  cat > /root/teach2keep.sh <<'TK'
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); R=baya1116/hypernet-sp-distill; cd /root/work; S0=/root/mtg3_s100.safetensors
+ENV="SP_BASE=/root/gptq_hf_gq14 SP_RANK=16 SP_NOSYS=1 SP_EPISODIC=1 OMP_NUM_THREADS=1 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True"
+EVARGS="--rw 768 --maxd 384 --samepage 1 --decode plain --temp 0.6 --gen 4000 --stop eos --replycap 600"
+OL="--pooler none --lora-layers all --lora-rank 16 --save-lora-only 1 --heldout /root/work/eval300.jsonl --maxsrch 7 --stop eos --judge 0 --reason-stub 1"
+FREE=$(df -BG --output=avail /root | tail -1 | tr -dc 0-9); echo "[teach2] $FREE GB free $(date -u +%H:%M)"
+[ "${FREE:-0}" -ge 6 ] || { echo "TEACH2_JOB_DONE disk still full"; exit 1; }
+[ -s /root/work/r1_traj.jsonl ] && [ -s /root/work/own_traces_s100.jsonl ] || { echo "TEACH2_JOB_DONE data missing"; exit 1; }
+while pgrep -f "pool_eval.p[y]|online_loop.p[y]|memfit.p[y]" >/dev/null; do sleep 30; done
+rm -rf /root/teach1
+env SP_BASE=/root/gptq_hf_gq14 SP_NOSYS=1 SP_EPISODIC=1 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python3 /root/work/online_loop.py $S0 /root/teach1 $OL \
+  --mt-items /root/work/probe_items.jsonl --demo-sft /root/work/r1_traj.jsonl --demo-per-step 4 --replay /root/work/own_traces_s100.jsonl --replay-per-step 2 \
+  --steps 50 --save-every 50 --lr 2e-5 > /root/teach1_run.log 2>&1
+grep -E "^\[demo-sft\]|ONLINE_|Error|Traceback" /root/teach1_run.log | tail -3 | cut -c1-200; grep -E "^\[step (1|25|50)\]" /root/teach1_run.log | cut -c1-200
+[ -s /root/teach1/latest.safetensors ] || { echo "TEACH2_JOB_DONE no checkpoint"; exit 1; }
+CK=/root/teach1_s50.safetensors; cp /root/teach1/latest.safetensors $CK; rm -f /root/teach1/*.pt /root/teach1/step*.safetensors
+hf upload $R $CK pooler_distill/chatsft/teach/teach1_s50.safetensors >/dev/null 2>&1
+SN=0; for i in 0 1 2; do env $ENV python3 /root/work/pool_eval.py $CK /root/work/ev_$i.jsonl /root/work/teach1st_$i.jsonl --n 100 $EVARGS --tag "[teach1st$i]" > /root/teach1st_$i.log 2>&1
+  c=$(python3 -c "import json;print(sum(bool(json.loads(l).get('correct')) for l in open('/root/work/teach1st_$i.jsonl')))" 2>/dev/null || echo 0); SN=$((SN + c)); echo "[teach2] single shard $i: $c/100 (s100 54/54/52)"; done
+echo "[teach2] single-turn: $SN/300 (s100 160, s300 144)"
+for b in "br3:/root/work/mt_eval_bridge3.jsonl:97 (s100 43/31)" "br:/root/work/mt_eval_bridge.jsonl:40 (s100 23/19)"; do T=${b%%:*}; r=${b#*:}; F=${r%%:*}; NOTE=${r#*:}
+  env $ENV python3 /root/work/pool_eval.py $CK /root/work/eval300.jsonl /root/work/${T}_teach1.jsonl --multiturn $F --mt-mode win --n 1000 $EVARGS --tag "[$T-teach1]" > /root/${T}_teach1.log 2>&1
+  echo "[teach2] $T (win): $(python3 -c "
+import json; r=[json.loads(l) for l in open('/root/work/${T}_teach1.jsonl')]
+print('turn 1', sum(x['correct'] for x in r if x['turn']==0), '/', sum(1 for x in r if x['turn']==0), ', follow-up', sum(x['correct'] for x in r if x['turn']==1), '/', sum(1 for x in r if x['turn']==1))" 2>&1 | tail -1) (s100 on $NOTE)"
+done
+env SP_BASE=/root/gptq_hf_gq14 SP_NOSYS=1 SP_EPISODIC=1 OMP_NUM_THREADS=1 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python3 /root/work/online_loop.py $CK /root/evalrun_dl_teach1 \
+  --questions /root/work/eval300.jsonl --dolphin /root/work/dolphin_v1.jsonl --heldout /root/work/eval300.jsonl \
+  --b 12 --gen 7000 --budget 2400 --temp 0.6 --maxsrch 7 --pooler none --lora-rank 16 --lora-layers all --stop eos --loop-break answer \
+  --eval-file /root/work/dolphinq.jsonl --eval-out /root/work/dl_teach1.jsonl > /root/dl_teach1.log 2>&1
+[ -s /root/dl_judge.py ] && OAI_KEY=$(cat /root/.oai 2>/dev/null) python3 /root/dl_judge.py /root/work/dl_teach1.jsonl teach1 | sed 's/\[mix0\]/[teach2]/'
+echo "[teach2] (s100: Dolphin 56)"
+echo "TEACH2_JOB_DONE $(date -u)"
+TK
+  setsid nohup bash -c 'bash /root/teach2keep.sh 2>&1 | tee -a /root/teach2.log' >> /proc/1/fd/1 2>&1 < /dev/null 9>&- &
+  echo "TEACH2_LAUNCHED $(date -u)"
 fi
 # ---- teach (2026-10-04 19:40 JST, the user: supervised from R1 for what GRPO cannot reach; DeepSeek topped up). From
 # mtg3 step 100 (s100): (1) probe 600 training items (every bridge follow-up + the rest at random), 4 samples each at
@@ -2629,6 +2671,7 @@ while :; do
     echo "--- pqjudge.log (tail) ---"; tail -n 5 /root/pqjudge.log 2>/dev/null | cut -c1-200
     echo "--- du_list ---"; cat /root/du_list.txt 2>/dev/null | head -42
     echo "--- r1smoke.log ---"; cat /root/r1smoke.log 2>/dev/null | cut -c1-700
+    echo "--- teach2.log (tail) ---"; tail -n 12 /root/teach2.log 2>/dev/null | cut -c1-250; grep -E "^\[step" /root/teach1_run.log 2>/dev/null | tail -n 1 | cut -c1-200
     echo "--- teach.log (tail) ---"; tail -n 16 /root/teach.log 2>/dev/null | cut -c1-250; tail -n 1 /root/probe_s100.log 2>/dev/null | cut -c1-200
     echo "--- moreq4.log (tail) ---"; tail -n 4 /root/moreq4.log 2>/dev/null | cut -c1-250
     echo "--- moreq3.log (tail) ---"; tail -n 10 /root/moreq3.log 2>/dev/null | cut -c1-250
