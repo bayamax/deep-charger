@@ -93,7 +93,9 @@ def save_rec(): json.dump(rec, open(REC, "w"), indent=1); upload(REC, "sentbart/
 def keep_cap(r):
     key = f"bge{r['enc_layers']}_bart{r['layers']}"
     if r["pool_top1"] > rec["cap"].get(key, {}).get("pool_top1", -1) and os.path.exists(r["ckpt"]):
-        d = os.path.join(A.work, "cap_" + key); os.makedirs(d, exist_ok=True); shutil.copy(r["ckpt"], os.path.join(d, "model_best.pt"))
+        d = os.path.join(A.work, "cap_" + key); os.makedirs(d, exist_ok=True)
+        try: shutil.copy(r["ckpt"], os.path.join(d, "model_best.pt"))
+        except OSError as e: log(f"could not keep {key} locally ({e}); the hub copy follows"); upload(r["ckpt"], f"sentbart/e2e/cap_{key}/model_best.pt"); return
         rec["cap"][key] = {k: r[k] for k in ("name", "pool_top1", "page_top1", "step", "neg")}
         upload(os.path.join(d, "model_best.pt"), f"sentbart/e2e/cap_{key}/model_best.pt")
         log(f"best for {key}: pool {r['pool_top1']:.3f} (2000: {r['page_top1']:.3f}) from {r['name']}")
@@ -134,7 +136,7 @@ while rec["cur"]["fails"] < 3:
     else:
         cur["turn"] += 1; cur["fails"] += 1
         log(f"{r['name']} not kept: pool {r['pool_top1']:.3f} vs {cur['pool_top1']:.3f}")
-    for f in ("state_e2e.pt", "model_latest.pt"):
+    for f in ("state_e2e.pt", "model_latest.pt", "model_best.pt"):   # what is kept lives in cur.pt and cap_*/ (the disk is ~13 GB)
         p = os.path.join(A.work, r["name"], f)
         if os.path.exists(p): os.remove(p)
     save_rec()
