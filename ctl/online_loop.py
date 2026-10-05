@@ -1016,8 +1016,8 @@ def demo_backward(q, traj, coef, hist=None):
 
 def judge_reason(q, ref, text):
     """teacher score for one reasoning sample; the reward is 1.0 only when every box is ticked"""
-    reply = text.split("</think>")[-1].strip()
-    if not reply: return 0.0, {"unfinished": True}
+    reply = text.split("</think>")[-1].strip() if "</think>" in text else ""   # no </think>: unfinished - the thinking is not a reply
+    if not reply: return 0.0, {"unfinished": True}                                   # (until 2026-10-06 it was judged as one, and could pass)
     if A.reason_stub:                                     # shape only, for a smoke run with no credit
         ok = 8 <= len(reply.split()) <= 400 and not any(t in reply for t in TAGS)
         return (1.0 if ok else 0.0), {"stub": True}
