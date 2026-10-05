@@ -39,6 +39,7 @@ ap.add_argument("--w-page", type=float, default=1.0)
 ap.add_argument("--page-res", type=int, default=0, help="1: page vector = normalise(mean of the visible sentence vectors + page_head(page token)), the head starting at zero - it starts at the mean baseline and learns the difference")
 ap.add_argument("--cluster", type=int, default=0, help=">0: hard negatives - k-means (this many clusters) over the training documents' mean sentence vectors; --cluster-frac of each batch is drawn from one cluster (the rest at random), so the page loss and the sentence losses meet look-alike documents in the batch")
 ap.add_argument("--cluster-frac", type=float, default=0.5)
+ap.add_argument("--page-hard", type=int, default=0, help=">0 (with --cluster): hard negatives for the PAGE loss only - for each batch document this many look-alike documents (same cluster) are encoded without gradient under the one-sentence-hidden condition and their page vectors join the page loss as negatives; the batch itself, and so the sentence losses, stay random (--cluster-frac 0)")
 ap.add_argument("--cluster-cache", default="/root/sb/doc_clusters")
 ap.add_argument("--page-ramp-max", type=float, default=0.3, help="--page-input ramp: the share of sentences hidden from the page pass at the end of the ramp")
 ap.add_argument("--page-ramp-steps", type=int, default=20000, help="--page-input ramp: steps over which the hidden share grows from one sentence to --page-ramp-max")
@@ -158,7 +159,7 @@ BID = [None]                                       # the global document index o
 
 def train_batch():
     items, gid = [], []
-    if CL is not None:                              # hard negatives: a block of one cluster, the rest at random
+    if CL is not None and A.cluster_frac > 0:       # hard negatives: a block of one cluster, the rest at random
         lab, order, bounds = CL; nk = int(round(A.batch * A.cluster_frac))
         g0 = random.randrange(len(docs)); c = lab[g0]; mem = [int(m) for m in order[bounds[c]:bounds[c + 1]] if m != g0]
         gid = [g0] + random.sample(mem, min(nk - 1, len(mem)))
@@ -313,6 +314,20 @@ def losses(x, valid, masked):
     LP[0] = torch.zeros((), device=DEV)
     if A.page:                                         # each hidden sentence must find its own document's page vector
         q = x[masked].float(); doc = torch.nonzero(masked)[:, 0]
+        HK = None
+        if A.page_hard and A.page_input != "mask" and CL is not None and model.training and BID[0] is not None:
+            # look-alike documents for the page loss only: same cluster as each batch document, no gradient
+            lab, order, bounds = CL; hid = []
+            for g in BID[0]:
+                c = lab[g]; lo, hi = bounds[c], bounds[c + 1]
+                for _ in range(A.page_hard):
+                    if hi - lo > 1:
+                        h = int(order[random.randrange(lo, hi)])
+                        if h != g: hid.append(h)
+            if hid:
+                with torch.no_grad():
+                    xh, vh, mh, _ = make_batch([crop(train_sh[docs[h][0]][1], docs[h][1], docs[h][2]) for h in hid], "one")
+                    model.encode(xh, vh, mh); HK = model.last_page.detach()
         if A.page_input == "ramp" and model.training:  # one sentence hidden at first, widening to --page-ramp-max of the document
             n = valid.sum(1); frac = A.page_ramp_max * min(1.0, STEP[0] / max(1, A.page_ramp_steps))
             k = torch.clamp((frac * n.float()).round().long(), min=1); k = torch.minimum(k, (n - 1).clamp_min(1))
@@ -328,6 +343,8 @@ def losses(x, valid, masked):
         keys = model.last_page
         if A.page_queue and PQ:
             keys = torch.cat([keys, torch.cat(PQ)])     # earlier batches' pages: negatives only (labels index the current batch)
+        if HK is not None:
+            keys = torch.cat([keys, HK])                # look-alike documents' pages: negatives only
         if LK is not None and model.training and BID[0] is not None and len(BID[0]) == len(model.last_page):
             kid = np.concatenate([BID[0]] + PQI) if PQI else BID[0]
             T = torch.from_numpy(link_targets(BID[0], kid)).to(q.device)[doc]      # one row per batch document, then per hidden sentence

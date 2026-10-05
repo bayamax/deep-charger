@@ -8,7 +8,7 @@ cd /root
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null)
 R=baya1116/hypernet-sp-distill
 RAW="https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl"
-BOXI_SERIAL=39
+BOXI_SERIAL=40
 if [ -f /root/.boxi_serial ] && [ "$(cat /root/.boxi_serial)" -gt "$BOXI_SERIAL" ] 2>/dev/null; then echo "BOXI_STALE $BOXI_SERIAL"; exit 0; fi
 echo $BOXI_SERIAL > /root/.boxi_serial
 mkdir -p /root/sb /root/work
@@ -892,6 +892,49 @@ echo "HN_JOB_DONE $(date -u)"
 RK
   setsid nohup bash -c 'bash /root/hnkeep.sh 2>&1 | tee -a /root/sb_hn.log' > /dev/null 2>&1 < /dev/null &
   echo "HN_LAUNCHED $(date -u)"
+fi
+# ---- ph (2026-10-05 09:40 JST, the user: hard negatives belong to the page loss only - the sentence prediction is not
+# there yet, its cosine barely beats "the sentence before"). Once hn's clustering has written its labels, hn is stopped
+# and two arms run with RANDOM batches (sentence losses unchanged) and look-alike documents added to the page loss only
+# (encoded without gradient, one sentence hidden, their page vectors as extra negatives): ph1 (one per batch document,
+# 32 more), ph2 (two each, 64). From run4h1 (55.1), one32 recipe, 30k, against one32's 58.1.
+if ! pgrep -f "phkee[p].sh" >/dev/null && ! grep -q "PH_JOB_DONE" /root/sb_ph.log 2>/dev/null; then
+  cat > /root/phkeep.sh <<'RK'
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); R=baya1116/hypernet-sp-distill; D=/root/sb/data/docs; cd /root/sb
+until ls /root/sb/doc_clusters/labels_4096_*.npy >/dev/null 2>&1 || grep -q "HN_JOB_DONE" /root/sb_hn.log 2>/dev/null; do sleep 60; done
+echo "HN_JOB_DONE replaced by ph (page-only hard negatives) $(date -u)" >> /root/sb_hn.log
+pkill -f "hnkee[p].sh"; pkill -f "python3 /root/sb/train.py .*--out /root/sb/abl_hn"; pkill -f "python3 /root/sb/train.py .*--out /root/sb/run4u"; sleep 15
+curl -sSf -o /root/sb/train.py "https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl/sentbart/train.py?$(date +%s)" || echo "[ph] train.py fetch failed"
+grep -q "page-hard" /root/sb/train.py || { echo "PH_JOB_DONE train.py has no --page-hard"; exit 1; }
+bestof() { grep -h "^\[best\]" /root/sb/$1/train.log 2>/dev/null | tail -1 | sed -E 's/.*page_top1 ([0-9.]+).*/\1/'; }
+evals() { grep -hoE "^\[eval [0-9]+\] page_top1 [0-9.]+" /root/sb/$1/train.log 2>/dev/null | sed -E 's/\[eval ([0-9]+)\] page_top1 ([0-9.]+)/\1:\2/' | tr '\n' ' '; }
+COMMON="--data $D --eval-shard 001 --seq 128 --d 512 --layers 8 --heads 8 --ffn 2048 --warmup 1000 --eval-every 10000 --save-every 10000 --page 1 --page-queue 64 --skip-grad 100 --batch 32 --lr 3e-5 --page-input one --cluster 4096 --cluster-frac 0"
+best=""; bestv=0
+for k in 1 2; do a=ph$k
+  n=abl_$a; rm -rf /root/sb/$n; echo "[ph] $a: page-hard $k $(date -u +%H:%M); $(df -h / | tail -1 | awk '{print $4}') free"
+  python3 /root/sb/train.py $COMMON --page-hard $k --init /root/sb/run4h1/model_best.pt --out /root/sb/$n --steps 30000 2>&1 | grep -E "^\[model|^\[cluster|TRAIN_DONE|Error|Traceback|out of memory|write failed"
+  hf upload $R /root/sb/$n/train.log sentbart/abl/$a/train.log >/dev/null 2>&1; rm -f /root/sb/$n/state.pt /root/sb/$n/model_latest.pt
+  v=$(bestof $n); echo "[ph] $a done: $(evals $n)| best ${v:-?} (one32: 10000:0.574 20000:0.581 30000:0.579)"
+  [ -n "$v" ] && python3 -c "import sys; sys.exit(0 if float('$v') > float('$bestv') else 1)" && { best=$a; bestv=$v; }
+done
+echo "[ph] best $best at $bestv"
+python3 -c "import sys; sys.exit(0 if float('$bestv') >= 0.586 else 1)" || { echo "PH_JOB_DONE no gain over one32 (best $best $bestv)"; exit 0; }
+K=${best#ph}; prev=/root/sb/abl_$best/model_best.pt; base=$bestv
+hf upload $R $prev sentbart/abl/$best/model_best.pt >/dev/null 2>&1
+for i in 1 2 3; do
+  n=run4v$i; rm -rf /root/sb/$n; echo "[ph] $n: $best recipe 100k from $prev (top-1 $base) $(date -u +%H:%M)"
+  ( while sleep 1800; do hf upload $R /root/sb/$n/train.log sentbart/small_$n/train.log >/dev/null 2>&1; done ) & UP=$!
+  python3 /root/sb/train.py $COMMON --page-hard $K --init $prev --out /root/sb/$n --steps 100000 2>&1 | grep -E "^\[model|^\[best|TRAIN_DONE|Error|Traceback|out of memory|write failed"
+  kill $UP 2>/dev/null; hf upload $R /root/sb/$n/train.log sentbart/small_$n/train.log >/dev/null 2>&1; hf upload $R /root/sb/$n/model_best.pt sentbart/small_$n/model_best.pt >/dev/null 2>&1
+  rm -f /root/sb/$n/state.pt /root/sb/$n/model_latest.pt
+  cur=$(bestof $n); cur=${cur:-0}; echo "[ph] $n done: best page top-1 $cur (from $base)"
+  python3 -c "import sys; sys.exit(0 if float('$cur') - float('$base') >= 0.01 else 1)" || { echo "PLATEAU_PH at $n: best $cur vs $base"; break; }
+  prev=/root/sb/$n/model_best.pt; base=$cur
+done
+echo "PH_JOB_DONE $(date -u)"
+RK
+  setsid nohup bash -c 'bash /root/phkeep.sh 2>&1 | tee -a /root/sb_ph.log' > /dev/null 2>&1 < /dev/null &
+  echo "PH_LAUNCHED $(date -u)"
 fi
 echo "BOXI_OK serial $BOXI_SERIAL $(date -u)"
 # CTL-END
