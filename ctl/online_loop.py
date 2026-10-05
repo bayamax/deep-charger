@@ -71,6 +71,7 @@ ap.add_argument("--probe-out", default="", help="with --mt-items: no training - 
 ap.add_argument("--probe-g", type=int, default=4); ap.add_argument("--probe-n", type=int, default=0)
 ap.add_argument("--demo-sft", default="", help="jsonl of {q, hist, traj}: supervised steps on teacher trajectories (thinking and searches trained, information blocks and the reply masked), --demo-per-step a step, beside --replay-per-step of the model's own verified traces {q, hist, text}")
 ap.add_argument("--demo-per-step", type=int, default=4)
+ap.add_argument("--demo-on-fail", type=float, default=0.0, help=">0 (with --search-demo): teacher-mixed GRPO - a search group none of whose samples passes also takes one supervised step on that question's teacher trajectory (searching trained, pages and reply masked) at this weight, beside its policy gradient")
 ap.add_argument("--loop-break", default="", choices=["", "stop", "answer"], help="a thinking span whose last 256 tokens are under 25%% distinct is a repetition loop (g14 step 400: 22 of 100 held-out replies never finished, tail repetition 0.84). stop: end the row there; answer: close the thinking and let it answer")
 ap.add_argument("--rft", type=int, default=0, help="1: rejection-sampling fine-tuning instead of the policy gradient on reasoning steps: of the G samples the teacher passes, the one with the shortest thinking is trained on as plain SFT; none passing falls back to --wheels. No advantage, no std, no length pressure.")
 ap.add_argument("--sft-only", type=int, default=0, help=">0: pure distillation, no rollouts and no judge: each step trains this many reasoning records (their R1 thinking and reply) as plain SFT, plus one verified search trace at --rft-replay weight")
@@ -1364,6 +1365,9 @@ for step in range(state["step"] + 1, A.steps + 1) if (reason or A.mt_items) else
         else:
             wheel = guarded(plain_backward, {"q": qtext, "thinking": prob.get("thinking", ""), "reply": ref}, 1.0 / A.accum)
         clear()
+    if A.demo_on_fail > 0 and searching and rw and max(rw) < 1.0 and demos.get(qtext.strip()):
+        model.train()   # nothing of its own passed: the teacher shows this question once, beside whatever the group's gradient said
+        wheel = guarded(demo_backward, qtext, demos[qtext.strip()], A.demo_on_fail / A.accum); clear()
     if opt_s is not None and searching:
         opt_s.step(); opt_s.zero_grad(set_to_none=True); opt.zero_grad(set_to_none=True); clear()
     dl = []

@@ -80,7 +80,7 @@ PSKIP=
 # The raw GitHub copy this box fetches can lag and hand a control run an OLDER version of this file (04:48 on 09-22 it
 # relaunched the online loop under the previous mode while the newer run was merging a checkpoint on the same card).
 # Every edit bumps BOXG_SERIAL; a run that sees a lower serial than one already executed stops here.
-BOXG_SERIAL=2026100326
+BOXG_SERIAL=2026100327
 if [ -f /root/.boxg_serial ] && [ "$(cat /root/.boxg_serial)" -gt "$BOXG_SERIAL" ] 2>/dev/null; then echo "BOXG_STALE $BOXG_SERIAL < $(cat /root/.boxg_serial)"; exit 0; fi
 echo $BOXG_SERIAL > /root/.boxg_serial
 MODE=idle         # 2026-09-29: the side jobs hold the card (multi-turn measurement and training); a finished reeval re-launched on every control run and killed their evaluators
@@ -1167,6 +1167,66 @@ import json
 for l in open('/root/work/r1smoke_out.jsonl'):
     x=json.loads(l); print('[r1smoke]', x['q'][:60], '| gold', x['gold'][:30], '| ns', x['ns'], '|', x['traj'][:500].replace(chr(10),' / '))" 2>&1 | head -4
     echo "R1SMOKE_DONE $(date -u)" ) > /root/r1smoke.log 2>&1 &
+fi
+# ---- mtg4 (2026-10-05 10:50 JST, the user: the R1 trajectories go INTO the GRPO, not a separate supervised pass -
+# teach1, two epochs of plain SFT on the 99, fell to 39/100 vs s100's 54). From mtg3 step 100 on the items that carry
+# signal: those s100 solves sometimes (1-3 of 4 in the probe, 160) and the never-solved ones R1 has a verified
+# trajectory for (99); a search group none of whose samples passes also takes one supervised step on that question's
+# R1 trajectory at half weight (--demo-on-fail 0.5). One step in four Dolphin reasoning, rates 5e-6, 80 steps.
+# Gate: single-turn shard 0 (s100 54/100); the full screens only when it holds (>= 52).
+if ! pgrep -f "mtg4kee[p].sh" >/dev/null && ! grep -q "MTG4_JOB_DONE" /root/mtg4.log 2>/dev/null; then
+  cat > /root/mtg4keep.sh <<'M4'
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); R=baya1116/hypernet-sp-distill; cd /root/work; OUT=/root/online_mtg4t; S0=/root/mtg3_s100.safetensors
+ENV="SP_BASE=/root/gptq_hf_gq14 SP_RANK=16 SP_NOSYS=1 SP_EPISODIC=1 OMP_NUM_THREADS=1 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True"
+EVARGS="--rw 768 --maxd 384 --samepage 1 --decode plain --temp 0.6 --gen 4000 --stop eos --replycap 600"
+python3 - <<'PYI'
+import json
+demo = {json.loads(l)["q"].strip() for l in open("/root/work/r1_traj.jsonl")}
+out = []
+for l in open("/root/work/probe_s100.jsonl"):
+    r = json.loads(l)
+    if 1 <= r["pass"] <= 3 or (r["pass"] == 0 and r["q"].strip() in demo): out.append({"q": r["q"], "gold": r["gold"], "hist": r.get("hist") or []})
+open("/root/work/mtg4_items.jsonl", "w").write("".join(json.dumps(x, ensure_ascii=False) + "\n" for x in out))
+print(f"[mtg4] {len(out)} items ({sum(1 for x in out if x['q'].strip() in demo)} with an R1 trajectory)", flush=True)
+PYI
+while pgrep -f "pool_eval.p[y]|online_loop.p[y]|memfit.p[y]" >/dev/null; do sleep 30; done
+echo "[mtg4] start $(date -u +%H:%M); $(df -h /root | tail -1 | awk '{print $4}') free"
+env SP_BASE=/root/gptq_hf_gq14 SP_NOSYS=1 SP_EPISODIC=1 OAI_KEY=$(cat /root/.oai 2>/dev/null) DSK_KEY=$(cat /root/.dsk 2>/dev/null) PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
+  python3 /root/work/online_loop.py $S0 $OUT --pooler none --lora-layers all --lora-rank 16 --save-lora-only 1 \
+  --mt-items /root/work/mtg4_items.jsonl --heldout /root/work/eval300.jsonl --reason /root/work/dolphin_rft.jsonl --reason-every 4 --reason-g 8 \
+  --search-demo /root/work/r1_traj.jsonl --demo-on-fail 0.5 \
+  --steps 80 --save-every 40 --lr 5e-6 --search-lr 5e-6 --search-temp 0.9 --search-gen 2000 --temp 0.6 --gen 3000 --budget 900 --maxsrch 7 --stop eos \
+  --judge-api openai --judge-model gpt-5-nano --w-talk 0.5 --dolphin-min 0 --adv-std 1 --pg-norm mean --kl 0 \
+  --guard 1 --guard-steps 20 > /root/mtg4_run.log 2>&1
+grep -E "^\[data\]|ONLINE_|Error|Traceback" /root/mtg4_run.log | tail -4 | cut -c1-250
+S=$(python3 -c "import json;print(json.load(open('$OUT/state.json'))['step'])" 2>/dev/null); echo "[mtg4] stopped at step ${S:-0} $(date -u +%H:%M)"
+[ -s $OUT/latest.safetensors ] || { echo "MTG4_JOB_DONE no checkpoint"; exit 1; }
+CK=/root/mtg4_s${S}.safetensors; cp $OUT/latest.safetensors $CK; hf upload $R $CK pooler_distill/chatsft/multiturn/$(basename $CK) >/dev/null 2>&1
+hf upload $R $OUT/rollouts.jsonl pooler_distill/chatsft/multiturn/mtg4_rollouts.jsonl >/dev/null 2>&1
+rm -f $OUT/*.pt $OUT/good.safetensors
+env $ENV python3 /root/work/pool_eval.py $CK /root/work/ev_0.jsonl /root/work/mtg4st_0.jsonl --n 100 $EVARGS --tag "[mtg4st0]" > /root/mtg4st_0.log 2>&1
+c0=$(python3 -c "import json;print(sum(bool(json.loads(l).get('correct')) for l in open('/root/work/mtg4st_0.jsonl')))" 2>/dev/null || echo 0)
+echo "[mtg4] single shard 0: $c0/100 (s100 54, teach1 39)"
+[ "$c0" -ge 52 ] || { echo "MTG4_JOB_DONE below the gate"; exit 0; }
+SN=$c0; for i in 1 2; do env $ENV python3 /root/work/pool_eval.py $CK /root/work/ev_$i.jsonl /root/work/mtg4st_$i.jsonl --n 100 $EVARGS --tag "[mtg4st$i]" > /root/mtg4st_$i.log 2>&1
+  c=$(python3 -c "import json;print(sum(bool(json.loads(l).get('correct')) for l in open('/root/work/mtg4st_$i.jsonl')))" 2>/dev/null || echo 0); SN=$((SN + c)); echo "[mtg4] single shard $i: $c/100"; done
+echo "[mtg4] single-turn: $SN/300 (s100 160)"
+for b in "br3:/root/work/mt_eval_bridge3.jsonl:97 (s100 43/31)" "br:/root/work/mt_eval_bridge.jsonl:40 (s100 23/19)"; do T=${b%%:*}; r=${b#*:}; F=${r%%:*}; NOTE=${r#*:}
+  env $ENV python3 /root/work/pool_eval.py $CK /root/work/eval300.jsonl /root/work/${T}_mtg4.jsonl --multiturn $F --mt-mode win --n 1000 $EVARGS --tag "[$T-mtg4]" > /root/${T}_mtg4.log 2>&1
+  echo "[mtg4] $T (win): $(python3 -c "
+import json; r=[json.loads(l) for l in open('/root/work/${T}_mtg4.jsonl')]
+print('turn 1', sum(x['correct'] for x in r if x['turn']==0), '/', sum(1 for x in r if x['turn']==0), ', follow-up', sum(x['correct'] for x in r if x['turn']==1), '/', sum(1 for x in r if x['turn']==1))" 2>&1 | tail -1) (s100 on $NOTE)"
+done
+env SP_BASE=/root/gptq_hf_gq14 SP_NOSYS=1 SP_EPISODIC=1 OMP_NUM_THREADS=1 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python3 /root/work/online_loop.py $CK /root/evalrun_dl_mtg4 \
+  --questions /root/work/eval300.jsonl --dolphin /root/work/dolphin_v1.jsonl --heldout /root/work/eval300.jsonl \
+  --b 12 --gen 7000 --budget 2400 --temp 0.6 --maxsrch 7 --pooler none --lora-rank 16 --lora-layers all --stop eos --loop-break answer \
+  --eval-file /root/work/dolphinq.jsonl --eval-out /root/work/dl_mtg4.jsonl > /root/dl_mtg4.log 2>&1
+[ -s /root/dl_judge.py ] && OAI_KEY=$(cat /root/.oai 2>/dev/null) python3 /root/dl_judge.py /root/work/dl_mtg4.jsonl mtg4 | sed 's/\[mix0\]/[mtg4]/'
+echo "[mtg4] (s100: Dolphin 56)"
+echo "MTG4_JOB_DONE $(date -u)"
+M4
+  setsid nohup bash -c 'bash /root/mtg4keep.sh 2>&1 | tee -a /root/mtg4.log' >> /proc/1/fd/1 2>&1 < /dev/null 9>&- &
+  echo "MTG4_LAUNCHED $(date -u)"
 fi
 # ---- 2026-10-05 10:35 JST: teach1 (R1 demos, 2 epochs at 2e-5) fell to 39/100 on single-turn shard 0 (s100 54):
 # clearly worse, stop its remaining screens; print what changed (searches, landed, grounded, reply length) for the
@@ -2697,6 +2757,7 @@ while :; do
     echo "--- pqjudge.log (tail) ---"; tail -n 5 /root/pqjudge.log 2>/dev/null | cut -c1-200
     echo "--- du_list ---"; cat /root/du_list.txt 2>/dev/null | head -42
     echo "--- r1smoke.log ---"; cat /root/r1smoke.log 2>/dev/null | cut -c1-700
+    echo "--- mtg4.log (tail) ---"; tail -n 12 /root/mtg4.log 2>/dev/null | cut -c1-250; grep -E "^\[step|ONLINE_" /root/mtg4_run.log 2>/dev/null | tail -n 3 | cut -c1-220
     echo "--- teach2.log (tail) ---"; tail -n 12 /root/teach2.log 2>/dev/null | cut -c1-250; grep -E "^\[step" /root/teach1_run.log 2>/dev/null | tail -n 1 | cut -c1-200
     echo "--- teach.log (tail) ---"; tail -n 16 /root/teach.log 2>/dev/null | cut -c1-250; tail -n 1 /root/probe_s100.log 2>/dev/null | cut -c1-200
     echo "--- moreq4.log (tail) ---"; tail -n 4 /root/moreq4.log 2>/dev/null | cut -c1-250
