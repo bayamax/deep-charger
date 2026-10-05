@@ -80,7 +80,7 @@ PSKIP=
 # The raw GitHub copy this box fetches can lag and hand a control run an OLDER version of this file (04:48 on 09-22 it
 # relaunched the online loop under the previous mode while the newer run was merging a checkpoint on the same card).
 # Every edit bumps BOXG_SERIAL; a run that sees a lower serial than one already executed stops here.
-BOXG_SERIAL=2026100506
+BOXG_SERIAL=2026100601
 if [ -f /root/.boxg_serial ] && [ "$(cat /root/.boxg_serial)" -gt "$BOXG_SERIAL" ] 2>/dev/null; then echo "BOXG_STALE $BOXG_SERIAL < $(cat /root/.boxg_serial)"; exit 0; fi
 echo $BOXG_SERIAL > /root/.boxg_serial
 MODE=idle         # 2026-09-29: the side jobs hold the card (multi-turn measurement and training); a finished reeval re-launched on every control run and killed their evaluators
@@ -1381,6 +1381,8 @@ SQ
   setsid nohup bash -c 'bash /root/s100qkeep.sh 2>&1 | tee -a /root/s100q.log' >> /proc/1/fd/1 2>&1 < /dev/null 9>&- &
   echo "S100Q_LAUNCHED $(date -u)"
 fi
+# (2026-10-06 03:45 JST: the box runs this file only when it changes; the 4-bit screens ended at 01:25 with no change
+# after them, so mtg5 waited - this edit is what starts it.)
 # ---- mtg5 (2026-10-05 17:30 JST, the user: GRPO again after the 4-bit, "there is something there"). What mtg4 showed: in
 # 80 steps only 60 search groups ran, one question each, so 182 of its 242 items were never seen; 45% of the search
 # rollouts went to never-solved items with an R1 demo, which passed 8-11% (little signal for the compute); the items
