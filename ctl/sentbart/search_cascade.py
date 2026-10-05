@@ -19,6 +19,8 @@ ap = argparse.ArgumentParser()
 ap.add_argument("--vec", required=True); ap.add_argument("--text", required=True); ap.add_argument("--ckpt", required=True)
 ap.add_argument("--queries", required=True); ap.add_argument("--out", required=True)
 ap.add_argument("--k", default="10,50"); ap.add_argument("--bge", default="BAAI/bge-small-en-v1.5")
+ap.add_argument("--lm", default="", help="a BART trained on LM sentence vectors (lmz.py vec): the queries are embedded the same way - the LM reads the query alone, its last token's final state, standardised by --lm-stats, L2-normalised")
+ap.add_argument("--lm-stats", default="")
 E = ap.parse_args()
 TP = os.path.join(os.path.dirname(os.path.abspath(__file__)), "train.py")
 src = open(TP).read(); cut = src.index("\nif A.search_eval:")
@@ -37,8 +39,29 @@ if trained: enc.load_state_dict(ck["enc"])
 enc = enc.to(DEV).eval()
 
 
+if E.lm:
+    from transformers import AutoModelForCausalLM
+    ltok = AutoTokenizer.from_pretrained(E.lm); lm = AutoModelForCausalLM.from_pretrained(E.lm, torch_dtype=torch.bfloat16).to(DEV).eval()
+    LBOS = ltok.bos_token_id if ltok.bos_token_id is not None else 0
+    _st = np.load(E.lm_stats); LMU, LSD = torch.tensor(_st["mu"], device=DEV), torch.tensor(_st["sd"], device=DEV)
+
+
+@torch.no_grad()
+def embed_lm(sents, chunk=256):
+    out = torch.empty(len(sents), DIM, dtype=torch.float16)
+    for i in range(0, len(sents), chunk):
+        enc_ = [[LBOS] + ltok.encode(t, add_special_tokens=False)[:95] for t in sents[i:i + chunk]]
+        L = max(len(e) for e in enc_); x = torch.zeros(len(enc_), L, dtype=torch.long); m = torch.zeros_like(x)
+        for r, e in enumerate(enc_): x[r, :len(e)] = torch.tensor(e); m[r, :len(e)] = 1
+        h = lm.model(input_ids=x.to(DEV), attention_mask=m.to(DEV)).last_hidden_state.float()
+        v = h[torch.arange(len(enc_), device=DEV), m.sum(1).to(DEV) - 1]
+        out[i:i + len(enc_)] = F.normalize((v - LMU) / LSD, dim=-1).half().cpu()
+    return out
+
+
 @torch.no_grad()
 def embed(sents, pfx="", chunk=512):
+    if E.lm: return embed_lm(sents)
     order = sorted(range(len(sents)), key=lambda i: len(sents[i])); out = torch.empty(len(sents), DIM, dtype=torch.float16)
     for i in range(0, len(order), chunk):
         idx = order[i:i + chunk]

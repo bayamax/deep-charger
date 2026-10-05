@@ -8,7 +8,7 @@ cd /root
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null)
 R=baya1116/hypernet-sp-distill
 RAW="https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl"
-BOXK_SERIAL=5
+BOXK_SERIAL=6
 if [ -f /root/.boxk_serial ] && [ "$(cat /root/.boxk_serial)" -gt "$BOXK_SERIAL" ] 2>/dev/null; then echo "BOXK_STALE $BOXK_SERIAL"; exit 0; fi
 echo $BOXK_SERIAL > /root/.boxk_serial
 mkdir -p /root/lz/docs
@@ -25,7 +25,7 @@ if [ ! -f /root/.bootstrapped ]; then
 fi
 
 # the code, fresh from the branch on every control run
-for f in lmz/lmz.py lmz/artret.py sentbart/prep.py sentbart/train.py; do
+for f in lmz/lmz.py lmz/artret.py sentbart/prep.py sentbart/train.py sentbart/search_cascade.py; do
   b=$(basename $f); curl -sS -L -o /root/lz/$b.new "$RAW/$f?$(date +%s)" && grep -q "^#!/usr/bin/env python3" /root/lz/$b.new && mv /root/lz/$b.new /root/lz/$b || rm -f /root/lz/$b.new
 done
 ls /root/lz
@@ -167,6 +167,38 @@ echo "LZ4_JOB_DONE $(date -u)"
 LK
   setsid nohup bash -c 'bash /root/lz4keep.sh 2>&1 | tee -a /root/lz_main.log' > /dev/null 2>&1 < /dev/null &
   echo "LZ4_LAUNCHED $(date -u)"
+fi
+# ---- lzcasc (2026-10-05 23:20 JST, the user: run both routes side by side and keep the better). The LM route on the same
+# real-query article search as box I's bge e2e: the app model's 553 keyword queries + the HyDE 100, over all 118,398
+# held-out articles, queries embedded by the LM the way the sentences were. lmrun1 (30k, 3 shards) now, beside the
+# vector pass; lmrun2 when it is done.
+if [ -f /root/lz/search_cascade.py ] && ! pgrep -f "lzcasckee[p].sh" >/dev/null && ! grep -q "LZCASC_JOB_DONE" /root/lz_casc.log 2>/dev/null; then
+  cat > /root/lzcasckeep.sh <<'LK'
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); R=baya1116/hypernet-sp-distill; cd /root/lz; mkdir -p /root/lz/sc /root/lz/sc_docs
+for f in sentbart/searcheval/dcq.jsonl sentbart/searcheval/dcq_hyde.jsonl; do hf download $R $f --local-dir /root/lz/sc/dl >/dev/null 2>&1; done
+python3 - <<'PYM'
+import json
+H = {json.loads(l)["idx"]: json.loads(l) for l in open("/root/lz/sc/dl/sentbart/searcheval/dcq_hyde.jsonl")}
+rows = []
+for l in open("/root/lz/sc/dl/sentbart/searcheval/dcq.jsonl"):
+    r = json.loads(l); h = H.get(r["idx"])
+    if h and h.get("q_api") == r.get("q_api") and h.get("q_good") == r.get("q_good"): r.update({k: v for k, v in h.items() if k.startswith("h_")})
+    rows.append(r)
+open("/root/lz/sc/dcq_all.jsonl", "w").write("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in rows))
+print(f"[lzcasc] {len(rows)} keyword queries, {sum(1 for r in rows if r.get('h_api') or r.get('h_good'))} with a HyDE form", flush=True)
+PYM
+for k in 000 001 002; do for f in vec scl off; do ln -sf /root/lz/docs/${f}_$k.npy /root/lz/sc_docs/${f}_$k.npy; done; done
+run() { echo "[lzcasc] $1 $(date -u +%H:%M)"
+  python3 /root/lz/search_cascade.py --vec $2 --text /root/lz/docs/docs_001.jsonl --ckpt $3 --queries /root/lz/sc/dcq_all.jsonl --out /root/lz/sc/$1.json \
+    --lm HuggingFaceTB/SmolLM2-135M --lm-stats /root/lz/docs/lm_stats.npz 2>&1 | grep --line-buffered -E "^\[cascade\]|CASCADE_DONE|Error|Traceback|out of memory"
+  hf upload $R /root/lz/sc/$1.json sentbart/searcheval/cascade_lm_$1.json >/dev/null 2>&1; }
+run lmrun1 /root/lz/sc_docs /root/lz/lmrun1/model_best.pt
+until grep -q "LZ4_JOB_DONE" /root/lz_main.log 2>/dev/null; do sleep 300; done
+[ -s /root/lz/lmrun2/model_best.pt ] && run lmrun2 /root/lz/sc_docs /root/lz/lmrun2/model_best.pt
+echo "LZCASC_JOB_DONE $(date -u)"
+LK
+  setsid nohup bash -c 'bash /root/lzcasckeep.sh 2>&1 | tee -a /root/lz_casc.log' > /dev/null 2>&1 < /dev/null &
+  echo "LZCASC_LAUNCHED $(date -u)"
 fi
 echo "BOXK_OK serial $BOXK_SERIAL $(date -u)"
 # CTL-END
