@@ -8,7 +8,7 @@ cd /root
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null)
 R=baya1116/hypernet-sp-distill
 RAW="https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl"
-BOXI_SERIAL=52
+BOXI_SERIAL=53
 if [ -f /root/.boxi_serial ] && [ "$(cat /root/.boxi_serial)" -gt "$BOXI_SERIAL" ] 2>/dev/null; then echo "BOXI_STALE $BOXI_SERIAL"; exit 0; fi
 echo $BOXI_SERIAL > /root/.boxi_serial
 mkdir -p /root/sb /root/work
@@ -1089,6 +1089,19 @@ echo "LADDER_JOB_DONE $(date -u)"
 RK
   setsid nohup bash -c 'bash /root/ladderkeep.sh 2>&1 | tee -a /root/sb_ladder.log' > /dev/null 2>&1 < /dev/null &
   echo "LADDER_LAUNCHED $(date -u)"
+fi
+# ---- ladderlog (2026-10-06 03:50 JST): the running rung's training log on the hub every 20 minutes (the ladder's own
+# log only speaks between rungs).
+if ! pgrep -f "ladderlogkee[p].sh" >/dev/null; then
+  cat > /root/ladderlogkeep.sh <<'RK'
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); R=baya1116/hypernet-sp-distill
+while :; do
+  f=$(ls -t /root/sb/ladder/r*/train.log 2>/dev/null | head -1)
+  [ -n "$f" ] && { echo "== $f $(date -u)"; grep -E "^\[eval|^\[best|^\[plateau|^\[e2e\]" $f | tail -20 | cut -c1-400; grep "^\[step" $f | tail -2; } > /root/ladder_current.txt && hf upload $R /root/ladder_current.txt sentbart/e2e/ladder/current.txt >/dev/null 2>&1
+  sleep 1200
+done
+RK
+  setsid nohup bash /root/ladderlogkeep.sh > /dev/null 2>&1 < /dev/null &
 fi
 echo "BOXI_OK serial $BOXI_SERIAL $(date -u)"
 # CTL-END
