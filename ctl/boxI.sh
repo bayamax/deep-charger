@@ -8,7 +8,7 @@ cd /root
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null)
 R=baya1116/hypernet-sp-distill
 RAW="https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl"
-BOXI_SERIAL=49
+BOXI_SERIAL=50
 if [ -f /root/.boxi_serial ] && [ "$(cat /root/.boxi_serial)" -gt "$BOXI_SERIAL" ] 2>/dev/null; then echo "BOXI_STALE $BOXI_SERIAL"; exit 0; fi
 echo $BOXI_SERIAL > /root/.boxi_serial
 mkdir -p /root/sb /root/work
@@ -1033,18 +1033,33 @@ if [ ! -e /root/.cascade553_stop ]; then touch /root/.cascade553_stop
   grep -q "CASCADE_JOB_DONE" /root/sb_cascade.log 2>/dev/null || echo "CASCADE_JOB_DONE e2e1 on 553 dropped (100 are enough) $(date -u)" >> /root/sb_cascade.log
   rm -f /root/sb/sc/e2e1_best.pt
 fi
+# ---- 2026-10-05 22:50 JST, the user: the time is the same either way - keep all 553 keyword queries. cascadeE now runs
+# once on all of them, the HyDE 100 carried along (one re-embedding of the shard).
+if [ ! -e /root/.cascadeE3 ]; then touch /root/.cascadeE3; pkill -f "cascadeEkee[p].sh"; pkill -f "search_cascade.py.*e2e1_bestH.pt"; sleep 3; fi
 # ---- cascadeE (2026-10-05 20:15 JST): e2e1's best (from its 10k evaluation on) on the HyDE 100 as well - keyword and
 # HyDE forms of the same queries, its own encoder; after the keyword run of the cascade job.
-if [ -f /root/sb/search_cascade.py ] && ! pgrep -f "cascadeEkee[p].sh" >/dev/null && ! grep -q "CASCADEE_JOB_DONE" /root/sb_cascadeE2.log 2>/dev/null; then
+if [ -f /root/sb/search_cascade.py ] && ! pgrep -f "cascadeEkee[p].sh" >/dev/null && ! grep -q "CASCADEE_JOB_DONE" /root/sb_cascadeE3.log 2>/dev/null; then
   cat > /root/cascadeEkeep.sh <<'RK'
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); R=baya1116/hypernet-sp-distill; cd /root/sb
 until grep -q "CASCADE_JOB_DONE" /root/sb_cascade.log 2>/dev/null && grep -q "CASCADEH_JOB_DONE" /root/sb_cascadeH.log 2>/dev/null; do sleep 120; done
+python3 - <<'PYM'
+import json
+H = {json.loads(l)["idx"]: json.loads(l) for l in open("/root/sb/sc/dl/sentbart/searcheval/dcq_hyde.jsonl")}
+rows = []
+for l in open("/root/sb/se2/dl/sentbart/searcheval/dcq.jsonl"):
+    r = json.loads(l); h = H.get(r["idx"])
+    if h and h.get("q_api") == r.get("q_api") and h.get("q_good") == r.get("q_good"):
+        r.update({k: v for k, v in h.items() if k.startswith("h_")})
+    rows.append(r)
+open("/root/sb/sc/dcq_all.jsonl", "w").write("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in rows))
+print(f"[cascadeE] {len(rows)} keyword queries, {sum(1 for r in rows if r.get('h_api') or r.get('h_good'))} with a HyDE form", flush=True)
+PYM
 cp /root/sb/e2e1/model_best.pt /root/sb/sc/e2e1_bestH.pt; echo "[cascadeE] e2e1 best ($(grep '^\[best' /root/sb/e2e1/train.log | tail -1)), HyDE 100 $(date -u +%H:%M)"
-python3 /root/sb/search_cascade.py --vec /root/sb/data/docs --text /root/sb/data/docs/docs_001.jsonl --ckpt /root/sb/sc/e2e1_bestH.pt --queries /root/sb/sc/dl/sentbart/searcheval/dcq_hyde.jsonl --out /root/sb/sc/e2e1_hyde.json 2>&1 | grep --line-buffered -E "^\[cascade\] (q_|h_)|CASCADE_DONE|Error|Traceback|out of memory"
+python3 /root/sb/search_cascade.py --vec /root/sb/data/docs --text /root/sb/data/docs/docs_001.jsonl --ckpt /root/sb/sc/e2e1_bestH.pt --queries /root/sb/sc/dcq_all.jsonl --out /root/sb/sc/e2e1_hyde.json 2>&1 | grep --line-buffered -E "^\[cascade\] (q_|h_)|CASCADE_DONE|Error|Traceback|out of memory"
 hf upload $R /root/sb/sc/e2e1_hyde.json sentbart/searcheval/cascade_e2e1_hyde.json >/dev/null 2>&1; rm -f /root/sb/sc/e2e1_bestH.pt
 echo "CASCADEE_JOB_DONE $(date -u)"
 RK
-  setsid nohup bash -c 'bash /root/cascadeEkeep.sh 2>&1 | tee -a /root/sb_cascadeE2.log' > /dev/null 2>&1 < /dev/null &
+  setsid nohup bash -c 'bash /root/cascadeEkeep.sh 2>&1 | tee -a /root/sb_cascadeE3.log' > /dev/null 2>&1 < /dev/null &
   echo "CASCADEE_LAUNCHED $(date -u)"
 fi
 echo "BOXI_OK serial $BOXI_SERIAL $(date -u)"
