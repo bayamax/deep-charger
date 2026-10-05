@@ -80,7 +80,7 @@ PSKIP=
 # The raw GitHub copy this box fetches can lag and hand a control run an OLDER version of this file (04:48 on 09-22 it
 # relaunched the online loop under the previous mode while the newer run was merging a checkpoint on the same card).
 # Every edit bumps BOXG_SERIAL; a run that sees a lower serial than one already executed stops here.
-BOXG_SERIAL=2026100328
+BOXG_SERIAL=2026100329
 if [ -f /root/.boxg_serial ] && [ "$(cat /root/.boxg_serial)" -gt "$BOXG_SERIAL" ] 2>/dev/null; then echo "BOXG_STALE $BOXG_SERIAL < $(cat /root/.boxg_serial)"; exit 0; fi
 echo $BOXG_SERIAL > /root/.boxg_serial
 MODE=idle         # 2026-09-29: the side jobs hold the card (multi-turn measurement and training); a finished reeval re-launched on every control run and killed their evaluators
@@ -1180,6 +1180,32 @@ r=[json.loads(l) for l in open('/root/work/r1_traj.jsonl')]
 k=[x for x in r if x.get('ns',9)<=3]
 open('/root/work/r1_traj_short.jsonl','w').write(''.join(json.dumps(x,ensure_ascii=False)+'\n' for x in k))
 print('MTG4_SHORT', len(k), 'of', len(r), 'R1 trajectories kept (<= 3 searches)')"
+fi
+# ---- 2026-10-05 12:20 JST (the user: are unseen questions left?): count the question pools and what training has used
+if [ ! -e /root/.qcount1 ]; then touch /root/.qcount1
+  python3 - <<'PYQ' > /root/qcount.txt 2>&1
+import json, glob, os
+def qs(f, key="q"):
+    out = set()
+    try:
+        for l in open(f):
+            try:
+                d = json.loads(l)
+                if d.get(key): out.add(d[key].strip())
+                for t in d.get("turns", []): out.add(t["q"].strip())
+                if d.get("seed"): out.add(d["seed"].strip())
+            except Exception: pass
+    except FileNotFoundError: pass
+    return out
+pools = {"selfq_all": qs("/root/work/selfq_all.jsonl"), "corpus_box_final": qs("/root/work/corpus_box_final.jsonl")}
+held = qs("/root/work/eval300.jsonl") | qs("/root/work/mt_eval.jsonl") | qs("/root/work/mt_eval_chain.jsonl") | qs("/root/work/mt_eval_bridge3.jsonl")
+used = set(); src = {}
+for f in glob.glob("/root/online_*/rollouts.jsonl") + glob.glob("/root/hfdl/**/rollouts*.jsonl", recursive=True) + ["/root/work/mtg2_items.jsonl", "/root/work/mtg_items.jsonl", "/root/work/mt_train.jsonl", "/root/work/mt_train_bridge.jsonl", "/root/work/probe_items.jsonl"]:
+    u = qs(f); src[f] = len(u); used |= u
+for k, P in pools.items():
+    print(f"QCOUNT {k}: {len(P)} questions, held-out {len(P & held)}, seen in training files {len(P & used)}, unseen {len(P - held - used)}")
+print("QCOUNT sources: " + "; ".join(f"{os.path.basename(os.path.dirname(f)) or f}={n}" for f, n in sorted(src.items(), key=lambda x: -x[1])[:12]))
+PYQ
 fi
 # ---- mtg4 (2026-10-05 10:50 JST, the user: the R1 trajectories go INTO the GRPO, not a separate supervised pass -
 # teach1, two epochs of plain SFT on the 99, fell to 39/100 vs s100's 54). From mtg3 step 100 on the items that carry
@@ -2770,6 +2796,7 @@ while :; do
     echo "--- pqjudge.log (tail) ---"; tail -n 5 /root/pqjudge.log 2>/dev/null | cut -c1-200
     echo "--- du_list ---"; cat /root/du_list.txt 2>/dev/null | head -42
     echo "--- r1smoke.log ---"; cat /root/r1smoke.log 2>/dev/null | cut -c1-700
+    echo "--- qcount ---"; cat /root/qcount.txt 2>/dev/null | cut -c1-600
     echo "--- mtg4.log (tail) ---"; tail -n 12 /root/mtg4.log 2>/dev/null | cut -c1-250; grep -E "^\[step|ONLINE_" /root/mtg4_run.log 2>/dev/null | tail -n 3 | cut -c1-220
     echo "--- teach2.log (tail) ---"; tail -n 12 /root/teach2.log 2>/dev/null | cut -c1-250; grep -E "^\[step" /root/teach1_run.log 2>/dev/null | tail -n 1 | cut -c1-200
     echo "--- teach.log (tail) ---"; tail -n 16 /root/teach.log 2>/dev/null | cut -c1-250; tail -n 1 /root/probe_s100.log 2>/dev/null | cut -c1-200
