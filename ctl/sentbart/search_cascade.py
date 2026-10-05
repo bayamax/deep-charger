@@ -81,10 +81,10 @@ print(f"[cascade] stage-1 vectors {(time.time()-t0)/60:.1f} min", flush=True)
 
 qs = [json.loads(l) for l in open(E.queries) if l.strip()]
 KS = [int(k) for k in E.k.split(",")]; res = {}
-for qk in ("q_api", "q_good"):
+for qk in ("q_api", "q_good", "h_api", "h_good"):   # h_*: HyDE sentences (hyde_gen.py), embedded as plain sentences - as the BART was trained
     sub = [q for q in qs if q.get(qk)]
     if not sub: continue
-    Q = embed([q[qk] for q in sub], "Represent this sentence for searching relevant passages: ").float().to(DEV)
+    Q = embed([q[qk] for q in sub], "" if qk.startswith("h_") else "Represent this sentence for searching relevant passages: ").float().to(DEV)
     gold = torch.tensor([int(q["idx"]) for q in sub], device=DEV)
     for m, M in P.items():
         S = Q @ M.T; g = S.gather(1, gold[:, None]); rank = (S > g).sum(1) + 1
