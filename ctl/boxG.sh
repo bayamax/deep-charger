@@ -80,7 +80,7 @@ PSKIP=
 # The raw GitHub copy this box fetches can lag and hand a control run an OLDER version of this file (04:48 on 09-22 it
 # relaunched the online loop under the previous mode while the newer run was merging a checkpoint on the same card).
 # Every edit bumps BOXG_SERIAL; a run that sees a lower serial than one already executed stops here.
-BOXG_SERIAL=2026100325
+BOXG_SERIAL=2026100326
 if [ -f /root/.boxg_serial ] && [ "$(cat /root/.boxg_serial)" -gt "$BOXG_SERIAL" ] 2>/dev/null; then echo "BOXG_STALE $BOXG_SERIAL < $(cat /root/.boxg_serial)"; exit 0; fi
 echo $BOXG_SERIAL > /root/.boxg_serial
 MODE=idle         # 2026-09-29: the side jobs hold the card (multi-turn measurement and training); a finished reeval re-launched on every control run and killed their evaluators
@@ -1167,6 +1167,32 @@ import json
 for l in open('/root/work/r1smoke_out.jsonl'):
     x=json.loads(l); print('[r1smoke]', x['q'][:60], '| gold', x['gold'][:30], '| ns', x['ns'], '|', x['traj'][:500].replace(chr(10),' / '))" 2>&1 | head -4
     echo "R1SMOKE_DONE $(date -u)" ) > /root/r1smoke.log 2>&1 &
+fi
+# ---- 2026-10-05 10:35 JST: teach1 (R1 demos, 2 epochs at 2e-5) fell to 39/100 on single-turn shard 0 (s100 54):
+# clearly worse, stop its remaining screens; print what changed (searches, landed, grounded, reply length) for the
+# post-mortem, against s100 on the same 100 questions.
+if [ ! -e /root/.teach2_stop ]; then touch /root/.teach2_stop
+  pkill -f "teach2kee[p].sh"; pkill -f "pool_eval.py /root/teach1_s50"; pkill -f "online_loop.py /root/teach1_s50"; sleep 5
+  echo "TEACH2_JOB_DONE stopped after shard 0 (39/100) $(date -u)" >> /root/teach2.log
+  echo "TEACH1_DIAG $(grep -h EVAL_DONE /root/teach1st_0.log | tail -1 | cut -c1-200)"
+  echo "S100_DIAG $(grep -h EVAL_DONE /root/mtg3s100stfull0.log | tail -1 | cut -c1-200)"
+  python3 - <<'PYD'
+import json, statistics as st
+def load(f):
+    try: return {json.loads(l)["q"]: json.loads(l) for l in open(f)}
+    except Exception as e: return {}
+a = load("/root/work/mtg3s100st_0.jsonl"); b = load("/root/work/teach1st_0.jsonl")
+ks = [k for k in b if k in a]
+def stats(d):
+    rs = [d[k] for k in ks]
+    rl = [len((r.get("reply") or r.get("text", "").split("</think>")[-1]).split()) for r in rs]
+    tl = [len(r.get("text", "").split("</think>")[0].split()) for r in rs]
+    return f"correct {sum(bool(r.get('correct')) for r in rs)}, searches {st.mean(r.get('ns', 0) for r in rs):.2f}, thinking words {st.median(tl)}, reply words {st.median(rl)}"
+print(f"TEACH1_CMP on {len(ks)} questions | s100: {stats(a)} | teach1: {stats(b)}")
+lost = [k for k in ks if a[k].get("correct") and not b[k].get("correct")]
+for k in lost[:3]:
+    print("TEACH1_LOST", k[:70], "|", (b[k].get("text", "")[:300]).replace("\n", " / "))
+PYD
 fi
 # ---- teach2 (2026-10-05 08:20 JST): teach's probe and R1 stages finished (600 probed: 316 never solved, 59/44/57
 # sometimes, 124 always; R1 verified 99 trajectories, 81 with history; 284 own traces) but the supervised step died at
