@@ -80,7 +80,7 @@ PSKIP=
 # The raw GitHub copy this box fetches can lag and hand a control run an OLDER version of this file (04:48 on 09-22 it
 # relaunched the online loop under the previous mode while the newer run was merging a checkpoint on the same card).
 # Every edit bumps BOXG_SERIAL; a run that sees a lower serial than one already executed stops here.
-BOXG_SERIAL=2026100330
+BOXG_SERIAL=2026100501
 if [ -f /root/.boxg_serial ] && [ "$(cat /root/.boxg_serial)" -gt "$BOXG_SERIAL" ] 2>/dev/null; then echo "BOXG_STALE $BOXG_SERIAL < $(cat /root/.boxg_serial)"; exit 0; fi
 echo $BOXG_SERIAL > /root/.boxg_serial
 MODE=idle         # 2026-09-29: the side jobs hold the card (multi-turn measurement and training); a finished reeval re-launched on every control run and killed their evaluators
@@ -1302,6 +1302,84 @@ echo "MTG4_JOB_DONE $(date -u)"
 M4
   setsid nohup bash -c 'bash /root/mtg4keep.sh 2>&1 | tee -a /root/mtg4.log' >> /proc/1/fd/1 2>&1 < /dev/null 9>&- &
   echo "MTG4_LAUNCHED $(date -u)"
+fi
+# ---- s100q (2026-10-05 17:00 JST, the user: s100 to 4 bits for the app, measured, then GRPO again). mtg3 step 100 is a
+# LoRA (rank 16, all layers) on the GPTQ model's dequantized weights (gptq_hf_gq14): folded in (build_merged), GPTQ onto
+# the app's grid again (gptq.py, the g14 calibration traces plus s100's own verified traces), packed and checked
+# (checkmlx), published as chatsft/s100_mlx4g; then the s100 screens on the 4-bit: single-turn 300, bridge3 / bridge40
+# follow-ups (win), Dolphin held-out 100. s100 in float: 160/300, br3 follow-up 31/97, br40 follow-up 19/40, Dolphin 56.
+if [ -s /root/gptq_hf_gq14/model.safetensors ] && grep -q "MTG4_JOB_DONE" /root/mtg4.log 2>/dev/null && ! pgrep -f "s100qkee[p].sh" >/dev/null && ! grep -q "S100Q_JOB_DONE" /root/s100q.log 2>/dev/null; then
+  cat > /root/s100qkeep.sh <<'SQ'
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); R=baya1116/hypernet-sp-distill; cd /root/work
+CK=/root/mtg3_s100.safetensors; HFM=/root/s100m_hf; PCK=/root/s100m_pooler.safetensors; HF=/root/gptq_hf_s100; MLX=/root/gptq_mlx4_s100
+EVARGS="--rw 768 --maxd 384 --samepage 1 --decode plain --temp 0.6 --gen 4000 --stop eos --replycap 600"
+ENV="SP_BASE=$HF SP_RANK=16 SP_NOSYS=1 SP_EPISODIC=1 OMP_NUM_THREADS=1 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True"
+while pgrep -f "pool_eval.p[y]|online_loop.p[y]|memfit.p[y]" >/dev/null; do sleep 30; done
+rm -rf /root/evalrun_* /root/online_mtg4t/*.pt
+echo "[s100q] start $(date -u +%H:%M); $(df -h /root | tail -1 | awk '{print $4}') free"
+[ -s $CK ] || hf download $R pooler_distill/chatsft/multiturn/mtg3_s100.safetensors --local-dir /root/hfdl >/dev/null 2>&1 && [ -s $CK ] || cp /root/hfdl/pooler_distill/chatsft/multiturn/mtg3_s100.safetensors $CK
+if [ ! -s $HF/model.safetensors ]; then
+  if [ ! -s $HFM/model.safetensors ]; then
+    SP_BASE=/root/gptq_hf_gq14 SP_NOSYS=1 SP_EPISODIC=1 OMP_NUM_THREADS=1 python3 /root/work/build_merged.py $CK $HFM $PCK 16 all 2>&1 | grep -E "^\[merge\]|MERGE_DONE|Error|assert|unexpected" | tail -4
+    [ -s $HFM/model.safetensors ] && [ -s $PCK ] || { echo "S100Q_JOB_DONE merge failed"; exit 1; }
+  fi
+  # calibration: the g14 traces gptq.py was tuned on, plus s100's own verified traces (the chat-era, multi-turn format)
+  python3 - <<'PYC'
+import json, random
+rows = [l for l in open("/root/work/qcal_q14.jsonl") if l.strip()]
+own = 0
+try:
+    for l in open("/root/work/own_traces_s100.jsonl"):
+        d = json.loads(l); t = d.get("text") or d.get("traj")
+        if t: rows.append(json.dumps({"text": t}, ensure_ascii=False) + "\n"); own += 1
+except FileNotFoundError: pass
+random.Random(0).shuffle(rows); open("/root/work/qcal_s100.jsonl", "w").write("".join(rows))
+print(f"[s100q] calibration: {len(rows) - own} g14 traces + {own} s100 traces", flush=True)
+PYC
+  PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python3 /root/work/gptq.py --base $HFM --data /root/work/qcal_s100.jsonl --out-hf $HF --out-mlx $MLX --state /root/gptq_state_s100.pt > /root/gptq_s100.log 2>&1
+  grep -q GPTQ_DONE /root/gptq_s100.log || { echo "S100Q_JOB_DONE gptq failed: $(grep -E 'Error|error' /root/gptq_s100.log | tail -1 | cut -c1-200)"; exit 1; }
+  echo "[s100q] $(grep -E '^\[gptq\] (layer 27|lm_head)' /root/gptq_s100.log | tail -1 | cut -c1-200)"
+fi
+python3 /root/work/checkmlx.py $MLX $HF 2>&1 | tail -3 | tee /root/checkmlx_s100.txt
+grep -q MLX_CHECK_OK /root/checkmlx_s100.txt || { echo "S100Q_JOB_DONE pack check failed"; exit 1; }
+# the pooler: the same tensors as g14's (whose 4-bit GPTQ file the app already ships) or not
+hf download $R pooler_distill/chatsft/g14_mlx4g/pooler.safetensors --local-dir /root/hfdl >/dev/null 2>&1
+python3 - $PCK /root/hfdl/pooler_distill/chatsft/g14_mlx4g/pooler.safetensors <<'PYP'
+import sys, torch
+from safetensors.torch import load_file
+a, b = load_file(sys.argv[1]), load_file(sys.argv[2])
+strip = lambda d: {k[len("pooler."):] if k.startswith("pooler.") else k: v for k, v in d.items()}
+a, b = strip(a), strip(b); same = set(a) == set(b)
+d = max(float((a[k].float() - b[k].float()).abs().max()) for k in a if k in b) if same else -1
+print(f"[s100q] pooler vs g14's: {len(a)} / {len(b)} tensors, max |diff| {d:.3g} -> {'identical: the shipped pooler_4bit applies' if same and d == 0 else 'DIFFERENT: needs its own 4-bit pooler'}", flush=True)
+PYP
+cp $PCK $MLX/pooler.safetensors
+for try in 1 2 3; do hf upload $R $MLX pooler_distill/chatsft/s100_mlx4g >/dev/null 2>&1 && break; sleep 30; done
+hf upload $R /root/gptq_s100.log pooler_distill/chatsft/logs/gptq_s100.log >/dev/null 2>&1
+echo "[s100q] uploaded chatsft/s100_mlx4g $(date -u +%H:%M)"
+rm -rf $HFM; rm -f /root/gptq_state_s100.pt
+SN=0; for i in 0 1 2; do env $ENV python3 /root/work/pool_eval.py $PCK /root/work/ev_$i.jsonl /root/work/s100q_$i.jsonl --n 100 $EVARGS --tag "[s100q$i]" > /root/s100q_$i.log 2>&1
+  c=$(python3 -c "import json;print(sum(bool(json.loads(l).get('correct')) for l in open('/root/work/s100q_$i.jsonl')))" 2>/dev/null || echo 0); SN=$((SN + c))
+  echo "[s100q] single shard $i: $c/100 $(grep -h -m1 'pooler restored\|WARNING: no pooler' /root/s100q_$i.log)"; done
+echo "[s100q] single-turn: $SN/300 (s100 float 160)"
+for b in "br3:/root/work/mt_eval_bridge3.jsonl:97 (s100 float 43/31)" "br:/root/work/mt_eval_bridge.jsonl:40 (s100 float 23/19)"; do T=${b%%:*}; r=${b#*:}; F=${r%%:*}; NOTE=${r#*:}
+  env $ENV python3 /root/work/pool_eval.py $PCK /root/work/eval300.jsonl /root/work/${T}_s100q.jsonl --multiturn $F --mt-mode win --n 1000 $EVARGS --tag "[$T-s100q]" > /root/${T}_s100q.log 2>&1
+  echo "[s100q] $T (win): $(python3 -c "
+import json; r=[json.loads(l) for l in open('/root/work/${T}_s100q.jsonl')]
+print('turn 1', sum(x['correct'] for x in r if x['turn']==0), '/', sum(1 for x in r if x['turn']==0), ', follow-up', sum(x['correct'] for x in r if x['turn']==1), '/', sum(1 for x in r if x['turn']==1))" 2>&1 | tail -1) (on $NOTE)"
+done
+env SP_BASE=$HF SP_NOSYS=1 SP_EPISODIC=1 OMP_NUM_THREADS=1 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python3 /root/work/online_loop.py $HF /root/evalrun_dl_s100q \
+  --questions /root/work/eval300.jsonl --dolphin /root/work/dolphin_v1.jsonl --heldout /root/work/eval300.jsonl --pooler-init $PCK \
+  --b 12 --gen 7000 --budget 2400 --temp 0.6 --maxsrch 7 --pooler none --lora-rank 16 --lora-layers all --stop eos --loop-break answer \
+  --eval-file /root/work/dolphinq.jsonl --eval-out /root/work/dl_s100q.jsonl > /root/dl_s100q.log 2>&1
+grep -m1 "pooler <-" /root/dl_s100q.log
+[ -s /root/dl_judge.py ] && OAI_KEY=$(cat /root/.oai 2>/dev/null) python3 /root/dl_judge.py /root/work/dl_s100q.jsonl s100q | sed 's/\[mix0\]/[s100q]/'
+echo "[s100q] (s100 float: Dolphin 56)"
+for f in /root/work/s100q_*.jsonl /root/work/br3_s100q.jsonl /root/work/br_s100q.jsonl /root/work/dl_s100q.jsonl; do [ -s $f ] && hf upload $R $f pooler_distill/chatsft/s100q/$(basename $f) >/dev/null 2>&1; done
+echo "S100Q_JOB_DONE $(date -u)"
+SQ
+  setsid nohup bash -c 'bash /root/s100qkeep.sh 2>&1 | tee -a /root/s100q.log' >> /proc/1/fd/1 2>&1 < /dev/null 9>&- &
+  echo "S100Q_LAUNCHED $(date -u)"
 fi
 # ---- 2026-10-05 10:35 JST: teach1 (R1 demos, 2 epochs at 2e-5) fell to 39/100 on single-turn shard 0 (s100 54):
 # clearly worse, stop its remaining screens; print what changed (searches, landed, grounded, reply length) for the
@@ -2834,6 +2912,7 @@ while :; do
     echo "--- r1smoke.log ---"; cat /root/r1smoke.log 2>/dev/null | cut -c1-700
     echo "--- leak ---"; cat /root/leak.txt 2>/dev/null | cut -c1-700
     echo "--- qcount ---"; cat /root/qcount.txt 2>/dev/null | cut -c1-600
+    echo "--- s100q.log (tail) ---"; tail -n 14 /root/s100q.log 2>/dev/null | cut -c1-250
     echo "--- mtg4.log (tail) ---"; tail -n 12 /root/mtg4.log 2>/dev/null | cut -c1-250; grep -E "^\[step|ONLINE_" /root/mtg4_run.log 2>/dev/null | tail -n 3 | cut -c1-220
     echo "--- teach2.log (tail) ---"; tail -n 12 /root/teach2.log 2>/dev/null | cut -c1-250; grep -E "^\[step" /root/teach1_run.log 2>/dev/null | tail -n 1 | cut -c1-200
     echo "--- teach.log (tail) ---"; tail -n 16 /root/teach.log 2>/dev/null | cut -c1-250; tail -n 1 /root/probe_s100.log 2>/dev/null | cut -c1-200
