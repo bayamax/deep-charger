@@ -8,7 +8,7 @@ cd /root
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null)
 R=baya1116/hypernet-sp-distill
 RAW="https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl"
-BOXK_SERIAL=2
+BOXK_SERIAL=3
 if [ -f /root/.boxk_serial ] && [ "$(cat /root/.boxk_serial)" -gt "$BOXK_SERIAL" ] 2>/dev/null; then echo "BOXK_STALE $BOXK_SERIAL"; exit 0; fi
 echo $BOXK_SERIAL > /root/.boxk_serial
 mkdir -p /root/lz/docs
@@ -25,7 +25,7 @@ if [ ! -f /root/.bootstrapped ]; then
 fi
 
 # the code, fresh from the branch on every control run
-for f in lmz/lmz.py sentbart/prep.py sentbart/train.py; do
+for f in lmz/lmz.py lmz/artret.py sentbart/prep.py sentbart/train.py; do
   b=$(basename $f); curl -sS -L -o /root/lz/$b.new "$RAW/$f?$(date +%s)" && grep -q "^#!/usr/bin/env python3" /root/lz/$b.new && mv /root/lz/$b.new /root/lz/$b || rm -f /root/lz/$b.new
 done
 ls /root/lz
@@ -101,6 +101,21 @@ echo "LZ2_JOB_DONE $(date -u)"
 LK
   setsid nohup bash -c 'bash /root/lz2keep.sh 2>&1 | tee -a /root/lz_main.log' > /dev/null 2>&1 < /dev/null &
   echo "LZ2_LAUNCHED $(date -u)"
+fi
+# ---- artret (2026-10-05 16:20 JST, the user: an index of one hidden state per article, at its end): Natural Questions
+# test questions against 30k articles of shards 0-6 (the gold ones in them + random others); the LM's article-end state
+# (plain, with a closing prompt, mean) vs bge-small. Beside the vector pass (small, ~3 GB of GPU).
+if [ -f /root/.bootstrapped ] && [ -f /root/lz/artret.py ] && ! pgrep -f "artretkee[p].sh" >/dev/null && ! grep -q "ARTRET_JOB_DONE" /root/lz_artret.log 2>/dev/null; then
+  cat > /root/artretkeep.sh <<'LK'
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); R=baya1116/hypernet-sp-distill; cd /root/lz
+ls /root/lz/docs/docs_006.jsonl >/dev/null 2>&1 || [ -s /root/lz/artret/pool.jsonl ] || { echo "ARTRET_JOB_DONE no documents"; exit 1; }
+echo "[artret] start $(date -u +%H:%M)"
+python3 /root/lz/artret.py --docs /root/lz/docs --pool 30000 --out /root/lz/artret 2>&1 | grep -E "^\[artret\]|ARTRET_DONE|Error|Traceback|out of memory"
+hf upload $R /root/lz/artret/result.txt sentbart/lmz/artret_result.txt >/dev/null 2>&1
+echo "ARTRET_JOB_DONE $(date -u)"
+LK
+  setsid nohup bash -c 'bash /root/artretkeep.sh 2>&1 | tee -a /root/lz_artret.log' > /dev/null 2>&1 < /dev/null &
+  echo "ARTRET_LAUNCHED $(date -u)"
 fi
 echo "BOXK_OK serial $BOXK_SERIAL $(date -u)"
 # CTL-END
