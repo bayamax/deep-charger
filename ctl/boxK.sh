@@ -8,7 +8,7 @@ cd /root
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null)
 R=baya1116/hypernet-sp-distill
 RAW="https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl"
-BOXK_SERIAL=4
+BOXK_SERIAL=5
 if [ -f /root/.boxk_serial ] && [ "$(cat /root/.boxk_serial)" -gt "$BOXK_SERIAL" ] 2>/dev/null; then echo "BOXK_STALE $BOXK_SERIAL"; exit 0; fi
 echo $BOXK_SERIAL > /root/.boxk_serial
 mkdir -p /root/lz/docs
@@ -143,6 +143,30 @@ echo "LZ3_JOB_DONE $(date -u)"
 LK
   setsid nohup bash -c 'bash /root/lz3keep.sh 2>&1 | tee -a /root/lz_main.log' > /dev/null 2>&1 < /dev/null &
   echo "LZ3_LAUNCHED $(date -u)"
+fi
+# ---- lz4 (2026-10-05 22:00 JST, the user: the sentence vectors were cut short - scale it up and train properly). The
+# LM-vector BART beat the bge one at every matched step on a third of the data (30k: 40.0 vs 38.3 page top-1). Now
+# shards 0-14 (bge's main run used 15): prep 7-14, LM sentence vectors for 003-014 (~1.8 h a shard), then the BART from
+# lmrun1's best on all 14 training shards, 200k steps at lr 1e-4 (cosine), evaluated every 10k on shard 001's 2000.
+if [ -f /root/.bootstrapped ] && grep -q "LZ3_JOB_DONE" /root/lz_main.log 2>/dev/null && ! pgrep -f "lz4kee[p].sh" >/dev/null && ! grep -q "LZ4_JOB_DONE" /root/lz_main.log 2>/dev/null; then
+  cat > /root/lz4keep.sh <<'LK'
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); R=baya1116/hypernet-sp-distill; cd /root/lz
+python3 /root/lz/prep.py --out /root/lz/docs --shards 7-14 2>&1 | grep --line-buffered -E "^\[prep\] shard|Error|Traceback"
+rm -rf /root/.cache/huggingface/hub/datasets--wikimedia--wikipedia
+SH=$(ls /root/lz/docs | grep -oE '^docs_[0-9]+' | sed 's/docs_//' | sort | tr '\n' ',' | sed 's/,$//')
+echo "[lz4] sentence vectors for $SH $(date -u +%H:%M); $(df -h /root | tail -1 | awk '{print $4}') free"
+python3 -u /root/lz/lmz.py vec --dir /root/lz/docs --shards $SH --batch 512 2>&1 | grep --line-buffered -E "^\[vec\]|VEC_DONE|Error|Traceback|out of memory"
+ls /root/lz/docs/vec_014.npy >/dev/null || { echo "LZ4_JOB_DONE vec failed"; exit 1; }
+n=lmrun2; echo "[lz4] BART $n from lmrun1 best, $(ls /root/lz/docs | grep -c '^vec_') shards $(date -u +%H:%M)"
+( while sleep 1800; do hf upload $R /root/lz/$n/train.log sentbart/lmz/$n/train.log >/dev/null 2>&1; done ) & UP=$!
+python3 /root/lz/train.py --data /root/lz/docs --out /root/lz/$n --init /root/lz/lmrun1/model_best.pt --eval-shard 001 --steps 200000 --batch 32 --seq 128 --d 512 --layers 8 --heads 8 --ffn 2048 \
+  --lr 1e-4 --warmup 1000 --eval-every 10000 --save-every 10000 --page 1 --page-queue 64 --page-input one --skip-grad 100 2>&1 | grep --line-buffered -E "^\[data|^\[model|^\[init|^\[eval|^\[best|TRAIN_DONE|Error|Traceback|out of memory" | sed -E 's/(page_top1 [0-9.]+ page_top10 [0-9.]+).*(next_top1 [0-9.]+ next_top10 [0-9.]+).*/\1 \2/'
+kill $UP 2>/dev/null; hf upload $R /root/lz/$n/train.log sentbart/lmz/$n/train.log >/dev/null 2>&1; hf upload $R /root/lz/$n/model_best.pt sentbart/lmz/$n/model_best.pt >/dev/null 2>&1
+rm -f /root/lz/$n/state.pt
+echo "LZ4_JOB_DONE $(date -u)"
+LK
+  setsid nohup bash -c 'bash /root/lz4keep.sh 2>&1 | tee -a /root/lz_main.log' > /dev/null 2>&1 < /dev/null &
+  echo "LZ4_LAUNCHED $(date -u)"
 fi
 echo "BOXK_OK serial $BOXK_SERIAL $(date -u)"
 # CTL-END
