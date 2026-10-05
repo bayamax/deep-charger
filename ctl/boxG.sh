@@ -80,7 +80,7 @@ PSKIP=
 # The raw GitHub copy this box fetches can lag and hand a control run an OLDER version of this file (04:48 on 09-22 it
 # relaunched the online loop under the previous mode while the newer run was merging a checkpoint on the same card).
 # Every edit bumps BOXG_SERIAL; a run that sees a lower serial than one already executed stops here.
-BOXG_SERIAL=2026100327
+BOXG_SERIAL=2026100328
 if [ -f /root/.boxg_serial ] && [ "$(cat /root/.boxg_serial)" -gt "$BOXG_SERIAL" ] 2>/dev/null; then echo "BOXG_STALE $BOXG_SERIAL < $(cat /root/.boxg_serial)"; exit 0; fi
 echo $BOXG_SERIAL > /root/.boxg_serial
 MODE=idle         # 2026-09-29: the side jobs hold the card (multi-turn measurement and training); a finished reeval re-launched on every control run and killed their evaluators
@@ -1168,20 +1168,33 @@ for l in open('/root/work/r1smoke_out.jsonl'):
     x=json.loads(l); print('[r1smoke]', x['q'][:60], '| gold', x['gold'][:30], '| ns', x['ns'], '|', x['traj'][:500].replace(chr(10),' / '))" 2>&1 | head -4
     echo "R1SMOKE_DONE $(date -u)" ) > /root/r1smoke.log 2>&1 &
 fi
+# ---- 2026-10-05 10:45 JST: teach1's post-mortem - it searched 13.8 times a question against s100's 3.9 (thinking and
+# reply length unchanged): it took on R1's habit of searching on and re-reading pages. mtg4 restarts with the R1
+# trajectories of at most 3 searches only (81 of 99) - the habit is in the long ones.
+if [ ! -e /root/.mtg4_short ]; then touch /root/.mtg4_short
+  pkill -f "mtg4kee[p].sh"; pkill -f "online_loop.py /root/mtg3_s100.safetensors /root/online_mtg4t"; sleep 10
+  rm -rf /root/online_mtg4t; rm -f /root/mtg4.log /root/mtg4_run.log
+  python3 -c "
+import json
+r=[json.loads(l) for l in open('/root/work/r1_traj.jsonl')]
+k=[x for x in r if x.get('ns',9)<=3]
+open('/root/work/r1_traj_short.jsonl','w').write(''.join(json.dumps(x,ensure_ascii=False)+'\n' for x in k))
+print('MTG4_SHORT', len(k), 'of', len(r), 'R1 trajectories kept (<= 3 searches)')"
+fi
 # ---- mtg4 (2026-10-05 10:50 JST, the user: the R1 trajectories go INTO the GRPO, not a separate supervised pass -
 # teach1, two epochs of plain SFT on the 99, fell to 39/100 vs s100's 54). From mtg3 step 100 on the items that carry
 # signal: those s100 solves sometimes (1-3 of 4 in the probe, 160) and the never-solved ones R1 has a verified
 # trajectory for (99); a search group none of whose samples passes also takes one supervised step on that question's
 # R1 trajectory at half weight (--demo-on-fail 0.5). One step in four Dolphin reasoning, rates 5e-6, 80 steps.
 # Gate: single-turn shard 0 (s100 54/100); the full screens only when it holds (>= 52).
-if ! pgrep -f "mtg4kee[p].sh" >/dev/null && ! grep -q "MTG4_JOB_DONE" /root/mtg4.log 2>/dev/null; then
+if [ -s /root/work/r1_traj_short.jsonl ] && ! pgrep -f "mtg4kee[p].sh" >/dev/null && ! grep -q "MTG4_JOB_DONE" /root/mtg4.log 2>/dev/null; then
   cat > /root/mtg4keep.sh <<'M4'
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); R=baya1116/hypernet-sp-distill; cd /root/work; OUT=/root/online_mtg4t; S0=/root/mtg3_s100.safetensors
 ENV="SP_BASE=/root/gptq_hf_gq14 SP_RANK=16 SP_NOSYS=1 SP_EPISODIC=1 OMP_NUM_THREADS=1 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True"
 EVARGS="--rw 768 --maxd 384 --samepage 1 --decode plain --temp 0.6 --gen 4000 --stop eos --replycap 600"
 python3 - <<'PYI'
 import json
-demo = {json.loads(l)["q"].strip() for l in open("/root/work/r1_traj.jsonl")}
+demo = {json.loads(l)["q"].strip() for l in open("/root/work/r1_traj_short.jsonl")}
 out = []
 for l in open("/root/work/probe_s100.jsonl"):
     r = json.loads(l)
@@ -1194,7 +1207,7 @@ echo "[mtg4] start $(date -u +%H:%M); $(df -h /root | tail -1 | awk '{print $4}'
 env SP_BASE=/root/gptq_hf_gq14 SP_NOSYS=1 SP_EPISODIC=1 OAI_KEY=$(cat /root/.oai 2>/dev/null) DSK_KEY=$(cat /root/.dsk 2>/dev/null) PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
   python3 /root/work/online_loop.py $S0 $OUT --pooler none --lora-layers all --lora-rank 16 --save-lora-only 1 \
   --mt-items /root/work/mtg4_items.jsonl --heldout /root/work/eval300.jsonl --reason /root/work/dolphin_rft.jsonl --reason-every 4 --reason-g 8 \
-  --search-demo /root/work/r1_traj.jsonl --demo-on-fail 0.5 \
+  --search-demo /root/work/r1_traj_short.jsonl --demo-on-fail 0.5 \
   --steps 80 --save-every 40 --lr 5e-6 --search-lr 5e-6 --search-temp 0.9 --search-gen 2000 --temp 0.6 --gen 3000 --budget 900 --maxsrch 7 --stop eos \
   --judge-api openai --judge-model gpt-5-nano --w-talk 0.5 --dolphin-min 0 --adv-std 1 --pg-norm mean --kl 0 \
   --guard 1 --guard-steps 20 > /root/mtg4_run.log 2>&1
