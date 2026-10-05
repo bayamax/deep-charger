@@ -80,7 +80,7 @@ PSKIP=
 # The raw GitHub copy this box fetches can lag and hand a control run an OLDER version of this file (04:48 on 09-22 it
 # relaunched the online loop under the previous mode while the newer run was merging a checkpoint on the same card).
 # Every edit bumps BOXG_SERIAL; a run that sees a lower serial than one already executed stops here.
-BOXG_SERIAL=2026100503
+BOXG_SERIAL=2026100504
 if [ -f /root/.boxg_serial ] && [ "$(cat /root/.boxg_serial)" -gt "$BOXG_SERIAL" ] 2>/dev/null; then echo "BOXG_STALE $BOXG_SERIAL < $(cat /root/.boxg_serial)"; exit 0; fi
 echo $BOXG_SERIAL > /root/.boxg_serial
 MODE=idle         # 2026-09-29: the side jobs hold the card (multi-turn measurement and training); a finished reeval re-launched on every control run and killed their evaluators
@@ -2969,18 +2969,8 @@ SPD
 chmod +x /root/status_pub.sh
 setsid nohup bash /root/status_pub.sh >> /proc/1/fd/1 2>&1 < /dev/null &
 
-# ---- hyde (2026-10-05 20:10 JST, the user: if the searching model wrote HyDE-style queries, the BART's page vector -
-# trained to be found from a sentence of its article - may be enough). API only (nano), no GPU: the app model's 614
-# search queries of the article-search test rewritten as one Wikipedia-style sentence each; box I measures them.
-if [ ! -e /root/.hyde1 ] && [ -s /root/.oai ]; then touch /root/.hyde1
-  ( export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); R=baya1116/hypernet-sp-distill; mkdir -p /root/hyde; cd /root/hyde
-    curl -sS -L -o hyde_gen.py "$RAW/sentbart/hyde_gen.py?$(date +%s)"
-    hf download $R sentbart/searcheval/dcq.jsonl --local-dir /root/hyde/dl >/dev/null 2>&1
-    python3 hyde_gen.py --queries /root/hyde/dl/sentbart/searcheval/dcq.jsonl --out /root/hyde/dcq_hyde.jsonl 2>&1 | grep -E "HYDE_DONE|api error|Error|Traceback" | cut -c1-300
-    [ -s /root/hyde/dcq_hyde.jsonl ] && hf upload $R /root/hyde/dcq_hyde.jsonl sentbart/searcheval/dcq_hyde.jsonl >/dev/null 2>&1 && echo "HYDE_UPLOADED $(date -u)"
-  ) > /root/hyde.log 2>&1 &
-  echo "HYDE_LAUNCHED $(date -u)"
-fi
+# ---- hyde: withdrawn (2026-10-05 20:15 JST, the user: HyDE was a thought, not a request to run it now)
+pkill -f "hyde_gen.p[y]" 2>/dev/null
 # ---- the box's own logs, mirrored to the hub every ten minutes: readable without the Vast API ----
 pkill -f "logmirro[r].sh" 2>/dev/null; pkill -f "logmirror[2].sh" 2>/dev/null   # replaced by logmirror3 (adds the score table)
 cat > /root/logmirror3.sh <<'LM'
@@ -3006,7 +2996,6 @@ while :; do
     echo "--- r1smoke.log ---"; cat /root/r1smoke.log 2>/dev/null | cut -c1-700
     echo "--- leak ---"; cat /root/leak.txt 2>/dev/null | cut -c1-700
     echo "--- qcount ---"; cat /root/qcount.txt 2>/dev/null | cut -c1-600
-    echo "--- hyde.log ---"; tail -n 4 /root/hyde.log 2>/dev/null | cut -c1-300
     echo "--- mtg5.log (tail) ---"; tail -n 14 /root/mtg5.log 2>/dev/null | cut -c1-250; grep -E "^\[step|ONLINE_|rollback|guard" /root/mtg5_run.log 2>/dev/null | tail -n 3 | cut -c1-220
     echo "--- s100q.log (tail) ---"; tail -n 14 /root/s100q.log 2>/dev/null | cut -c1-250
     echo "--- mtg4.log (tail) ---"; tail -n 12 /root/mtg4.log 2>/dev/null | cut -c1-250; grep -E "^\[step|ONLINE_" /root/mtg4_run.log 2>/dev/null | tail -n 3 | cut -c1-220

@@ -8,7 +8,7 @@ cd /root
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null)
 R=baya1116/hypernet-sp-distill
 RAW="https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl"
-BOXI_SERIAL=44
+BOXI_SERIAL=45
 if [ -f /root/.boxi_serial ] && [ "$(cat /root/.boxi_serial)" -gt "$BOXI_SERIAL" ] 2>/dev/null; then echo "BOXI_STALE $BOXI_SERIAL"; exit 0; fi
 echo $BOXI_SERIAL > /root/.boxi_serial
 mkdir -p /root/sb /root/work
@@ -1010,21 +1010,7 @@ RK
   setsid nohup bash -c 'bash /root/cascadekeep.sh 2>&1 | tee -a /root/sb_cascade.log' > /dev/null 2>&1 < /dev/null &
   echo "CASCADE_LAUNCHED $(date -u)"
 fi
-# ---- cascadeH (2026-10-05 20:10 JST, the user: HyDE-style queries): the same two-stage search with the queries
-# rewritten as one Wikipedia-style sentence each (box G, nano), embedded as plain sentences - the 58.1 model.
-if [ -f /root/sb/search_cascade.py ] && ! pgrep -f "cascadeHkee[p].sh" >/dev/null && ! grep -q "CASCADEH_JOB_DONE" /root/sb_cascadeH.log 2>/dev/null; then
-  cat > /root/cascadeHkeep.sh <<'RK'
-export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); R=baya1116/hypernet-sp-distill; cd /root/sb; mkdir -p /root/sb/sc
-until hf download $R sentbart/searcheval/dcq_hyde.jsonl --local-dir /root/sb/sc/dl >/dev/null 2>&1 && [ -s /root/sb/sc/dl/sentbart/searcheval/dcq_hyde.jsonl ]; do sleep 120; done
-until [ -s /root/sb/sc/one32.json ]; do sleep 60; done
-I0=/root/sb/abl_one32/model_best.pt; [ -s $I0 ] || I0=/root/sb/hfdl/sentbart/abl/one32/model_best.pt
-echo "[cascadeH] one32 (58.1), HyDE queries $(date -u +%H:%M)"
-python3 /root/sb/search_cascade.py --vec /root/sb/data/docs --text /root/sb/data/docs/docs_001.jsonl --ckpt $I0 --queries /root/sb/sc/dl/sentbart/searcheval/dcq_hyde.jsonl --out /root/sb/sc/one32_hyde.json 2>&1 | grep --line-buffered -E "^\[cascade\] h_|CASCADE_DONE|Error|Traceback|out of memory"
-hf upload $R /root/sb/sc/one32_hyde.json sentbart/searcheval/cascade_one32_hyde.json >/dev/null 2>&1
-echo "CASCADEH_JOB_DONE $(date -u)"
-RK
-  setsid nohup bash -c 'bash /root/cascadeHkeep.sh 2>&1 | tee -a /root/sb_cascadeH.log' > /dev/null 2>&1 < /dev/null &
-  echo "CASCADEH_LAUNCHED $(date -u)"
-fi
+# ---- cascadeH: withdrawn (2026-10-05 20:15 JST, the user: HyDE was a thought, not a request to run it now)
+pkill -f "cascadeHkee[p].sh" 2>/dev/null
 echo "BOXI_OK serial $BOXI_SERIAL $(date -u)"
 # CTL-END
