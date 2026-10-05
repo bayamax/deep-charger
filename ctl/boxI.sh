@@ -8,7 +8,7 @@ cd /root
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null)
 R=baya1116/hypernet-sp-distill
 RAW="https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl"
-BOXI_SERIAL=40
+BOXI_SERIAL=41
 if [ -f /root/.boxi_serial ] && [ "$(cat /root/.boxi_serial)" -gt "$BOXI_SERIAL" ] 2>/dev/null; then echo "BOXI_STALE $BOXI_SERIAL"; exit 0; fi
 echo $BOXI_SERIAL > /root/.boxi_serial
 mkdir -p /root/sb /root/work
@@ -935,6 +935,28 @@ echo "PH_JOB_DONE $(date -u)"
 RK
   setsid nohup bash -c 'bash /root/phkeep.sh 2>&1 | tee -a /root/sb_ph.log' > /dev/null 2>&1 < /dev/null &
   echo "PH_LAUNCHED $(date -u)"
+fi
+# ---- bgectl (2026-10-05 14:20 JST): the control for box K's BART on language-model sentence vectors - the same
+# recipe from scratch (8+8, page vector from the one-sentence-hidden input, lr 1e-4, 100k) on the same Wikipedia
+# shards (0, 2-6 for training, 1 held out: the same 2000 evaluation articles) with bge-small vectors. After ph.
+if ! pgrep -f "bgectlkee[p].sh" >/dev/null && ! grep -q "BGECTL_JOB_DONE" /root/sb_bgectl.log 2>/dev/null; then
+  cat > /root/bgectlkeep.sh <<'RK'
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); R=baya1116/hypernet-sp-distill; cd /root/sb
+until grep -q "PH_JOB_DONE" /root/sb_ph.log 2>/dev/null; do sleep 120; done
+while pgrep -f "python3 /root/sb/train.py --data" >/dev/null; do sleep 30; done
+D=/root/sb/data/docs7; mkdir -p $D
+for k in 000 001 002 003 004 005 006; do for f in vec scl off; do [ -e /root/sb/data/docs/${f}_$k.npy ] && ln -sf /root/sb/data/docs/${f}_$k.npy $D/${f}_$k.npy; done; done
+echo "[bgectl] shards: $(ls $D | tr '\n' ' ') $(date -u +%H:%M)"
+n=bgectl1
+( while sleep 1800; do hf upload $R /root/sb/$n/train.log sentbart/lmz/$n/train.log >/dev/null 2>&1; done ) & UP=$!
+python3 /root/sb/train.py --data $D --out /root/sb/$n --eval-shard 001 --steps 100000 --batch 32 --seq 128 --d 512 --layers 8 --heads 8 --ffn 2048 \
+  --lr 1e-4 --warmup 1000 --eval-every 10000 --save-every 10000 --page 1 --page-queue 64 --page-input one --skip-grad 100 2>&1 | grep -E "^\[data|^\[model|^\[best|TRAIN_DONE|Error|Traceback|out of memory"
+kill $UP 2>/dev/null; hf upload $R /root/sb/$n/train.log sentbart/lmz/$n/train.log >/dev/null 2>&1
+rm -f /root/sb/$n/state.pt /root/sb/$n/model_latest.pt
+echo "BGECTL_JOB_DONE $(date -u)"
+RK
+  setsid nohup bash -c 'bash /root/bgectlkeep.sh 2>&1 | tee -a /root/sb_bgectl.log' > /dev/null 2>&1 < /dev/null &
+  echo "BGECTL_LAUNCHED $(date -u)"
 fi
 echo "BOXI_OK serial $BOXI_SERIAL $(date -u)"
 # CTL-END
