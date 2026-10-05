@@ -8,7 +8,7 @@ cd /root
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null)
 R=baya1116/hypernet-sp-distill
 RAW="https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl"
-BOXI_SERIAL=42
+BOXI_SERIAL=43
 if [ -f /root/.boxi_serial ] && [ "$(cat /root/.boxi_serial)" -gt "$BOXI_SERIAL" ] 2>/dev/null; then echo "BOXI_STALE $BOXI_SERIAL"; exit 0; fi
 echo $BOXI_SERIAL > /root/.boxi_serial
 mkdir -p /root/sb /root/work
@@ -25,7 +25,7 @@ if [ ! -f /root/.bootstrapped ]; then
 fi
 
 # the code, fresh from the branch on every control run
-for f in prep.py embed.py train.py train_e2e.py evalsb.py links.py; do
+for f in prep.py embed.py train.py train_e2e.py search_cascade.py evalsb.py links.py; do
   curl -sS -L -o /root/sb/$f.new "$RAW/sentbart/$f?$(date +%s)" && grep -q "^#!/usr/bin/env python3" /root/sb/$f.new && mv /root/sb/$f.new /root/sb/$f || rm -f /root/sb/$f.new
 done
 ls /root/sb
@@ -988,6 +988,27 @@ echo "E2E_JOB_DONE $(date -u)"
 RK
   setsid nohup bash -c 'bash /root/e2ekeep.sh 2>&1 | tee -a /root/sb_e2e.log' > /dev/null 2>&1 < /dev/null &
   echo "E2E_LAUNCHED $(date -u)"
+fi
+# ---- cascade (2026-10-05 19:50 JST, the user: one vector per article picks ~10 candidates, the candidates are opened
+# and searched sentence by sentence with bge). search_cascade.py with the app model's own queries over all 118,398
+# held-out articles: the 58.1 model (abl_one32) now, beside e2e1; e2e1's best once its 10k evaluation is in (its
+# own encoder embeds the shard and the queries).
+if [ -f /root/sb/search_cascade.py ] && ! pgrep -f "cascadekee[p].sh" >/dev/null && ! grep -q "CASCADE_JOB_DONE" /root/sb_cascade.log 2>/dev/null; then
+  cat > /root/cascadekeep.sh <<'RK'
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); R=baya1116/hypernet-sp-distill; cd /root/sb; mkdir -p /root/sb/sc
+QF=/root/sb/se2/dl/sentbart/searcheval/dcq.jsonl; [ -s $QF ] || hf download $R sentbart/searcheval/dcq.jsonl --local-dir /root/sb/se2/dl >/dev/null 2>&1
+I0=/root/sb/abl_one32/model_best.pt; [ -s $I0 ] || I0=/root/sb/hfdl/sentbart/abl/one32/model_best.pt
+echo "[cascade] one32 (58.1) $(date -u +%H:%M)"
+python3 /root/sb/search_cascade.py --vec /root/sb/data/docs --text /root/sb/data/docs/docs_001.jsonl --ckpt $I0 --queries $QF --out /root/sb/sc/one32.json 2>&1 | grep --line-buffered -E "^\[cascade\]|CASCADE_DONE|Error|Traceback|out of memory"
+hf upload $R /root/sb/sc/one32.json sentbart/searcheval/cascade_one32.json >/dev/null 2>&1
+until grep -q "^\[eval 10000\]" /root/sb/e2e1/train.log 2>/dev/null || grep -q "E2E_JOB_DONE" /root/sb_e2e.log 2>/dev/null; do sleep 120; done
+cp /root/sb/e2e1/model_best.pt /root/sb/sc/e2e1_best.pt; echo "[cascade] e2e1 best ($(grep '^\[best' /root/sb/e2e1/train.log | tail -1)) $(date -u +%H:%M)"
+python3 /root/sb/search_cascade.py --vec /root/sb/data/docs --text /root/sb/data/docs/docs_001.jsonl --ckpt /root/sb/sc/e2e1_best.pt --queries $QF --out /root/sb/sc/e2e1.json 2>&1 | grep --line-buffered -E "^\[cascade\]|CASCADE_DONE|Error|Traceback|out of memory"
+hf upload $R /root/sb/sc/e2e1.json sentbart/searcheval/cascade_e2e1.json >/dev/null 2>&1; rm -f /root/sb/sc/e2e1_best.pt
+echo "CASCADE_JOB_DONE $(date -u)"
+RK
+  setsid nohup bash -c 'bash /root/cascadekeep.sh 2>&1 | tee -a /root/sb_cascade.log' > /dev/null 2>&1 < /dev/null &
+  echo "CASCADE_LAUNCHED $(date -u)"
 fi
 echo "BOXI_OK serial $BOXI_SERIAL $(date -u)"
 # CTL-END
