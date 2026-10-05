@@ -8,7 +8,7 @@ cd /root
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null)
 R=baya1116/hypernet-sp-distill
 RAW="https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl"
-BOXK_SERIAL=3
+BOXK_SERIAL=4
 if [ -f /root/.boxk_serial ] && [ "$(cat /root/.boxk_serial)" -gt "$BOXK_SERIAL" ] 2>/dev/null; then echo "BOXK_STALE $BOXK_SERIAL"; exit 0; fi
 echo $BOXK_SERIAL > /root/.boxk_serial
 mkdir -p /root/lz/docs
@@ -116,6 +116,33 @@ echo "ARTRET_JOB_DONE $(date -u)"
 LK
   setsid nohup bash -c 'bash /root/artretkeep.sh 2>&1 | tee -a /root/lz_artret.log' > /dev/null 2>&1 < /dev/null &
   echo "ARTRET_LAUNCHED $(date -u)"
+fi
+# ---- lz3 (2026-10-05 19:05 JST, the user: a first read does not need all seven shards). The vectors stop once shard
+# 002 is written (001 held out, 000 + 002 for training: ~230k documents); the BART runs bgectl1's recipe and schedule
+# (lr 1e-4, cosine over 100k) but is stopped after its 30k evaluation, so its 10k / 20k / 30k compare with bgectl1's
+# at the same steps (bge, 6 training shards: 26.1 / 33.2 / 38.3% page top-1).
+if [ -f /root/.bootstrapped ] && pgrep -f "lz2kee[p].sh" >/dev/null && ! pgrep -f "lz3kee[p].sh" >/dev/null && ! grep -q "LZ3_JOB_DONE" /root/lz_main.log 2>/dev/null; then
+  cat > /root/lz3keep.sh <<'LK'
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); R=baya1116/hypernet-sp-distill; cd /root/lz
+until [ -s /root/lz/docs/vec_002.npy ] && [ -s /root/lz/docs/off_002.npy ]; do sleep 60; done; sleep 30
+pkill -f "lz2kee[p].sh"; pkill -f "lmz.py vec"; sleep 10
+echo "[lz3] vectors stopped after shard 002 $(date -u +%H:%M): $(ls /root/lz/docs | grep -E '^vec_' | tr '\n' ' ')"
+n=lmrun1; rm -rf /root/lz/$n
+( while sleep 1800; do hf upload $R /root/lz/$n/train.log sentbart/lmz/$n/train.log >/dev/null 2>&1; done ) & UP=$!
+python3 /root/lz/train.py --data /root/lz/docs --out /root/lz/$n --eval-shard 001 --steps 100000 --batch 32 --seq 128 --d 512 --layers 8 --heads 8 --ffn 2048 \
+  --lr 1e-4 --warmup 1000 --eval-every 10000 --save-every 10000 --page 1 --page-queue 64 --page-input one --skip-grad 100 > /root/lz/$n.out 2>&1 &
+TP=$!
+while kill -0 $TP 2>/dev/null; do
+  grep -q "^\[eval 30000\]" /root/lz/$n/train.log 2>/dev/null && { sleep 5; kill $TP; break; }; sleep 60
+done
+grep -hE "^\[data|^\[model|Error|Traceback|out of memory" /root/lz/$n.out | tail -4
+grep -hE "^\[eval" /root/lz/$n/train.log | sed -E 's/(page_top1 [0-9.]+ page_top10 [0-9.]+).*(next_top1 [0-9.]+ next_top10 [0-9.]+).*/\1 \2/' | sed 's/^/[lz3] /'
+kill $UP 2>/dev/null; hf upload $R /root/lz/$n/train.log sentbart/lmz/$n/train.log >/dev/null 2>&1; hf upload $R /root/lz/$n/model_best.pt sentbart/lmz/$n/model_best.pt >/dev/null 2>&1
+rm -f /root/lz/$n/state.pt
+echo "LZ3_JOB_DONE $(date -u)"
+LK
+  setsid nohup bash -c 'bash /root/lz3keep.sh 2>&1 | tee -a /root/lz_main.log' > /dev/null 2>&1 < /dev/null &
+  echo "LZ3_LAUNCHED $(date -u)"
 fi
 echo "BOXK_OK serial $BOXK_SERIAL $(date -u)"
 # CTL-END
