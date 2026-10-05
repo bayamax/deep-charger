@@ -80,7 +80,7 @@ PSKIP=
 # The raw GitHub copy this box fetches can lag and hand a control run an OLDER version of this file (04:48 on 09-22 it
 # relaunched the online loop under the previous mode while the newer run was merging a checkpoint on the same card).
 # Every edit bumps BOXG_SERIAL; a run that sees a lower serial than one already executed stops here.
-BOXG_SERIAL=2026100601
+BOXG_SERIAL=2026100602
 if [ -f /root/.boxg_serial ] && [ "$(cat /root/.boxg_serial)" -gt "$BOXG_SERIAL" ] 2>/dev/null; then echo "BOXG_STALE $BOXG_SERIAL < $(cat /root/.boxg_serial)"; exit 0; fi
 echo $BOXG_SERIAL > /root/.boxg_serial
 MODE=idle         # 2026-09-29: the side jobs hold the card (multi-turn measurement and training); a finished reeval re-launched on every control run and killed their evaluators
@@ -2982,6 +2982,10 @@ if [ ! -e /root/.hyde3 ] && [ -s /root/.oai ]; then touch /root/.hyde3; pkill -f
     [ -s /root/hyde/dcq_hyde.jsonl ] && hf upload $R /root/hyde/dcq_hyde.jsonl sentbart/searcheval/dcq_hyde.jsonl >/dev/null 2>&1 && echo "HYDE_UPLOADED $(date -u)"
   ) > /root/hyde.log 2>&1 &
   echo "HYDE_LAUNCHED $(date -u)"
+fi
+# ---- 2026-10-06 08:45 JST: mtg5's rollouts so far on the hub (the reasoning blocks read 42% without </think> yet 71% passed).
+if [ ! -e /root/.mtg5_partial1 ] && [ -s /root/online_mtg5/rollouts.jsonl ]; then touch /root/.mtg5_partial1
+  HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token) hf upload baya1116/hypernet-sp-distill /root/online_mtg5/rollouts.jsonl pooler_distill/chatsft/multiturn/mtg5_rollouts_partial.jsonl >/dev/null 2>&1 && echo "MTG5_PARTIAL_UP $(date -u)"
 fi
 # ---- the box's own logs, mirrored to the hub every ten minutes: readable without the Vast API ----
 pkill -f "logmirro[r].sh" 2>/dev/null; pkill -f "logmirror[2].sh" 2>/dev/null   # replaced by logmirror3 (adds the score table)
