@@ -80,7 +80,7 @@ PSKIP=
 # The raw GitHub copy this box fetches can lag and hand a control run an OLDER version of this file (04:48 on 09-22 it
 # relaunched the online loop under the previous mode while the newer run was merging a checkpoint on the same card).
 # Every edit bumps BOXG_SERIAL; a run that sees a lower serial than one already executed stops here.
-BOXG_SERIAL=2026100329
+BOXG_SERIAL=2026100330
 if [ -f /root/.boxg_serial ] && [ "$(cat /root/.boxg_serial)" -gt "$BOXG_SERIAL" ] 2>/dev/null; then echo "BOXG_STALE $BOXG_SERIAL < $(cat /root/.boxg_serial)"; exit 0; fi
 echo $BOXG_SERIAL > /root/.boxg_serial
 MODE=idle         # 2026-09-29: the side jobs hold the card (multi-turn measurement and training); a finished reeval re-launched on every control run and killed their evaluators
@@ -1180,6 +1180,42 @@ r=[json.loads(l) for l in open('/root/work/r1_traj.jsonl')]
 k=[x for x in r if x.get('ns',9)<=3]
 open('/root/work/r1_traj_short.jsonl','w').write(''.join(json.dumps(x,ensure_ascii=False)+'\n' for x in k))
 print('MTG4_SHORT', len(k), 'of', len(r), 'R1 trajectories kept (<= 3 searches)')"
+fi
+# ---- 2026-10-05 12:30 JST (the user: are the evaluation sets really untrained?): every evaluation set against every
+# training file on the box (SFT, replay, teacher trajectories, GRPO rollouts and items, Dolphin)
+if [ ! -e /root/.leak1 ]; then touch /root/.leak1
+  python3 - <<'PYL' > /root/leak.txt 2>&1
+import json, glob, os, re
+def norm(q): return re.sub(r"\s+", " ", q.strip().lower())
+def qs(f):
+    out = set()
+    try:
+        for l in open(f):
+            try: d = json.loads(l)
+            except Exception: continue
+            for k in ("q", "question", "seed"):
+                if isinstance(d.get(k), str) and d[k].strip(): out.add(norm(d[k]))
+            for t in d.get("turns", []) or []:
+                if t.get("q"): out.add(norm(t["q"]))
+            for m in (d.get("messages") or d.get("hist") or []):
+                if isinstance(m, dict) and m.get("role") == "user" and m.get("content"): out.add(norm(m["content"]))
+    except (FileNotFoundError, IsADirectoryError, UnicodeDecodeError): pass
+    return out
+evals = {"eval300": "/root/work/eval300.jsonl", "dolphin_heldout100": "/root/work/dolphin_heldout100.jsonl", "mt_eval (bridge40+chains)": "/root/work/mt_eval.jsonl",
+         "mt_eval_chain": "/root/work/mt_eval_chain.jsonl", "bridge3 (97)": "/root/work/mt_eval_bridge3.jsonl"}
+E = {k: qs(v) for k, v in evals.items()}
+train_files = [f for f in glob.glob("/root/work/*.jsonl") + glob.glob("/root/hfdl/**/*.jsonl", recursive=True) + glob.glob("/root/online_*/rollouts.jsonl") + glob.glob("/root/online_*/*.jsonl")
+               if not any(x in f for x in ("eval300", "heldout", "mt_eval", "dolphinq", "_out_", "st_", "br_", "br2_", "br3_", "mc_", "dl_", "chain", "cache", "probe_s100", "pool_eval"))]
+hits = {}
+for f in sorted(set(train_files)):
+    T = qs(f)
+    if not T: continue
+    for k, S in E.items():
+        n = len(S & T)
+        if n: hits.setdefault(k, []).append(f"{f.replace('/root/', '')}:{n}")
+for k, S in E.items():
+    print(f"LEAK {k}: {len(S)} questions; found in training files: " + ("; ".join(hits.get(k, [])[:8]) or "none"))
+PYL
 fi
 # ---- 2026-10-05 12:20 JST (the user: are unseen questions left?): count the question pools and what training has used
 if [ ! -e /root/.qcount1 ]; then touch /root/.qcount1
@@ -2796,6 +2832,7 @@ while :; do
     echo "--- pqjudge.log (tail) ---"; tail -n 5 /root/pqjudge.log 2>/dev/null | cut -c1-200
     echo "--- du_list ---"; cat /root/du_list.txt 2>/dev/null | head -42
     echo "--- r1smoke.log ---"; cat /root/r1smoke.log 2>/dev/null | cut -c1-700
+    echo "--- leak ---"; cat /root/leak.txt 2>/dev/null | cut -c1-700
     echo "--- qcount ---"; cat /root/qcount.txt 2>/dev/null | cut -c1-600
     echo "--- mtg4.log (tail) ---"; tail -n 12 /root/mtg4.log 2>/dev/null | cut -c1-250; grep -E "^\[step|ONLINE_" /root/mtg4_run.log 2>/dev/null | tail -n 3 | cut -c1-220
     echo "--- teach2.log (tail) ---"; tail -n 12 /root/teach2.log 2>/dev/null | cut -c1-250; grep -E "^\[step" /root/teach1_run.log 2>/dev/null | tail -n 1 | cut -c1-200
