@@ -12,6 +12,7 @@ import concurrent.futures as cf
 ap = argparse.ArgumentParser()
 ap.add_argument("--queries", required=True); ap.add_argument("--out", required=True)
 ap.add_argument("--model", default="gpt-5-nano"); ap.add_argument("--workers", type=int, default=8)
+ap.add_argument("--n", type=int, default=100, help="a random sample of this many queries (the output holds only these, so both query forms are measured on the same ones)")
 A = ap.parse_args()
 KEY = open("/root/.oai").read().strip(); URL = "https://api.openai.com/v1/chat/completions"
 SYS = ("You turn a Wikipedia search query into ONE sentence written the way the English Wikipedia article being searched "
@@ -36,6 +37,7 @@ def chat(q, tries=4):
 
 
 rows = [json.loads(l) for l in open(A.queries) if l.strip()]
+import random; random.Random(0).shuffle(rows); rows = rows[:A.n] if A.n else rows
 jobs = [(i, k) for i, r in enumerate(rows) for k in ("q_api", "q_good") if r.get(k)]
 with cf.ThreadPoolExecutor(A.workers) as ex:
     for (i, k), s in zip(jobs, ex.map(lambda j: chat(rows[j[0]][j[1]]), jobs)):

@@ -8,7 +8,7 @@ cd /root
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null)
 R=baya1116/hypernet-sp-distill
 RAW="https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl"
-BOXI_SERIAL=46
+BOXI_SERIAL=47
 if [ -f /root/.boxi_serial ] && [ "$(cat /root/.boxi_serial)" -gt "$BOXI_SERIAL" ] 2>/dev/null; then echo "BOXI_STALE $BOXI_SERIAL"; exit 0; fi
 echo $BOXI_SERIAL > /root/.boxi_serial
 mkdir -p /root/sb /root/work
@@ -1019,7 +1019,7 @@ until hf download $R sentbart/searcheval/dcq_hyde.jsonl --local-dir /root/sb/sc/
 until [ -s /root/sb/sc/one32.json ]; do sleep 60; done
 I0=/root/sb/abl_one32/model_best.pt; [ -s $I0 ] || I0=/root/sb/hfdl/sentbart/abl/one32/model_best.pt
 echo "[cascadeH] one32 (58.1), HyDE queries $(date -u +%H:%M)"
-python3 /root/sb/search_cascade.py --vec /root/sb/data/docs --text /root/sb/data/docs/docs_001.jsonl --ckpt $I0 --queries /root/sb/sc/dl/sentbart/searcheval/dcq_hyde.jsonl --out /root/sb/sc/one32_hyde.json 2>&1 | grep --line-buffered -E "^\[cascade\] h_|CASCADE_DONE|Error|Traceback|out of memory"
+python3 /root/sb/search_cascade.py --vec /root/sb/data/docs --text /root/sb/data/docs/docs_001.jsonl --ckpt $I0 --queries /root/sb/sc/dl/sentbart/searcheval/dcq_hyde.jsonl --out /root/sb/sc/one32_hyde.json 2>&1 | grep --line-buffered -E "^\[cascade\] (q_|h_)|CASCADE_DONE|Error|Traceback|out of memory"
 hf upload $R /root/sb/sc/one32_hyde.json sentbart/searcheval/cascade_one32_hyde.json >/dev/null 2>&1
 echo "CASCADEH_JOB_DONE $(date -u)"
 RK
