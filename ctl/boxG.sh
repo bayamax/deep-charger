@@ -80,7 +80,7 @@ PSKIP=
 # The raw GitHub copy this box fetches can lag and hand a control run an OLDER version of this file (04:48 on 09-22 it
 # relaunched the online loop under the previous mode while the newer run was merging a checkpoint on the same card).
 # Every edit bumps BOXG_SERIAL; a run that sees a lower serial than one already executed stops here.
-BOXG_SERIAL=2026100503
+BOXG_SERIAL=2026100505
 if [ -f /root/.boxg_serial ] && [ "$(cat /root/.boxg_serial)" -gt "$BOXG_SERIAL" ] 2>/dev/null; then echo "BOXG_STALE $BOXG_SERIAL < $(cat /root/.boxg_serial)"; exit 0; fi
 echo $BOXG_SERIAL > /root/.boxg_serial
 MODE=idle         # 2026-09-29: the side jobs hold the card (multi-turn measurement and training); a finished reeval re-launched on every control run and killed their evaluators
@@ -2972,7 +2972,7 @@ setsid nohup bash /root/status_pub.sh >> /proc/1/fd/1 2>&1 < /dev/null &
 # ---- hyde (2026-10-05 20:10 JST, the user: if the searching model wrote HyDE-style queries, the BART's page vector -
 # trained to be found from a sentence of its article - may be enough). API only (nano), no GPU: the app model's 614
 # search queries of the article-search test rewritten as one Wikipedia-style sentence each; box I measures them.
-if [ ! -e /root/.hyde1 ] && [ -s /root/.oai ]; then touch /root/.hyde1
+if [ ! -e /root/.hyde2 ] && [ -s /root/.oai ]; then touch /root/.hyde2
   ( export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); R=baya1116/hypernet-sp-distill; mkdir -p /root/hyde; cd /root/hyde
     curl -sS -L -o hyde_gen.py "$RAW/sentbart/hyde_gen.py?$(date +%s)"
     hf download $R sentbart/searcheval/dcq.jsonl --local-dir /root/hyde/dl >/dev/null 2>&1
