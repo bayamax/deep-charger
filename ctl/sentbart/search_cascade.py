@@ -22,10 +22,12 @@ ap.add_argument("--k", default="10,50"); ap.add_argument("--bge", default="BAAI/
 ap.add_argument("--lm", default="", help="a BART trained on LM sentence vectors (lmz.py vec): the queries are embedded the same way - the LM reads the query alone, its last token's final state, standardised by --lm-stats, L2-normalised")
 ap.add_argument("--lm-stats", default="")
 E = ap.parse_args()
+import torch as _t
+_ck = _t.load(E.ckpt, map_location="cpu"); NL = str(_ck.get("layers", 8)); NE = _ck.get("enc_layers", 12); del _ck
 TP = os.path.join(os.path.dirname(os.path.abspath(__file__)), "train.py")
 src = open(TP).read(); cut = src.index("\nif A.search_eval:")
 sys.argv = ["train.py", "--data", E.vec, "--out", os.path.dirname(E.out) or ".", "--eval-shard", "001", "--batch", "32", "--seq", "128", "--d", "512",
-            "--layers", "8", "--heads", "8", "--ffn", "2048", "--page", "1", "--init", E.ckpt]
+            "--layers", NL, "--heads", "8", "--ffn", "2048", "--page", "1", "--init", E.ckpt]
 ns = {"__name__": "search_cascade", "__file__": TP}
 exec(compile(src[:cut], TP, "exec"), ns)
 model, DEV, DIM = ns["model"], ns["DEV"], ns["DIM"]
@@ -35,7 +37,11 @@ model.eval()
 ck = torch.load(E.ckpt, map_location="cpu")
 btok = AutoTokenizer.from_pretrained(E.bge); enc = AutoModel.from_pretrained(E.bge)
 trained = "enc" in ck
-if trained: enc.load_state_dict(ck["enc"])
+if trained:
+    import copy
+    while len(enc.encoder.layer) < NE:   # a grown encoder (train_e2e.py --enc-layers): the same shape first
+        j = len(enc.encoder.layer) // 2; enc.encoder.layer.insert(j + 1, copy.deepcopy(enc.encoder.layer[j]))
+    enc.load_state_dict(ck["enc"])
 enc = enc.to(DEV).eval()
 
 

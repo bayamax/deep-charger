@@ -22,10 +22,20 @@ ap = argparse.ArgumentParser()
 ap.add_argument("--vec", required=True, help="the embedded shards train.py reads (only shard 001's layout is used: which 2000 documents are evaluated)")
 ap.add_argument("--text", required=True, help="training documents as text: docs_XXX.jsonl (prep.py)")
 ap.add_argument("--eval-text", required=True, help="docs_001.jsonl, the held-out shard's text")
-ap.add_argument("--init", required=True); ap.add_argument("--out", required=True)
+ap.add_argument("--init", default="", help="a BART (model_*.pt); an e2e checkpoint also carries its encoder (\"enc\"), which is loaded too")
+ap.add_argument("--out", required=True)
+ap.add_argument("--layers", type=int, default=8, help="BART layers per stack")
+ap.add_argument("--grow", default="", help="instead of --init: an e2e checkpoint with fewer BART layers, grown to --layers (train.py --grow: the new layers start as the identity); its encoder is loaded too")
+ap.add_argument("--enc-layers", type=int, default=0, help="bge layers: 0 = what the checkpoint has (stock: 12); more = the checkpoint's encoder grown by duplicating middle layers")
+ap.add_argument("--page-queue", type=int, default=16, help="earlier batches' page vectors kept as extra negatives for the page loss")
+ap.add_argument("--patience", type=int, default=0, help=">0: stop after this many evaluations in a row without a new best (the selection metric)")
+ap.add_argument("--min-gain", type=float, default=0.002)
+ap.add_argument("--pool", type=int, default=0, help=">0: also page retrieval among this many held-out articles (the 2000 + others of shard 001), one sentence hidden in each, the 2000's hidden sentences as queries")
+ap.add_argument("--select", default="page_top1", help="the metric the best checkpoint and the patience follow (page_top1, or pool_top1 with --pool)")
 ap.add_argument("--steps", type=int, default=30000); ap.add_argument("--batch", type=int, default=32)
 ap.add_argument("--lr", type=float, default=3e-5, help="the BART"); ap.add_argument("--lr-enc", type=float, default=1e-5, help="bge")
 ap.add_argument("--w-anchor", type=float, default=1.0); ap.add_argument("--tau-anchor", type=float, default=0.05)
+ap.add_argument("--anchor-q", type=int, default=0, help=">0: the anchor also on this many of the step's sentences in QUERY form (bge's query instruction in front) - the path real searches take, which the BART losses never see; without it e2e1 drifted there (app-query search fell)")
 ap.add_argument("--maxlen", type=int, default=128, help="tokens per sentence into bge (embed.py's 128, so step 0 reads the stored vectors' equal)")
 ap.add_argument("--eval-every", type=int, default=2000); ap.add_argument("--save-every", type=int, default=2000)
 ap.add_argument("--bge", default="BAAI/bge-small-en-v1.5")
@@ -36,8 +46,8 @@ os.makedirs(E.out, exist_ok=True)
 TP = os.path.join(os.path.dirname(os.path.abspath(__file__)), "train.py")
 src = open(TP).read(); cut = src.index("\nif A.search_eval:")
 sys.argv = ["train.py", "--data", E.vec, "--out", E.out, "--eval-shard", "001", "--batch", str(E.batch), "--seq", "128", "--d", "512",
-            "--layers", "8", "--heads", "8", "--ffn", "2048", "--lr", str(E.lr), "--warmup", "500", "--steps", str(E.steps),
-            "--page", "1", "--page-queue", "16", "--page-input", "one", "--skip-grad", "100", "--init", E.init]
+            "--layers", str(E.layers), "--heads", "8", "--ffn", "2048", "--lr", str(E.lr), "--warmup", "500", "--steps", str(max(1, E.steps)),
+            "--page", "1", "--page-queue", str(E.page_queue), "--page-input", "one", "--skip-grad", "100"] + (["--grow", E.grow] if E.grow else ["--init", E.init])
 ns = {"__name__": "train_e2e", "__file__": TP}
 exec(compile(src[:cut], TP, "exec"), ns)
 A, model, DEV, DIM = ns["A"], ns["model"], ns["DEV"], ns["DIM"]
@@ -46,9 +56,30 @@ from transformers import AutoModel, AutoTokenizer  # noqa: E402
 assert DIM == 384, DIM
 
 btok = AutoTokenizer.from_pretrained(E.bge)
-enc = AutoModel.from_pretrained(E.bge).to(DEV); enc.gradient_checkpointing_enable(); enc.train()
+enc = AutoModel.from_pretrained(E.bge)
+
+
+def grow_bge(m, n):
+    """duplicate middle layers until the encoder has n (deterministic, so a saved grown encoder rebuilds the same shape)"""
+    import copy
+    L = m.encoder.layer
+    while len(L) < n:
+        j = len(L) // 2; L.insert(j + 1, copy.deepcopy(L[j]))
+    m.config.num_hidden_layers = len(L)
+
+
+CK0 = torch.load(E.grow or E.init, map_location="cpu") if (E.grow or E.init) else {}
+n0 = CK0.get("enc_layers", 12) if "enc" in CK0 else 12
+grow_bge(enc, n0)
+if "enc" in CK0: enc.load_state_dict(CK0["enc"]); print(f"[e2e] encoder from {E.grow or E.init} ({n0} layers)", flush=True)
+if E.enc_layers > n0: grow_bge(enc, E.enc_layers); print(f"[e2e] encoder grown {n0} -> {E.enc_layers} layers (middle layers duplicated)", flush=True)
+del CK0
+enc = enc.to(DEV); enc.gradient_checkpointing_enable(); enc.train()
 ref = AutoModel.from_pretrained(E.bge).to(DEV).eval()
 for p in ref.parameters(): p.requires_grad_(False)
+
+
+QPFX = "Represent this sentence for searching relevant passages: "
 
 
 def embed(m, sents, chunk=256):
@@ -98,12 +129,51 @@ def eval_now():
     for d in ev_text: off.append(off[-1] + len(d))
     V = np.concatenate(vs).astype(np.float32)
     ns["eval_sh"] = ("001", V, np.array(off)); ns["edocs"] = [(off[k], off[k + 1]) for k in range(len(ev_text))]
-    r = ns["evaluate"](); enc.train(); return r
+    r = ns["evaluate"](); enc.train()
+    if POOL: r.update(eval_pool())
+    return r
+
+
+POOL = []
+if E.pool > len(ev_text):   # the other documents of the pool: shard 001's, not among the 2000, fixed
+    used = {start[int(a)] for a, _ in ns["edocs"]}
+    cand = [d for d in range(len(ET)) if d not in used]; random.Random(7).shuffle(cand)
+    for d in cand:
+        s_ = ET[d]["sents"]
+        if len(s_) >= A.min_sents: POOL.append(s_[:A.seq])
+        if len(POOL) >= E.pool - len(ev_text): break
+    print(f"[e2e] pool: {len(ev_text)} + {len(POOL)} held-out articles", flush=True)
+
+
+@torch.no_grad()
+def eval_pool():
+    """page retrieval among --pool articles: each with one sentence hidden (fixed draw), its page vector; the 2000
+    evaluation articles' hidden sentences are the queries"""
+    enc.eval(); model.eval()
+    docs = [d[:A.seq] for d in ev_text] + POOL; rng = random.Random(55)
+    hid = [rng.randint(1, len(d) - 1) for d in docs]
+    P, Q = [], []
+    for i in range(0, len(docs), 64):
+        part = docs[i:i + 64]; flat = [s for d in part for s in d]
+        v = torch.cat([embed(enc, flat[k:k + 1024]) for k in range(0, len(flat), 1024)])
+        L = max(len(d) for d in part); x = torch.zeros(len(part), L, DIM, device=DEV)
+        valid = torch.zeros(len(part), L, dtype=torch.bool, device=DEV); masked = torch.zeros_like(valid); o = 0
+        for r, d in enumerate(part):
+            x[r, :len(d)] = v[o:o + len(d)]; valid[r, :len(d)] = True; masked[r, hid[i + r]] = True
+            if i + r < len(ev_text): Q.append(v[o + hid[i + r]])
+            o += len(d)
+        with torch.autocast("cuda", dtype=torch.bfloat16):
+            model.encode(x, valid, masked)
+        P.append(model.last_page.float())
+    P = torch.cat(P); Q = torch.stack(Q).float(); S = Q @ P.T
+    rank = (S > S.diagonal()[:, None]).sum(1) + 1
+    enc.train(); model.train()
+    return {"pool_top1": float((rank <= 1).float().mean()), "pool_top10": float((rank <= 10).float().mean()), "pool_size": len(docs)}
 
 
 opt = torch.optim.AdamW([{"params": [p for p in model.parameters()], "lr": E.lr},
                          {"params": [p for p in enc.parameters()], "lr": E.lr_enc}], betas=(0.9, 0.98), weight_decay=0.01)
-sched = torch.optim.lr_scheduler.LambdaLR(opt, lambda s: min(1.0, (s + 1) / 500) * 0.5 * (1 + np.cos(np.pi * min(1.0, s / E.steps))))
+sched = torch.optim.lr_scheduler.LambdaLR(opt, lambda s: min(1.0, (s + 1) / 500) * 0.5 * (1 + np.cos(np.pi * min(1.0, s / max(1, E.steps)))))
 STATE = os.path.join(E.out, "state_e2e.pt"); step0 = 0
 if os.path.exists(STATE):
     st = torch.load(STATE, map_location=DEV); model.load_state_dict(st["model"]); enc.load_state_dict(st["enc"])
@@ -111,9 +181,10 @@ if os.path.exists(STATE):
 
 
 def save(tag, step):
-    torch.save({"model": model.state_dict(), "enc": enc.state_dict(), "opt": opt.state_dict(), "sched": sched.state_dict(), "step": step}, STATE + ".tmp")
+    meta = {"enc_layers": len(enc.encoder.layer), "layers": E.layers, "step": step, "args": vars(E)}
+    torch.save({"model": model.state_dict(), "enc": enc.state_dict(), "opt": opt.state_dict(), "sched": sched.state_dict(), **meta}, STATE + ".tmp")
     os.replace(STATE + ".tmp", STATE)
-    torch.save({"model": model.state_dict(), "enc": enc.state_dict(), "step": step, "args": vars(E)}, os.path.join(E.out, f"model_{tag}.pt"))
+    torch.save({"model": model.state_dict(), "enc": enc.state_dict(), **meta}, os.path.join(E.out, f"model_{tag}.pt"))
 
 
 log = open(os.path.join(E.out, "train.log"), "a")
@@ -121,11 +192,11 @@ def out(line): print(line, flush=True); log.write(line + "\n"); log.flush()
 
 
 fmt = lambda r: " ".join(f"{k} {v:.3f}" if isinstance(v, float) else f"{k} {v}" for k, v in r.items())
-BEST = -1.0
+BEST = -1.0; STALE = 0
 if step0 == 0:
-    r = eval_now(); BEST = r["page_top1"]; out(f"[eval 0] {fmt(r)}"); save("best", 0); out(f"[best] step 0 page_top1 {BEST:.3f}")
+    r = eval_now(); BEST = r[E.select]; out(f"[eval 0] {fmt(r)}"); save("best", 0); out(f"[best] step 0 {E.select} {BEST:.3f}")
 model.train(); t0 = time.time(); acc = []
-for step in range(step0 + 1, E.steps + 1):
+for step in range(step0 + 1, E.steps + 1) if E.steps > 0 else []:
     ns["STEP"][0] = step
     sents, items = [], []
     for _ in range(E.batch):
@@ -141,6 +212,11 @@ for step in range(step0 + 1, E.steps + 1):
     with torch.autocast("cuda", dtype=torch.bfloat16):
         le, ld, _, _, _ = ns["losses"](x, valid, masked)
         la = F.cross_entropy(v @ v0.T / E.tau_anchor, torch.arange(len(v), device=DEV))
+        if E.anchor_q > 0:
+            qs_ = [QPFX + t for t in random.sample(flat, min(E.anchor_q, len(flat)))]
+            vq = embed(enc, qs_)
+            with torch.no_grad(): vq0 = embed(ref, qs_)
+            la = la + F.cross_entropy(vq @ vq0.T / E.tau_anchor, torch.arange(len(vq), device=DEV))
         loss = A.w_enc * le + ld + A.w_page * ns["LP"][0] + E.w_anchor * la
     ns["LAST_COS"].clear()
     opt.zero_grad(set_to_none=True); loss.backward()
@@ -153,6 +229,9 @@ for step in range(step0 + 1, E.steps + 1):
         out(f"[step {step}] enc {e:.3f} dec {d_:.3f} page {p_:.3f} anchor {a_:.3f} cos_to_stock {c_:.3f} |grad| {gn:.2f} {(time.time()-t0)/60:.0f} min")
     if step % E.eval_every == 0 or step == E.steps:
         r = eval_now(); out(f"[eval {step}] {fmt(r)}")
-        if r["page_top1"] > BEST: BEST = r["page_top1"]; save("best", step); out(f"[best] step {step} page_top1 {BEST:.3f}")
+        if r[E.select] > BEST + E.min_gain: STALE = 0
+        else: STALE += 1
+        if r[E.select] > BEST: BEST = r[E.select]; save("best", step); out(f"[best] step {step} {E.select} {BEST:.3f}")
+        if E.patience and STALE >= E.patience: out(f"[plateau] {STALE} evaluations without a gain of {E.min_gain}: stopping at {step}"); break
     if step % E.save_every == 0: save("latest", step)
 out("TRAIN_DONE")
