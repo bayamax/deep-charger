@@ -163,7 +163,7 @@ else:
             L = max(len(e) for e in enc)
             x = torch.zeros((len(enc), L), dtype=torch.long); m = torch.zeros((len(enc), L), dtype=torch.long)
             for r, e in enumerate(enc): x[r, :len(e)] = torch.tensor(e); m[r, :len(e)] = 1   # right-padded
-            h = lm(x.to(DEV), attention_mask=m.to(DEV), output_hidden_states=True).hidden_states[-1].float()
+            h = lm.model(input_ids=x.to(DEV), attention_mask=m.to(DEV)).last_hidden_state.float()   # the body only: no 49k-wide logits
             last = m.sum(1).to(DEV) - 1
             out[idx] = h[torch.arange(len(enc), device=DEV), last].cpu().numpy()
         return out

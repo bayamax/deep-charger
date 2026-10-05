@@ -8,7 +8,7 @@ cd /root
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null)
 R=baya1116/hypernet-sp-distill
 RAW="https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl"
-BOXK_SERIAL=1
+BOXK_SERIAL=2
 if [ -f /root/.boxk_serial ] && [ "$(cat /root/.boxk_serial)" -gt "$BOXK_SERIAL" ] 2>/dev/null; then echo "BOXK_STALE $BOXK_SERIAL"; exit 0; fi
 echo $BOXK_SERIAL > /root/.boxk_serial
 mkdir -p /root/lz/docs
@@ -76,6 +76,31 @@ echo "LZ_JOB_DONE $(date -u)"
 LK
   setsid nohup bash -c 'bash /root/lzkeep.sh 2>&1 | tee -a /root/lz_main.log' > /dev/null 2>&1 < /dev/null &
   echo "LZ_LAUNCHED $(date -u)"
+fi
+# ---- lz2 (2026-10-05 14:30 JST): compression done (held-out 300 articles: 0.955 bits/byte = 11.9% of raw, zlib 44.0%,
+# lzma 45.5%; 10/10 articles back byte for byte). The vector pass died of CUDA OOM - it asked the LM for 49k-wide
+# logits it never uses; fixed (the body only). Vectors and the BART again.
+if [ -f /root/.bootstrapped ] && grep -q "LZ_JOB_DONE vec failed" /root/lz_main.log 2>/dev/null && ! pgrep -f "lz2kee[p].sh" >/dev/null && ! grep -q "LZ2_JOB_DONE" /root/lz_main.log 2>/dev/null; then
+  cat > /root/lz2keep.sh <<'LK'
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); R=baya1116/hypernet-sp-distill; cd /root/lz
+grep -q "lm.model(input_ids" /root/lz/lmz.py || { echo "LZ2_JOB_DONE stale lmz.py"; exit 1; }
+rm -f /root/lz/docs/vec_*.npy /root/lz/docs/scl_*.npy /root/lz/docs/off_*.npy /root/lz/docs/lm_stats.npz
+echo "[lz2] sentence vectors $(date -u +%H:%M)"
+python3 /root/lz/lmz.py vec --dir /root/lz/docs --shards 001,000,002,003,004,005,006 --batch 512 2>&1 | grep -E "^\[vec\]|VEC_DONE|Error|Traceback|out of memory"
+ls /root/lz/docs/vec_006.npy >/dev/null || { echo "LZ2_JOB_DONE vec failed"; exit 1; }
+rm -f /root/lz/docs/docs_00[02-6].jsonl
+df -h /root | tail -1
+echo "[lz2] BART on the LM sentence vectors $(date -u +%H:%M)"
+n=lmrun1
+( while sleep 1800; do hf upload $R /root/lz/$n/train.log sentbart/lmz/$n/train.log >/dev/null 2>&1; done ) & UP=$!
+python3 /root/lz/train.py --data /root/lz/docs --out /root/lz/$n --eval-shard 001 --steps 100000 --batch 32 --seq 128 --d 512 --layers 8 --heads 8 --ffn 2048 \
+  --lr 1e-4 --warmup 1000 --eval-every 10000 --save-every 10000 --page 1 --page-queue 64 --page-input one --skip-grad 100 2>&1 | grep -E "^\[data|^\[model|^\[best|TRAIN_DONE|Error|Traceback|out of memory"
+kill $UP 2>/dev/null; hf upload $R /root/lz/$n/train.log sentbart/lmz/$n/train.log >/dev/null 2>&1; hf upload $R /root/lz/$n/model_best.pt sentbart/lmz/$n/model_best.pt >/dev/null 2>&1
+rm -f /root/lz/$n/state.pt
+echo "LZ2_JOB_DONE $(date -u)"
+LK
+  setsid nohup bash -c 'bash /root/lz2keep.sh 2>&1 | tee -a /root/lz_main.log' > /dev/null 2>&1 < /dev/null &
+  echo "LZ2_LAUNCHED $(date -u)"
 fi
 echo "BOXK_OK serial $BOXK_SERIAL $(date -u)"
 # CTL-END
