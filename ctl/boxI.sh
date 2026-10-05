@@ -8,7 +8,7 @@ cd /root
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null)
 R=baya1116/hypernet-sp-distill
 RAW="https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl"
-BOXI_SERIAL=41
+BOXI_SERIAL=42
 if [ -f /root/.boxi_serial ] && [ "$(cat /root/.boxi_serial)" -gt "$BOXI_SERIAL" ] 2>/dev/null; then echo "BOXI_STALE $BOXI_SERIAL"; exit 0; fi
 echo $BOXI_SERIAL > /root/.boxi_serial
 mkdir -p /root/sb /root/work
@@ -25,7 +25,7 @@ if [ ! -f /root/.bootstrapped ]; then
 fi
 
 # the code, fresh from the branch on every control run
-for f in prep.py embed.py train.py evalsb.py links.py; do
+for f in prep.py embed.py train.py train_e2e.py evalsb.py links.py; do
   curl -sS -L -o /root/sb/$f.new "$RAW/sentbart/$f?$(date +%s)" && grep -q "^#!/usr/bin/env python3" /root/sb/$f.new && mv /root/sb/$f.new /root/sb/$f || rm -f /root/sb/$f.new
 done
 ls /root/sb
@@ -957,6 +957,37 @@ echo "BGECTL_JOB_DONE $(date -u)"
 RK
   setsid nohup bash -c 'bash /root/bgectlkeep.sh 2>&1 | tee -a /root/sb_bgectl.log' > /dev/null 2>&1 < /dev/null &
   echo "BGECTL_LAUNCHED $(date -u)"
+fi
+# ---- e2e (2026-10-05 18:40 JST, the user: the bge control is not needed - end to end instead). bgectl1 stops (its log
+# stays). train_e2e.py: bge-small trained inside the BART's step (every BART loss reaches it; inputs and targets are
+# its outputs), anchored to the stock bge by in-batch InfoNCE; from abl_one32 (58.1%) and stock bge, so step 0 is
+# 58.1. Training text: shards 0, 2, 3 again as text (prep.py). Evaluated every 2000 steps on the same 2000 held-out
+# documents, embedded by the current bge.
+if [ ! -e /root/.bgectl_stop ]; then touch /root/.bgectl_stop
+  pkill -f "bgectlkee[p].sh"; pkill -f "train.py --data /root/sb/data/docs7"; sleep 5
+  hf upload baya1116/hypernet-sp-distill /root/sb/bgectl1/train.log sentbart/lmz/bgectl1/train.log >/dev/null 2>&1
+  echo "BGECTL_JOB_DONE stopped by the user at $(grep -oE '^\[step [0-9]+' /root/sb/bgectl1/train.log | tail -1) $(date -u)" >> /root/sb_bgectl.log
+  rm -f /root/sb/bgectl1/state.pt /root/sb/bgectl1/model_latest.pt
+fi
+if [ -f /root/sb/train_e2e.py ] && ! pgrep -f "e2ekee[p].sh" >/dev/null && ! grep -q "E2E_JOB_DONE" /root/sb_e2e.log 2>/dev/null; then
+  cat > /root/e2ekeep.sh <<'RK'
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); R=baya1116/hypernet-sp-distill; cd /root/sb
+while pgrep -f "python3 /root/sb/train.py --data" >/dev/null; do sleep 30; done
+T=/root/sb/data/e2e; mkdir -p $T
+for r in 0-0 2-3; do python3 /root/sb/prep.py --out $T --shards $r 2>&1 | grep --line-buffered -E "^\[prep\] shard|Error|Traceback"; done
+rm -rf /root/.cache/huggingface/hub/datasets--wikimedia--wikipedia
+ls $T; df -h /root | tail -1
+I0=/root/sb/abl_one32/model_best.pt; [ -s $I0 ] || hf download $R sentbart/abl/one32/model_best.pt --local-dir /root/sb/hfdl >/dev/null 2>&1 && [ -s $I0 ] || I0=/root/sb/hfdl/sentbart/abl/one32/model_best.pt
+n=e2e1; echo "[e2e] $n from $I0, anchor 1.0, bge lr 1e-5, BART lr 3e-5, 30k $(date -u +%H:%M)"
+( while sleep 1800; do hf upload $R /root/sb/$n/train.log sentbart/e2e/$n/train.log >/dev/null 2>&1; done ) & UP=$!
+python3 /root/sb/train_e2e.py --vec /root/sb/data/docs --text $T --eval-text /root/sb/data/docs/docs_001.jsonl --init $I0 --out /root/sb/$n \
+  --steps 30000 --w-anchor 1.0 --lr-enc 1e-5 --lr 3e-5 2>&1 | grep --line-buffered -E "^\[e2e\]|^\[model|^\[init|^\[eval|^\[best|^\[step [0-9]*000\]|TRAIN_DONE|Error|Traceback|out of memory|assert"
+kill $UP 2>/dev/null; hf upload $R /root/sb/$n/train.log sentbart/e2e/$n/train.log >/dev/null 2>&1; hf upload $R /root/sb/$n/model_best.pt sentbart/e2e/$n/model_best.pt >/dev/null 2>&1
+rm -f /root/sb/$n/state_e2e.pt
+echo "E2E_JOB_DONE $(date -u)"
+RK
+  setsid nohup bash -c 'bash /root/e2ekeep.sh 2>&1 | tee -a /root/sb_e2e.log' > /dev/null 2>&1 < /dev/null &
+  echo "E2E_LAUNCHED $(date -u)"
 fi
 echo "BOXI_OK serial $BOXI_SERIAL $(date -u)"
 # CTL-END
