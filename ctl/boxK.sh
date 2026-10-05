@@ -8,7 +8,7 @@ cd /root
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null)
 R=baya1116/hypernet-sp-distill
 RAW="https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl"
-BOXK_SERIAL=6
+BOXK_SERIAL=7
 if [ -f /root/.boxk_serial ] && [ "$(cat /root/.boxk_serial)" -gt "$BOXK_SERIAL" ] 2>/dev/null; then echo "BOXK_STALE $BOXK_SERIAL"; exit 0; fi
 echo $BOXK_SERIAL > /root/.boxk_serial
 mkdir -p /root/lz/docs
@@ -39,7 +39,7 @@ while :; do
     for f in /root/lz_*.log; do [ -e $f ] && { echo "--- $f ---"; tail -n 25 $f | cut -c1-300; }; done
     echo "--- gpu ---"; nvidia-smi --query-gpu=memory.used,memory.total,utilization.gpu --format=csv,noheader
     echo "--- disk ---"; df -h /root | tail -1; du -sh /root/lz/docs 2>/dev/null
-    echo "--- processes ---"; pgrep -fa "python3 /root/lz/" | cut -c1-160; } > /root/boxlog.txt 2>&1
+    echo "--- processes ---"; pgrep -fa "python3 (-u )?/root/lz/" | cut -c1-160; } > /root/boxlog.txt 2>&1
   hf upload $R /root/boxlog.txt sentbart/audit/boxlog_K.txt >/dev/null 2>&1
   sleep 600
 done
@@ -199,6 +199,29 @@ echo "LZCASC_JOB_DONE $(date -u)"
 LK
   setsid nohup bash -c 'bash /root/lzcasckeep.sh 2>&1 | tee -a /root/lz_casc.log' > /dev/null 2>&1 < /dev/null &
   echo "LZCASC_LAUNCHED $(date -u)"
+fi
+# ---- 2026-10-06 06:45 JST: lz2's keeper came back. lz3 killed it at 10:37 without writing LZ2_JOB_DONE, so the next
+# control run (13:06, lz4's edit) relaunched it: it deleted the vectors (000, 002 - hence their second pass) and has
+# been extracting 001-006 beside lz4's own pass ever since, both at half speed. Stopped for good; lz4 carries on (it
+# skips shards already written). lzcasc failed on the deleted files at 14:23; lmrun1's real-query run again.
+if [ ! -e /root/.lz2_stop ]; then touch /root/.lz2_stop
+  echo "LZ2_JOB_DONE superseded by lz4 $(date -u)" >> /root/lz_main.log
+  pkill -f "lz2kee[p].sh"; pkill -f "lmz.py vec --dir /root/lz/docs --shards 001,000"; sleep 5
+  rm -f /root/lz/docs/vec_*.npy.tmp.npy
+  echo "[lz2stop] vectors on disk: $(ls /root/lz/docs | grep -E '^vec_[0-9]+\.npy$' | tr '\n' ' ')"
+fi
+if [ -f /root/lz/search_cascade.py ] && [ -s /root/lz/lmrun1/model_best.pt ] && ! pgrep -f "lzcasc1kee[p].sh" >/dev/null && ! grep -q "LZCASC1_JOB_DONE" /root/lz_casc1.log 2>/dev/null; then
+  cat > /root/lzcasc1keep.sh <<'LK'
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); R=baya1116/hypernet-sp-distill; cd /root/lz
+until [ -s /root/lz/docs/off_000.npy ] && [ -s /root/lz/docs/off_001.npy ] && [ -s /root/lz/docs/off_002.npy ] && [ -s /root/lz/sc/dcq_all.jsonl ]; do sleep 120; done
+echo "[lzcasc] lmrun1 (again) $(date -u +%H:%M)"
+python3 /root/lz/search_cascade.py --vec /root/lz/sc_docs --text /root/lz/docs/docs_001.jsonl --ckpt /root/lz/lmrun1/model_best.pt --queries /root/lz/sc/dcq_all.jsonl --out /root/lz/sc/lmrun1.json \
+  --lm HuggingFaceTB/SmolLM2-135M --lm-stats /root/lz/docs/lm_stats.npz 2>&1 | grep --line-buffered -E "^\[cascade\]|CASCADE_DONE|Error|Traceback|out of memory"
+hf upload $R /root/lz/sc/lmrun1.json sentbart/searcheval/cascade_lm_lmrun1.json >/dev/null 2>&1
+echo "LZCASC1_JOB_DONE $(date -u)"
+LK
+  setsid nohup bash -c 'bash /root/lzcasc1keep.sh 2>&1 | tee -a /root/lz_casc1.log' > /dev/null 2>&1 < /dev/null &
+  echo "LZCASC1_LAUNCHED $(date -u)"
 fi
 echo "BOXK_OK serial $BOXK_SERIAL $(date -u)"
 # CTL-END
