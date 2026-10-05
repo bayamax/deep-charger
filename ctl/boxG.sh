@@ -80,7 +80,7 @@ PSKIP=
 # The raw GitHub copy this box fetches can lag and hand a control run an OLDER version of this file (04:48 on 09-22 it
 # relaunched the online loop under the previous mode while the newer run was merging a checkpoint on the same card).
 # Every edit bumps BOXG_SERIAL; a run that sees a lower serial than one already executed stops here.
-BOXG_SERIAL=2026100602
+BOXG_SERIAL=2026100603
 if [ -f /root/.boxg_serial ] && [ "$(cat /root/.boxg_serial)" -gt "$BOXG_SERIAL" ] 2>/dev/null; then echo "BOXG_STALE $BOXG_SERIAL < $(cat /root/.boxg_serial)"; exit 0; fi
 echo $BOXG_SERIAL > /root/.boxg_serial
 MODE=idle         # 2026-09-29: the side jobs hold the card (multi-turn measurement and training); a finished reeval re-launched on every control run and killed their evaluators
@@ -2986,6 +2986,20 @@ fi
 # ---- 2026-10-06 08:45 JST: mtg5's rollouts so far on the hub (the reasoning blocks read 42% without </think> yet 71% passed).
 if [ ! -e /root/.mtg5_partial1 ] && [ -s /root/online_mtg5/rollouts.jsonl ]; then touch /root/.mtg5_partial1
   HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token) hf upload baya1116/hypernet-sp-distill /root/online_mtg5/rollouts.jsonl pooler_distill/chatsft/multiturn/mtg5_rollouts_partial.jsonl >/dev/null 2>&1 && echo "MTG5_PARTIAL_UP $(date -u)"
+fi
+# ---- mtg5fix (2026-10-06 09:05 JST, the user: the reasoning reward credited unfinished thinking - likely the push toward
+# longer thinking - fix the scoring and see whether it comes back). The run is resumed under the fixed online_loop.py
+# right after its step-80 save (same command, so it continues from latest.safetensors and its optimizer state).
+if [ ! -e /root/.mtg5fix ] && grep -q "if \"</think>\" in text else \"\"   # no </think>: unfinished" /root/work/online_loop.py 2>/dev/null; then touch /root/.mtg5fix
+  cat > /root/mtg5fixkeep.sh <<'FX'
+until [ -s /root/mtg5_s80.safetensors ]; do sleep 30; done; sleep 30
+pkill -f "mtg5kee[p].sh"; pkill -f "online_loop.py /root/mtg3_s100.safetensors /root/online_mtg5"; sleep 15
+pkill -9 -f "online_loop.py /root/mtg3_s100.safetensors /root/online_mtg5" 2>/dev/null; sleep 5
+echo "[mtg5] restarted at step $(python3 -c "import json;print(json.load(open('/root/online_mtg5/state.json'))['step'])") under the fixed reasoning reward $(date -u +%H:%M)" >> /root/mtg5.log
+setsid nohup bash -c 'bash /root/mtg5keep.sh 2>&1 | tee -a /root/mtg5.log' >> /proc/1/fd/1 2>&1 < /dev/null 9>&- &
+FX
+  setsid nohup bash /root/mtg5fixkeep.sh > /root/mtg5fix.log 2>&1 < /dev/null &
+  echo "MTG5FIX_ARMED $(date -u)"
 fi
 # ---- the box's own logs, mirrored to the hub every ten minutes: readable without the Vast API ----
 pkill -f "logmirro[r].sh" 2>/dev/null; pkill -f "logmirror[2].sh" 2>/dev/null   # replaced by logmirror3 (adds the score table)
