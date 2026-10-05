@@ -8,7 +8,7 @@ cd /root
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null)
 R=baya1116/hypernet-sp-distill
 RAW="https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl"
-BOXI_SERIAL=51
+BOXI_SERIAL=52
 if [ -f /root/.boxi_serial ] && [ "$(cat /root/.boxi_serial)" -gt "$BOXI_SERIAL" ] 2>/dev/null; then echo "BOXI_STALE $BOXI_SERIAL"; exit 0; fi
 echo $BOXI_SERIAL > /root/.boxi_serial
 mkdir -p /root/sb /root/work
@@ -1061,6 +1061,12 @@ echo "CASCADEE_JOB_DONE $(date -u)"
 RK
   setsid nohup bash -c 'bash /root/cascadeEkeep.sh 2>&1 | tee -a /root/sb_cascadeE3.log' > /dev/null 2>&1 < /dev/null &
   echo "CASCADEE_LAUNCHED $(date -u)"
+fi
+# ---- 2026-10-06 00:35 JST: the ladder restarted once on the fixed e2e_ladder.py (each rung's checkpoints removed after
+# use - the disk holds ~13 GB); it resumes from ladder.json where there is one.
+if [ ! -e /root/.ladder_r2 ] && [ -f /root/sb/e2e_ladder.py ] && grep -q '"model_best.pt")' /root/sb/e2e_ladder.py; then touch /root/.ladder_r2
+  pkill -f "ladderkee[p].sh"; pkill -f "e2e_ladder.p[y]"; pkill -f "train_e2e.py.*/root/sb/ladder/"; pkill -f "search_cascade.py.*/root/sb/ladder/"; sleep 10
+  echo "LADDER_RESTART $(date -u)" >> /root/sb_ladder.log
 fi
 # ---- ladder (2026-10-06 00:20 JST, the user, away tomorrow: raise the sentence BART as far as it goes - negatives ->
 # bge layers -> BART layers, round and round, each step when the last has levelled off; the best kept per capacity).
