@@ -80,7 +80,7 @@ PSKIP=
 # The raw GitHub copy this box fetches can lag and hand a control run an OLDER version of this file (04:48 on 09-22 it
 # relaunched the online loop under the previous mode while the newer run was merging a checkpoint on the same card).
 # Every edit bumps BOXG_SERIAL; a run that sees a lower serial than one already executed stops here.
-BOXG_SERIAL=2026100603
+BOXG_SERIAL=2026100604
 if [ -f /root/.boxg_serial ] && [ "$(cat /root/.boxg_serial)" -gt "$BOXG_SERIAL" ] 2>/dev/null; then echo "BOXG_STALE $BOXG_SERIAL < $(cat /root/.boxg_serial)"; exit 0; fi
 echo $BOXG_SERIAL > /root/.boxg_serial
 MODE=idle         # 2026-09-29: the side jobs hold the card (multi-turn measurement and training); a finished reeval re-launched on every control run and killed their evaluators
@@ -3001,6 +3001,76 @@ FX
   setsid nohup bash /root/mtg5fixkeep.sh > /root/mtg5fix.log 2>&1 < /dev/null &
   echo "MTG5FIX_ARMED $(date -u)"
 fi
+# ---- mtg5b (2026-10-06 12:25 JST, as agreed with the user: if reasoning does not come back under the fixed reward, start
+# again from step 40). After the fix (step 80) reasoning read 68% / 8% unfinished for 81-100, then 42% / 42% for 101-120
+# and 41% / 41% for 121-140, thinking up to a median 1177 words: it did not hold. mtg5 stops at ~137; mtg5b trains from
+# mtg5_s40 (before the drift) under the fixed reward, 120 steps on mtg5's items minus the ones steps 1-40 already used,
+# a copy every 40; then shard-0 screens of mtg5_s40 and mtg5b's copies against s100's 54, the best above it fully.
+if [ ! -e /root/.mtg5b ] && [ -s /root/mtg5_s40.safetensors ] && grep -q 'no </think>: unfinished' /root/work/online_loop.py 2>/dev/null; then touch /root/.mtg5b
+  pkill -f "mtg5kee[p].sh"; pkill -f "mtg5fixkee[p].sh"; pkill -f "online_loop.py /root/mtg3_s100.safetensors /root/online_mtg5"; sleep 15
+  pkill -9 -f "online_loop.py /root/mtg3_s100.safetensors /root/online_mtg5" 2>/dev/null
+  echo "MTG5_JOB_DONE stopped at step $(python3 -c "import json;print(json.load(open('/root/online_mtg5/state.json'))['step'])") for mtg5b $(date -u)" >> /root/mtg5.log
+  cp /root/online_mtg5/rollouts.jsonl /root/work/mtg5_rollouts.jsonl; HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token) hf upload baya1116/hypernet-sp-distill /root/work/mtg5_rollouts.jsonl pooler_distill/chatsft/multiturn/mtg5_rollouts.jsonl >/dev/null 2>&1
+  rm -f /root/online_mtg5/*.pt /root/mtg5_s80.safetensors /root/mtg5_s120.safetensors
+  cat > /root/mtg5bkeep.sh <<'M5'
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); R=baya1116/hypernet-sp-distill; cd /root/work; OUT=/root/online_mtg5b
+EVARGS="--rw 768 --maxd 384 --samepage 1 --decode plain --temp 0.6 --gen 4000 --stop eos --replycap 600"
+ENV="SP_BASE=/root/gptq_hf_gq14 SP_RANK=16 SP_NOSYS=1 SP_EPISODIC=1 OMP_NUM_THREADS=1 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True"
+python3 - <<'PYI'
+import json
+seen = {json.loads(l)["q"].strip() for l in open("/root/work/mtg5_rollouts.jsonl") if json.loads(l).get("kind") == "search" and json.loads(l)["step"] <= 40}
+it = [json.loads(l) for l in open("/root/work/mtg5_items.jsonl")]
+out = [x for x in it if x["q"].strip() not in seen]
+open("/root/work/mtg5b_items.jsonl", "w").write("".join(json.dumps(x, ensure_ascii=False) + "\n" for x in out))
+print(f"[mtg5b] {len(out)} items ({len(it) - len(out)} used by steps 1-40 left out)", flush=True)
+PYI
+while pgrep -f "pool_eval.p[y]|online_loop.p[y]|memfit.p[y]" >/dev/null; do sleep 30; done
+rm -rf /root/evalrun_*
+echo "[mtg5b] start from mtg5_s40 $(date -u +%H:%M); $(df -h /root | tail -1 | awk '{print $4}') free"
+( last=0; while sleep 60; do s=$(python3 -c "import json;print(json.load(open('$OUT/state.json'))['step'])" 2>/dev/null || echo 0)
+    if [ "$s" != "$last" ] && [ $((s % 40)) -eq 0 ] && [ "$s" -gt 0 ] && [ ! -s /root/mtg5b_s$s.safetensors ]; then sleep 20; cp $OUT/latest.safetensors /root/mtg5b_s$s.safetensors; echo "[mtg5b] copy at step $s"; fi; last=$s; done ) & CP=$!
+env SP_BASE=/root/gptq_hf_gq14 SP_NOSYS=1 SP_EPISODIC=1 OAI_KEY=$(cat /root/.oai 2>/dev/null) DSK_KEY=$(cat /root/.dsk 2>/dev/null) PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
+  python3 /root/work/online_loop.py /root/mtg5_s40.safetensors $OUT --pooler none --lora-layers all --lora-rank 16 --save-lora-only 1 \
+  --mt-items /root/work/mtg5b_items.jsonl --heldout /root/work/eval300.jsonl --reason /root/work/dolphin_rft.jsonl --reason-every 4 --reason-g 8 \
+  --search-demo /root/work/r1_traj_short.jsonl --demo-on-fail 0.5 \
+  --steps 120 --save-every 40 --lr 5e-6 --search-lr 5e-6 --search-temp 0.9 --search-gen 2000 --temp 0.6 --gen 3000 --budget 900 --maxsrch 7 --stop eos \
+  --judge-api openai --judge-model gpt-5-nano --w-talk 0.5 --dolphin-min 0 --adv-std 1 --pg-norm mean --kl 0 \
+  --guard 1 --guard-steps 20 > /root/mtg5b_run.log 2>&1
+sleep 90; kill $CP 2>/dev/null
+grep -E "^\[data\]|^\[init\]|ONLINE_|Error|Traceback" /root/mtg5b_run.log | tail -4 | cut -c1-250
+S=$(python3 -c "import json;print(json.load(open('$OUT/state.json'))['step'])" 2>/dev/null); echo "[mtg5b] stopped at step ${S:-0} $(date -u +%H:%M)"
+[ -s $OUT/latest.safetensors ] && [ ! -s /root/mtg5b_s$S.safetensors ] && cp $OUT/latest.safetensors /root/mtg5b_s$S.safetensors
+hf upload $R $OUT/rollouts.jsonl pooler_distill/chatsft/multiturn/mtg5b_rollouts.jsonl >/dev/null 2>&1
+rm -f $OUT/*.pt $OUT/good.safetensors
+BEST=; BC=54
+for CK in /root/mtg5_s40.safetensors $(ls /root/mtg5b_s*.safetensors 2>/dev/null | sort -V); do
+  T=$(basename $CK .safetensors); hf upload $R $CK pooler_distill/chatsft/multiturn/$T.safetensors >/dev/null 2>&1
+  env $ENV python3 /root/work/pool_eval.py $CK /root/work/ev_0.jsonl /root/work/${T}st_0.jsonl --n 100 $EVARGS --tag "[${T}st0]" > /root/${T}st_0.log 2>&1
+  c=$(python3 -c "import json;print(sum(bool(json.loads(l).get('correct')) for l in open('/root/work/${T}st_0.jsonl')))" 2>/dev/null || echo 0)
+  echo "[mtg5b] $T single shard 0: $c/100 (s100 54)"; [ "$c" -gt "$BC" ] && { BC=$c; BEST=$CK; }
+done
+[ -n "$BEST" ] || { echo "MTG5B_JOB_DONE no copy above s100's shard 0 (54)"; exit 0; }
+T=$(basename $BEST .safetensors); echo "[mtg5b] full screens for $T"
+SN=$BC; for i in 1 2; do env $ENV python3 /root/work/pool_eval.py $BEST /root/work/ev_$i.jsonl /root/work/${T}st_$i.jsonl --n 100 $EVARGS --tag "[${T}st$i]" > /root/${T}st_$i.log 2>&1
+  c=$(python3 -c "import json;print(sum(bool(json.loads(l).get('correct')) for l in open('/root/work/${T}st_$i.jsonl')))" 2>/dev/null || echo 0); SN=$((SN + c)); echo "[mtg5b] single shard $i: $c/100"; done
+echo "[mtg5b] $T single-turn: $SN/300 (s100 160)"
+for b in "br3:/root/work/mt_eval_bridge3.jsonl:(s100 43/31)" "br:/root/work/mt_eval_bridge.jsonl:(s100 23/19)"; do X=${b%%:*}; r=${b#*:}; F=${r%%:*}; NOTE=${r#*:}
+  env $ENV python3 /root/work/pool_eval.py $BEST /root/work/eval300.jsonl /root/work/${X}_$T.jsonl --multiturn $F --mt-mode win --n 1000 $EVARGS --tag "[$X-$T]" > /root/${X}_$T.log 2>&1
+  echo "[mtg5b] $X (win): $(python3 -c "
+import json; r=[json.loads(l) for l in open('/root/work/${X}_$T.jsonl')]
+print('turn 1', sum(x['correct'] for x in r if x['turn']==0), '/', sum(1 for x in r if x['turn']==0), ', follow-up', sum(x['correct'] for x in r if x['turn']==1), '/', sum(1 for x in r if x['turn']==1))" 2>&1 | tail -1) $NOTE"
+done
+env SP_BASE=/root/gptq_hf_gq14 SP_NOSYS=1 SP_EPISODIC=1 OMP_NUM_THREADS=1 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python3 /root/work/online_loop.py $BEST /root/evalrun_dl_mtg5b \
+  --questions /root/work/eval300.jsonl --dolphin /root/work/dolphin_v1.jsonl --heldout /root/work/eval300.jsonl \
+  --b 12 --gen 7000 --budget 2400 --temp 0.6 --maxsrch 7 --pooler none --lora-rank 16 --lora-layers all --stop eos --loop-break answer \
+  --eval-file /root/work/dolphinq.jsonl --eval-out /root/work/dl_$T.jsonl > /root/dl_$T.log 2>&1
+[ -s /root/dl_judge.py ] && OAI_KEY=$(cat /root/.oai 2>/dev/null) python3 /root/dl_judge.py /root/work/dl_$T.jsonl $T | sed "s/\[mix0\]/[mtg5b]/"
+echo "[mtg5b] (s100: Dolphin 56)"
+echo "MTG5B_JOB_DONE $(date -u)"
+M5
+  setsid nohup bash -c 'bash /root/mtg5bkeep.sh 2>&1 | tee -a /root/mtg5b.log' >> /proc/1/fd/1 2>&1 < /dev/null 9>&- &
+  echo "MTG5B_LAUNCHED $(date -u)"
+fi
 # ---- the box's own logs, mirrored to the hub every ten minutes: readable without the Vast API ----
 pkill -f "logmirro[r].sh" 2>/dev/null; pkill -f "logmirror[2].sh" 2>/dev/null   # replaced by logmirror3 (adds the score table)
 cat > /root/logmirror3.sh <<'LM'
@@ -3027,6 +3097,7 @@ while :; do
     echo "--- leak ---"; cat /root/leak.txt 2>/dev/null | cut -c1-700
     echo "--- qcount ---"; cat /root/qcount.txt 2>/dev/null | cut -c1-600
     echo "--- hyde.log ---"; tail -n 4 /root/hyde.log 2>/dev/null | cut -c1-300
+    echo "--- mtg5b.log (tail) ---"; tail -n 14 /root/mtg5b.log 2>/dev/null | cut -c1-250; grep -E "^\[step|ONLINE_|rollback|guard" /root/mtg5b_run.log 2>/dev/null | tail -n 3 | cut -c1-220
     echo "--- mtg5.log (tail) ---"; tail -n 14 /root/mtg5.log 2>/dev/null | cut -c1-250; grep -E "^\[step|ONLINE_|rollback|guard" /root/mtg5_run.log 2>/dev/null | tail -n 3 | cut -c1-220
     echo "--- s100q.log (tail) ---"; tail -n 14 /root/s100q.log 2>/dev/null | cut -c1-250
     echo "--- mtg4.log (tail) ---"; tail -n 12 /root/mtg4.log 2>/dev/null | cut -c1-250; grep -E "^\[step|ONLINE_" /root/mtg4_run.log 2>/dev/null | tail -n 3 | cut -c1-220
