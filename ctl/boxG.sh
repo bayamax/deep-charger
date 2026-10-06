@@ -80,7 +80,7 @@ PSKIP=
 # The raw GitHub copy this box fetches can lag and hand a control run an OLDER version of this file (04:48 on 09-22 it
 # relaunched the online loop under the previous mode while the newer run was merging a checkpoint on the same card).
 # Every edit bumps BOXG_SERIAL; a run that sees a lower serial than one already executed stops here.
-BOXG_SERIAL=2026100615
+BOXG_SERIAL=2026100616
 if [ -f /root/.boxg_serial ] && [ "$(cat /root/.boxg_serial)" -gt "$BOXG_SERIAL" ] 2>/dev/null; then echo "BOXG_STALE $BOXG_SERIAL < $(cat /root/.boxg_serial)"; exit 0; fi
 echo $BOXG_SERIAL > /root/.boxg_serial
 MODE=idle         # 2026-09-29: the side jobs hold the card (multi-turn measurement and training); a finished reeval re-launched on every control run and killed their evaluators
@@ -3130,6 +3130,7 @@ if [ ! -e /root/.mtg6_v2 ]; then touch /root/.mtg6_v2; pkill -f "mtg6kee[p].sh";
 # 2026-10-07 02:50 JST (the user: a never-solved reasoning group takes Dolphin's own CoT, a never-solved search or follow-up
 # group gets R1 on the fly - what it can solve it solves better, what it cannot it is shown): --cot-on-fail 0.5 --r1-on-fail 1.
 if [ ! -e /root/.mtg6_v3 ]; then touch /root/.mtg6_v3; pkill -f "mtg6kee[p].sh"; sleep 2; fi
+if [ ! -e /root/.mtg6_v4 ]; then touch /root/.mtg6_v4; pkill -f "mtg6kee[p].sh"; sleep 2; fi   # the teacher gate
 # ---- mtg6 (2026-10-07 01:15 JST, the user: from now on train on questions never seen, barely learned, or unsolved; the
 # home-made pool is nearly used up and nq_open has ~88k). After mtg5b's screens: the best of {mtg5_s40, mtg5b_s40/80/120,
 # s100} on shard 0 is the start; 600 fresh Natural Questions (none in any evaluation or earlier training file) probed
@@ -3143,6 +3144,23 @@ ENV="SP_BASE=/root/gptq_hf_gq14 SP_RANK=16 SP_NOSYS=1 SP_EPISODIC=1 OMP_NUM_THRE
 OL="--pooler none --lora-layers all --lora-rank 16 --save-lora-only 1 --heldout /root/work/eval300.jsonl --maxsrch 7 --stop eos --judge 0 --reason-stub 1"
 until grep -q "MTG5B_JOB_DONE" /root/mtg5b.log 2>/dev/null; do sleep 120; done
 while pgrep -f "pool_eval.p[y]|online_loop.p[y]" >/dev/null; do sleep 30; done
+# the teacher must be able to answer (03:15 JST the OpenAI account ran out of credit: every judge call would fail and
+# the run would train on nothing): one tiny call every ten minutes until it does
+oai_ok() { python3 - <<'PYO'
+import json, urllib.request, urllib.error, sys
+key = open("/root/.oai").read().strip()
+body = {"model": "gpt-5-nano", "messages": [{"role": "user", "content": "Reply with the word ok."}], "max_completion_tokens": 200}
+try:
+    d = json.load(urllib.request.urlopen(urllib.request.Request("https://api.openai.com/v1/chat/completions", data=json.dumps(body).encode(),
+        headers={"Authorization": "Bearer " + key, "Content-Type": "application/json"}), timeout=60)); sys.exit(0 if "choices" in d else 1)
+except urllib.error.HTTPError as e:
+    print("[mtg6] teacher: http", e.code, e.read().decode()[:120].replace("\n", " "), flush=True); sys.exit(1)
+except Exception as e:
+    print("[mtg6] teacher:", type(e).__name__, flush=True); sys.exit(1)
+PYO
+}
+until oai_ok; do sleep 600; done
+echo "[mtg6] teacher reachable $(date -u +%H:%M)"
 # the start: the best shard-0 screen of mtg5b's job, s100 (54) if none beat it
 S0=/root/mtg3_s100.safetensors; B0=54
 while read -r c ck; do [ "$c" -gt "$B0" ] && [ -s "$ck" ] && { B0=$c; S0=$ck; }; done < <(grep -oE "\[mtg5b\] mtg5b?_s[0-9]+ single shard 0: [0-9]+" /root/mtg5b.log | sed -E 's/\[mtg5b\] (mtg5b?_s[0-9]+) single shard 0: ([0-9]+)/\2 \/root\/\1.safetensors/')
