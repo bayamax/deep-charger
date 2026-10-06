@@ -80,7 +80,7 @@ PSKIP=
 # The raw GitHub copy this box fetches can lag and hand a control run an OLDER version of this file (04:48 on 09-22 it
 # relaunched the online loop under the previous mode while the newer run was merging a checkpoint on the same card).
 # Every edit bumps BOXG_SERIAL; a run that sees a lower serial than one already executed stops here.
-BOXG_SERIAL=2026100620
+BOXG_SERIAL=2026100621
 if [ -f /root/.boxg_serial ] && [ "$(cat /root/.boxg_serial)" -gt "$BOXG_SERIAL" ] 2>/dev/null; then echo "BOXG_STALE $BOXG_SERIAL < $(cat /root/.boxg_serial)"; exit 0; fi
 echo $BOXG_SERIAL > /root/.boxg_serial
 MODE=idle         # 2026-09-29: the side jobs hold the card (multi-turn measurement and training); a finished reeval re-launched on every control run and killed their evaluators
@@ -3150,6 +3150,14 @@ fi
 if [ ! -e /root/.mtg6_win ] && [ -e /root/.mtg6_direct ] && grep -q "def seed_from_roll" /root/work/online_loop.py; then touch /root/.mtg6_win; rm -f /root/.mtg6_direct
   pkill -f "mtg6kee[p].sh"; pkill -f "online_loop.py /root/mtg3_s100.safetensors /root/online_mtg6"; sleep 10; pkill -9 -f "online_loop.py /root/mtg3_s100.safetensors /root/online_mtg6" 2>/dev/null
   echo "[mtg6] restarted with the history as a stream (win), 12 samples a search question $(date -u +%H:%M)" >> /root/mtg6.log
+fi
+# 2026-10-07 08:25 JST: the previous push carried a syntax error for two minutes; if the box ran it, mtg6 died at step 0
+# and wrote MTG6_JOB_DONE. Then: the log aside, the markers cleared, and the direct block below starts it again.
+if [ ! -e /root/.mtg6_win2 ] && python3 -m py_compile /root/work/online_loop.py 2>/dev/null; then touch /root/.mtg6_win2
+  if grep -q "stopped at step 0" /root/mtg6.log 2>/dev/null; then
+    pkill -f "mtg6kee[p].sh"; sleep 2; mv /root/mtg6.log /root/mtg6.log.crash; rm -f /root/.mtg6_direct
+    echo "[mtg6] the step-0 crash (syntax error) cleared; starting again $(date -u +%H:%M)" >> /root/mtg6.log
+  fi
 fi
 if [ ! -e /root/.mtg6_direct ] && [ -s /root/work/nq_items_1.jsonl ]; then touch /root/.mtg6_direct
   pkill -f "mtg6kee[p].sh"; pkill -f "online_loop.py /root/mtg3_s100.safetensors /root/probe_nq1"; sleep 10
