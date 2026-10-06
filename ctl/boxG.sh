@@ -80,7 +80,7 @@ PSKIP=
 # The raw GitHub copy this box fetches can lag and hand a control run an OLDER version of this file (04:48 on 09-22 it
 # relaunched the online loop under the previous mode while the newer run was merging a checkpoint on the same card).
 # Every edit bumps BOXG_SERIAL; a run that sees a lower serial than one already executed stops here.
-BOXG_SERIAL=2026100623
+BOXG_SERIAL=2026100624
 if [ -f /root/.boxg_serial ] && [ "$(cat /root/.boxg_serial)" -gt "$BOXG_SERIAL" ] 2>/dev/null; then echo "BOXG_STALE $BOXG_SERIAL < $(cat /root/.boxg_serial)"; exit 0; fi
 echo $BOXG_SERIAL > /root/.boxg_serial
 MODE=idle         # 2026-09-29: the side jobs hold the card (multi-turn measurement and training); a finished reeval re-launched on every control run and killed their evaluators
@@ -3458,7 +3458,8 @@ while :; do
     echo "--- hyde.log ---"; tail -n 4 /root/hyde.log 2>/dev/null | cut -c1-300
     echo "--- mtg6.log (tail) ---"; tail -n 12 /root/mtg6.log 2>/dev/null | cut -c1-250; grep -E "^\[step|ONLINE_|rollback|guard" /root/mtg6_run.log 2>/dev/null | tail -n 3 | cut -c1-220
     echo "--- mtg6 teacher lines ---"; grep -E "^\[r1\]|^\[followup\]|^\[warn\]|Traceback|Error" /root/mtg6_run.log 2>/dev/null | tail -n 8 | cut -c1-250
-    echo "--- qgen.log ---"; tail -n 4 /root/qgen.log 2>/dev/null | cut -c1-300
+    echo "--- r1 on the fly: why no trajectory ---"; tail -n 6 /root/online_mtg6/r1_fly_out.jsonl.why 2>/dev/null | cut -c1-300
+echo "--- qgen.log ---"; tail -n 4 /root/qgen.log 2>/dev/null | cut -c1-300
     echo "--- mtg5b.log (tail) ---"; tail -n 14 /root/mtg5b.log 2>/dev/null | cut -c1-250; grep -E "^\[step|ONLINE_|rollback|guard" /root/mtg5b_run.log 2>/dev/null | tail -n 3 | cut -c1-220
     echo "--- mtg5.log (tail) ---"; tail -n 14 /root/mtg5.log 2>/dev/null | cut -c1-250; grep -E "^\[step|ONLINE_|rollback|guard" /root/mtg5_run.log 2>/dev/null | tail -n 3 | cut -c1-220
     echo "--- s100q.log (tail) ---"; tail -n 14 /root/s100q.log 2>/dev/null | cut -c1-250

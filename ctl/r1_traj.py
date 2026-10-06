@@ -112,23 +112,35 @@ def r1(messages, tries=3):
     return None
 
 
+def why(q, reason):
+    """why an item gave no trajectory (a sidecar next to --out; the on-the-fly caller shows nothing else)"""
+    with lock:
+        with open(A.out + ".why", "a") as f: f.write(json.dumps({"q": q, "why": reason}, ensure_ascii=False) + "\n")
+
+
 def solve(it):
     q, gold, hist = it["q"], it["gold"], it.get("hist") or []
+    pushed = 0
     conv = "\n".join(("USER: " if m["role"] == "user" else "ASSISTANT: ") + m["content"][:1500] for m in hist) + ("\n" if hist else "") + "USER: " + q
     steps, traj, served, seen, ns = [], "", [], {}, 0
     for _ in range(A.maxsrch + 2):
         log = "".join(f"\nSTEP {i+1}: thought={s['thought']!r} search={s['search']!r}\nRESULT: {s['result']}" for i, s in enumerate(steps))
         v = r1([{"role": "system", "content": SYS}, {"role": "user", "content": f"CONVERSATION:\n{conv}\n\nYOUR SEARCHES SO FAR:{log or ' none'}\n\nNext step (JSON):"}])
-        if not v: return None
+        if not v: why(q, "no reply from the teacher"); return None
         th = (v.get("thought") or "").strip()
         if v.get("answer"):
             reply = v["answer"].strip()
+            if not served and pushed < 2:   # answered from memory, nothing looked up: not a demonstration of searching - once more, search first
+                pushed += 1
+                steps.append({"thought": th, "search": "", "result": "(no search was made: the answer has to come from a page - look it up first, then answer)"})
+                continue
             traj += (th + "\n" if th else "") + "</think>\n\n" + reply
             ok = has(reply, gold) and any(has(c, gold) for c in served)
+            if not ok: why(q, f"answered {reply[:60]!r} (gold {gold!r}) " + ("not on any served page" if has(reply, gold) else "wrong") + f", {ns} searches: " + " | ".join(s_["search"] for s_ in steps))
             return {"q": q, "gold": gold, "hist": hist, "traj": traj, "reply": reply, "ns": ns} if ok else None
         kw = (v.get("search") or "").strip()
-        if not kw or ns >= A.maxsrch: return None
-        if has(kw, gold) and not has(conv, gold) and not any(has(c, gold) for c in served): return None   # searched for the answer before finding it: not a demonstration
+        if not kw or ns >= A.maxsrch: why(q, f"no answer after {ns} searches: " + " | ".join(s_["search"] for s_ in steps)); return None
+        if has(kw, gold) and not has(conv, gold) and not any(has(c, gold) for c in served): why(q, f"searched for the answer itself: {kw!r}"); return None   # searched for the answer before finding it: not a demonstration
         ns += 1
         pg = get_page(kw)
         if not pg: chunk = "(no results)"
@@ -139,7 +151,7 @@ def solve(it):
             if nxt: served.append(chunk)
         traj += (th + "\n" if th else "") + f"<search>{kw}</search" + f"\n<information>\n{chunk}\n[READER] (no extraction)\n</information>\n"
         steps.append({"thought": th, "search": kw, "result": chunk[:1500]})
-    return None
+    why(q, f"ran out of steps after {ns} searches"); return None
 
 
 items = [json.loads(l) for l in open(A.probe) if l.strip()]
