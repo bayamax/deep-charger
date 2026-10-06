@@ -80,7 +80,7 @@ PSKIP=
 # The raw GitHub copy this box fetches can lag and hand a control run an OLDER version of this file (04:48 on 09-22 it
 # relaunched the online loop under the previous mode while the newer run was merging a checkpoint on the same card).
 # Every edit bumps BOXG_SERIAL; a run that sees a lower serial than one already executed stops here.
-BOXG_SERIAL=2026100613
+BOXG_SERIAL=2026100614
 if [ -f /root/.boxg_serial ] && [ "$(cat /root/.boxg_serial)" -gt "$BOXG_SERIAL" ] 2>/dev/null; then echo "BOXG_STALE $BOXG_SERIAL < $(cat /root/.boxg_serial)"; exit 0; fi
 echo $BOXG_SERIAL > /root/.boxg_serial
 MODE=idle         # 2026-09-29: the side jobs hold the card (multi-turn measurement and training); a finished reeval re-launched on every control run and killed their evaluators
@@ -3260,6 +3260,20 @@ if [ ! -e /root/.qgen3 ] && [ -s /root/.oai ]; then touch /root/.qgen3
     [ -s /root/qgen/queries.jsonl ] && hf upload $R /root/qgen/queries.jsonl sentbart/e2e2/queries.jsonl >/dev/null 2>&1 && echo "QGEN_UPLOADED $(wc -l < /root/qgen/queries.jsonl) rows $(date -u)"
   ) >> /root/qgen.log 2>&1 &
   echo "QGEN3_LAUNCHED $(date -u)"
+fi
+# ---- qgen, fourth start (2026-10-07 02:55 JST): the rate limit (429) hit at 16 workers too, and each 429 spent one of
+# the four tries. A 429 now only waits (up to 10 min a document); 12 workers. Resumable as before.
+if [ ! -e /root/.qgen4 ] && [ -s /root/.oai ]; then touch /root/.qgen4
+  pkill -f "qgen.py --docs" 2>/dev/null; sleep 3
+  ( export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); R=baya1116/hypernet-sp-distill; cd /root/qgen
+    curl -sS -L -o qgen.py "$RAW/sentbart/qgen.py?$(date +%s)"
+    echo "[qgen] restart at 12 workers, 429 waits, $(wc -l < /root/qgen/queries.jsonl 2>/dev/null || echo 0) done $(date -u +%H:%M)"
+    ( while sleep 900; do [ -s /root/qgen/queries.jsonl ] && hf upload $R /root/qgen/queries.jsonl sentbart/e2e2/queries_partial.jsonl >/dev/null 2>&1; done ) & UP=$!
+    python3 -u qgen.py --docs /root/qgen/dl/sentbart/e2e2/docs_for_qgen.jsonl --out /root/qgen/queries.jsonl --workers 12 2>&1 | grep --line-buffered -E "^\[qgen\]|QGEN_"
+    kill $UP 2>/dev/null
+    [ -s /root/qgen/queries.jsonl ] && hf upload $R /root/qgen/queries.jsonl sentbart/e2e2/queries.jsonl >/dev/null 2>&1 && echo "QGEN_UPLOADED $(wc -l < /root/qgen/queries.jsonl) rows $(date -u)"
+  ) >> /root/qgen.log 2>&1 &
+  echo "QGEN4_LAUNCHED $(date -u)"
 fi
 # ---- the box's own logs, mirrored to the hub every ten minutes: readable without the Vast API ----
 pkill -f "logmirro[r].sh" 2>/dev/null; pkill -f "logmirror[2].sh" 2>/dev/null   # replaced by logmirror3 (adds the score table)

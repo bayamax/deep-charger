@@ -8,7 +8,7 @@ cd /root
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null)
 R=baya1116/hypernet-sp-distill
 RAW="https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl"
-BOXI_SERIAL=56
+BOXI_SERIAL=57
 if [ -f /root/.boxi_serial ] && [ "$(cat /root/.boxi_serial)" -gt "$BOXI_SERIAL" ] 2>/dev/null; then echo "BOXI_STALE $BOXI_SERIAL"; exit 0; fi
 echo $BOXI_SERIAL > /root/.boxi_serial
 mkdir -p /root/sb /root/work
@@ -1130,12 +1130,15 @@ if [ -f /root/sb/pick_docs.py ] && [ ! -e /root/.e2e2_docs ]; then touch /root/.
 fi
 # ---- 2026-10-07 02:20 JST: ladder2's waiting keeper replaced (starts on the partial queries at 10,000 rows, refreshes them).
 if [ ! -e /root/.ladder2_v2 ]; then touch /root/.ladder2_v2; pkill -f "ladder2kee[p].sh"; sleep 2; fi
+if [ ! -e /root/.ladder2_v3 ]; then touch /root/.ladder2_v3; pkill -f "ladder2kee[p].sh"; sleep 2; fi
 if [ -f /root/sb/e2e_ladder.py ] && ! pgrep -f "ladder2kee[p].sh" >/dev/null && ! grep -q "LADDER2_JOB_DONE" /root/sb_ladder2.log 2>/dev/null; then
   cat > /root/ladder2keep.sh <<'RK'
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); R=baya1116/hypernet-sp-distill; cd /root/sb; mkdir -p /root/sb/e2e2
 # the writer takes hours: start once 10,000 rows are there (the 2000 evaluation documents' come first), and refresh the
 # file from the hub every 15 minutes - each later rung reads it afresh at its start
-fetchq() { for f in queries.jsonl queries_partial.jsonl; do hf download $R sentbart/e2e2/$f --local-dir /root/sb/e2e2/dl >/dev/null 2>&1 && [ -s /root/sb/e2e2/dl/sentbart/e2e2/$f ] && { cp /root/sb/e2e2/dl/sentbart/e2e2/$f /root/sb/e2e2/queries.jsonl.new && mv /root/sb/e2e2/queries.jsonl.new /root/sb/e2e2/queries.jsonl; return 0; }; done; return 1; }
+fetchq() { best=""; bn=0   # whichever of the final and the partial file holds more rows (a killed writer once uploaded a short "final")
+  for f in queries.jsonl queries_partial.jsonl; do hf download $R sentbart/e2e2/$f --local-dir /root/sb/e2e2/dl >/dev/null 2>&1 && [ -s /root/sb/e2e2/dl/sentbart/e2e2/$f ] && n=$(wc -l < /root/sb/e2e2/dl/sentbart/e2e2/$f) && [ "$n" -gt "$bn" ] && { bn=$n; best=/root/sb/e2e2/dl/sentbart/e2e2/$f; }; done
+  [ -n "$best" ] || return 1; cp $best /root/sb/e2e2/queries.jsonl.new && mv /root/sb/e2e2/queries.jsonl.new /root/sb/e2e2/queries.jsonl; }
 until fetchq && [ "$(wc -l < /root/sb/e2e2/queries.jsonl)" -ge 10000 ]; do sleep 300; done
 echo "[ladder2] queries: $(wc -l < /root/sb/e2e2/queries.jsonl) rows $(date -u +%H:%M)"
 ( while sleep 900; do fetchq; done ) > /dev/null 2>&1 &
