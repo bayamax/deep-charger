@@ -6,7 +6,7 @@ Output rows: {id, s0, s1, query, hyde}.
 
   python3 qgen.py --docs docs_for_qgen.jsonl --out queries.jsonl --workers 8
 """
-import argparse, json, os, time, urllib.request
+import argparse, json, os, time, urllib.error, urllib.request
 import concurrent.futures as cf
 ap = argparse.ArgumentParser()
 ap.add_argument("--docs", required=True); ap.add_argument("--out", required=True)
@@ -28,13 +28,24 @@ def ask(r, tries=4):
         try:
             d = json.load(urllib.request.urlopen(urllib.request.Request(URL, data=json.dumps(body).encode(),
                 headers={"Authorization": "Bearer " + KEY, "Content-Type": "application/json"}), timeout=120))
-            v = json.loads(d["choices"][0]["message"]["content"])
+            ch = d["choices"][0]; c = ch["message"].get("content") or ""
+            if not c.strip():                       # the reasoning used the whole budget: no content to parse
+                ERR[0] += 1
+                if ERR[0] % 50 == 1: print(f"[qgen] empty content (finish {ch.get('finish_reason')}, usage {d.get('usage', {}).get('completion_tokens_details')}) x{ERR[0]}", flush=True)
+                body["max_completion_tokens"] = 6000; continue
+            v = json.loads(c[c.find("{"): c.rfind("}") + 1])
             q, h = (v.get("query") or "").strip(), (v.get("hyde") or "").strip()
             if q and h: return {"id": r["id"], "s0": r["s0"], "s1": r["s1"], "query": q, "hyde": h}
             return None
+        except urllib.error.HTTPError as e:
+            msg = e.read()[:200].decode(errors="replace") if hasattr(e, "read") else ""
+            ERR[0] += 1
+            if ERR[0] % 50 == 1 or ERR[0] <= 5: print(f"[qgen] http {e.code} x{ERR[0]}: {msg}", flush=True)
+            if e.code in (401, 402) or "insufficient_quota" in msg: raise SystemExit(f"QGEN_ABORT http {e.code} {msg[:100]}")
+            time.sleep(20 if e.code == 429 else 3 * (t + 1))
         except Exception as e:
-            if ERR[0] < 5: ERR[0] += 1; print(f"[qgen] api error: {type(e).__name__} {str(e)[:120]}", flush=True)
-            if "401" in str(e) or "402" in str(e) or "insufficient_quota" in str(e): raise SystemExit(f"QGEN_ABORT {str(e)[:120]}")
+            ERR[0] += 1
+            if ERR[0] % 50 == 1 or ERR[0] <= 5: print(f"[qgen] error x{ERR[0]}: {type(e).__name__} {str(e)[:120]}", flush=True)
             time.sleep(3 * (t + 1))
     return None
 
