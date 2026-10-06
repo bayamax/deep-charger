@@ -8,7 +8,7 @@ cd /root
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null)
 R=baya1116/hypernet-sp-distill
 RAW="https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl"
-BOXI_SERIAL=57
+BOXI_SERIAL=58
 if [ -f /root/.boxi_serial ] && [ "$(cat /root/.boxi_serial)" -gt "$BOXI_SERIAL" ] 2>/dev/null; then echo "BOXI_STALE $BOXI_SERIAL"; exit 0; fi
 echo $BOXI_SERIAL > /root/.boxi_serial
 mkdir -p /root/sb /root/work
@@ -31,6 +31,7 @@ done
 ls /root/sb
 
 # ---- the mirror: what this box is doing, on the hub every 10 minutes ----
+if [ ! -e /root/.mirror_r2 ]; then touch /root/.mirror_r2; pkill -f "mirrorkee[p].sh"; sleep 1; fi   # 2026-10-07: restarted once for the ladder2 lines
 if ! pgrep -f "mirrorkee[p].sh" >/dev/null; then
   cat > /root/mirrorkeep.sh <<'MK'
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); R=baya1116/hypernet-sp-distill
@@ -39,7 +40,9 @@ while :; do
     for f in /root/sb_*.log; do [ -e $f ] && { echo "--- $f ---"; tail -n 25 $f | cut -c1-300; }; done
     echo "--- gpu ---"; nvidia-smi --query-gpu=memory.used,memory.total,utilization.gpu --format=csv,noheader
     echo "--- disk ---"; df -h /root | tail -1; du -sh /root/sb/data 2>/dev/null
-    echo "--- processes ---"; pgrep -fa "python3 /root/sb/" | cut -c1-160; } > /root/boxlog.txt 2>&1
+    echo "--- ladder2 ---"; ls -t /root/sb/ladder2 2>/dev/null | head -8 | tr '\n' ' '; echo
+    f=$(ls -t /root/sb/ladder2/*.out 2>/dev/null | head -1); [ -n "$f" ] && { echo "== $f"; grep -E "^\[eval|^\[best|^\[plateau|^\[init\]|Error|Traceback" $f | tail -8 | cut -c1-300; grep "^\[step" $f | tail -1 | cut -c1-200; }
+    echo "--- processes ---"; pgrep -fa "python3 /root/sb/" | cut -c1-300; } > /root/boxlog.txt 2>&1
   hf upload $R /root/boxlog.txt sentbart/audit/boxlog_I.txt >/dev/null 2>&1
   sleep 600
 done
@@ -1149,7 +1152,7 @@ for d in /root/sb/ladder/r*/; do rm -f $d/state_e2e.pt $d/model_latest.pt $d/mod
 I0=/root/sb/abl_one32/model_best.pt; [ -s $I0 ] || I0=/root/sb/hfdl/sentbart/abl/one32/model_best.pt
 QF=/root/sb/se2/dl/sentbart/searcheval/dcq.jsonl
 echo "[ladder2] from $I0 with the query losses $(date -u +%H:%M); $(df -h /root | tail -1 | awk '{print $4}') free"
-python3 -u /root/sb/e2e_ladder.py --start $I0 --work /root/sb/ladder2 --queries $QF --qfile /root/sb/e2e2/queries.jsonl --select pool_qh_top1 2>&1 | grep --line-buffered -E "^\[ladder\]|LADDER_DONE|Error|Traceback" | sed 's/^\[ladder\]/[ladder2]/'
+python3 -u /root/sb/e2e_ladder.py --start $I0 --work /root/sb/ladder2 --queries $QF --qfile /root/sb/e2e2/queries.jsonl --select pool_qh_top1 2>&1 | grep --line-buffered -E "^\[ladder\]|LADDER_DONE|Error|Traceback" | sed -u 's/^\[ladder\]/[ladder2]/'
 echo "LADDER2_JOB_DONE $(date -u)"
 RK
   setsid nohup bash -c 'bash /root/ladder2keep.sh 2>&1 | tee -a /root/sb_ladder2.log' > /dev/null 2>&1 < /dev/null &
