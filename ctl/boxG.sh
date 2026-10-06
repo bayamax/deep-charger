@@ -80,7 +80,7 @@ PSKIP=
 # The raw GitHub copy this box fetches can lag and hand a control run an OLDER version of this file (04:48 on 09-22 it
 # relaunched the online loop under the previous mode while the newer run was merging a checkpoint on the same card).
 # Every edit bumps BOXG_SERIAL; a run that sees a lower serial than one already executed stops here.
-BOXG_SERIAL=2026100605
+BOXG_SERIAL=2026100606
 if [ -f /root/.boxg_serial ] && [ "$(cat /root/.boxg_serial)" -gt "$BOXG_SERIAL" ] 2>/dev/null; then echo "BOXG_STALE $BOXG_SERIAL < $(cat /root/.boxg_serial)"; exit 0; fi
 echo $BOXG_SERIAL > /root/.boxg_serial
 MODE=idle         # 2026-09-29: the side jobs hold the card (multi-turn measurement and training); a finished reeval re-launched on every control run and killed their evaluators
@@ -3082,6 +3082,16 @@ if [ ! -e /root/.mtg5b_long ] && [ -s /root/mtg5bkeep.sh ]; then touch /root/.mt
   rm -rf /root/online_mtg5b /root/mtg5b_s*.safetensors /root/mtg5b_run.log
   setsid nohup bash -c 'bash /root/mtg5bkeep.sh 2>&1 | tee -a /root/mtg5b.log' >> /proc/1/fd/1 2>&1 < /dev/null 9>&- &
   echo "MTG5B_LONG_LAUNCHED $(date -u)"
+fi
+# ---- mtg5b back at 3000 (2026-10-06 13:00 JST, the user: if the longer cap does not change anything it is wasted - back).
+if [ ! -e /root/.mtg5b_short ] && [ -s /root/mtg5bkeep.sh ]; then touch /root/.mtg5b_short
+  pkill -f "mtg5bkee[p].sh"; pkill -f "online_loop.py /root/mtg5_s40.safetensors /root/online_mtg5b"; sleep 15
+  pkill -9 -f "online_loop.py /root/mtg5_s40.safetensors /root/online_mtg5b" 2>/dev/null; sleep 3
+  sed -i 's/--temp 0.6 --gen 7000 --budget 2400/--temp 0.6 --gen 3000 --budget 900/' /root/mtg5bkeep.sh
+  grep -q -- "--gen 3000 --budget 900" /root/mtg5bkeep.sh && echo "[mtg5b] restart with the reasoning cap back at 3000 tokens $(date -u +%H:%M)" >> /root/mtg5b.log
+  rm -rf /root/online_mtg5b /root/mtg5b_s*.safetensors /root/mtg5b_run.log
+  setsid nohup bash -c 'bash /root/mtg5bkeep.sh 2>&1 | tee -a /root/mtg5b.log' >> /proc/1/fd/1 2>&1 < /dev/null 9>&- &
+  echo "MTG5B_SHORT_LAUNCHED $(date -u)"
 fi
 # ---- the box's own logs, mirrored to the hub every ten minutes: readable without the Vast API ----
 pkill -f "logmirro[r].sh" 2>/dev/null; pkill -f "logmirror[2].sh" 2>/dev/null   # replaced by logmirror3 (adds the score table)
