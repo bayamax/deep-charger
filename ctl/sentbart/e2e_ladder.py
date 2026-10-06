@@ -30,6 +30,8 @@ ap.add_argument("--patience", type=int, default=3); ap.add_argument("--min-gain"
 ap.add_argument("--max-enc", type=int, default=20); ap.add_argument("--max-layers", type=int, default=32)
 ap.add_argument("--repo", default="baya1116/hypernet-sp-distill")
 ap.add_argument("--anchor-q", type=int, default=256)
+ap.add_argument("--qfile", default="", help="qgen.py's queries.jsonl: train_e2e --queries (the query -> article losses)")
+ap.add_argument("--select", default="pool_top1", help="the metric rungs are selected on (pool_top1, or pool_qh_top1 with --qfile)")
 ap.add_argument("--queries", default="/root/sb/se2/dl/sentbart/searcheval/dcq.jsonl"); ap.add_argument("--dev", type=int, default=300)
 A = ap.parse_args()
 os.makedirs(A.work, exist_ok=True)
@@ -49,15 +51,16 @@ def run(name, init, layers, enc_layers, neg, grow=False, steps=None):
     out = os.path.join(A.work, name)
     cmd = [sys.executable, os.path.join(HERE, "train_e2e.py"), "--vec", A.vec, "--text", A.text, "--eval-text", A.eval_text,
            "--out", out, "--steps", str(A.steps if steps is None else steps), "--batch", str(neg[0]), "--page-queue", str(neg[1]),
-           "--layers", str(layers), "--enc-layers", str(enc_layers), "--pool", str(A.pool), "--select", "pool_top1",
-           "--patience", str(A.patience), "--min-gain", str(A.min_gain), "--anchor-q", str(A.anchor_q), ("--grow" if grow else "--init"), init]
+           "--layers", str(layers), "--enc-layers", str(enc_layers), "--pool", str(A.pool),
+           "--patience", str(A.patience), "--min-gain", str(A.min_gain), "--anchor-q", str(A.anchor_q), "--select", A.select] \
+          + (["--queries", A.qfile] if A.qfile else []) + [("--grow" if grow else "--init"), init]
     log(f"{name}: batch {neg[0]} queue {neg[1]}, bge {enc_layers} layers, BART {layers}+{layers}{' (grown)' if grow else ''}")
     with open(os.path.join(A.work, name + ".out"), "w") as fo:
         rc = subprocess.run(cmd, stdout=fo, stderr=subprocess.STDOUT).returncode
     tl = os.path.join(out, "train.log"); best, p2k, step = -1.0, -1.0, 0
     if os.path.exists(tl):
         for line in open(tl):
-            m = re.match(r"\[eval (\d+)\] .*page_top1 ([0-9.]+).*pool_top1 ([0-9.]+)", line)
+            m = re.match(r"\[eval (\d+)\] .*page_top1 ([0-9.]+).*" + re.escape(A.select) + r" ([0-9.]+)", line)
             if m and float(m.group(3)) > best: best, p2k, step = float(m.group(3)), float(m.group(2)), int(m.group(1))
         upload(tl, f"sentbart/e2e/ladder/{name}/train.log")
     tail = open(os.path.join(A.work, name + ".out")).read()[-400:].replace("\n", " | ")

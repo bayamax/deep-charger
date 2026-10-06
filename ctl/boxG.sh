@@ -80,7 +80,7 @@ PSKIP=
 # The raw GitHub copy this box fetches can lag and hand a control run an OLDER version of this file (04:48 on 09-22 it
 # relaunched the online loop under the previous mode while the newer run was merging a checkpoint on the same card).
 # Every edit bumps BOXG_SERIAL; a run that sees a lower serial than one already executed stops here.
-BOXG_SERIAL=2026100607
+BOXG_SERIAL=2026100608
 if [ -f /root/.boxg_serial ] && [ "$(cat /root/.boxg_serial)" -gt "$BOXG_SERIAL" ] 2>/dev/null; then echo "BOXG_STALE $BOXG_SERIAL < $(cat /root/.boxg_serial)"; exit 0; fi
 echo $BOXG_SERIAL > /root/.boxg_serial
 MODE=idle         # 2026-09-29: the side jobs hold the card (multi-turn measurement and training); a finished reeval re-launched on every control run and killed their evaluators
@@ -3108,6 +3108,21 @@ if [ ! -e /root/.mtg5b_trial ] && [ -s /root/mtg5bkeep.sh ]; then touch /root/.m
       && echo "[mtg5b] rollouts to step 40 on the hub $(date -u +%H:%M)" >> /root/mtg5b.log ) > /dev/null 2>&1 &
   echo "MTG5B_TRIAL_LAUNCHED $(date -u)"
 fi
+# ---- qgen (2026-10-06 23:30 JST, the user: the HyDE-style and search-query losses go into the sentence BART's e2e). The
+# query writer, API only (nano, ~22,000 documents, 8 at a time): box I's docs_for_qgen.jsonl from the hub, a search query
+# and a HyDE sentence per document, back to the hub as sentbart/e2e2/queries.jsonl.
+if [ ! -e /root/.qgen1 ] && [ -s /root/.oai ]; then touch /root/.qgen1
+  ( export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); R=baya1116/hypernet-sp-distill; mkdir -p /root/qgen; cd /root/qgen
+    curl -sS -L -o qgen.py "$RAW/sentbart/qgen.py?$(date +%s)"
+    until hf download $R sentbart/e2e2/docs_for_qgen.jsonl --local-dir /root/qgen/dl >/dev/null 2>&1 && [ -s /root/qgen/dl/sentbart/e2e2/docs_for_qgen.jsonl ]; do sleep 120; done
+    echo "[qgen] $(wc -l < /root/qgen/dl/sentbart/e2e2/docs_for_qgen.jsonl) documents $(date -u +%H:%M)"
+    ( while sleep 900; do [ -s /root/qgen/queries.jsonl ] && hf upload $R /root/qgen/queries.jsonl sentbart/e2e2/queries_partial.jsonl >/dev/null 2>&1; done ) & UP=$!
+    python3 -u qgen.py --docs /root/qgen/dl/sentbart/e2e2/docs_for_qgen.jsonl --out /root/qgen/queries.jsonl --workers 8 2>&1 | grep --line-buffered -E "^\[qgen\]|QGEN_" | cut -c1-300
+    kill $UP 2>/dev/null
+    [ -s /root/qgen/queries.jsonl ] && hf upload $R /root/qgen/queries.jsonl sentbart/e2e2/queries.jsonl >/dev/null 2>&1 && echo "QGEN_UPLOADED $(wc -l < /root/qgen/queries.jsonl) rows $(date -u)"
+  ) > /root/qgen.log 2>&1 &
+  echo "QGEN_LAUNCHED $(date -u)"
+fi
 # ---- the box's own logs, mirrored to the hub every ten minutes: readable without the Vast API ----
 pkill -f "logmirro[r].sh" 2>/dev/null; pkill -f "logmirror[2].sh" 2>/dev/null   # replaced by logmirror3 (adds the score table)
 cat > /root/logmirror3.sh <<'LM'
@@ -3134,6 +3149,7 @@ while :; do
     echo "--- leak ---"; cat /root/leak.txt 2>/dev/null | cut -c1-700
     echo "--- qcount ---"; cat /root/qcount.txt 2>/dev/null | cut -c1-600
     echo "--- hyde.log ---"; tail -n 4 /root/hyde.log 2>/dev/null | cut -c1-300
+    echo "--- qgen.log ---"; tail -n 4 /root/qgen.log 2>/dev/null | cut -c1-300
     echo "--- mtg5b.log (tail) ---"; tail -n 14 /root/mtg5b.log 2>/dev/null | cut -c1-250; grep -E "^\[step|ONLINE_|rollback|guard" /root/mtg5b_run.log 2>/dev/null | tail -n 3 | cut -c1-220
     echo "--- mtg5.log (tail) ---"; tail -n 14 /root/mtg5.log 2>/dev/null | cut -c1-250; grep -E "^\[step|ONLINE_|rollback|guard" /root/mtg5_run.log 2>/dev/null | tail -n 3 | cut -c1-220
     echo "--- s100q.log (tail) ---"; tail -n 14 /root/s100q.log 2>/dev/null | cut -c1-250

@@ -8,7 +8,7 @@ cd /root
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null)
 R=baya1116/hypernet-sp-distill
 RAW="https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl"
-BOXI_SERIAL=54
+BOXI_SERIAL=55
 if [ -f /root/.boxi_serial ] && [ "$(cat /root/.boxi_serial)" -gt "$BOXI_SERIAL" ] 2>/dev/null; then echo "BOXI_STALE $BOXI_SERIAL"; exit 0; fi
 echo $BOXI_SERIAL > /root/.boxi_serial
 mkdir -p /root/sb /root/work
@@ -25,7 +25,7 @@ if [ ! -f /root/.bootstrapped ]; then
 fi
 
 # the code, fresh from the branch on every control run
-for f in prep.py embed.py train.py train_e2e.py e2e_ladder.py search_cascade.py evalsb.py links.py; do
+for f in prep.py embed.py train.py train_e2e.py e2e_ladder.py search_cascade.py pick_docs.py evalsb.py links.py; do
   curl -sS -L -o /root/sb/$f.new "$RAW/sentbart/$f?$(date +%s)" && grep -q "^#!/usr/bin/env python3" /root/sb/$f.new && mv /root/sb/$f.new /root/sb/$f || rm -f /root/sb/$f.new
 done
 ls /root/sb
@@ -1096,7 +1096,7 @@ if ! pgrep -f "ladderlogkee[p].sh" >/dev/null; then
   cat > /root/ladderlogkeep.sh <<'RK'
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); R=baya1116/hypernet-sp-distill
 while :; do
-  f=$(ls -t /root/sb/ladder/r*/train.log 2>/dev/null | head -1)
+  f=$(ls -t /root/sb/ladder/r*/train.log /root/sb/ladder2/r*/train.log 2>/dev/null | head -1)
   [ -n "$f" ] && { echo "== $f $(date -u)"; grep -E "^\[eval|^\[best|^\[plateau|^\[e2e\]" $f | tail -20 | cut -c1-400; grep "^\[step" $f | tail -2; } > /root/ladder_current.txt && hf upload $R /root/ladder_current.txt sentbart/e2e/ladder/current.txt >/dev/null 2>&1
   sleep 1200
 done
@@ -1115,6 +1115,37 @@ echo "CASCADER1_JOB_DONE $(date -u)"
 RK
   setsid nohup bash -c 'bash /root/cascadeR1keep.sh 2>&1 | tee -a /root/sb_cascadeR1.log' > /dev/null 2>&1 < /dev/null &
   echo "CASCADER1_LAUNCHED $(date -u)"
+fi
+# ---- e2e2 (2026-10-06 23:30 JST, the user: the HyDE-style and search-query losses were never in - put them in). Step 1,
+# here: the documents the query writer gets (pick_docs.py: 20,000 training documents + the 2000 evaluation ones, a passage
+# each) to the hub; box G writes the queries with nano and puts them back. Step 2: once the queries are on the hub, the
+# running ladder stops and a second ladder starts from the 58.1 model with train_e2e --queries (query -> article and
+# query -> passage sentence losses, search-query and HyDE forms), selected on pool_qh_top1 (the written queries of the
+# 2000 evaluation documents against 20,000 pages), the real-query dev guard as before. Record: sentbart/e2e2/ladder.json.
+if [ -f /root/sb/pick_docs.py ] && [ ! -e /root/.e2e2_docs ]; then touch /root/.e2e2_docs
+  ( export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); mkdir -p /root/sb/e2e2
+    python3 /root/sb/pick_docs.py --vec /root/sb/data/docs --text /root/sb/data/e2e --eval-text /root/sb/data/docs/docs_001.jsonl --n 20000 --out /root/sb/e2e2/docs_for_qgen.jsonl 2>&1 | tail -2
+    [ -s /root/sb/e2e2/docs_for_qgen.jsonl ] && hf upload baya1116/hypernet-sp-distill /root/sb/e2e2/docs_for_qgen.jsonl sentbart/e2e2/docs_for_qgen.jsonl >/dev/null 2>&1 && echo "E2E2_DOCS_UP $(date -u)"
+  ) >> /root/sb_e2e2.log 2>&1 &
+fi
+if [ -f /root/sb/e2e_ladder.py ] && ! pgrep -f "ladder2kee[p].sh" >/dev/null && ! grep -q "LADDER2_JOB_DONE" /root/sb_ladder2.log 2>/dev/null; then
+  cat > /root/ladder2keep.sh <<'RK'
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); R=baya1116/hypernet-sp-distill; cd /root/sb; mkdir -p /root/sb/e2e2
+until hf download $R sentbart/e2e2/queries.jsonl --local-dir /root/sb/e2e2/dl >/dev/null 2>&1 && [ -s /root/sb/e2e2/dl/sentbart/e2e2/queries.jsonl ]; do sleep 300; done
+cp /root/sb/e2e2/dl/sentbart/e2e2/queries.jsonl /root/sb/e2e2/queries.jsonl
+echo "[ladder2] queries: $(wc -l < /root/sb/e2e2/queries.jsonl) rows $(date -u +%H:%M)"
+pkill -f "ladderkee[p].sh"; pkill -f "e2e_ladder.py --start"; pkill -f "train_e2e.py.*/root/sb/ladder/"; pkill -f "search_cascade.py.*/root/sb/ladder/"; sleep 15
+echo "LADDER_JOB_DONE replaced by ladder2 $(date -u)" >> /root/sb_ladder.log
+hf upload $R /root/sb/ladder/ladder.json sentbart/e2e/ladder/ladder.json >/dev/null 2>&1
+for d in /root/sb/ladder/r*/; do rm -f $d/state_e2e.pt $d/model_latest.pt $d/model_best.pt; done
+I0=/root/sb/abl_one32/model_best.pt; [ -s $I0 ] || I0=/root/sb/hfdl/sentbart/abl/one32/model_best.pt
+QF=/root/sb/se2/dl/sentbart/searcheval/dcq.jsonl
+echo "[ladder2] from $I0 with the query losses $(date -u +%H:%M); $(df -h /root | tail -1 | awk '{print $4}') free"
+python3 -u /root/sb/e2e_ladder.py --start $I0 --work /root/sb/ladder2 --queries $QF --qfile /root/sb/e2e2/queries.jsonl --select pool_qh_top1 2>&1 | grep --line-buffered -E "^\[ladder\]|LADDER_DONE|Error|Traceback" | sed 's/^\[ladder\]/[ladder2]/'
+echo "LADDER2_JOB_DONE $(date -u)"
+RK
+  setsid nohup bash -c 'bash /root/ladder2keep.sh 2>&1 | tee -a /root/sb_ladder2.log' > /dev/null 2>&1 < /dev/null &
+  echo "LADDER2_LAUNCHED $(date -u)"
 fi
 echo "BOXI_OK serial $BOXI_SERIAL $(date -u)"
 # CTL-END

@@ -36,6 +36,9 @@ ap.add_argument("--steps", type=int, default=30000); ap.add_argument("--batch", 
 ap.add_argument("--lr", type=float, default=3e-5, help="the BART"); ap.add_argument("--lr-enc", type=float, default=1e-5, help="bge")
 ap.add_argument("--w-anchor", type=float, default=1.0); ap.add_argument("--tau-anchor", type=float, default=0.05)
 ap.add_argument("--anchor-q", type=int, default=0, help=">0: the anchor also on this many of the step's sentences in QUERY form (bge's query instruction in front) - the path real searches take, which the BART losses never see; without it e2e1 drifted there (app-query search fell)")
+ap.add_argument("--queries", default="", help="qgen.py's queries.jsonl ({id: '<shard>:<line>', s0, s1, query, hyde}): the query -> article losses. For a batch document with queries, its search query (bge's query instruction in front) and its HyDE sentence (plain) must each find (a) the document's page vector among the batch's pages (+ the page queue) and (b) the passage's first sentence among every sentence of the batch (the bge side) - the forms real searches take, which the sentence losses never show")
+ap.add_argument("--w-q", type=float, default=1.0); ap.add_argument("--tau-q", type=float, default=0.05)
+ap.add_argument("--q-frac", type=float, default=0.5, help="share of each batch drawn from the documents that have queries")
 ap.add_argument("--maxlen", type=int, default=128, help="tokens per sentence into bge (embed.py's 128, so step 0 reads the stored vectors' equal)")
 ap.add_argument("--eval-every", type=int, default=2000); ap.add_argument("--save-every", type=int, default=2000)
 ap.add_argument("--bge", default="BAAI/bge-small-en-v1.5")
@@ -105,9 +108,23 @@ class Lines:
     def __getitem__(s, i): s.fh.seek(s.off[i]); return json.loads(s.fh.readline())
 
 
-TR = [Lines(p) for p in sorted(glob.glob(os.path.join(E.text, "docs_*.jsonl"))) if not p.endswith("docs_001.jsonl")]
+TRP = [p for p in sorted(glob.glob(os.path.join(E.text, "docs_*.jsonl"))) if not p.endswith("docs_001.jsonl")]
+TR = [Lines(p) for p in TRP]; TKEY = {os.path.basename(p)[5:-6]: i for i, p in enumerate(TRP)}
 tdocs = [(i, j) for i, L in enumerate(TR) for j in range(len(L))]
 print(f"[e2e] {len(tdocs)} training documents as text in {len(TR)} shards", flush=True)
+
+# ---- the queries: training documents' by (shard, line); the evaluation documents' by line of shard 001 ----
+QT, QE_LINE = {}, {}
+if E.queries:
+    for l in open(E.queries):
+        if not l.strip(): continue
+        r = json.loads(l); key, ln = r["id"].split(":"); ln = int(ln)
+        if key == "001": QE_LINE[ln] = r
+        elif key in TKEY: QT.setdefault((TKEY[key], ln), []).append(r)
+    qdocs = sorted(QT)
+    print(f"[e2e] queries: {sum(len(v) for v in QT.values())} for {len(qdocs)} training documents, {len(QE_LINE)} for shard 001", flush=True)
+else:
+    qdocs = []
 
 # ---- the held-out 2000: the documents train.py evaluates, matched to their text by sentence count ----
 eoff = ns["eval_sh"][2]; start = {int(a): d for d, a in enumerate(eoff[:-1])}
@@ -118,6 +135,8 @@ for a, b in ns["edocs"]:
     ev_text.append(d["sents"])
 assert bad == 0, f"{bad} of {len(ev_text)} held-out documents do not match their text"
 print(f"[e2e] {len(ev_text)} held-out documents matched to their text", flush=True)
+EQ = [(k, QE_LINE[start[int(a)]]) for k, (a, _) in enumerate(ns["edocs"]) if start[int(a)] in QE_LINE]   # (eval doc index, its query row)
+if E.queries: print(f"[e2e] {len(EQ)} of the {len(ev_text)} evaluation documents have queries", flush=True)
 
 
 @torch.no_grad()
@@ -167,8 +186,16 @@ def eval_pool():
         P.append(model.last_page.float())
     P = torch.cat(P); Q = torch.stack(Q).float(); S = Q @ P.T
     rank = (S > S.diagonal()[:, None]).sum(1) + 1
+    r = {"pool_top1": float((rank <= 1).float().mean()), "pool_top10": float((rank <= 10).float().mean()), "pool_size": len(docs)}
+    if EQ:   # the written queries of the evaluation documents against every page of the pool
+        gold = torch.tensor([k for k, _ in EQ], device=DEV)
+        for nm, texts in (("q", [QPFX + q["query"] for _, q in EQ]), ("h", [q["hyde"] for _, q in EQ])):
+            V_ = torch.cat([embed(enc, texts[i:i + 1024]) for i in range(0, len(texts), 1024)]).float(); S_ = V_ @ P.T
+            rk = (S_ > S_.gather(1, gold[:, None])).sum(1) + 1
+            r[f"pool_{nm}_top1"] = float((rk <= 1).float().mean()); r[f"pool_{nm}_top10"] = float((rk <= 10).float().mean())
+        r["pool_qh_top1"] = (r["pool_q_top1"] + r["pool_h_top1"]) / 2; r["pool_nq"] = len(EQ)
     enc.train(); model.train()
-    return {"pool_top1": float((rank <= 1).float().mean()), "pool_top10": float((rank <= 10).float().mean()), "pool_size": len(docs)}
+    return r
 
 
 opt = torch.optim.AdamW([{"params": [p for p in model.parameters()], "lr": E.lr},
@@ -198,17 +225,22 @@ if step0 == 0:
 model.train(); t0 = time.time(); acc = []
 for step in range(step0 + 1, E.steps + 1) if E.steps > 0 else []:
     ns["STEP"][0] = step
-    sents, items = [], []
-    for _ in range(E.batch):
-        i, j = random.choice(tdocs); s_ = TR[i][j]["sents"]
-        while len(s_) < A.min_sents: i, j = random.choice(tdocs); s_ = TR[i][j]["sents"]
-        if len(s_) > A.seq: k = random.randint(0, len(s_) - A.seq); s_ = s_[k:k + A.seq]
+    sents, items, qrows = [], [], []                          # qrows: (batch row, query row, the passage's first sentence's position in the crop or -1)
+    for b in range(E.batch):
+        from_q = bool(qdocs) and random.random() < E.q_frac
+        i, j = random.choice(qdocs) if from_q else random.choice(tdocs); s_ = TR[i][j]["sents"]
+        while len(s_) < A.min_sents: i, j = random.choice(tdocs); s_ = TR[i][j]["sents"]; from_q = (i, j) in QT
+        k = random.randint(0, len(s_) - A.seq) if len(s_) > A.seq else 0; s_ = s_[k:k + A.seq]
         items.append(np.zeros((len(s_), DIM), np.float32)); sents.append(s_)
+        if from_q:
+            qr = random.choice(QT[(i, j)]); pos = qr["s0"] - k
+            qrows.append((b, qr, pos if 0 <= pos < len(s_) else -1))
     _, valid, masked, _ = ns["make_batch"](items)            # train.py's corruption (spans or a hidden tail)
     flat = [s for d in sents for s in d]
     v = embed(enc, flat)                                      # gradient into bge
     with torch.no_grad(): v0 = embed(ref, flat)
     x = torch.zeros(valid.shape + (DIM,), device=DEV, dtype=v.dtype); x[valid] = v   # row-major order = the documents' order
+    lq = torch.zeros((), device=DEV)
     with torch.autocast("cuda", dtype=torch.bfloat16):
         le, ld, _, _, _ = ns["losses"](x, valid, masked)
         la = F.cross_entropy(v @ v0.T / E.tau_anchor, torch.arange(len(v), device=DEV))
@@ -217,16 +249,28 @@ for step in range(step0 + 1, E.steps + 1) if E.steps > 0 else []:
             vq = embed(enc, qs_)
             with torch.no_grad(): vq0 = embed(ref, qs_)
             la = la + F.cross_entropy(vq @ vq0.T / E.tau_anchor, torch.arange(len(vq), device=DEV))
-        loss = A.w_enc * le + ld + A.w_page * ns["LP"][0] + E.w_anchor * la
+        if qrows:
+            pages = model.last_page                           # the "one" pass's page vectors, with gradient; earlier batches' as negatives only
+            PQ = ns["PQ"]; keys = torch.cat([pages] + PQ[:-1]) if len(PQ) > 1 else pages
+            doc = torch.tensor([b for b, _, _ in qrows], device=DEV)
+            off_ = np.cumsum([0] + [len(d) for d in sents]); sel = [(n_, off_[b] + p) for n_, (b, _, p) in enumerate(qrows) if p >= 0]
+            for texts in ([QPFX + q["query"] for _, q, _ in qrows], [q["hyde"] for _, q, _ in qrows]):
+                qv = embed(enc, texts)
+                lq = lq + F.cross_entropy(qv @ keys.T / E.tau_q, doc)                                   # -> the article
+                if sel:                                                                                   # -> the passage's sentence (the bge side)
+                    si = torch.tensor([a for a, _ in sel], device=DEV); tgt = torch.tensor([t for _, t in sel], device=DEV)
+                    lq = lq + F.cross_entropy(qv[si] @ v.T / E.tau_q, tgt)
+            lq = lq / 2
+        loss = A.w_enc * le + ld + A.w_page * ns["LP"][0] + E.w_anchor * la + E.w_q * lq
     ns["LAST_COS"].clear()
     opt.zero_grad(set_to_none=True); loss.backward()
     gn = float(torch.nn.utils.clip_grad_norm_(list(model.parameters()) + list(enc.parameters()), 1.0))
     if gn < 100: opt.step()
     sched.step()
-    acc.append((le.item(), ld.item(), float(ns["LP"][0]), la.item(), float((v * v0).sum(-1).mean())))
+    acc.append((le.item(), ld.item(), float(ns["LP"][0]), la.item(), float((v * v0).sum(-1).mean()), float(lq)))
     if step % 100 == 0:
-        e, d_, p_, a_, c_ = np.mean(acc, 0); acc = []
-        out(f"[step {step}] enc {e:.3f} dec {d_:.3f} page {p_:.3f} anchor {a_:.3f} cos_to_stock {c_:.3f} |grad| {gn:.2f} {(time.time()-t0)/60:.0f} min")
+        e, d_, p_, a_, c_, q_ = np.mean(acc, 0); acc = []
+        out(f"[step {step}] enc {e:.3f} dec {d_:.3f} page {p_:.3f} anchor {a_:.3f} query {q_:.3f} cos_to_stock {c_:.3f} |grad| {gn:.2f} {(time.time()-t0)/60:.0f} min")
     if step % E.eval_every == 0 or step == E.steps:
         r = eval_now(); out(f"[eval {step}] {fmt(r)}")
         if r[E.select] > BEST + E.min_gain: STALE = 0

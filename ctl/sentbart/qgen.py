@@ -1,0 +1,55 @@
+#!/usr/bin/env python3
+"""Queries for the sentence BART's query -> article training: for each document of pick_docs.py's file, from its
+passage, (1) a search query the way the app model types one (a short keyword query, 3-8 words) and (2) a HyDE
+sentence - one sentence written the way the article would state the fact. By a small teacher (nano). Resumable.
+Output rows: {id, s0, s1, query, hyde}.
+
+  python3 qgen.py --docs docs_for_qgen.jsonl --out queries.jsonl --workers 8
+"""
+import argparse, json, os, time, urllib.request
+import concurrent.futures as cf
+ap = argparse.ArgumentParser()
+ap.add_argument("--docs", required=True); ap.add_argument("--out", required=True)
+ap.add_argument("--model", default="gpt-5-nano"); ap.add_argument("--workers", type=int, default=8)
+A = ap.parse_args()
+KEY = open("/root/.oai").read().strip(); URL = "https://api.openai.com/v1/chat/completions"
+SYS = ("You read a passage of an English Wikipedia article and write two things someone looking for the fact in it might use. "
+       "1) query: a search query as typed into a search box - 3 to 8 words, keywords only, no question mark, naming the subject when the passage does. "
+       "2) hyde: ONE sentence, 15-30 words, written the way the article itself states the fact - encyclopedic, declarative, naming the subject; "
+       "it must not copy the passage's sentence word for word. Reply as JSON: {\"query\": \"...\", \"hyde\": \"...\"}")
+ERR = [0]
+
+
+def ask(r, tries=4):
+    body = {"model": A.model, "messages": [{"role": "system", "content": SYS},
+            {"role": "user", "content": f"Article title: {r['title']}\nPassage: {r['passage'][:1200]}"}],
+            "response_format": {"type": "json_object"}, "max_completion_tokens": 3000}
+    for t in range(tries):
+        try:
+            d = json.load(urllib.request.urlopen(urllib.request.Request(URL, data=json.dumps(body).encode(),
+                headers={"Authorization": "Bearer " + KEY, "Content-Type": "application/json"}), timeout=120))
+            v = json.loads(d["choices"][0]["message"]["content"])
+            q, h = (v.get("query") or "").strip(), (v.get("hyde") or "").strip()
+            if q and h: return {"id": r["id"], "s0": r["s0"], "s1": r["s1"], "query": q, "hyde": h}
+            return None
+        except Exception as e:
+            if ERR[0] < 5: ERR[0] += 1; print(f"[qgen] api error: {type(e).__name__} {str(e)[:120]}", flush=True)
+            if "401" in str(e) or "402" in str(e) or "insufficient_quota" in str(e): raise SystemExit(f"QGEN_ABORT {str(e)[:120]}")
+            time.sleep(3 * (t + 1))
+    return None
+
+
+rows = [json.loads(l) for l in open(A.docs) if l.strip()]
+done = set()
+if os.path.exists(A.out):
+    done = {json.loads(l)["id"] for l in open(A.out) if l.strip()}
+todo = [r for r in rows if r["id"] not in done]
+print(f"[qgen] {len(rows)} documents, {len(todo)} to go, {A.workers} at a time", flush=True)
+ok = 0; t0 = time.time()
+with open(A.out, "a") as fo, cf.ThreadPoolExecutor(A.workers) as ex:
+    for k, r in enumerate(ex.map(ask, todo)):
+        if r: ok += 1; fo.write(json.dumps(r, ensure_ascii=False) + "\n"); fo.flush()
+        if (k + 1) % 500 == 0: print(f"[qgen] {k+1}/{len(todo)}: {ok} written ({(time.time()-t0)/60:.0f} min)", flush=True)
+ex_ = rows[0] if rows else {}
+print(f"QGEN_DONE {ok} of {len(todo)} written ({len(done)} were there); e.g. {ex_.get('title','')!r} -> " +
+      (open(A.out).readline().strip()[:200] if os.path.exists(A.out) else ""), flush=True)
