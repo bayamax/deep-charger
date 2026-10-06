@@ -73,6 +73,7 @@ ap.add_argument("--demo-sft", default="", help="jsonl of {q, hist, traj}: superv
 ap.add_argument("--demo-per-step", type=int, default=4)
 ap.add_argument("--demo-on-fail", type=float, default=0.0, help=">0 (with --search-demo): teacher-mixed GRPO - a search group none of whose samples passes also takes one supervised step on that question's teacher trajectory (searching trained, pages and reply masked) at this weight, beside its policy gradient")
 ap.add_argument("--followup", type=float, default=0.0, help="with --mt-items: after a search step on a question without history that at least one sample passed, with this probability the teacher writes the user's follow-up (refers to the exchange by pronoun, asks one new fact with a short answer an English Wikipedia article states; the page is fetched and the answer checked to be on it); it becomes the next search step's item, the exchange as its history - follow-ups on the fly, never seen before")
+ap.add_argument("--search-g", type=int, default=0, help=">0: samples per search question on the multi-turn path (the original search GRPO used 12; the multi-turn runs used --reason-g for both kinds); 0 = --reason-g")
 ap.add_argument("--cot-on-fail", type=float, default=0.0, help=">0: a reasoning group none of whose samples passes takes one supervised step on the problem's own reference thinking and answer (Dolphin's CoT), at this weight - the teacher shows the way where the model found none")
 ap.add_argument("--r1-on-fail", type=int, default=0, help="1 (with --demo-on-fail): a search group none of whose samples passes, with no teacher trajectory on file, has R1 solve the question now in the student's environment (r1_traj.py, up to 5 searches, kept at <= 3); a verified trajectory is shown at once (as --demo-on-fail) and kept for the run. Follow-ups written on the fly get theirs this way")
 ap.add_argument("--loop-break", default="", choices=["", "stop", "answer"], help="a thinking span whose last 256 tokens are under 25%% distinct is a repetition loop (g14 step 400: 22 of 100 held-out replies never finished, tail repetition 0.84). stop: end the row there; answer: close the thinking and let it answer")
@@ -1371,7 +1372,7 @@ for step in range(state["step"] + 1, A.steps + 1) if (reason or A.mt_items) else
     A.temp = ns["TEMP"] = A.search_temp if (searching and A.search_temp > 0) else BASE_TEMP
     A.gen = A.search_gen if (searching and A.search_gen > 0) else BASE_GEN
     try:
-        rolls = rollout_batch(qtext, A.reason_g)
+        rolls = rollout_batch(qtext, A.search_g if (searching and A.search_g > 0) else A.reason_g)
     except (KeyboardInterrupt, SystemExit):
         raise
     except BaseException as e:
