@@ -72,6 +72,7 @@ ap.add_argument("--probe-g", type=int, default=4); ap.add_argument("--probe-n", 
 ap.add_argument("--demo-sft", default="", help="jsonl of {q, hist, traj}: supervised steps on teacher trajectories (thinking and searches trained, information blocks and the reply masked), --demo-per-step a step, beside --replay-per-step of the model's own verified traces {q, hist, text}")
 ap.add_argument("--demo-per-step", type=int, default=4)
 ap.add_argument("--demo-on-fail", type=float, default=0.0, help=">0 (with --search-demo): teacher-mixed GRPO - a search group none of whose samples passes also takes one supervised step on that question's teacher trajectory (searching trained, pages and reply masked) at this weight, beside its policy gradient")
+ap.add_argument("--followup", type=float, default=0.0, help="with --mt-items: after a search step on a question without history that at least one sample passed, with this probability the teacher writes the user's follow-up (refers to the exchange by pronoun, asks one new fact with a short answer an English Wikipedia article states; the page is fetched and the answer checked to be on it); it becomes the next search step's item, the exchange as its history - follow-ups on the fly, never seen before")
 ap.add_argument("--loop-break", default="", choices=["", "stop", "answer"], help="a thinking span whose last 256 tokens are under 25%% distinct is a repetition loop (g14 step 400: 22 of 100 held-out replies never finished, tail repetition 0.84). stop: end the row there; answer: close the thinking and let it answer")
 ap.add_argument("--rft", type=int, default=0, help="1: rejection-sampling fine-tuning instead of the policy gradient on reasoning steps: of the G samples the teacher passes, the one with the shortest thinking is trained on as plain SFT; none passing falls back to --wheels. No advantage, no std, no length pressure.")
 ap.add_argument("--sft-only", type=int, default=0, help=">0: pure distillation, no rollouts and no judge: each step trains this many reasoning records (their R1 thinking and reply) as plain SFT, plus one verified search trace at --rft-replay weight")
@@ -835,8 +836,39 @@ if A.mt_items:
 def chat_msgs(q):
     """the prompt as the app sends it: the earlier exchanges of the conversation (if any), then the new question"""
     return HIST.get(q, []) + [{"role": "user", "content": q}]
+FOLLOW = collections.deque()
+FOLLOW_SYS = "You write the next thing a user says in a chat with an assistant. Output JSON only."
+FOLLOW_USER = """The chat so far:
+USER: {q}
+ASSISTANT: {reply}
+
+Write the user's natural follow-up question. It asks for ONE new fact closely related to what the assistant just said; it refers to things from the exchange only by a pronoun or a phrase like "that film" / "he" / "that city" (never by name); it is not answerable from the exchange itself. The answer must be a short name, term, date or number (1-4 words) that an English Wikipedia article states plainly.
+Output: {{"q": "...", "gold": "<the answer>", "page": "<the title of the Wikipedia article that states it>"}} - or {{"skip": true}} if no good follow-up exists."""
+
+
+def make_followup(step, q, gold, roll):
+    """the teacher's follow-up to a passing exchange, verified on its page, queued for the next search step"""
+    reply = roll["text"].split("</think>")[-1].strip()[:1500]
+    v = ask_teacher(FOLLOW_SYS, FOLLOW_USER.format(q=q[:1500], reply=reply), "followup")
+    fq, fg, pg = (v.get("q") or "").strip(), (v.get("gold") or "").strip(), (v.get("page") or "").strip()
+    why = None
+    if "error" in v or v.get("skip") or not fq or not fg or not pg: why = v.get("error") or "skip"
+    elif len(fg.split()) > 4 or not any(c.isalnum() for c in fg): why = "gold shape"
+    elif has(fq, fg) or has(q, fg) or has(reply, fg): why = "answer already in the exchange"
+    elif has(fq, gold): why = "names the first answer"
+    elif not has(get_page(pg) or "", fg): why = "answer not on the page"
+    if why: print(f"[followup] not used ({why}): {fq[:80]!r} / {fg!r}", flush=True); return
+    hist = [{"role": "user", "content": q}, {"role": "assistant", "content": reply}]
+    HIST[fq] = hist; FOLLOW.append({"q": fq, "gold": fg})
+    with open(os.path.join(A.outdir, "followups.jsonl"), "a") as f:
+        f.write(json.dumps({"step": step, "q": q, "fq": fq, "gold": fg, "page": pg, "hist": hist}, ensure_ascii=False) + "\n")
+    print(f"[followup] {fq[:90]!r} -> {fg!r} ({pg})", flush=True)
+
+
 def pool_item(step):
-    """the search question of this step: loop order indexes by step (odd slots), pool3 order counts search steps from --pool-offset"""
+    """the search question of this step: loop order indexes by step (odd slots), pool3 order counts search steps from --pool-offset;
+    a follow-up written on the fly (--followup) comes first"""
+    if FOLLOW: return FOLLOW.popleft()
     if A.pool_order == "pool3":
         n_search = (step - step // A.reason_every) if A.reason_every else step // max(A.search_every, 1)   # search steps so far, this one included
         return pool[(A.pool_offset + n_search - 1) % len(pool)]
@@ -1331,6 +1363,9 @@ for step in range(state["step"] + 1, A.steps + 1) if (reason or A.mt_items) else
                                       "reward": sc, "why": v, "ns": r["ns"], "text": r["text"]},
                                      ensure_ascii=False) + "\n")
     roll_fh.flush()
+    if searching and A.followup > 0 and A.mt_items and not HIST.get(qtext) and rw and max(rw) >= 1.0 and random.random() < A.followup:
+        try: make_followup(step, qtext, item["gold"], rolls[max(range(len(rw)), key=lambda i_: rw[i_])])
+        except Exception as e_: print(f"[followup] failed: {type(e_).__name__}: {str(e_)[:100]}", flush=True)
     mu = sum(rw) / max(len(rw), 1)
     sd = (sum((x - mu) ** 2 for x in rw) / max(len(rw), 1)) ** 0.5
     losses = []; wheel = 0.0
