@@ -8,7 +8,7 @@ cd /root
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null)
 R=baya1116/hypernet-sp-distill
 RAW="https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl"
-BOXI_SERIAL=55
+BOXI_SERIAL=56
 if [ -f /root/.boxi_serial ] && [ "$(cat /root/.boxi_serial)" -gt "$BOXI_SERIAL" ] 2>/dev/null; then echo "BOXI_STALE $BOXI_SERIAL"; exit 0; fi
 echo $BOXI_SERIAL > /root/.boxi_serial
 mkdir -p /root/sb /root/work
@@ -1128,12 +1128,17 @@ if [ -f /root/sb/pick_docs.py ] && [ ! -e /root/.e2e2_docs ]; then touch /root/.
     [ -s /root/sb/e2e2/docs_for_qgen.jsonl ] && hf upload baya1116/hypernet-sp-distill /root/sb/e2e2/docs_for_qgen.jsonl sentbart/e2e2/docs_for_qgen.jsonl >/dev/null 2>&1 && echo "E2E2_DOCS_UP $(date -u)"
   ) >> /root/sb_e2e2.log 2>&1 &
 fi
+# ---- 2026-10-07 02:20 JST: ladder2's waiting keeper replaced (starts on the partial queries at 10,000 rows, refreshes them).
+if [ ! -e /root/.ladder2_v2 ]; then touch /root/.ladder2_v2; pkill -f "ladder2kee[p].sh"; sleep 2; fi
 if [ -f /root/sb/e2e_ladder.py ] && ! pgrep -f "ladder2kee[p].sh" >/dev/null && ! grep -q "LADDER2_JOB_DONE" /root/sb_ladder2.log 2>/dev/null; then
   cat > /root/ladder2keep.sh <<'RK'
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); R=baya1116/hypernet-sp-distill; cd /root/sb; mkdir -p /root/sb/e2e2
-until hf download $R sentbart/e2e2/queries.jsonl --local-dir /root/sb/e2e2/dl >/dev/null 2>&1 && [ -s /root/sb/e2e2/dl/sentbart/e2e2/queries.jsonl ]; do sleep 300; done
-cp /root/sb/e2e2/dl/sentbart/e2e2/queries.jsonl /root/sb/e2e2/queries.jsonl
+# the writer takes hours: start once 10,000 rows are there (the 2000 evaluation documents' come first), and refresh the
+# file from the hub every 15 minutes - each later rung reads it afresh at its start
+fetchq() { for f in queries.jsonl queries_partial.jsonl; do hf download $R sentbart/e2e2/$f --local-dir /root/sb/e2e2/dl >/dev/null 2>&1 && [ -s /root/sb/e2e2/dl/sentbart/e2e2/$f ] && { cp /root/sb/e2e2/dl/sentbart/e2e2/$f /root/sb/e2e2/queries.jsonl.new && mv /root/sb/e2e2/queries.jsonl.new /root/sb/e2e2/queries.jsonl; return 0; }; done; return 1; }
+until fetchq && [ "$(wc -l < /root/sb/e2e2/queries.jsonl)" -ge 10000 ]; do sleep 300; done
 echo "[ladder2] queries: $(wc -l < /root/sb/e2e2/queries.jsonl) rows $(date -u +%H:%M)"
+( while sleep 900; do fetchq; done ) > /dev/null 2>&1 &
 pkill -f "ladderkee[p].sh"; pkill -f "e2e_ladder.py --start"; pkill -f "train_e2e.py.*/root/sb/ladder/"; pkill -f "search_cascade.py.*/root/sb/ladder/"; sleep 15
 echo "LADDER_JOB_DONE replaced by ladder2 $(date -u)" >> /root/sb_ladder.log
 hf upload $R /root/sb/ladder/ladder.json sentbart/e2e/ladder/ladder.json >/dev/null 2>&1
