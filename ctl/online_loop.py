@@ -508,7 +508,6 @@ def last_logits(**kw):
     return HEAD(h)[:, -1, :]
 
 
-@torch.no_grad()
 EOS_IDS = tok.encode("<｜end▁of▁sentence｜>", add_special_tokens=False)
 
 
@@ -530,6 +529,7 @@ def seed_from_roll(roll):
     return {"gen": wgen, "kept": wkept}
 
 
+@torch.no_grad()
 def rollout_batch(question, B, seed=None):
     """B independent rollouts decoded in lockstep: one question for all rows (str), or one question per row (list).
     seed (multi-turn, the win scheme the app runs): {gen, kept} - the conversation so far as one stream; its newest --rw
