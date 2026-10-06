@@ -23,7 +23,7 @@ ERR = [0]
 def ask(r, tries=4):
     body = {"model": A.model, "messages": [{"role": "system", "content": SYS},
             {"role": "user", "content": f"Article title: {r['title']}\nPassage: {r['passage'][:1200]}"}],
-            "response_format": {"type": "json_object"}, "max_completion_tokens": 3000}
+            "response_format": {"type": "json_object"}, "max_completion_tokens": 2000, "reasoning_effort": "low"}   # a short task: little reasoning, so each call is quick and light on the token limit
     t = 0; waited = 0
     while t < tries and waited < 600:
         try:
@@ -39,9 +39,9 @@ def ask(r, tries=4):
             if q and h: return {"id": r["id"], "s0": r["s0"], "s1": r["s1"], "query": q, "hyde": h}
             return None
         except urllib.error.HTTPError as e:
-            msg = e.read()[:200].decode(errors="replace") if hasattr(e, "read") else ""
+            msg = " ".join(e.read()[:400].decode(errors="replace").split()) if hasattr(e, "read") else ""
             ERR[0] += 1
-            if ERR[0] % 50 == 1 or ERR[0] <= 5: print(f"[qgen] http {e.code} x{ERR[0]}: {msg}", flush=True)
+            if ERR[0] % 50 == 1 or ERR[0] <= 5: print(f"[qgen] http {e.code} x{ERR[0]}: {msg[:220]}", flush=True)
             if e.code in (401, 402) or "insufficient_quota" in msg: raise SystemExit(f"QGEN_ABORT http {e.code} {msg[:100]}")
             if e.code == 429: time.sleep(20); waited += 20; continue      # the rate limit: wait, not a try spent
             time.sleep(3 * (t + 1)); t += 1
