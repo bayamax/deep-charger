@@ -509,8 +509,32 @@ def last_logits(**kw):
 
 
 @torch.no_grad()
-def rollout_batch(question, B):
+EOS_IDS = tok.encode("<｜end▁of▁sentence｜>", add_special_tokens=False)
+
+
+def seed_from_hist(hist):
+    """earlier exchanges given as chat messages (an items file): the stream they would have been, nothing absorbed yet"""
+    ids = tok.encode(tok.apply_chat_template(list(hist), tokenize=False), add_special_tokens=False)
+    if ids and ids[0] == tok.bos_token_id: ids = ids[1:]
+    return {"gen": ids, "kept": []}
+
+
+def seed_from_roll(roll):
+    """the stream after a rollout, as pool_eval's win mode carries it to the next turn: the pooler's kept tokens as they
+    stand, the unabsorbed tail (plus the end-of-turn token) raw; a first turn's question, pinned only, goes into the stream"""
+    q_part = roll["q_ids"][1:] if roll["q_ids"] and roll["q_ids"][0] == tok.bos_token_id else list(roll["q_ids"])
+    wkept, wgen = list(roll.get("kept") or []), list(roll["gen"][roll.get("absorbed", 0):]) + EOS_IDS
+    if roll.get("g0", 0) == 0:
+        if roll.get("absorbed", 0): wkept = q_part + wkept
+        else: wgen = q_part + wgen
+    return {"gen": wgen, "kept": wkept}
+
+
+def rollout_batch(question, B, seed=None):
     """B independent rollouts decoded in lockstep: one question for all rows (str), or one question per row (list).
+    seed (multi-turn, the win scheme the app runs): {gen, kept} - the conversation so far as one stream; its newest --rw
+    tokens start in the raw window, the rest is absorbed by the pooler, and only this question is pinned. Memory is then
+    bounded whatever the history (question + SP + raw window + block), exactly as pool_eval --mt-mode win measures it.
 
     Semantics match rollout() exactly: every row keeps its own generation, pooled set, page offsets and stop
     conditions, and each block is rebuilt from that row's own state against a freshly prefilled question cache.
@@ -520,8 +544,12 @@ def rollout_batch(question, B):
     model.eval()
     qs = list(question) if isinstance(question, (list, tuple)) else [question] * B
     B = len(qs)
-    QID = [tok.encode(tok.apply_chat_template(chat_msgs(q), add_generation_prompt=True, tokenize=False) + "<think>\n")
+    QID = [tok.encode(tok.apply_chat_template([{"role": "user", "content": q}] if seed else chat_msgs(q), add_generation_prompt=True, tokenize=False) + "<think>\n")
            for q in qs]
+    seed_gen = []
+    if seed:   # the stream so far, then this question as the chat renders it (the same header the pinned prompt holds)
+        hdr = QID[0][1:] if QID[0] and QID[0][0] == tok.bos_token_id else list(QID[0])
+        seed_gen = list(seed["gen"]) + hdr
     MQs = [len(x) for x in QID]; MQ = max(MQs)                       # MQ = cache slots of the question prefix (left-padded)
     PAD = tok.pad_token_id if tok.pad_token_id is not None else eos
     q_in = torch.full((B, MQ), PAD, dtype=torch.long, device=DEV); q_am = torch.zeros(B, MQ, device=DEV)
@@ -529,7 +557,8 @@ def rollout_batch(question, B):
     for b, ids in enumerate(QID):                                    # every row's own tokens end on slot MQ-1, positions 0..len-1
         q_in[b, MQ - len(ids):] = torch.tensor(ids, device=DEV); q_am[b, MQ - len(ids):] = 1
         q_pos[b, MQ - len(ids):] = torch.arange(len(ids), device=DEV)
-    S = [dict(gen=[], msk=[], kept=[], absorbed=0, segs=[], n_model=0, ns_=0, nm=0, nmt=0, served=[], queries=[],
+    S = [dict(gen=list(seed_gen), msk=[0] * len(seed_gen), kept=list(seed["kept"]) if seed else [], absorbed=0, g0=len(seed_gen),
+              segs=[], n_model=0, ns_=0, nm=0, nmt=0, served=[], queries=[],
               page_ids=[], page_off=0, seen_pages={}, cur_key=None, nrep=0, dead=False, cut=False, done=False)
          for _ in range(B)]
     # Wall clock, not work: the rows run together, so the batch needs about what one rollout needed. 600 s was
@@ -551,8 +580,8 @@ def rollout_batch(question, B):
         gen = st["gen"]
         if len(gen) >= 8 and len(set(gen[-8:])) == 1:
             st["dead"] = True; return True
-        txt = tok.decode(gen)
-        if A.loop_break and st["n_model"] % 64 == 0 and len(gen) >= 256 and "</think>" not in txt and len(set(gen[-256:])) < 64:
+        txt = tok.decode(gen[st["g0"]:])
+        if A.loop_break and st["n_model"] % 64 == 0 and len(gen) - st["g0"] >= 256 and "</think>" not in txt and len(set(gen[-256:])) < 64:
             st["loops"] = st.get("loops", 0) + 1
             if A.loop_break == "stop" or st["loops"] > 1:
                 st["dead"] = True; return True
@@ -615,10 +644,10 @@ def rollout_batch(question, B):
             st = S[b]; gen = st["gen"]; c0 = len(gen); R = min(c0, A.rw); nd = c0 - R
             if nd > st["absorbed"]:
                 st["kept"].extend(gen[st["absorbed"]:nd]); st["absorbed"] = nd
-                if len(st["kept"]) > A.maxd:
-                    _, mass = pooler.forward_with_mass(emb(st["kept"]).to(torch.float32))
-                    mm = mass[0].float().cpu().numpy()
-                    st["kept"] = [st["kept"][i] for i in np.sort(np.argsort(mm)[-A.maxd:])]
+            if len(st["kept"]) > A.maxd:
+                _, mass = pooler.forward_with_mass(emb(st["kept"]).to(torch.float32))
+                mm = mass[0].float().cpu().numpy()
+                st["kept"] = [st["kept"][i] for i in np.sort(np.argsort(mm)[-A.maxd:])]
             spv = sp(st["kept"]); st["segs"].append([c0, None, list(st["kept"])])
             parts = [spv] + ([emb(gen[c0 - R:c0])] if R > 0 else [])
             blk = torch.cat(parts, dim=1); blocks.append(blk); Ls.append(blk.shape[1])
@@ -664,7 +693,7 @@ def rollout_batch(question, B):
             npos = [p + 1 for p in npos]
         for b in act:
             st = S[b]; st["segs"][-1][1] = len(st["gen"])
-            txt = tok.decode(st["gen"])
+            txt = tok.decode(st["gen"][st["g0"]:])
             if st["dead"] or st["cut"] or st.get("ended") or (st["gen"] and st["gen"][-1] == eos):
                 st["done"] = True
             elif A.stop == "answer" and "</think>" in txt and answer_complete(txt.split("</think>")[-1]):
@@ -672,15 +701,15 @@ def rollout_batch(question, B):
         del past, last; clear()
 
     cut_by_time = sum(1 for st in S if st["n_model"] < A.gen and not st["cut"] and not st["dead"]
-                      and "</think>" not in tok.decode(st["gen"]))
+                      and "</think>" not in tok.decode(st["gen"][st["g0"]:]))
     if cut_by_time:
         print(f"[warn] {cut_by_time}/{B} rollouts hit the {budget}s batch budget before answering", flush=True)
     outs = []
     for b, st in enumerate(S):
-        txt = tok.decode(st["gen"])
+        txt = tok.decode(st["gen"][st["g0"]:])
         landed = (not st["cut"]) and "</think>" in txt and bool(txt.split("</think>")[-1].strip())
         ans = head_sentence(txt.split("</think>")[-1].strip()) if landed else ""
-        outs.append(dict(q_ids=QID[b], q=qs[b], gen=st["gen"], msk=st["msk"], ended=bool(st.get("ended")),
+        outs.append(dict(q_ids=QID[b], q=qs[b], gen=st["gen"], msk=st["msk"], ended=bool(st.get("ended")), kept=st["kept"], absorbed=st["absorbed"], g0=st["g0"],
                          segs=[x for x in st["segs"] if x[1] is not None], text=txt, answer=ans,
                          ns=st["ns_"], more=st["nm"], rep=st["nrep"], cut=st["cut"], served=st["served"],
                          queries=st["queries"], landed=landed, dead=st["dead"]))
@@ -862,7 +891,7 @@ def make_followup(step, q, gold, roll):
     elif not has(get_page(pg) or "", fg): why = "answer not on the page"
     if why: print(f"[followup] not used ({why}): {fq[:80]!r} / {fg!r}", flush=True); return
     hist = [{"role": "user", "content": q}, {"role": "assistant", "content": reply}]
-    HIST[fq] = hist; FOLLOW.append({"q": fq, "gold": fg})
+    HIST[fq] = hist; FOLLOW.append({"q": fq, "gold": fg, "seed": seed_from_roll(roll)})
     with open(os.path.join(A.outdir, "followups.jsonl"), "a") as f:
         f.write(json.dumps({"step": step, "q": q, "fq": fq, "gold": fg, "page": pg, "hist": hist}, ensure_ascii=False) + "\n")
     print(f"[followup] {fq[:90]!r} -> {fg!r} ({pg})", flush=True)
@@ -1371,8 +1400,11 @@ for step in range(state["step"] + 1, A.steps + 1) if (reason or A.mt_items) else
     if (step - 1) % A.accum == 0: opt.zero_grad(set_to_none=True)
     A.temp = ns["TEMP"] = A.search_temp if (searching and A.search_temp > 0) else BASE_TEMP
     A.gen = A.search_gen if (searching and A.search_gen > 0) else BASE_GEN
+    seed = None
+    if searching:
+        seed = item.get("seed") or (seed_from_hist(HIST[qtext]) if HIST.get(qtext) else None)
     try:
-        rolls = rollout_batch(qtext, A.search_g if (searching and A.search_g > 0) else A.reason_g)
+        rolls = rollout_batch(qtext, A.search_g if (searching and A.search_g > 0) else A.reason_g, seed=seed)
     except (KeyboardInterrupt, SystemExit):
         raise
     except BaseException as e:

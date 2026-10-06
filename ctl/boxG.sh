@@ -80,7 +80,7 @@ PSKIP=
 # The raw GitHub copy this box fetches can lag and hand a control run an OLDER version of this file (04:48 on 09-22 it
 # relaunched the online loop under the previous mode while the newer run was merging a checkpoint on the same card).
 # Every edit bumps BOXG_SERIAL; a run that sees a lower serial than one already executed stops here.
-BOXG_SERIAL=2026100619
+BOXG_SERIAL=2026100620
 if [ -f /root/.boxg_serial ] && [ "$(cat /root/.boxg_serial)" -gt "$BOXG_SERIAL" ] 2>/dev/null; then echo "BOXG_STALE $BOXG_SERIAL < $(cat /root/.boxg_serial)"; exit 0; fi
 echo $BOXG_SERIAL > /root/.boxg_serial
 MODE=idle         # 2026-09-29: the side jobs hold the card (multi-turn measurement and training); a finished reeval re-launched on every control run and killed their evaluators
@@ -3141,6 +3141,15 @@ if [ ! -e /root/.mtg6_v4 ]; then touch /root/.mtg6_v4; pkill -f "mtg6kee[p].sh";
 if [ ! -e /root/.mtg6_g12 ] && [ -e /root/.mtg6_direct ]; then touch /root/.mtg6_g12; rm -f /root/.mtg6_direct
   pkill -f "mtg6kee[p].sh"; pkill -f "online_loop.py /root/mtg3_s100.safetensors /root/online_mtg6"; sleep 10; pkill -9 -f "online_loop.py /root/mtg3_s100.safetensors /root/online_mtg6" 2>/dev/null
   echo "[mtg6] restarted with 12 samples a search question $(date -u +%H:%M)" >> /root/mtg6.log
+fi
+# 2026-10-07 08:10 JST (the user: the memory is bounded, so 12 must fit - and if it is not bounded, that is the problem).
+# It was not, with history: the training rollouts pinned the whole conversation in the prompt, where pool_eval's win
+# mode (the app's scheme) pins only the current question and runs the rest as one stream through the raw window and
+# the pooler. rollout_batch now takes the stream as a seed; a follow-up continues the stream of the exchange it was
+# written from. mtg6 restarted once more so every follow-up trains the way the app runs.
+if [ ! -e /root/.mtg6_win ] && [ -e /root/.mtg6_direct ] && grep -q "def seed_from_roll" /root/work/online_loop.py; then touch /root/.mtg6_win; rm -f /root/.mtg6_direct
+  pkill -f "mtg6kee[p].sh"; pkill -f "online_loop.py /root/mtg3_s100.safetensors /root/online_mtg6"; sleep 10; pkill -9 -f "online_loop.py /root/mtg3_s100.safetensors /root/online_mtg6" 2>/dev/null
+  echo "[mtg6] restarted with the history as a stream (win), 12 samples a search question $(date -u +%H:%M)" >> /root/mtg6.log
 fi
 if [ ! -e /root/.mtg6_direct ] && [ -s /root/work/nq_items_1.jsonl ]; then touch /root/.mtg6_direct
   pkill -f "mtg6kee[p].sh"; pkill -f "online_loop.py /root/mtg3_s100.safetensors /root/probe_nq1"; sleep 10
