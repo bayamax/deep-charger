@@ -80,7 +80,7 @@ PSKIP=
 # The raw GitHub copy this box fetches can lag and hand a control run an OLDER version of this file (04:48 on 09-22 it
 # relaunched the online loop under the previous mode while the newer run was merging a checkpoint on the same card).
 # Every edit bumps BOXG_SERIAL; a run that sees a lower serial than one already executed stops here.
-BOXG_SERIAL=2026100622
+BOXG_SERIAL=2026100623
 if [ -f /root/.boxg_serial ] && [ "$(cat /root/.boxg_serial)" -gt "$BOXG_SERIAL" ] 2>/dev/null; then echo "BOXG_STALE $BOXG_SERIAL < $(cat /root/.boxg_serial)"; exit 0; fi
 echo $BOXG_SERIAL > /root/.boxg_serial
 MODE=idle         # 2026-09-29: the side jobs hold the card (multi-turn measurement and training); a finished reeval re-launched on every control run and killed their evaluators
@@ -3428,6 +3428,8 @@ QK
   setsid nohup bash -c 'bash /root/qgen6keep.sh >> /root/qgen.log 2>&1' > /dev/null 2>&1 < /dev/null &
   echo "QGEN6_ARMED $(date -u)"
 fi
+# 2026-10-07 08:00 JST: the mirror keeper runs the script it was started with; restarted once so the new lines show.
+if [ ! -e /root/.mirror_r3 ]; then touch /root/.mirror_r3; pkill -f "mirrorkee[p].sh"; sleep 1; fi
 # ---- the box's own logs, mirrored to the hub every ten minutes: readable without the Vast API ----
 pkill -f "logmirro[r].sh" 2>/dev/null; pkill -f "logmirror[2].sh" 2>/dev/null   # replaced by logmirror3 (adds the score table)
 cat > /root/logmirror3.sh <<'LM'
