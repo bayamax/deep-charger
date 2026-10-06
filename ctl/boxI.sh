@@ -8,7 +8,7 @@ cd /root
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null)
 R=baya1116/hypernet-sp-distill
 RAW="https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl"
-BOXI_SERIAL=53
+BOXI_SERIAL=54
 if [ -f /root/.boxi_serial ] && [ "$(cat /root/.boxi_serial)" -gt "$BOXI_SERIAL" ] 2>/dev/null; then echo "BOXI_STALE $BOXI_SERIAL"; exit 0; fi
 echo $BOXI_SERIAL > /root/.boxi_serial
 mkdir -p /root/sb /root/work
@@ -1102,6 +1102,19 @@ while :; do
 done
 RK
   setsid nohup bash /root/ladderlogkeep.sh > /dev/null 2>&1 < /dev/null &
+fi
+# ---- cascadeR1 (2026-10-06 13:25 JST, the user: and with HyDE queries?): ladder r01's best (e2e + query anchor) on the
+# keyword queries and the HyDE 100 (dcq_all), beside the running rung. The 58.1 model and e2e1 were measured on the same.
+if [ -s /root/sb/ladder/cap_bge12_bart8/model_best.pt ] && [ -s /root/sb/sc/dcq_all.jsonl ] && ! pgrep -f "cascadeR1kee[p].sh" >/dev/null && ! grep -q "CASCADER1_JOB_DONE" /root/sb_cascadeR1.log 2>/dev/null; then
+  cat > /root/cascadeR1keep.sh <<'RK'
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); R=baya1116/hypernet-sp-distill; cd /root/sb
+cp /root/sb/ladder/cap_bge12_bart8/model_best.pt /root/sb/sc/r01_best.pt; echo "[cascadeR1] r01 best $(date -u +%H:%M)"
+python3 /root/sb/search_cascade.py --vec /root/sb/data/docs --text /root/sb/data/docs/docs_001.jsonl --ckpt /root/sb/sc/r01_best.pt --queries /root/sb/sc/dcq_all.jsonl --out /root/sb/sc/r01.json 2>&1 | grep --line-buffered -E "^\[cascade\] (q_api|h_api)|CASCADE_DONE|Error|Traceback|out of memory"
+hf upload $R /root/sb/sc/r01.json sentbart/searcheval/cascade_r01.json >/dev/null 2>&1; rm -f /root/sb/sc/r01_best.pt
+echo "CASCADER1_JOB_DONE $(date -u)"
+RK
+  setsid nohup bash -c 'bash /root/cascadeR1keep.sh 2>&1 | tee -a /root/sb_cascadeR1.log' > /dev/null 2>&1 < /dev/null &
+  echo "CASCADER1_LAUNCHED $(date -u)"
 fi
 echo "BOXI_OK serial $BOXI_SERIAL $(date -u)"
 # CTL-END
