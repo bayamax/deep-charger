@@ -73,6 +73,8 @@ ap.add_argument("--demo-sft", default="", help="jsonl of {q, hist, traj}: superv
 ap.add_argument("--demo-per-step", type=int, default=4)
 ap.add_argument("--demo-on-fail", type=float, default=0.0, help=">0 (with --search-demo): teacher-mixed GRPO - a search group none of whose samples passes also takes one supervised step on that question's teacher trajectory (searching trained, pages and reply masked) at this weight, beside its policy gradient")
 ap.add_argument("--followup", type=float, default=0.0, help="with --mt-items: after a search step on a question without history that at least one sample passed, with this probability the teacher writes the user's follow-up (refers to the exchange by pronoun, asks one new fact with a short answer an English Wikipedia article states; the page is fetched and the answer checked to be on it); it becomes the next search step's item, the exchange as its history - follow-ups on the fly, never seen before")
+ap.add_argument("--cot-on-fail", type=float, default=0.0, help=">0: a reasoning group none of whose samples passes takes one supervised step on the problem's own reference thinking and answer (Dolphin's CoT), at this weight - the teacher shows the way where the model found none")
+ap.add_argument("--r1-on-fail", type=int, default=0, help="1 (with --demo-on-fail): a search group none of whose samples passes, with no teacher trajectory on file, has R1 solve the question now in the student's environment (r1_traj.py, up to 5 searches, kept at <= 3); a verified trajectory is shown at once (as --demo-on-fail) and kept for the run. Follow-ups written on the fly get theirs this way")
 ap.add_argument("--loop-break", default="", choices=["", "stop", "answer"], help="a thinking span whose last 256 tokens are under 25%% distinct is a repetition loop (g14 step 400: 22 of 100 held-out replies never finished, tail repetition 0.84). stop: end the row there; answer: close the thinking and let it answer")
 ap.add_argument("--rft", type=int, default=0, help="1: rejection-sampling fine-tuning instead of the policy gradient on reasoning steps: of the G samples the teacher passes, the one with the shortest thinking is trained on as plain SFT; none passing falls back to --wheels. No advantage, no std, no length pressure.")
 ap.add_argument("--sft-only", type=int, default=0, help=">0: pure distillation, no rollouts and no judge: each step trains this many reasoning records (their R1 thinking and reply) as plain SFT, plus one verified search trace at --rft-replay weight")
@@ -865,6 +867,29 @@ def make_followup(step, q, gold, roll):
     print(f"[followup] {fq[:90]!r} -> {fg!r} ({pg})", flush=True)
 
 
+def r1_on_the_fly(q, gold, hist):
+    """R1 on one question now: r1_traj.py as a subprocess; the trajectory (student format) or None"""
+    import subprocess, tempfile
+    d = A.outdir; fi = os.path.join(d, "r1_fly_in.jsonl"); fo = os.path.join(d, "r1_fly_out.jsonl")
+    open(fi, "w").write(json.dumps({"q": q, "gold": gold, "hist": hist, "pass": 0}, ensure_ascii=False) + "\n")
+    if os.path.exists(fo): os.remove(fo)
+    t_ = time.time()
+    try:
+        subprocess.run([sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "r1_traj.py"), "--probe", fi, "--out", fo,
+                        "--max-pass", "0", "--workers", "1", "--maxsrch", "5", "--tok", os.environ.get("SP_BASE", "/root/gptq_hf_gq14")],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=900)
+    except Exception as e:
+        print(f"[r1] failed: {type(e).__name__}", flush=True); return None
+    rows = [json.loads(l) for l in open(fo)] if os.path.exists(fo) else []
+    r = next((x for x in rows if x.get("traj")), None)
+    ok = r is not None and r.get("ns", 9) <= 3
+    print(f"[r1] {q[:80]!r}: {'verified, ' + str(r['ns']) + ' searches' if r else 'no verified trajectory'}{'' if ok or not r else ' (too many searches, not used)'} ({time.time()-t_:.0f} s)", flush=True)
+    if ok:
+        with open(os.path.join(d, "r1_onfly.jsonl"), "a") as f: f.write(json.dumps(r, ensure_ascii=False) + "\n")
+        return r["traj"]
+    return None
+
+
 def pool_item(step):
     """the search question of this step: loop order indexes by step (odd slots), pool3 order counts search steps from --pool-offset;
     a follow-up written on the fly (--followup) comes first"""
@@ -1403,6 +1428,14 @@ for step in range(state["step"] + 1, A.steps + 1) if (reason or A.mt_items) else
     if A.demo_on_fail > 0 and searching and rw and max(rw) < 1.0 and demos.get(qtext.strip()):
         model.train()   # nothing of its own passed: the teacher shows this question once, beside whatever the group's gradient said
         wheel = guarded(demo_backward, qtext, demos[qtext.strip()], A.demo_on_fail / A.accum); clear()
+    elif A.r1_on_fail and A.demo_on_fail > 0 and searching and rw and max(rw) < 1.0:
+        traj = r1_on_the_fly(qtext, item["gold"], HIST.get(qtext) or [])
+        if traj:
+            demos[qtext.strip()] = traj; model.train()
+            wheel = guarded(demo_backward, qtext, traj, A.demo_on_fail / A.accum); clear()
+    if A.cot_on_fail > 0 and not searching and rw and max(rw) < 1.0 and prob.get("thinking"):
+        model.train()   # the problem's own reference thinking and answer, once
+        wheel = guarded(plain_backward, {"q": qtext, "thinking": prob["thinking"], "reply": ref}, A.cot_on_fail / A.accum); clear()
     if opt_s is not None and searching:
         opt_s.step(); opt_s.zero_grad(set_to_none=True); opt.zero_grad(set_to_none=True); clear()
     dl = []

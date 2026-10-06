@@ -80,7 +80,7 @@ PSKIP=
 # The raw GitHub copy this box fetches can lag and hand a control run an OLDER version of this file (04:48 on 09-22 it
 # relaunched the online loop under the previous mode while the newer run was merging a checkpoint on the same card).
 # Every edit bumps BOXG_SERIAL; a run that sees a lower serial than one already executed stops here.
-BOXG_SERIAL=2026100611
+BOXG_SERIAL=2026100612
 if [ -f /root/.boxg_serial ] && [ "$(cat /root/.boxg_serial)" -gt "$BOXG_SERIAL" ] 2>/dev/null; then echo "BOXG_STALE $BOXG_SERIAL < $(cat /root/.boxg_serial)"; exit 0; fi
 echo $BOXG_SERIAL > /root/.boxg_serial
 MODE=idle         # 2026-09-29: the side jobs hold the card (multi-turn measurement and training); a finished reeval re-launched on every control run and killed their evaluators
@@ -3127,6 +3127,9 @@ fi
 # --followup 0.5 (online_loop writes the user's follow-up to a passing exchange with the teacher, checks its answer on
 # the named page, and asks it next with the exchange as history).
 if [ ! -e /root/.mtg6_v2 ]; then touch /root/.mtg6_v2; pkill -f "mtg6kee[p].sh"; sleep 2; fi
+# 2026-10-07 02:50 JST (the user: a never-solved reasoning group takes Dolphin's own CoT, a never-solved search or follow-up
+# group gets R1 on the fly - what it can solve it solves better, what it cannot it is shown): --cot-on-fail 0.5 --r1-on-fail 1.
+if [ ! -e /root/.mtg6_v3 ]; then touch /root/.mtg6_v3; pkill -f "mtg6kee[p].sh"; sleep 2; fi
 # ---- mtg6 (2026-10-07 01:15 JST, the user: from now on train on questions never seen, barely learned, or unsolved; the
 # home-made pool is nearly used up and nq_open has ~88k). After mtg5b's screens: the best of {mtg5_s40, mtg5b_s40/80/120,
 # s100} on shard 0 is the start; 600 fresh Natural Questions (none in any evaluation or earlier training file) probed
@@ -3190,7 +3193,7 @@ echo "[mtg6] start $(date -u +%H:%M); $(df -h /root | tail -1 | awk '{print $4}'
 env SP_BASE=/root/gptq_hf_gq14 SP_NOSYS=1 SP_EPISODIC=1 OAI_KEY=$(cat /root/.oai 2>/dev/null) DSK_KEY=$(cat /root/.dsk 2>/dev/null) PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
   python3 /root/work/online_loop.py $S0 $OUT --pooler none --lora-layers all --lora-rank 16 --save-lora-only 1 \
   --mt-items /root/work/mtg6_items.jsonl --heldout /root/work/eval300.jsonl --reason /root/work/dolphin_rft.jsonl --reason-every 4 --reason-g 8 \
-  --search-demo /root/work/r1_nq1_short.jsonl --demo-on-fail 0.5 --followup 0.5 \
+  --search-demo /root/work/r1_nq1_short.jsonl --demo-on-fail 0.5 --followup 0.5 --r1-on-fail 1 --cot-on-fail 0.5 \
   --steps 120 --save-every 40 --lr 5e-6 --search-lr 5e-6 --search-temp 0.9 --search-gen 2000 --temp 0.6 --gen 7000 --budget 2400 --maxsrch 7 --stop eos \
   --judge-api openai --judge-model gpt-5-nano --w-talk 0.5 --dolphin-min 0 --adv-std 1 --pg-norm mean --kl 0 \
   --guard 1 --guard-steps 20 > /root/mtg6_run.log 2>&1
