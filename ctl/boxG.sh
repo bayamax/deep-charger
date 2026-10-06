@@ -80,7 +80,7 @@ PSKIP=
 # The raw GitHub copy this box fetches can lag and hand a control run an OLDER version of this file (04:48 on 09-22 it
 # relaunched the online loop under the previous mode while the newer run was merging a checkpoint on the same card).
 # Every edit bumps BOXG_SERIAL; a run that sees a lower serial than one already executed stops here.
-BOXG_SERIAL=2026100616
+BOXG_SERIAL=2026100617
 if [ -f /root/.boxg_serial ] && [ "$(cat /root/.boxg_serial)" -gt "$BOXG_SERIAL" ] 2>/dev/null; then echo "BOXG_STALE $BOXG_SERIAL < $(cat /root/.boxg_serial)"; exit 0; fi
 echo $BOXG_SERIAL > /root/.boxg_serial
 MODE=idle         # 2026-09-29: the side jobs hold the card (multi-turn measurement and training); a finished reeval re-launched on every control run and killed their evaluators
@@ -3307,6 +3307,34 @@ if [ ! -e /root/.qgen5 ] && [ -s /root/.oai ]; then touch /root/.qgen5
     [ -s /root/qgen/queries.jsonl ] && hf upload $R /root/qgen/queries.jsonl sentbart/e2e2/queries.jsonl >/dev/null 2>&1 && echo "QGEN_UPLOADED $(wc -l < /root/qgen/queries.jsonl) rows $(date -u)"
   ) >> /root/qgen.log 2>&1 &
   echo "QGEN5_LAUNCHED $(date -u)"
+fi
+# ---- qgen, waiting for credit (2026-10-07 03:30 JST): the writer aborted on "no credits remaining". This keeper tries the
+# teacher every ten minutes and, once it answers, runs the writer again (resumable, 12 workers, low reasoning).
+if [ ! -e /root/.qgen6 ] && [ -s /root/.oai ] && ! pgrep -f "qgen6kee[p].sh" >/dev/null; then touch /root/.qgen6
+  cat > /root/qgen6keep.sh <<'QK'
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); R=baya1116/hypernet-sp-distill; cd /root/qgen
+oai_ok() { python3 - <<'PYO'
+import json, urllib.request, sys
+key = open("/root/.oai").read().strip()
+body = {"model": "gpt-5-nano", "messages": [{"role": "user", "content": "Reply with the word ok."}], "max_completion_tokens": 200}
+try:
+    d = json.load(urllib.request.urlopen(urllib.request.Request("https://api.openai.com/v1/chat/completions", data=json.dumps(body).encode(),
+        headers={"Authorization": "Bearer " + key, "Content-Type": "application/json"}), timeout=60)); sys.exit(0 if "choices" in d else 1)
+except Exception: sys.exit(1)
+PYO
+}
+until oai_ok; do sleep 600; done
+pkill -f "qgen.py --docs" 2>/dev/null; sleep 2
+curl -sS -L -o qgen.py "$RAW/sentbart/qgen.py?$(date +%s)"
+echo "[qgen] credit is back; resuming at $(wc -l < /root/qgen/queries.jsonl 2>/dev/null || echo 0) $(date -u +%H:%M)"
+( while sleep 900; do [ -s /root/qgen/queries.jsonl ] && hf upload $R /root/qgen/queries.jsonl sentbart/e2e2/queries_partial.jsonl >/dev/null 2>&1; done ) & UP=$!
+python3 -u qgen.py --docs /root/qgen/dl/sentbart/e2e2/docs_for_qgen.jsonl --out /root/qgen/queries.jsonl --workers 12 2>&1 | grep --line-buffered -E "^\[qgen\]|QGEN_"
+kill $UP 2>/dev/null
+[ -s /root/qgen/queries.jsonl ] && hf upload $R /root/qgen/queries.jsonl sentbart/e2e2/queries.jsonl >/dev/null 2>&1 && echo "QGEN_UPLOADED $(wc -l < /root/qgen/queries.jsonl) rows $(date -u)"
+QK
+  sed -i "s#\$RAW#$RAW#g" /root/qgen6keep.sh
+  setsid nohup bash -c 'bash /root/qgen6keep.sh >> /root/qgen.log 2>&1' > /dev/null 2>&1 < /dev/null &
+  echo "QGEN6_ARMED $(date -u)"
 fi
 # ---- the box's own logs, mirrored to the hub every ten minutes: readable without the Vast API ----
 pkill -f "logmirro[r].sh" 2>/dev/null; pkill -f "logmirror[2].sh" 2>/dev/null   # replaced by logmirror3 (adds the score table)
