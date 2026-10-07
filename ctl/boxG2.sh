@@ -3,7 +3,7 @@
 # renter and the start sat in Vast's queue (the user: that is no good, move house). Only what the routine needs is here:
 # the 4-bit base, s100, the evaluation sets, the data, the loop; then mtg7 and the rounds after it. Pull-based as the
 # others (ctl.sh runs this file whenever it changes).
-BOXG2_SERIAL=3
+BOXG2_SERIAL=4
 if [ -f /root/.boxg2_serial ] && [ "$(cat /root/.boxg2_serial)" -gt "$BOXG2_SERIAL" ] 2>/dev/null; then echo "BOXG2_STALE $BOXG2_SERIAL"; exit 0; fi
 echo $BOXG2_SERIAL > /root/.boxg2_serial
 mkdir -p /root/work/runtime /root/work/fft_out /root/hfdl; cd /root/work
@@ -93,7 +93,9 @@ export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); R=baya1116/h
 while :; do
   { echo "=== boxG2 $(date -u) ==="; echo "--- ctl.log ---"; tail -n 40 /root/ctl.log 2>/dev/null | cut -c1-300
     for f in /root/base.log /root/mtg7.log; do [ -e $f ] && { echo "--- $f ---"; tail -n 20 $f | cut -c1-300; }; done
-    [ -s /root/mtg7_run.log ] && { echo "--- mtg7 teacher lines ---"; grep -E "^\[r1\]|^\[followup\]|^\[warn\]" /root/mtg7_run.log | tail -n 8 | cut -c1-250; }
+    [ -s /root/mtg7_run.log ] && { echo "--- mtg7 steps ---"; grep -E "^\[step|rollback|^\[guard\]|Traceback|out of memory" /root/mtg7_run.log | sed -E 's/\| ce=.*cumulative/| cum/' | tail -n 8 | cut -c1-220
+      echo "--- mtg7 teacher lines ---"; grep -E "^\[r1\]|^\[followup\]|^\[warn\]" /root/mtg7_run.log | tail -n 8 | cut -c1-250; }
+    [ -s /root/r1chk.log ] && { echo "--- r1 check ---"; tail -n 6 /root/r1chk.log | cut -c1-250; }
     echo "--- r1 on the fly: why no trajectory ---"; tail -n 5 /root/online_mtg7/r1_fly_out.jsonl.why 2>/dev/null | cut -c1-300
     echo "--- mtg7 by source (fresh questions) ---"
     python3 - <<'PQ' 2>/dev/null
@@ -199,6 +201,13 @@ echo "MTG7_JOB_DONE $(date -u)"
 M7
   setsid nohup bash -c 'bash /root/mtg7keep.sh 2>&1 | tee -a /root/mtg7.log' >> /proc/1/fd/1 2>&1 < /dev/null 9>&- &
   echo "MTG7_LAUNCHED $(date -u)"
+fi
+# ---- 2026-10-08 05:05 JST: R1 on the fly gave no trajectory three times, one in 9 s, and wrote no reason - the subprocess's
+# errors are swallowed. One run by hand on one question, its output kept, to see whether r1_traj.py works on this box.
+if [ ! -e /root/.r1chk ] && [ -s /root/work/mtg7_items.jsonl ]; then touch /root/.r1chk
+  ( head -1 /root/work/mtg7_items.jsonl | python3 -c "import json,sys; r=json.loads(sys.stdin.readline()); r['pass']=0; print(json.dumps(r))" > /root/r1chk_in.jsonl
+    cd /root/work && timeout 600 python3 /root/work/r1_traj.py --probe /root/r1chk_in.jsonl --out /root/r1chk_out.jsonl --max-pass 0 --workers 1 --maxsrch 5 --tok /root/gptq_hf_gq14 2>&1 | tail -n 5 | cut -c1-250
+    echo "out: $(wc -c < /root/r1chk_out.jsonl 2>/dev/null) bytes; why: $(cat /root/r1chk_out.jsonl.why 2>/dev/null | cut -c1-200)"; echo "R1CHK_DONE $(date -u)" ) > /root/r1chk.log 2>&1 &
 fi
 echo "BOXG2_OK serial $BOXG2_SERIAL $(date -u)"
 # CTL-END
