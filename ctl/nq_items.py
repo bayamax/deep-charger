@@ -32,10 +32,11 @@ for f in A.exclude:
             if q: seen.add(norm(q))
 p = hf_hub_download("google-research-datasets/nq_open", "nq_open/train-00000-of-00001.parquet", repo_type="dataset")
 t = pq.read_table(p).to_pydict()
-kept, dup, long_ = [], 0, 0
+kept, dup, long_, bad = [], 0, 0, 0
 for q, ans in zip(t["question"], t["answer"]):
     q = (q or "").strip()
     if not q or norm(q) in seen: dup += 1; continue
+    if re.search(r"\b(the following|which of these|above|below|this (passage|text|chart|table|graph|diagram|figure))\b", q, re.I): bad += 1; continue   # quiz stems about a page the asker had (NQ: "which of the following ...")
     cands = sorted({a.strip() for a in (ans or []) if a and 1 <= len(a.split()) <= 4 and len(a.strip()) >= 2}, key=len)
     if not cands: long_ += 1; continue
     gold = cands[0]
@@ -46,4 +47,4 @@ random.Random(A.seed).shuffle(kept)
 if A.pool: open(A.pool, "w").write("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in kept))
 sel = kept[A.skip:A.skip + A.n]
 open(A.out, "w").write("".join(json.dumps({k: r[k] for k in ("q", "gold", "hist")}, ensure_ascii=False) + "\n" for r in sel))
-print(f"NQ_ITEMS_DONE {len(sel)} items (of {len(kept)} kept; {dup} already in an evaluation or training set, {long_} without a short answer) -> {A.out}", flush=True)
+print(f"NQ_ITEMS_DONE {len(sel)} items (of {len(kept)} kept; {dup} already in an evaluation or training set, {long_} without a short answer, {bad} quiz stems) -> {A.out}", flush=True)
