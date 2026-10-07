@@ -61,6 +61,7 @@ ap.add_argument("--link-frac", type=float, default=0.5, help="share of each batc
 ap.add_argument("--page-queue", type=int, default=0, help="N: the last N batches' page vectors (detached) as extra negatives for the page loss")
 ap.add_argument("--prev-skip", type=int, default=0, help="1: the decoder's output is (its head + a learned gate x the previous sentence's vector), normalised")
 ap.add_argument("--p-suffix", type=float, default=0.5, help="share of documents whose tail is hidden (continuation) instead of spans")
+ap.add_argument("--dim", type=int, default=384, help="the sentence vectors' width, for a shard that has only its layout (off_XXX.npy, no vec_XXX.npy)")
 A = ap.parse_args()
 os.makedirs(A.out, exist_ok=True)
 torch.manual_seed(0); random.seed(0); np.random.seed(0)
@@ -73,12 +74,20 @@ class Q8:
     def __getitem__(s, sl): return s.q[sl].astype(np.float32) * (s.scl[sl].astype(np.float32)[:, None] / 127.0)
 
 
+class NoVec:
+    """a shard without stored vectors (train_e2e computes them from the text): only its layout - the row ranges - exists"""
+    def __init__(s, n, dim): s.shape = (n, dim); s.dtype = np.float32
+    def __getitem__(s, sl): raise RuntimeError("this shard has no stored vectors (layout only)")
+
+
 shards = []
-for vf in sorted(glob.glob(os.path.join(A.data, "vec_*.npy"))):
-    k = os.path.basename(vf)[4:-4]
-    off = np.load(os.path.join(A.data, f"off_{k}.npy"))
-    v = np.load(vf, mmap_mode="r"); sf = os.path.join(A.data, f"scl_{k}.npy")
-    if v.dtype == np.int8: v = Q8(v, np.load(sf, mmap_mode="r"))
+for of in sorted(glob.glob(os.path.join(A.data, "off_*.npy"))):
+    k = os.path.basename(of)[4:-4]
+    off = np.load(of); vf = os.path.join(A.data, f"vec_{k}.npy"); sf = os.path.join(A.data, f"scl_{k}.npy")
+    if os.path.exists(vf):
+        v = np.load(vf, mmap_mode="r")
+        if v.dtype == np.int8: v = Q8(v, np.load(sf, mmap_mode="r"))
+    else: v = NoVec(int(off[-1]), A.dim)
     shards.append((k, v, off))
 assert len(shards) >= 2, "need at least two embedded shards (one is held out)"
 ei = [k for k, _, _ in shards].index(A.eval_shard) if A.eval_shard else len(shards) - 1
