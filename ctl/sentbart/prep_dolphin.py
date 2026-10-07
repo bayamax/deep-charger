@@ -27,7 +27,7 @@ def norm(s): return " ".join(re.sub(r"[^a-z0-9]+", " ", (s or "").lower()).split
 
 def split(text):
     out = []
-    for para in re.split(r"\n\s*\n|\n(?=\s*(?:[-*#>]|\d+\.))", text or ""):   # blank lines, list items and headings start a new unit
+    for para in re.split(r"\n+", text or ""):   # reasoning text breaks lines at thoughts, list items and headings: each line is a unit
         para = " ".join(para.split())
         if not para: continue
         for s_ in text_to_sentences(para).split("\n"):
