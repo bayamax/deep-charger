@@ -8,7 +8,7 @@ cd /root
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null)
 R=baya1116/hypernet-sp-distill
 RAW="https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl"
-BOXI_SERIAL=66
+BOXI_SERIAL=67
 if [ -f /root/.boxi_serial ] && [ "$(cat /root/.boxi_serial)" -gt "$BOXI_SERIAL" ] 2>/dev/null; then echo "BOXI_STALE $BOXI_SERIAL"; exit 0; fi
 echo $BOXI_SERIAL > /root/.boxi_serial
 mkdir -p /root/sb /root/work
@@ -1249,6 +1249,29 @@ if [ ! -e /root/.dolphin_novec ] && [ -e /root/.dolphin_ladder ] && grep -q "cla
   ( D=/root/sb/data/dolphin; until pgrep -f "train_e2e.py.*/root/sb/dolphin_ladder/" >/dev/null; do sleep 60; done; sleep 120
     rm -f $D/vec_000.npy $D/vec_001.npy $D/scl_000.npy $D/scl_001.npy; rm -rf $D/q8
     echo "[dolphinladder] stored vectors removed $(date -u +%H:%M); $(df -h /root | tail -1 | awk '{print $4}') free" >> /root/sb_dolphinladder.log ) > /dev/null 2>&1 &
+fi
+# ---- 2026-10-07 22:25 JST: the int8 re-embedding failed (the disk); with train.py taking the layout alone, the vectors are simply
+# dropped and the ladder launched on the text + off files.
+if [ ! -e /root/.dolphin_ladder2 ] && [ -e /root/.dolphin_ladder ] && grep -q "class NoVec" /root/sb/train.py; then touch /root/.dolphin_ladder2
+  cat > /root/dolphinladderkeep.sh <<'DL'
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); R=baya1116/hypernet-sp-distill; cd /root/sb; D=/root/sb/data/dolphin
+pkill -f "dolphinkee[p].sh"; pkill -f "train_e2e.py.*/root/sb/dolphin_e2e"; pkill -f "embed.py --dir $D"; sleep 10
+rm -f $D/vec_000.npy $D/vec_001.npy $D/scl_000.npy $D/scl_001.npy; rm -rf $D/q8 /root/sb/dolphin_e2e
+[ -s $D/off_000.npy ] && [ -s $D/off_001.npy ] || python3 - <<'PO'
+import json, numpy as np
+for k in ("000", "001"):
+    n = [len(json.loads(l)["sents"]) for l in open(f"/root/sb/data/dolphin/docs_{k}.jsonl") if l.strip()]
+    np.save(f"/root/sb/data/dolphin/off_{k}.npy", np.cumsum([0] + n).astype(np.int64))
+PO
+[ -s $D/off_001.npy ] || { echo "DOLPHINLADDER_JOB_DONE no layout"; exit 1; }
+I0=/root/sb/abl_one32/model_best.pt; [ -s $I0 ] || I0=/root/sb/hfdl/sentbart/abl/one32/model_best.pt
+echo "[dolphinladder] from $I0 (text + layout, no stored vectors) $(date -u +%H:%M); $(df -h /root | tail -1 | awk '{print $4}') free"
+python3 -u /root/sb/e2e_ladder.py --start $I0 --work /root/sb/dolphin_ladder --vec $D --text $D --eval-text $D/docs_001.jsonl --pool 20000 \
+  --guard 0 --anchor-q 0 --hub sentbart/dolphin --max-layers 64 --max-enc 20 --select pool_top1 2>&1 | grep --line-buffered -E "^\[ladder\]|LADDER_DONE|Error|Traceback|out of memory" | sed -u 's/^\[ladder\]/[dolphinladder]/'
+echo "DOLPHINLADDER_JOB_DONE $(date -u)"
+DL
+  setsid nohup bash -c 'bash /root/dolphinladderkeep.sh 2>&1 | tee -a /root/sb_dolphinladder.log' > /dev/null 2>&1 < /dev/null &
+  echo "DOLPHINLADDER_RELAUNCHED $(date -u)"
 fi
 echo "BOXI_OK serial $BOXI_SERIAL $(date -u)"
 # CTL-END
