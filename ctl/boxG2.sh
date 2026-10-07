@@ -3,7 +3,7 @@
 # renter and the start sat in Vast's queue (the user: that is no good, move house). Only what the routine needs is here:
 # the 4-bit base, s100, the evaluation sets, the data, the loop; then mtg7 and the rounds after it. Pull-based as the
 # others (ctl.sh runs this file whenever it changes).
-BOXG2_SERIAL=1
+BOXG2_SERIAL=2
 if [ -f /root/.boxg2_serial ] && [ "$(cat /root/.boxg2_serial)" -gt "$BOXG2_SERIAL" ] 2>/dev/null; then echo "BOXG2_STALE $BOXG2_SERIAL"; exit 0; fi
 echo $BOXG2_SERIAL > /root/.boxg2_serial
 mkdir -p /root/work/runtime /root/work/fft_out /root/hfdl; cd /root/work
@@ -14,7 +14,7 @@ export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); R=baya1116/h
 RAW="https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl"
 
 # ---- the code, fresh on every control run ----
-for f in online_loop.py pool_eval.py r1_traj.py tqa_items.py musique_items.py nq_items.py web_search.py dl_judge.py gptq.py dequant_state.py memfit.py mt_sim.py; do
+for f in online_loop.py pool_eval.py r1_traj.py tqa_items.py musique_items.py nq_items.py web_search.py dl_judge.py gptq.py q4.py packmlx.py checkmlx.py dequant_state.py build_merged.py memfit.py mt_sim.py; do
   for try in 1 2 3; do curl -sS -o /root/work/$f "$RAW/$f?nocache=$(date +%s)" && python3 -m py_compile /root/work/$f && break; sleep 5; done
 done
 cp /root/work/web_search.py /root/work/runtime/web_search.py 2>/dev/null; touch /root/work/runtime/__init__.py
@@ -68,10 +68,11 @@ if [ ! -s /root/gptq_hf_gq14/model.safetensors ] && ! pgrep -f "basekee[p].sh" >
   cat > /root/basekeep.sh <<'BK'
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); R=baya1116/hypernet-sp-distill
 while [ ! -f /root/.bootstrapped ]; do sleep 30; done
-for i in $(seq 1 12); do
+N=12; grep -q "BASE_FAILED" /root/base.log 2>/dev/null && N=1   # the hour's wait for box G's copy was already spent
+for i in $(seq 1 $N); do
   if hf download $R --include "pooler_distill/chatsft/gq14_hf/*" --local-dir /root/hfdl >/dev/null 2>&1 && [ -s /root/hfdl/pooler_distill/chatsft/gq14_hf/model.safetensors ]; then
     rm -rf /root/gptq_hf_gq14; cp -r /root/hfdl/pooler_distill/chatsft/gq14_hf /root/gptq_hf_gq14; echo "[base] gq14 from the hub (box G's own) $(date -u +%H:%M)"; break; fi
-  sleep 300
+  [ "$N" -gt 1 ] && sleep 300
 done
 if [ ! -s /root/gptq_hf_gq14/model.safetensors ]; then
   echo "[base] quantising g14 here from its own traces $(date -u +%H:%M)"
