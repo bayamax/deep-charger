@@ -128,11 +128,12 @@ else:
 
 # ---- the held-out 2000: the documents train.py evaluates, matched to their text by sentence count ----
 eoff = ns["eval_sh"][2]; start = {int(a): d for d, a in enumerate(eoff[:-1])}
-ET = Lines(E.eval_text); ev_text = []; bad = 0
+ET = Lines(E.eval_text); ev_text = []; ev_nq = []; bad = 0
 for a, b in ns["edocs"]:
     d = ET[start[int(a)]]
     if len(d["sents"]) != b - a: bad += 1
-    ev_text.append(d["sents"])
+    ev_text.append(d["sents"]); ev_nq.append(int(d.get("nq", 0) or 0))
+if any(ev_nq): ns["NQ_EVAL"] = ev_nq; print(f"[e2e] conversations: the question's sentences (median {sorted(ev_nq)[len(ev_nq)//2]}) are context only", flush=True)
 assert bad == 0, f"{bad} of {len(ev_text)} held-out documents do not match their text"
 print(f"[e2e] {len(ev_text)} held-out documents matched to their text", flush=True)
 EQ = [(k, QE_LINE[start[int(a)]]) for k, (a, _) in enumerate(ns["edocs"]) if start[int(a)] in QE_LINE]   # (eval doc index, its query row)
@@ -153,13 +154,13 @@ def eval_now():
     return r
 
 
-POOL = []
+POOL = []; POOL_NQ = []
 if E.pool > len(ev_text):   # the other documents of the pool: shard 001's, not among the 2000, fixed
     used = {start[int(a)] for a, _ in ns["edocs"]}
     cand = [d for d in range(len(ET)) if d not in used]; random.Random(7).shuffle(cand)
     for d in cand:
         s_ = ET[d]["sents"]
-        if len(s_) >= A.min_sents: POOL.append(s_[:A.seq])
+        if len(s_) >= A.min_sents: POOL.append(s_[:A.seq]); POOL_NQ.append(int(ET[d].get("nq", 0) or 0))
         if len(POOL) >= E.pool - len(ev_text): break
     print(f"[e2e] pool: {len(ev_text)} + {len(POOL)} held-out articles", flush=True)
 
@@ -169,8 +170,8 @@ def eval_pool():
     """page retrieval among --pool articles: each with one sentence hidden (fixed draw), its page vector; the 2000
     evaluation articles' hidden sentences are the queries"""
     enc.eval(); model.eval()
-    docs = [d[:A.seq] for d in ev_text] + POOL; rng = random.Random(55)
-    hid = [rng.randint(1, len(d) - 1) for d in docs]
+    docs = [d[:A.seq] for d in ev_text] + POOL; rng = random.Random(55); nqs_ = ev_nq + POOL_NQ
+    hid = [rng.randint(max(1, min(q_, len(d) - 2)), len(d) - 1) for d, q_ in zip(docs, nqs_)]   # a conversation's hidden sentence is never its question's
     P, Q = [], []
     for i in range(0, len(docs), 64):
         part = docs[i:i + 64]; flat = [s for d in part for s in d]
@@ -225,17 +226,18 @@ if step0 == 0:
 model.train(); t0 = time.time(); acc = []
 for step in range(step0 + 1, E.steps + 1) if E.steps > 0 else []:
     ns["STEP"][0] = step
-    sents, items, qrows = [], [], []                          # qrows: (batch row, query row, the passage's first sentence's position in the crop or -1)
+    sents, items, qrows, nqs = [], [], [], []                 # qrows: (batch row, query row, the passage's first sentence's position in the crop or -1)
     for b in range(E.batch):
         from_q = bool(qdocs) and random.random() < E.q_frac
-        i, j = random.choice(qdocs) if from_q else random.choice(tdocs); s_ = TR[i][j]["sents"]
-        while len(s_) < A.min_sents: i, j = random.choice(tdocs); s_ = TR[i][j]["sents"]; from_q = (i, j) in QT
-        k = random.randint(0, len(s_) - A.seq) if len(s_) > A.seq else 0; s_ = s_[k:k + A.seq]
-        items.append(np.zeros((len(s_), DIM), np.float32)); sents.append(s_)
+        i, j = random.choice(qdocs) if from_q else random.choice(tdocs); d_ = TR[i][j]; s_ = d_["sents"]
+        while len(s_) < A.min_sents: i, j = random.choice(tdocs); d_ = TR[i][j]; s_ = d_["sents"]; from_q = (i, j) in QT
+        nq_ = int(d_.get("nq", 0) or 0)
+        k = random.randint(0, len(s_) - A.seq) if len(s_) > A.seq and not nq_ else 0; s_ = s_[k:k + A.seq]
+        items.append(np.zeros((len(s_), DIM), np.float32)); sents.append(s_); nqs.append(nq_)
         if from_q:
             qr = random.choice(QT[(i, j)]); pos = qr["s0"] - k
             qrows.append((b, qr, pos if 0 <= pos < len(s_) else -1))
-    _, valid, masked, _ = ns["make_batch"](items)            # train.py's corruption (spans or a hidden tail)
+    _, valid, masked, _ = ns["make_batch"](items, "mix", nqs if any(nqs) else None)   # train.py's corruption (spans or a hidden tail); a conversation's question is never hidden
     flat = [s for d in sents for s in d]
     v = embed(enc, flat)                                      # gradient into bge
     with torch.no_grad(): v0 = embed(ref, flat)

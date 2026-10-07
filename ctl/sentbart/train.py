@@ -121,30 +121,38 @@ if A.cluster:
     sz = np.diff(bounds); print(f"[cluster] {A.cluster} clusters: median {int(np.median(sz))} documents, max {sz.max()}, empty {(sz == 0).sum()}", flush=True)
 
 
-def crop(vec, a, b):
+def crop(vec, a, b, nq=0):
+    """nq > 0 (a conversation: the question's sentences first): the head is kept, so the prefix stays in the window"""
     n = b - a
     if n > A.seq:
-        a = a + random.randint(0, n - A.seq); b = a + A.seq
+        a = a + (0 if nq > 0 else random.randint(0, n - A.seq)); b = a + A.seq
     return np.asarray(vec[a:b], dtype=np.float32)
 
 
-def make_batch(items, mode="mix"):
+LAST_NQ = [None]                                   # the prefix lengths of the last batch (losses() draws its page-loss sentence past them)
+
+
+def make_batch(items, mode="mix", nq=None):
     """items: list of float32 [n_i, DIM] arrays -> padded x [B, L, DIM], valid [B, L], masked [B, L], cut [B]
-    mode: mix (training), span (spans only), suffix (tails only); cut = first hidden position of a suffix document, else -1"""
+    mode: mix (training), span (spans only), suffix (tails only); cut = first hidden position of a suffix document, else -1
+    nq: per item, the length of a context prefix (a conversation's question) that is read but never hidden or predicted"""
     L = max(len(x) for x in items); B = len(items)
     x = np.zeros((B, L, DIM), np.float32); valid = np.zeros((B, L), bool); masked = np.zeros((B, L), bool); cut = np.full(B, -1)
+    LAST_NQ[0] = list(nq) if nq is not None else None
     for i, v in enumerate(items):
         n = len(v); x[i, :n] = v; valid[i, :n] = True
+        q0 = min(int(nq[i]) if nq is not None else 0, n - 2) if n >= 2 else 0   # at least one sentence stays predictable
         if mode == "one":
-            j = random.randint(1, n - 1); masked[i, j] = True; cut[i] = j; continue
+            j = random.randint(max(1, q0), n - 1); masked[i, j] = True; cut[i] = j; continue
         if mode == "suffix" or (mode == "mix" and random.random() < A.p_suffix):
-            k = random.randint(max(1, n // 4), max(1, (3 * n) // 4)); masked[i, k:n] = True; cut[i] = k; continue
+            k = random.randint(max(1, n // 4), max(1, (3 * n) // 4)); k = max(k, q0, 1); masked[i, k:n] = True; cut[i] = k; continue
         mfrac = A.mask if (A.mask_start < 0 or mode != "mix") else A.mask_start + (A.mask - A.mask_start) * min(1.0, STEP[0] / max(1, A.mask_ramp_steps))
         budget = max(1, int(round(mfrac * n)))
         tries = 0
         while masked[i, :n].sum() < budget and tries < 100:
-            ln = max(1, np.random.poisson(A.span)); st = random.randint(0, max(0, n - ln))
+            ln = max(1, np.random.poisson(A.span)); st = random.randint(q0, max(q0, n - ln))
             masked[i, st:min(n, st + ln)] = True; tries += 1
+        if q0: masked[i, :q0] = False
     t = lambda a: torch.from_numpy(a).to(DEV)
     return t(x), t(valid), t(masked), t(cut)
 
@@ -331,12 +339,18 @@ def losses(x, valid, masked):
         if A.page_input == "ramp" and model.training:  # one sentence hidden at first, widening to --page-ramp-max of the document
             n = valid.sum(1); frac = A.page_ramp_max * min(1.0, STEP[0] / max(1, A.page_ramp_steps))
             k = torch.clamp((frac * n.float()).round().long(), min=1); k = torch.minimum(k, (n - 1).clamp_min(1))
-            rr = torch.rand(valid.shape, device=DEV).masked_fill(~valid, 2.0); rank = rr.argsort(1).argsort(1)
+            rr = torch.rand(valid.shape, device=DEV).masked_fill(~valid, 2.0)
+            if LAST_NQ[0] is not None:
+                for i_, q_ in enumerate(LAST_NQ[0]): rr[i_, :min(int(q_), max(int(n[i_]) - 1, 0))] = 2.0
+            rank = rr.argsort(1).argsort(1)
             hide = (rank < k[:, None]) & valid
             model.encode(x, valid, hide)
             q = x[hide].float(); doc = torch.nonzero(hide)[:, 0]
         if A.page_input == "one" and model.training:   # the page vector from the measured condition: one sentence hidden, that sentence asks
-            n = valid.sum(1); j = torch.where(n > 1, 1 + (torch.rand(len(n), device=DEV) * (n - 1).clamp_min(1)).long().clamp(max=(n - 1).clamp_min(1)), torch.zeros_like(n))
+            n = valid.sum(1); lo = torch.ones_like(n)
+            if LAST_NQ[0] is not None: lo = torch.maximum(lo, torch.minimum(torch.tensor(LAST_NQ[0], device=DEV, dtype=n.dtype), (n - 1).clamp_min(1)))
+            j = torch.where(n > 1, lo + (torch.rand(len(n), device=DEV) * (n - lo).clamp_min(1)).long(), torch.zeros_like(n))
+            j = torch.minimum(j, (n - 1).clamp_min(0))
             one = torch.zeros_like(masked); one[torch.arange(len(n), device=DEV), j] = True; one &= valid
             model.encode(x, valid, one)                 # sets model.last_page
             q = x[one].float(); doc = torch.nonzero(one)[:, 0]
@@ -358,6 +372,7 @@ def losses(x, valid, masked):
 
 
 LP = [None]; PQ = []; PQI = []; R_CURVE = {}; SKIPPED = [0]; BEST = [-1.0]; STEP = [0]
+NQ_EVAL = []                                       # the held-out documents' prefix lengths (train_e2e sets them for conversations)
 
 
 @torch.no_grad()
@@ -369,8 +384,8 @@ def evaluate():
     for mode in ("span", "suffix"):
         random.seed(123); np.random.seed(123)
         for i in range(0, len(edocs), A.batch):
-            items = [crop(eval_sh[1], a, b) for a, b in edocs[i:i + A.batch]]
-            x, valid, masked, cut = make_batch(items, mode)
+            items = [crop(eval_sh[1], a, b, NQ_EVAL[i + k] if NQ_EVAL else 0) for k, (a, b) in enumerate(edocs[i:i + A.batch])]
+            x, valid, masked, cut = make_batch(items, mode, NQ_EVAL[i:i + A.batch] if NQ_EVAL else None)
             with torch.autocast("cuda", dtype=torch.bfloat16):
                 le, ld, lge, lgd, pos = losses(x, valid, masked)
             lg, idx, k = (lge, pos[masked], "enc") if mode == "span" else (lgd, pos[masked], "dec")
@@ -410,8 +425,8 @@ def evaluate():
     if A.page:
         random.seed(321); np.random.seed(321); pv, bv, qv = [], [], []
         for i in range(0, len(edocs), A.batch):
-            items = [crop(eval_sh[1], a, b) for a, b in edocs[i:i + A.batch]]
-            x, valid, masked, cut = make_batch(items, "one")
+            items = [crop(eval_sh[1], a, b, NQ_EVAL[i + k] if NQ_EVAL else 0) for k, (a, b) in enumerate(edocs[i:i + A.batch])]
+            x, valid, masked, cut = make_batch(items, "one", NQ_EVAL[i:i + A.batch] if NQ_EVAL else None)
             with torch.autocast("cuda", dtype=torch.bfloat16):
                 model(x, valid, masked)
             pv.append(model.last_page.float()); qv.append(x[masked].float())
