@@ -82,7 +82,9 @@ def get_page(kw):
 
 
 def norm(s): return " ".join(re.sub(r"[^a-z0-9]+", " ", s.lower()).split())
-def has(t, g): return (" " + norm(g) + " ") in (" " + norm(t) + " ")
+def has(t, g):
+    if isinstance(g, (list, tuple)): return any(has(t, x) for x in g)
+    return (" " + norm(g) + " ") in (" " + norm(t) + " ")
 
 
 SYS = """You are answering a user's question in a chat by searching Wikipedia step by step. Each step, reply with JSON only:
@@ -120,7 +122,7 @@ def why(q, reason):
 
 
 def solve(it):
-    q, gold, hist = it["q"], it["gold"], it.get("hist") or []
+    q, gold, hist = it["q"], it.get("golds") or it["gold"], it.get("hist") or []   # gold: the accepted forms (a list) or the one string
     pushed = 0
     conv = "\n".join(("USER: " if m["role"] == "user" else "ASSISTANT: ") + m["content"][:1500] for m in hist) + ("\n" if hist else "") + "USER: " + q
     steps, traj, served, seen, ns = [], "", [], {}, 0
@@ -138,7 +140,7 @@ def solve(it):
             traj += (th + "\n" if th else "") + "</think>\n\n" + reply
             ok = has(reply, gold) and any(has(c, gold) for c in served)
             if not ok: why(q, f"answered {reply[:60]!r} (gold {gold!r}) " + ("not on any served page" if has(reply, gold) else "wrong") + f", {ns} searches: " + " | ".join(s_["search"] for s_ in steps))
-            return {"q": q, "gold": gold, "hist": hist, "traj": traj, "reply": reply, "ns": ns} if ok else None
+            return {"q": q, "gold": it["gold"], "hist": hist, "traj": traj, "reply": reply, "ns": ns} if ok else None
         kw = (v.get("search") or "").strip()
         if not kw or ns >= A.maxsrch: why(q, f"no answer after {ns} searches: " + " | ".join(s_["search"] for s_ in steps)); return None
         if has(kw, gold) and not has(conv, gold) and not any(has(c, gold) for c in served):   # searched for the answer before finding it: not a demonstration

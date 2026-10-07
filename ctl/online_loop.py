@@ -338,7 +338,10 @@ def get_page(kw):
 
 
 def norm(s): return re.sub(r"[^a-z0-9 ]", " ", (s or "").lower()).strip()
-def has(t, g): return (" " + norm(g) + " ") in (" " + norm(t) + " ")
+def has(t, g):
+    """g: the gold string, or a list of accepted forms (any of them)"""
+    if isinstance(g, (list, tuple)): return any(has(t, x) for x in g)
+    return (" " + norm(g) + " ") in (" " + norm(t) + " ")
 ABBR = {"st", "mr", "mrs", "ms", "dr", "jr", "sr", "mt", "vs", "no", "inc", "ltd", "co"}
 
 
@@ -897,11 +900,11 @@ def make_followup(step, q, gold, roll):
     print(f"[followup] {fq[:90]!r} -> {fg!r} ({pg})", flush=True)
 
 
-def r1_on_the_fly(q, gold, hist):
+def r1_on_the_fly(q, gold, hist, golds=None):
     """R1 on one question now: r1_traj.py as a subprocess; the trajectory (student format) or None"""
     import subprocess, tempfile
     d = A.outdir; fi = os.path.join(d, "r1_fly_in.jsonl"); fo = os.path.join(d, "r1_fly_out.jsonl")
-    open(fi, "w").write(json.dumps({"q": q, "gold": gold, "hist": hist, "pass": 0}, ensure_ascii=False) + "\n")
+    open(fi, "w").write(json.dumps({"q": q, "gold": gold, "golds": golds or [gold], "hist": hist, "pass": 0}, ensure_ascii=False) + "\n")
     if os.path.exists(fo): os.remove(fo)
     t_ = time.time()
     try:
@@ -1229,7 +1232,7 @@ if A.probe_out:
                 print(f"[probe] batch {k} failed: {type(e).__name__}: {str(e)[:120]}", flush=True); clear(); continue
             for j, it in enumerate(chunk):
                 rs = outs[j * A.probe_g:(j + 1) * A.probe_g]
-                ok = [o for o in rs if price({**o, "answer": o.get("answer", "")}, it["gold"])[0] >= 1.0]
+                ok = [o for o in rs if price({**o, "answer": o.get("answer", "")}, it.get("golds") or it["gold"])[0] >= 1.0]
                 fo.write(json.dumps({"q": it["q"], "gold": it["gold"], "hist": HIST.get(it["q"], []), "n": len(rs), "pass": len(ok),
                                      "texts": [o["text"] for o in ok][:2]}, ensure_ascii=False) + "\n")
             fo.flush(); clear()
@@ -1299,7 +1302,7 @@ for step in range(state["step"] + 1, A.steps + 1) if not (reason or A.mt_items) 
             print(f"[warn] batch dropped: {type(e).__name__}: {str(e)[:120]}", flush=True); clear()
     reasons = []; positives = []
     for r in rolls:
-        _, c, g = price(r, item["gold"]); reply = r["text"].split("</think>")[-1] if "</think>" in r["text"] else ""
+        _, c, g = price(r, item.get("golds") or item["gold"]); reply = r["text"].split("</think>")[-1] if "</think>" in r["text"] else ""
         if r.get("cut"): why = "search loop"
         elif not r["landed"]: why = "no reply"
         elif not g: why = "page not found"
@@ -1411,7 +1414,7 @@ for step in range(state["step"] + 1, A.steps + 1) if (reason or A.mt_items) else
         print(f"[warn] batch dropped: {type(e).__name__}: {str(e)[:120]}", flush=True); clear(); continue
     for r in rolls: r.setdefault("q", qtext)
     rw, notes = [], []
-    score = ((lambda x: score_search(x, item["gold"])) if searching
+    score = ((lambda x: score_search(x, item.get("golds") or item["gold"])) if searching
              else (lambda x: verify_numeric(ref, x["text"])) if A.reason_verify == "numeric"
              else (lambda x: judge_reason(qtext, ref, x["text"])))
     with ThreadPoolExecutor(max_workers=min(8, len(rolls))) as ex:
@@ -1462,7 +1465,7 @@ for step in range(state["step"] + 1, A.steps + 1) if (reason or A.mt_items) else
         model.train()   # nothing of its own passed: the teacher shows this question once, beside whatever the group's gradient said
         wheel = guarded(demo_backward, qtext, demos[qtext.strip()], A.demo_on_fail / A.accum); clear()
     elif A.r1_on_fail and A.demo_on_fail > 0 and searching and rw and max(rw) < 1.0:
-        traj = r1_on_the_fly(qtext, item["gold"], HIST.get(qtext) or [])
+        traj = r1_on_the_fly(qtext, item["gold"], HIST.get(qtext) or [], item.get("golds"))
         if traj:
             demos[qtext.strip()] = traj; model.train()
             wheel = guarded(demo_backward, qtext, traj, A.demo_on_fail / A.accum); clear()
