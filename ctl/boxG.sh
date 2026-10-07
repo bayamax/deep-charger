@@ -80,7 +80,7 @@ PSKIP=
 # The raw GitHub copy this box fetches can lag and hand a control run an OLDER version of this file (04:48 on 09-22 it
 # relaunched the online loop under the previous mode while the newer run was merging a checkpoint on the same card).
 # Every edit bumps BOXG_SERIAL; a run that sees a lower serial than one already executed stops here.
-BOXG_SERIAL=2026100625
+BOXG_SERIAL=2026100626
 if [ -f /root/.boxg_serial ] && [ "$(cat /root/.boxg_serial)" -gt "$BOXG_SERIAL" ] 2>/dev/null; then echo "BOXG_STALE $BOXG_SERIAL < $(cat /root/.boxg_serial)"; exit 0; fi
 echo $BOXG_SERIAL > /root/.boxg_serial
 MODE=idle         # 2026-09-29: the side jobs hold the card (multi-turn measurement and training); a finished reeval re-launched on every control run and killed their evaluators
@@ -3464,7 +3464,23 @@ while :; do
     echo "--- hyde.log ---"; tail -n 4 /root/hyde.log 2>/dev/null | cut -c1-300
     echo "--- mtg6.log (tail) ---"; tail -n 12 /root/mtg6.log 2>/dev/null | cut -c1-250; grep -E "^\[step|ONLINE_|rollback|guard" /root/mtg6_run.log 2>/dev/null | tail -n 3 | cut -c1-220
     echo "--- mtg6 teacher lines ---"; grep -E "^\[r1\]|^\[followup\]|^\[warn\]|Traceback|Error" /root/mtg6_run.log 2>/dev/null | tail -n 8 | cut -c1-250
-    echo "--- r1 on the fly: why no trajectory ---"; tail -n 6 /root/online_mtg6/r1_fly_out.jsonl.why 2>/dev/null | cut -c1-300
+    echo "--- s100 on the same fresh questions (the dropped probe: 4 samples each, temp 0.9) ---"
+python3 - <<'PQ' 2>/dev/null
+import json
+r=[json.loads(l) for l in open("/root/work/probe_nq1.jsonl") if l.strip()]
+n=sum(x["n"] for x in r); p=sum(x["pass"] for x in r)
+print(f"probe: {len(r)} questions, samples passing {p}/{n} = {100*p/max(n,1):.0f}%, questions with any pass {sum(1 for x in r if x['pass']>0)}/{len(r)}, all passing {sum(1 for x in r if x['pass']==x['n'])}/{len(r)}")
+PQ
+python3 - <<'PQ' 2>/dev/null
+import json, collections
+r=[json.loads(l) for l in open("/root/online_mtg6/rollouts.jsonl") if l.strip()]
+by=collections.defaultdict(list)
+for x in r:
+    if x.get("kind")=="search": by[x["q"]].append(x.get("reward",0)>=1.0)
+qs=list(by)
+print(f"mtg6 so far: {len(qs)} search questions, samples passing {sum(sum(v) for v in by.values())}/{sum(len(v) for v in by.values())}, questions with any pass {sum(1 for v in by.values() if any(v))}/{len(qs)}")
+PQ
+echo "--- r1 on the fly: why no trajectory ---"; tail -n 6 /root/online_mtg6/r1_fly_out.jsonl.why 2>/dev/null | cut -c1-300
 echo "--- qgen.log ---"; tail -n 4 /root/qgen.log 2>/dev/null | cut -c1-300
     echo "--- mtg5b.log (tail) ---"; tail -n 14 /root/mtg5b.log 2>/dev/null | cut -c1-250; grep -E "^\[step|ONLINE_|rollback|guard" /root/mtg5b_run.log 2>/dev/null | tail -n 3 | cut -c1-220
     echo "--- mtg5.log (tail) ---"; tail -n 14 /root/mtg5.log 2>/dev/null | cut -c1-250; grep -E "^\[step|ONLINE_|rollback|guard" /root/mtg5_run.log 2>/dev/null | tail -n 3 | cut -c1-220
