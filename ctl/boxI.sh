@@ -8,7 +8,7 @@ cd /root
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null)
 R=baya1116/hypernet-sp-distill
 RAW="https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl"
-BOXI_SERIAL=61
+BOXI_SERIAL=62
 if [ -f /root/.boxi_serial ] && [ "$(cat /root/.boxi_serial)" -gt "$BOXI_SERIAL" ] 2>/dev/null; then echo "BOXI_STALE $BOXI_SERIAL"; exit 0; fi
 echo $BOXI_SERIAL > /root/.boxi_serial
 mkdir -p /root/sb /root/work
@@ -1168,6 +1168,19 @@ echo "LADDER2_JOB_DONE $(date -u)"
 RK
   setsid nohup bash -c 'bash /root/ladder2keep.sh 2>&1 | tee -a /root/sb_ladder2.log' > /dev/null 2>&1 < /dev/null &
   echo "LADDER2_LAUNCHED $(date -u)"
+fi
+# ---- 2026-10-07 19:10 JST (the user: the dev guard looks very low - is it the HyDE-form evaluation?): the guard runs the
+# app's keyword queries over all 118,398 articles; the pool's HyDE numbers are nano-written sentences over 20,000. The
+# missing figure - HyDE-form queries over the 118,398 - is measured here for ladder2's r01 model (the 100 dev queries
+# that have HyDE forms, like cascade_one32_hyde.json for the start model). Runs beside the training as the earlier cascades did.
+if [ ! -e /root/.casc_l2r01 ] && [ -s /root/sb/ladder2/cap_bge12_bart8/model_best.pt ]; then touch /root/.casc_l2r01
+  ( export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); R=baya1116/hypernet-sp-distill; mkdir -p /root/sb/sc
+    until hf download $R sentbart/searcheval/dcq_hyde.jsonl --local-dir /root/sb/sc/dl >/dev/null 2>&1 && [ -s /root/sb/sc/dl/sentbart/searcheval/dcq_hyde.jsonl ]; do sleep 120; done
+    echo "[cascadeL2] r01 (cap_bge12_bart8) on the HyDE dev queries $(date -u +%H:%M)"
+    python3 /root/sb/search_cascade.py --vec /root/sb/data/docs --text /root/sb/data/docs/docs_001.jsonl --ckpt /root/sb/ladder2/cap_bge12_bart8/model_best.pt \
+      --queries /root/sb/sc/dl/sentbart/searcheval/dcq_hyde.jsonl --out /root/sb/sc/l2r01_hyde.json 2>&1 | grep -E "^\[cascade\]|Error|Traceback|out of memory" | cut -c1-300
+    [ -s /root/sb/sc/l2r01_hyde.json ] && hf upload $R /root/sb/sc/l2r01_hyde.json sentbart/searcheval/cascade_ladder2_r01_hyde.json >/dev/null 2>&1 && echo "CASCADEL2_DONE $(date -u)"
+  ) > /root/sb_cascadeL2.log 2>&1 &
 fi
 echo "BOXI_OK serial $BOXI_SERIAL $(date -u)"
 # CTL-END
