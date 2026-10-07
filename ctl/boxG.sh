@@ -80,7 +80,7 @@ PSKIP=
 # The raw GitHub copy this box fetches can lag and hand a control run an OLDER version of this file (04:48 on 09-22 it
 # relaunched the online loop under the previous mode while the newer run was merging a checkpoint on the same card).
 # Every edit bumps BOXG_SERIAL; a run that sees a lower serial than one already executed stops here.
-BOXG_SERIAL=2026100629
+BOXG_SERIAL=2026100630
 if [ -f /root/.boxg_serial ] && [ "$(cat /root/.boxg_serial)" -gt "$BOXG_SERIAL" ] 2>/dev/null; then echo "BOXG_STALE $BOXG_SERIAL < $(cat /root/.boxg_serial)"; exit 0; fi
 echo $BOXG_SERIAL > /root/.boxg_serial
 MODE=idle         # 2026-09-29: the side jobs hold the card (multi-turn measurement and training); a finished reeval re-launched on every control run and killed their evaluators
@@ -3497,6 +3497,25 @@ for x in r:
     if x.get("kind")=="search": by[x["q"]].append(x.get("reward",0)>=1.0)
 qs=list(by)
 print(f"mtg6 so far: {len(qs)} search questions, samples passing {sum(sum(v) for v in by.values())}/{sum(len(v) for v in by.values())}, questions with any pass {sum(1 for v in by.values() if any(v))}/{len(qs)}")
+PQ
+echo "--- mtg6 vs s100 on the same fresh questions, in order (blocks of 12 questions; s100 = the probe's 4 samples) ---"
+python3 - <<'PQ' 2>/dev/null
+import json, collections
+pr={}
+for l in open("/root/work/probe_nq1.jsonl"):
+    if l.strip(): x=json.loads(l); pr[x["q"].strip()]=(x["pass"], x["n"])
+by=collections.OrderedDict()
+for l in open("/root/online_mtg6/rollouts.jsonl"):
+    if not l.strip(): continue
+    x=json.loads(l)
+    if x.get("kind")!="search": continue
+    by.setdefault(x["q"].strip(), []).append(x.get("reward",0)>=1.0)
+qs=[q for q in by if q in pr]
+for i in range(0, len(qs), 12):
+    blk=qs[i:i+12]
+    sp=sum(pr[q][0] for q in blk); sn=sum(pr[q][1] for q in blk); mp=sum(sum(by[q]) for q in blk); mn=sum(len(by[q]) for q in blk)
+    print(f"  questions {i+1:3d}-{i+len(blk):3d}: s100 {100*sp/max(sn,1):3.0f}% of samples, {sum(1 for q in blk if pr[q][0]>0):2d}/{len(blk)} questions | mtg6 {100*mp/max(mn,1):3.0f}% of samples, {sum(1 for q in blk if any(by[q])):2d}/{len(blk)} questions")
+print(f"  ({len(qs)} questions in both; {len(by)-len(qs)} mtg6 questions not in the probe - follow-ups and beyond its 60)")
 PQ
 echo "--- mtg6: the last reasoning step's rows (chars, closed, tail) ---"
 python3 - <<'PQ' 2>/dev/null
