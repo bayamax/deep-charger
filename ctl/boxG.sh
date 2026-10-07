@@ -80,7 +80,7 @@ PSKIP=
 # The raw GitHub copy this box fetches can lag and hand a control run an OLDER version of this file (04:48 on 09-22 it
 # relaunched the online loop under the previous mode while the newer run was merging a checkpoint on the same card).
 # Every edit bumps BOXG_SERIAL; a run that sees a lower serial than one already executed stops here.
-BOXG_SERIAL=2026100628
+BOXG_SERIAL=2026100629
 if [ -f /root/.boxg_serial ] && [ "$(cat /root/.boxg_serial)" -gt "$BOXG_SERIAL" ] 2>/dev/null; then echo "BOXG_STALE $BOXG_SERIAL < $(cat /root/.boxg_serial)"; exit 0; fi
 echo $BOXG_SERIAL > /root/.boxg_serial
 MODE=idle         # 2026-09-29: the side jobs hold the card (multi-turn measurement and training); a finished reeval re-launched on every control run and killed their evaluators
@@ -3497,6 +3497,17 @@ for x in r:
     if x.get("kind")=="search": by[x["q"]].append(x.get("reward",0)>=1.0)
 qs=list(by)
 print(f"mtg6 so far: {len(qs)} search questions, samples passing {sum(sum(v) for v in by.values())}/{sum(len(v) for v in by.values())}, questions with any pass {sum(1 for v in by.values() if any(v))}/{len(qs)}")
+PQ
+echo "--- mtg6: the last reasoning step's rows (chars, closed, tail) ---"
+python3 - <<'PQ' 2>/dev/null
+import json
+r=[json.loads(l) for l in open("/root/online_mtg6/rollouts.jsonl") if l.strip()]
+rs=[x for x in r if x.get("kind")=="reason"]
+if rs:
+    st=rs[-1]["step"]; rows=[x for x in rs if x["step"]==st]
+    print(f"step {st}: {rows[0]['q'][:90]!r}")
+    for x in rows:
+        t=x.get("text","") or ""; print(f"  {len(t):6d} chars  {'closed' if '</think>' in t else 'OPEN  '}  reward {x.get('reward')}  tail: {t[-70:]!r}")
 PQ
 echo "--- r1 on the fly: why no trajectory ---"; tail -n 6 /root/online_mtg6/r1_fly_out.jsonl.why 2>/dev/null | cut -c1-300
 echo "--- qgen.log ---"; tail -n 4 /root/qgen.log 2>/dev/null | cut -c1-300
