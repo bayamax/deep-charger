@@ -93,7 +93,8 @@ answer: two or three conversational sentences that answer the user's latest mess
 Each search returns about 250 tokens of the best-matching page; searching the same query again returns the next part of that page.
 If the latest message refers to something earlier in the conversation ("that film", "he", "it"), search for the thing it refers to by name.
 Search the way someone who does NOT know the answer would: build each query only from the conversation and from what the results so far have shown. Never put the answer you expect into a query - find it.
-Keep thoughts short and about the results ("The page names X but not Y; search Y."), not about the user."""
+Keep thoughts short and about the results ("The page names X but not Y; search Y."), not about the user.
+As soon as a result states the answer, answer - do not search again to confirm what a page already said."""
 
 
 def r1(messages, tries=3):
@@ -140,7 +141,12 @@ def solve(it):
             return {"q": q, "gold": gold, "hist": hist, "traj": traj, "reply": reply, "ns": ns} if ok else None
         kw = (v.get("search") or "").strip()
         if not kw or ns >= A.maxsrch: why(q, f"no answer after {ns} searches: " + " | ".join(s_["search"] for s_ in steps)); return None
-        if has(kw, gold) and not has(conv, gold) and not any(has(c, gold) for c in served): why(q, f"searched for the answer itself: {kw!r}"); return None   # searched for the answer before finding it: not a demonstration
+        if has(kw, gold) and not has(conv, gold) and not any(has(c, gold) for c in served):   # searched for the answer before finding it: not a demonstration
+            if pushed < 2:   # once more: search for the subject instead
+                pushed += 1
+                steps.append({"thought": th, "search": "", "result": "(that query names an answer no result has shown yet: search for the subject of the question - the person, work or place it names - not for an answer)"})
+                continue
+            why(q, f"searched for the answer itself: {kw!r}"); return None
         ns += 1
         pg = get_page(kw)
         if not pg: chunk = "(no results)"
