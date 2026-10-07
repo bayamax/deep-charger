@@ -3,7 +3,7 @@
 # renter and the start sat in Vast's queue (the user: that is no good, move house). Only what the routine needs is here:
 # the 4-bit base, s100, the evaluation sets, the data, the loop; then mtg7 and the rounds after it. Pull-based as the
 # others (ctl.sh runs this file whenever it changes).
-BOXG2_SERIAL=2
+BOXG2_SERIAL=3
 if [ -f /root/.boxg2_serial ] && [ "$(cat /root/.boxg2_serial)" -gt "$BOXG2_SERIAL" ] 2>/dev/null; then echo "BOXG2_STALE $BOXG2_SERIAL"; exit 0; fi
 echo $BOXG2_SERIAL > /root/.boxg2_serial
 mkdir -p /root/work/runtime /root/work/fft_out /root/hfdl; cd /root/work
@@ -143,6 +143,12 @@ ENV="SP_BASE=/root/gptq_hf_gq14 SP_RANK=16 SP_NOSYS=1 SP_EPISODIC=1 OMP_NUM_THRE
 S0=/root/mtg3_s100.safetensors; B0=54
 while pgrep -f "pool_eval.p[y]|online_loop.p[y]" >/dev/null; do sleep 30; done
 [ -s /root/work/mtg7_items.jsonl ] || { echo "MTG7_JOB_DONE no items"; exit 1; }
+# the base was quantised here with its own calibration draw, so s100's shard-0 line is measured again on it (box G: 54)
+if [ ! -s /root/work/s100st_0.jsonl ]; then
+  env $ENV python3 /root/work/pool_eval.py $S0 /root/work/ev_0.jsonl /root/work/s100st_0.jsonl --n 100 $EVARGS --tag "[s100st0]" > /root/s100st_0.log 2>&1
+fi
+c=$(python3 -c "import json;print(sum(bool(json.loads(l).get('correct')) for l in open('/root/work/s100st_0.jsonl')))" 2>/dev/null || echo 0)
+[ "$c" -gt 0 ] && B0=$c; echo "[mtg7] s100 on this box's base: single shard 0 $c/100 (box G's base: 54) - the line to beat is $B0"
 echo "[mtg7] start from s100 on $(wc -l < /root/work/mtg7_items.jsonl) fresh questions (TriviaQA + MuSiQue two-hop) $(date -u +%H:%M); $(df -h /root | tail -1 | awk '{print $4}') free"
 ( last=0; while sleep 60; do s=$(python3 -c "import json;print(json.load(open('$OUT/state.json'))['step'])" 2>/dev/null || echo 0)
     if [ "$s" != "$last" ] && [ $((s % 40)) -eq 0 ] && [ "$s" -gt 0 ] && [ ! -s /root/mtg7_s$s.safetensors ]; then sleep 20; cp $OUT/latest.safetensors /root/mtg7_s$s.safetensors; hf upload $R /root/mtg7_s$s.safetensors pooler_distill/chatsft/multiturn/mtg7_s$s.safetensors >/dev/null 2>&1; echo "[mtg7] copy at step $s (on the hub)"; fi; last=$s; done ) & CP=$!
@@ -172,9 +178,9 @@ for CK in $(ls /root/mtg7_s*.safetensors 2>/dev/null | sort -V); do
   T=$(basename $CK .safetensors)
   env $ENV python3 /root/work/pool_eval.py $CK /root/work/ev_0.jsonl /root/work/${T}st_0.jsonl --n 100 $EVARGS --tag "[${T}st0]" > /root/${T}st_0.log 2>&1
   c=$(python3 -c "import json;print(sum(bool(json.loads(l).get('correct')) for l in open('/root/work/${T}st_0.jsonl')))" 2>/dev/null || echo 0)
-  echo "[mtg7] $T single shard 0: $c/100 (s100 54)"; [ "$c" -gt "$BC" ] && { BC=$c; BEST=$CK; }
+  echo "[mtg7] $T single shard 0: $c/100 (s100 here $B0)"; [ "$c" -gt "$BC" ] && { BC=$c; BEST=$CK; }
 done
-[ -n "$BEST" ] || { echo "MTG7_JOB_DONE no copy above s100's shard 0 (54)"; exit 0; }
+[ -n "$BEST" ] || { echo "MTG7_JOB_DONE no copy above s100's shard 0 ($B0)"; exit 0; }
 T=$(basename $BEST .safetensors); echo "[mtg7] full screens for $T"
 SN=$BC; for i in 1 2; do env $ENV python3 /root/work/pool_eval.py $BEST /root/work/ev_$i.jsonl /root/work/${T}st_$i.jsonl --n 100 $EVARGS --tag "[${T}st$i]" > /root/${T}st_$i.log 2>&1
   c=$(python3 -c "import json;print(sum(bool(json.loads(l).get('correct')) for l in open('/root/work/${T}st_$i.jsonl')))" 2>/dev/null || echo 0); SN=$((SN + c)); echo "[mtg7] single shard $i: $c/100"; done

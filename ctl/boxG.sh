@@ -80,7 +80,7 @@ PSKIP=
 # The raw GitHub copy this box fetches can lag and hand a control run an OLDER version of this file (04:48 on 09-22 it
 # relaunched the online loop under the previous mode while the newer run was merging a checkpoint on the same card).
 # Every edit bumps BOXG_SERIAL; a run that sees a lower serial than one already executed stops here.
-BOXG_SERIAL=2026100635
+BOXG_SERIAL=2026100636
 if [ -f /root/.boxg_serial ] && [ "$(cat /root/.boxg_serial)" -gt "$BOXG_SERIAL" ] 2>/dev/null; then echo "BOXG_STALE $BOXG_SERIAL < $(cat /root/.boxg_serial)"; exit 0; fi
 echo $BOXG_SERIAL > /root/.boxg_serial
 MODE=idle         # 2026-09-29: the side jobs hold the card (multi-turn measurement and training); a finished reeval re-launched on every control run and killed their evaluators
@@ -3255,7 +3255,7 @@ fi
 if [ ! -e /root/.salvage ]; then touch /root/.salvage
   ( export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); R=baya1116/hypernet-sp-distill
     pkill -f "mtg6kee[p].sh"; pkill -f "online_loop.p[y]"; pkill -f "pool_eval.p[y]"; pkill -f "qgenkee[p].sh"; sleep 5
-    [ -s /root/gptq_hf_gq14/model.safetensors ] && hf upload $R /root/gptq_hf_gq14 pooler_distill/chatsft/gq14_hf >/dev/null 2>&1 && echo "[salvage] gq14_hf up"
+    [ -s /root/gptq_hf_gq14/model.safetensors ] && hf upload $R /root/gptq_hf_gq14 pooler_distill/chatsft/gq14_hf_orig >/dev/null 2>&1 && echo "[salvage] gq14_hf_orig up"
     for f in qcal_q14.jsonl selfq_all.jsonl probe_items.jsonl mtg_items.jsonl mtg4_items.jsonl mtg5_items.jsonl nq_items_1.jsonl nq_pool.jsonl trained_items.jsonl mt_eval_bridge.jsonl dolphin_rft.jsonl dolphin_heldout100.jsonl r1_page_cache.jsonl pool_eval_cache.jsonl; do
       [ -s /root/work/$f ] && hf upload $R /root/work/$f pooler_distill/chatsft/data/$f >/dev/null 2>&1; done; echo "[salvage] data up"
     for f in /root/mtg6_s*.safetensors; do [ -s $f ] && hf upload $R $f pooler_distill/chatsft/multiturn/$(basename $f) >/dev/null 2>&1; done
