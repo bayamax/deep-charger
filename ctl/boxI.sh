@@ -8,7 +8,7 @@ cd /root
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null)
 R=baya1116/hypernet-sp-distill
 RAW="https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl"
-BOXI_SERIAL=59
+BOXI_SERIAL=60
 if [ -f /root/.boxi_serial ] && [ "$(cat /root/.boxi_serial)" -gt "$BOXI_SERIAL" ] 2>/dev/null; then echo "BOXI_STALE $BOXI_SERIAL"; exit 0; fi
 echo $BOXI_SERIAL > /root/.boxi_serial
 mkdir -p /root/sb /root/work
@@ -31,7 +31,8 @@ done
 ls /root/sb
 
 # ---- the mirror: what this box is doing, on the hub every 10 minutes ----
-if [ ! -e /root/.mirror_r2 ]; then touch /root/.mirror_r2; pkill -f "mirrorkee[p].sh"; sleep 1; fi   # 2026-10-07: restarted once for the ladder2 lines
+if [ ! -e /root/.mirror_r2 ]; then touch /root/.mirror_r2; pkill -f "mirrorkee[p].sh"; sleep 1; fi
+if [ ! -e /root/.mirror_r3 ]; then touch /root/.mirror_r3; pkill -f "mirrorkee[p].sh"; sleep 1; fi   # again for the pool fields   # 2026-10-07: restarted once for the ladder2 lines
 if ! pgrep -f "mirrorkee[p].sh" >/dev/null; then
   cat > /root/mirrorkeep.sh <<'MK'
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); R=baya1116/hypernet-sp-distill
