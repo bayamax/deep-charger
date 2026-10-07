@@ -8,7 +8,7 @@ cd /root
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null)
 R=baya1116/hypernet-sp-distill
 RAW="https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl"
-BOXI_SERIAL=67
+BOXI_SERIAL=68
 if [ -f /root/.boxi_serial ] && [ "$(cat /root/.boxi_serial)" -gt "$BOXI_SERIAL" ] 2>/dev/null; then echo "BOXI_STALE $BOXI_SERIAL"; exit 0; fi
 echo $BOXI_SERIAL > /root/.boxi_serial
 mkdir -p /root/sb /root/work
@@ -1272,6 +1272,13 @@ echo "DOLPHINLADDER_JOB_DONE $(date -u)"
 DL
   setsid nohup bash -c 'bash /root/dolphinladderkeep.sh 2>&1 | tee -a /root/sb_dolphinladder.log' > /dev/null 2>&1 < /dev/null &
   echo "DOLPHINLADDER_RELAUNCHED $(date -u)"
+fi
+# ---- 2026-10-08 00:00 JST: the Vast credit ran out and the box stopped six minutes into r01. After the restart the ladder keeper
+# is relaunched (e2e_ladder.py resumes from ladder.json: r00_ref again, briefly, then r01 from the start).
+if [ -s /root/dolphinladderkeep.sh ] && ! pgrep -f "dolphinladderkee[p].sh" >/dev/null && grep -q "text + layout" /root/sb_dolphinladder.log 2>/dev/null \
+   && ! grep -q "DOLPHINLADDER_JOB_DONE [A-Z][a-z][a-z] " /root/sb_dolphinladder.log 2>/dev/null; then
+  echo "[dolphinladder] relaunched after the box stopped $(date -u +%H:%M)" >> /root/sb_dolphinladder.log
+  setsid nohup bash -c 'bash /root/dolphinladderkeep.sh 2>&1 | tee -a /root/sb_dolphinladder.log' > /dev/null 2>&1 < /dev/null &
 fi
 echo "BOXI_OK serial $BOXI_SERIAL $(date -u)"
 # CTL-END
