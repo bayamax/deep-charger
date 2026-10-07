@@ -8,7 +8,7 @@ cd /root
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null)
 R=baya1116/hypernet-sp-distill
 RAW="https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl"
-BOXI_SERIAL=63
+BOXI_SERIAL=64
 if [ -f /root/.boxi_serial ] && [ "$(cat /root/.boxi_serial)" -gt "$BOXI_SERIAL" ] 2>/dev/null; then echo "BOXI_STALE $BOXI_SERIAL"; exit 0; fi
 echo $BOXI_SERIAL > /root/.boxi_serial
 mkdir -p /root/sb /root/work
@@ -1188,7 +1188,7 @@ fi
 # Data: 50,000 training + 22,000 held-out conversations of dolphin-r1's deepseek set (dolphin_v1's questions excluded),
 # stock bge vectors for the layout, then train_e2e.py: pool retrieval among 20,000 conversations selects the best.
 # DOLPHIN_GO=1 also stops ladder2 (the box has one GPU) - set once the user says so.
-DOLPHIN_GO=0
+DOLPHIN_GO=1
 if [ "$DOLPHIN_GO" = "1" ] && [ ! -e /root/.dolphin_e2e ] && [ -s /root/sb/prep_dolphin.py ]; then touch /root/.dolphin_e2e
   cat > /root/dolphinkeep.sh <<'DK'
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); R=baya1116/hypernet-sp-distill; cd /root/sb; D=/root/sb/data/dolphin; OUT=/root/sb/dolphin_e2e
