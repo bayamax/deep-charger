@@ -8,7 +8,7 @@ cd /root
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null)
 R=baya1116/hypernet-sp-distill
 RAW="https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl"
-BOXI_SERIAL=62
+BOXI_SERIAL=63
 if [ -f /root/.boxi_serial ] && [ "$(cat /root/.boxi_serial)" -gt "$BOXI_SERIAL" ] 2>/dev/null; then echo "BOXI_STALE $BOXI_SERIAL"; exit 0; fi
 echo $BOXI_SERIAL > /root/.boxi_serial
 mkdir -p /root/sb /root/work
@@ -25,7 +25,7 @@ if [ ! -f /root/.bootstrapped ]; then
 fi
 
 # the code, fresh from the branch on every control run
-for f in prep.py embed.py train.py train_e2e.py e2e_ladder.py search_cascade.py pick_docs.py evalsb.py links.py; do
+for f in prep.py embed.py train.py train_e2e.py e2e_ladder.py search_cascade.py pick_docs.py evalsb.py links.py prep_dolphin.py; do
   curl -sS -L -o /root/sb/$f.new "$RAW/sentbart/$f?$(date +%s)" && grep -q "^#!/usr/bin/env python3" /root/sb/$f.new && mv /root/sb/$f.new /root/sb/$f || rm -f /root/sb/$f.new
 done
 ls /root/sb
@@ -44,6 +44,7 @@ while :; do
     echo "--- disk ---"; df -h /root | tail -1; du -sh /root/sb/data 2>/dev/null
     echo "--- ladder2 ---"; ls -t /root/sb/ladder2 2>/dev/null | head -8 | tr '\n' ' '; echo
     f=$(ls -t /root/sb/ladder2/*.out 2>/dev/null | head -1); [ -n "$f" ] && { echo "== $f"; grep -E "^\[eval|^\[best|^\[plateau|^\[init\]|Error|Traceback" $f | tail -8 | cut -c1-300; echo "pool fields:"; grep -E "^\[eval" $f | tail -6 | sed -E 's/^(\[eval [0-9]+\]).*page_top1 ([0-9.]+).*(pool_top1.*)$/\1 2000: \2 | \3/' | cut -c1-200; grep "^\[step" $f | tail -1 | cut -c1-200; }
+    [ -s /root/sb/dolphin_e2e/train.log ] && { echo "--- dolphin e2e (train.log) ---"; grep -E "^\[eval|^\[best|^\[plateau|^\[init\]|^\[e2e\]|Error|Traceback" /root/sb/dolphin_e2e/train.log | tail -8 | sed -E 's/^(\[eval [0-9]+\]).*page_top1 ([0-9.]+).*page_base_top1 ([0-9.]+).*(next_top1 [0-9.]+).*(pool_top1 [0-9.]+ pool_top10 [0-9.]+).*$/\1 2000: \2 (base \3) \4 \5/' | cut -c1-300; grep "^\[step" /root/sb/dolphin_e2e/train.log | tail -1 | cut -c1-200; }
     echo "--- ladder2 rungs (ladder.json) and dev guards ---"; python3 -c "
 import json,glob
 try:
@@ -1181,6 +1182,38 @@ if [ ! -e /root/.casc_l2r01 ] && [ -s /root/sb/ladder2/cap_bge12_bart8/model_bes
       --queries /root/sb/sc/dl/sentbart/searcheval/dcq_hyde.jsonl --out /root/sb/sc/l2r01_hyde.json 2>&1 | grep -E "^\[cascade\]|Error|Traceback|out of memory" | cut -c1-300
     [ -s /root/sb/sc/l2r01_hyde.json ] && hf upload $R /root/sb/sc/l2r01_hyde.json sentbart/searcheval/cascade_ladder2_r01_hyde.json >/dev/null 2>&1 && echo "CASCADEL2_DONE $(date -u)"
   ) > /root/sb_cascadeL2.log 2>&1 &
+fi
+# ---- Dolphin context sequences, e2e (2026-10-07 20:30 JST; the user's last item: the BART before bge was touched (abl_one32) +
+# stock bge, trained e2e on Dolphin conversations - the question's sentences read as context, never hidden or predicted).
+# Data: 50,000 training + 22,000 held-out conversations of dolphin-r1's deepseek set (dolphin_v1's questions excluded),
+# stock bge vectors for the layout, then train_e2e.py: pool retrieval among 20,000 conversations selects the best.
+# DOLPHIN_GO=1 also stops ladder2 (the box has one GPU) - set once the user says so.
+DOLPHIN_GO=0
+if [ "$DOLPHIN_GO" = "1" ] && [ ! -e /root/.dolphin_e2e ] && [ -s /root/sb/prep_dolphin.py ]; then touch /root/.dolphin_e2e
+  cat > /root/dolphinkeep.sh <<'DK'
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); R=baya1116/hypernet-sp-distill; cd /root/sb; D=/root/sb/data/dolphin; OUT=/root/sb/dolphin_e2e
+pkill -f "ladder2kee[p].sh"; pkill -f "e2e_ladder.py --start"; pkill -f "train_e2e.py.*/root/sb/ladder2/"; pkill -f "search_cascade.py.*/root/sb/ladder2/"; sleep 15
+echo "LADDER2_JOB_DONE stopped for the Dolphin e2e $(date -u)" >> /root/sb_ladder2.log
+hf upload $R /root/sb/ladder2/ladder.json sentbart/e2e/ladder2/ladder.json >/dev/null 2>&1
+for d in /root/sb/ladder2/r*/; do rm -f $d/state_e2e.pt $d/model_latest.pt $d/model_best.pt; done
+I0=/root/sb/abl_one32/model_best.pt; [ -s $I0 ] || { hf download $R sentbart/abl/one32/model_best.pt --local-dir /root/sb/hfdl >/dev/null 2>&1; I0=/root/sb/hfdl/sentbart/abl/one32/model_best.pt; }
+[ -s $I0 ] || { echo "DOLPHIN_JOB_DONE no one32"; exit 1; }
+mkdir -p /root/sb/dl; hf download $R pooler_distill/chatsft/dolphin_v1.jsonl --local-dir /root/sb/dl >/dev/null 2>&1
+if [ ! -s $D/docs_001.jsonl ]; then
+  echo "[dolphin] preparing the conversations $(date -u +%H:%M); $(df -h /root | tail -1 | awk '{print $4}') free"
+  python3 /root/sb/prep_dolphin.py --out $D --n-train 50000 --n-eval 22000 --exclude /root/sb/dl/pooler_distill/chatsft/dolphin_v1.jsonl 2>&1 | grep -E "^\[prep_dolphin\]|PREP_DOLPHIN|Error|Traceback" | cut -c1-300
+  head -c 600 $D/docs_001.jsonl; echo
+fi
+[ -s $D/docs_001.jsonl ] || { echo "DOLPHIN_JOB_DONE no documents"; exit 1; }
+[ -s $D/vec_001.npy ] || { echo "[dolphin] stock bge vectors $(date -u +%H:%M)"; python3 /root/sb/embed.py --dir $D 2>&1 | grep -vE "Warning|warn" | tail -3 | cut -c1-200; }
+[ -s $D/vec_001.npy ] || { echo "DOLPHIN_JOB_DONE no vectors"; exit 1; }
+echo "[dolphin] e2e from $I0 $(date -u +%H:%M)"
+python3 -u /root/sb/train_e2e.py --vec $D --text $D --eval-text $D/docs_001.jsonl --init $I0 --out $OUT --steps 40000 --batch 32 --page-queue 16   --pool 20000 --select pool_top1 --patience 4 --min-gain 0.002 --anchor-q 0 2>&1 | grep --line-buffered -E "^\[e2e\]|^\[data\]|^\[init\]|^\[best|^\[plateau|TRAIN_DONE|Error|Traceback|out of memory" | cut -c1-300
+for f in model_best.pt train.log; do [ -s $OUT/$f ] && hf upload $R $OUT/$f sentbart/dolphin/e2e1/$f >/dev/null 2>&1; done
+echo "DOLPHIN_JOB_DONE $(date -u)"
+DK
+  setsid nohup bash -c 'bash /root/dolphinkeep.sh 2>&1 | tee -a /root/sb_dolphin.log' > /dev/null 2>&1 < /dev/null &
+  echo "DOLPHIN_LAUNCHED $(date -u)"
 fi
 echo "BOXI_OK serial $BOXI_SERIAL $(date -u)"
 # CTL-END
