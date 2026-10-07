@@ -80,7 +80,7 @@ PSKIP=
 # The raw GitHub copy this box fetches can lag and hand a control run an OLDER version of this file (04:48 on 09-22 it
 # relaunched the online loop under the previous mode while the newer run was merging a checkpoint on the same card).
 # Every edit bumps BOXG_SERIAL; a run that sees a lower serial than one already executed stops here.
-BOXG_SERIAL=2026100634
+BOXG_SERIAL=2026100635
 if [ -f /root/.boxg_serial ] && [ "$(cat /root/.boxg_serial)" -gt "$BOXG_SERIAL" ] 2>/dev/null; then echo "BOXG_STALE $BOXG_SERIAL < $(cat /root/.boxg_serial)"; exit 0; fi
 echo $BOXG_SERIAL > /root/.boxg_serial
 MODE=idle         # 2026-09-29: the side jobs hold the card (multi-turn measurement and training); a finished reeval re-launched on every control run and killed their evaluators
@@ -3249,13 +3249,18 @@ M7
     echo "MTG7_LAUNCHED $(date -u)"
   else echo "MTG7_NOT_LAUNCHED no items" >> /root/mtg7.log; fi
 fi
-# ---- 2026-10-08 00:00 JST: the Vast credit ran out at 22:15 JST and the box stopped at mtg6 step 114 (the keeper's checkpoint
-# is step 80: save-every 40). After the restart the keeper is relaunched as it stands on disk (it resumes from
-# /root/online_mtg6 - the budget edit already stopped it clearing that directory), then the screens and mtg7 follow as before.
-if [ -s /root/mtg6keep.sh ] && ! pgrep -f "mtg6kee[p].sh" >/dev/null && ! grep -q "MTG6_JOB_DONE" /root/mtg6.log 2>/dev/null \
-   && [ -s /root/online_mtg6/latest.safetensors ] && ! grep -q "probe_nq1 /root/online_mtg6" /root/mtg6keep.sh; then
-  echo "[mtg6] relaunched after the box stopped; resumes from the step-$(python3 -c "import json;print(json.load(open('/root/online_mtg6/state.json'))['step'])" 2>/dev/null) checkpoint $(date -u +%H:%M)" >> /root/mtg6.log
-  setsid nohup bash -c 'bash /root/mtg6keep.sh 2>&1 | tee -a /root/mtg6.log' >> /proc/1/fd/1 2>&1 < /dev/null 9>&- &
+# ---- 2026-10-08 00:40 JST: this box is being left (its host's GPU stayed taken after the credit lapse; the user: move). If it
+# ever starts again, the first thing it does is put what only its disk holds on the hub - the 4-bit base, its calibration
+# traces, mtg6's copies, the question sets and the ledger - then it stops itself. No training resumes here.
+if [ ! -e /root/.salvage ]; then touch /root/.salvage
+  ( export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); R=baya1116/hypernet-sp-distill
+    pkill -f "mtg6kee[p].sh"; pkill -f "online_loop.p[y]"; pkill -f "pool_eval.p[y]"; pkill -f "qgenkee[p].sh"; sleep 5
+    [ -s /root/gptq_hf_gq14/model.safetensors ] && hf upload $R /root/gptq_hf_gq14 pooler_distill/chatsft/gq14_hf >/dev/null 2>&1 && echo "[salvage] gq14_hf up"
+    for f in qcal_q14.jsonl selfq_all.jsonl probe_items.jsonl mtg_items.jsonl mtg4_items.jsonl mtg5_items.jsonl nq_items_1.jsonl nq_pool.jsonl trained_items.jsonl mt_eval_bridge.jsonl dolphin_rft.jsonl dolphin_heldout100.jsonl r1_page_cache.jsonl pool_eval_cache.jsonl; do
+      [ -s /root/work/$f ] && hf upload $R /root/work/$f pooler_distill/chatsft/data/$f >/dev/null 2>&1; done; echo "[salvage] data up"
+    for f in /root/mtg6_s*.safetensors; do [ -s $f ] && hf upload $R $f pooler_distill/chatsft/multiturn/$(basename $f) >/dev/null 2>&1; done
+    for f in rollouts.jsonl followups.jsonl r1_onfly.jsonl; do [ -s /root/online_mtg6/$f ] && hf upload $R /root/online_mtg6/$f pooler_distill/chatsft/multiturn/mtg6_$f >/dev/null 2>&1; done
+    echo "SALVAGE_DONE $(date -u)" ) 2>&1 | tee -a /root/salvage.log >> /proc/1/fd/1 &
 fi
 # ---- mtg6 without the probe (2026-10-07 07:20 JST, the user: why not learn as you go?). The probe (600 x 4 rollouts, ~10 h,
 # no learning) is dropped: GRPO's own eight samples grade each fresh question as it comes - 1-7 pass: the gradient; 8 pass:
