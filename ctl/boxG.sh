@@ -80,7 +80,7 @@ PSKIP=
 # The raw GitHub copy this box fetches can lag and hand a control run an OLDER version of this file (04:48 on 09-22 it
 # relaunched the online loop under the previous mode while the newer run was merging a checkpoint on the same card).
 # Every edit bumps BOXG_SERIAL; a run that sees a lower serial than one already executed stops here.
-BOXG_SERIAL=2026100631
+BOXG_SERIAL=2026100632
 if [ -f /root/.boxg_serial ] && [ "$(cat /root/.boxg_serial)" -gt "$BOXG_SERIAL" ] 2>/dev/null; then echo "BOXG_STALE $BOXG_SERIAL < $(cat /root/.boxg_serial)"; exit 0; fi
 echo $BOXG_SERIAL > /root/.boxg_serial
 MODE=idle         # 2026-09-29: the side jobs hold the card (multi-turn measurement and training); a finished reeval re-launched on every control run and killed their evaluators
@@ -155,7 +155,7 @@ OSEARCHGEN=1500   # and capped as it capped them; the reasoning side keeps OGEN
 OTEMP=0.6
 SHARDS=3
 RAW="https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl"
-for f in pool_eval.py q4.py qat.py dwq.py poolerfit.py jointfit.py checkmlx.py packmlx.py dequant_state.py gptq.py sft_lora.py selfgen_gpu.py build_merged.py web_search.py grpo_pool.py online_loop.py mt_gen.py memfit.py mt_sim.py r1_traj.py nq_items.py tqa_items.py; do
+for f in pool_eval.py q4.py qat.py dwq.py poolerfit.py jointfit.py checkmlx.py packmlx.py dequant_state.py gptq.py sft_lora.py selfgen_gpu.py build_merged.py web_search.py grpo_pool.py online_loop.py mt_gen.py memfit.py mt_sim.py r1_traj.py nq_items.py tqa_items.py musique_items.py; do
   for try in 1 2 3; do curl -sS -o /root/work/$f "$RAW/$f?nocache=$(date +%s)" && python3 -m py_compile /root/work/$f && break; sleep 5; done
 done
 cp /root/work/web_search.py /root/work/runtime/web_search.py 2>/dev/null
@@ -3173,7 +3173,20 @@ PS
   python3 /root/work/tqa_items.py --n 600 --out /root/work/tqa_items_1.jsonl --pool /root/work/tqa_pool.jsonl \
     --exclude /root/work/eval300.jsonl /root/work/dolphin_v1.jsonl /root/work/dolphinq.jsonl /root/work/replay_v1.jsonl /root/work/selfq_all.jsonl /root/work/probe_items.jsonl \
       /root/work/nq_items_1.jsonl /root/work/trained_items.jsonl /root/work/mt_eval*.jsonl /root/work/mtg*_items.jsonl 2>&1 | tail -2 >> /root/mtg7.log
-  if [ -s /root/work/tqa_items_1.jsonl ]; then
+  # 2026-10-07 19:30 JST (the user: would MuSiQue serve better?): mixed in - 400 TriviaQA (single lookup, natural trivia) and
+  # 200 MuSiQue two-hop (the bridge entity first, then the fact), shuffled together; each item carries its source.
+  python3 /root/work/musique_items.py --n 200 --out /root/work/musique_items_1.jsonl --pool /root/work/musique_pool.jsonl \
+    --exclude /root/work/eval300.jsonl /root/work/dolphin_v1.jsonl /root/work/dolphinq.jsonl /root/work/replay_v1.jsonl /root/work/selfq_all.jsonl /root/work/probe_items.jsonl \
+      /root/work/nq_items_1.jsonl /root/work/trained_items.jsonl /root/work/mt_eval*.jsonl /root/work/mtg*_items.jsonl 2>&1 | tail -2 >> /root/mtg7.log
+  python3 - <<'PM' >> /root/mtg7.log
+import json, random
+t = [dict(json.loads(l), src="triviaqa") for l in open("/root/work/tqa_items_1.jsonl") if l.strip()][:400]
+m = [json.loads(l) for l in open("/root/work/musique_items_1.jsonl") if l.strip()] if __import__("os").path.exists("/root/work/musique_items_1.jsonl") else []
+it = t + m; random.Random(11).shuffle(it)
+open("/root/work/mtg7_items.jsonl", "w").write("".join(json.dumps(x, ensure_ascii=False) + "\n" for x in it))
+print(f"[mtg7] items: {len(t)} TriviaQA + {len(m)} MuSiQue two-hop = {len(it)}")
+PM
+  if [ -s /root/work/mtg7_items.jsonl ]; then
     cat > /root/mtg7keep.sh <<'M7'
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); R=baya1116/hypernet-sp-distill; cd /root/work; OUT=/root/online_mtg7
 EVARGS="--rw 768 --maxd 384 --samepage 1 --decode plain --temp 0.6 --gen 4000 --stop eos --replycap 600"
@@ -3181,12 +3194,12 @@ ENV="SP_BASE=/root/gptq_hf_gq14 SP_RANK=16 SP_NOSYS=1 SP_EPISODIC=1 OMP_NUM_THRE
 S0=$(cut -d' ' -f1 /root/mtg7_start.txt); B0=$(cut -d' ' -f2 /root/mtg7_start.txt)
 while pgrep -f "pool_eval.p[y]|online_loop.p[y]" >/dev/null; do sleep 30; done
 rm -rf /root/evalrun_* /root/online_mtg7
-echo "[mtg7] start from $S0 (shard 0: $B0) on 600 fresh TriviaQA questions $(date -u +%H:%M); $(df -h /root | tail -1 | awk '{print $4}') free"
+echo "[mtg7] start from $S0 (shard 0: $B0) on 600 fresh questions (TriviaQA + MuSiQue two-hop) $(date -u +%H:%M); $(df -h /root | tail -1 | awk '{print $4}') free"
 ( last=0; while sleep 60; do s=$(python3 -c "import json;print(json.load(open('$OUT/state.json'))['step'])" 2>/dev/null || echo 0)
     if [ "$s" != "$last" ] && [ $((s % 40)) -eq 0 ] && [ "$s" -gt 0 ] && [ ! -s /root/mtg7_s$s.safetensors ]; then sleep 20; cp $OUT/latest.safetensors /root/mtg7_s$s.safetensors; echo "[mtg7] copy at step $s"; fi; last=$s; done ) & CP=$!
 env SP_BASE=/root/gptq_hf_gq14 SP_NOSYS=1 SP_EPISODIC=1 OAI_KEY=$(cat /root/.oai 2>/dev/null) DSK_KEY=$(cat /root/.dsk 2>/dev/null) PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
   python3 /root/work/online_loop.py $S0 $OUT --pooler none --lora-layers all --lora-rank 16 --save-lora-only 1 \
-  --mt-items /root/work/tqa_items_1.jsonl --heldout /root/work/eval300.jsonl --reason /root/work/dolphin_rft.jsonl --reason-every 4 --reason-g 12 --search-g 12 \
+  --mt-items /root/work/mtg7_items.jsonl --heldout /root/work/eval300.jsonl --reason /root/work/dolphin_rft.jsonl --reason-every 4 --reason-g 12 --search-g 12 \
   --demo-on-fail 0.5 --followup 0.5 --r1-on-fail 1 --cot-on-fail 0.5 \
   --steps 120 --save-every 40 --lr 5e-6 --search-lr 5e-6 --search-temp 0.9 --search-gen 2000 --temp 0.6 --gen 7000 --budget 3600 --maxsrch 7 --stop eos \
   --judge-api openai --judge-model gpt-5-nano --w-talk 0.5 --dolphin-min 0 --adv-std 1 --pg-norm mean --kl 0 \
