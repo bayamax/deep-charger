@@ -80,7 +80,7 @@ PSKIP=
 # The raw GitHub copy this box fetches can lag and hand a control run an OLDER version of this file (04:48 on 09-22 it
 # relaunched the online loop under the previous mode while the newer run was merging a checkpoint on the same card).
 # Every edit bumps BOXG_SERIAL; a run that sees a lower serial than one already executed stops here.
-BOXG_SERIAL=2026100626
+BOXG_SERIAL=2026100627
 if [ -f /root/.boxg_serial ] && [ "$(cat /root/.boxg_serial)" -gt "$BOXG_SERIAL" ] 2>/dev/null; then echo "BOXG_STALE $BOXG_SERIAL < $(cat /root/.boxg_serial)"; exit 0; fi
 echo $BOXG_SERIAL > /root/.boxg_serial
 MODE=idle         # 2026-09-29: the side jobs hold the card (multi-turn measurement and training); a finished reeval re-launched on every control run and killed their evaluators
@@ -3131,6 +3131,24 @@ if [ ! -e /root/.mtg6_v2 ]; then touch /root/.mtg6_v2; pkill -f "mtg6kee[p].sh";
 # group gets R1 on the fly - what it can solve it solves better, what it cannot it is shown): --cot-on-fail 0.5 --r1-on-fail 1.
 if [ ! -e /root/.mtg6_v3 ]; then touch /root/.mtg6_v3; pkill -f "mtg6kee[p].sh"; sleep 2; fi
 if [ ! -e /root/.mtg6_v4 ]; then touch /root/.mtg6_v4; pkill -f "mtg6kee[p].sh"; sleep 2; fi   # the teacher gate
+# ---- 2026-10-07 11:20 JST: with 12 reasoning samples in lockstep, 7000-token rows hit the 2400 s batch budget (steps 8 and
+# 16: 6/12 and 8/12 cut by time, counted unfinished) - the cap the user chose is never reached. At the step-40 save the loop
+# is resumed from its own checkpoint with the budget at 3600 s (the evaluation keeps its 2400 s; nothing is lost).
+if [ ! -e /root/.mtg6_budget ] && [ -e /root/.mtg6_g12r ]; then touch /root/.mtg6_budget
+  cat > /root/mtg6budget.sh <<'MB'
+while :; do s=$(python3 -c "import json;print(json.load(open('/root/online_mtg6/state.json'))['step'])" 2>/dev/null || echo 0)
+  [ "$s" -ge 40 ] && [ -s /root/online_mtg6/latest.safetensors ] && [ -s /root/mtg6_s40.safetensors ] && break
+  grep -q "MTG6_JOB_DONE\|resumed at step 40" /root/mtg6.log 2>/dev/null && exit 0
+  sleep 60; done
+sleep 60
+pkill -f "mtg6kee[p].sh"; pkill -f "online_loop.py /root/mtg3_s100.safetensors /root/online_mtg6"; sleep 15; pkill -9 -f "online_loop.py /root/mtg3_s100.safetensors /root/online_mtg6" 2>/dev/null
+sed -i 's|rm -rf /root/evalrun_\* /root/probe_nq1 /root/online_mtg6|rm -rf /root/evalrun_* /root/probe_nq1|; s|--temp 0.6 --gen 7000 --budget 2400 --maxsrch 7 --stop eos|--temp 0.6 --gen 7000 --budget 3600 --maxsrch 7 --stop eos|' /root/mtg6keep.sh
+grep -q -- "--budget 3600" /root/mtg6keep.sh && ! grep -q "probe_nq1 /root/online_mtg6" /root/mtg6keep.sh && echo "[mtg6] resumed at step $s with the batch budget at 3600 s (12 rows x 7000 tokens hit 2400 s) $(date -u +%H:%M)" >> /root/mtg6.log || echo "[mtg6] budget edit failed - the keeper restarts as it was" >> /root/mtg6.log
+setsid nohup bash -c 'bash /root/mtg6keep.sh 2>&1 | tee -a /root/mtg6.log' >> /proc/1/fd/1 2>&1 < /dev/null 9>&- &
+MB
+  setsid nohup bash /root/mtg6budget.sh > /root/mtg6budget.log 2>&1 < /dev/null &
+  echo "MTG6_BUDGET_ARMED $(date -u)"
+fi
 # ---- mtg6 without the probe (2026-10-07 07:20 JST, the user: why not learn as you go?). The probe (600 x 4 rollouts, ~10 h,
 # no learning) is dropped: GRPO's own eight samples grade each fresh question as it comes - 1-7 pass: the gradient; 8 pass:
 # nothing much (the advantage is ~0); 0 pass: R1 on the fly, then the demonstration (--r1-on-fail). Training starts now
