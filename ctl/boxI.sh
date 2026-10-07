@@ -8,7 +8,7 @@ cd /root
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null)
 R=baya1116/hypernet-sp-distill
 RAW="https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl"
-BOXI_SERIAL=64
+BOXI_SERIAL=65
 if [ -f /root/.boxi_serial ] && [ "$(cat /root/.boxi_serial)" -gt "$BOXI_SERIAL" ] 2>/dev/null; then echo "BOXI_STALE $BOXI_SERIAL"; exit 0; fi
 echo $BOXI_SERIAL > /root/.boxi_serial
 mkdir -p /root/sb /root/work
@@ -42,13 +42,13 @@ while :; do
     for f in /root/sb_*.log; do [ -e $f ] && { echo "--- $f ---"; tail -n 25 $f | cut -c1-300; }; done
     echo "--- gpu ---"; nvidia-smi --query-gpu=memory.used,memory.total,utilization.gpu --format=csv,noheader
     echo "--- disk ---"; df -h /root | tail -1; du -sh /root/sb/data 2>/dev/null
-    echo "--- ladder2 ---"; ls -t /root/sb/ladder2 2>/dev/null | head -8 | tr '\n' ' '; echo
-    f=$(ls -t /root/sb/ladder2/*.out 2>/dev/null | head -1); [ -n "$f" ] && { echo "== $f"; grep -E "^\[eval|^\[best|^\[plateau|^\[init\]|Error|Traceback" $f | tail -8 | cut -c1-300; echo "pool fields:"; grep -E "^\[eval" $f | tail -6 | sed -E 's/^(\[eval [0-9]+\]).*page_top1 ([0-9.]+).*(pool_top1.*)$/\1 2000: \2 | \3/' | cut -c1-200; grep "^\[step" $f | tail -1 | cut -c1-200; }
+    echo "--- ladder2 / dolphin ladder ---"; ls -t /root/sb/ladder2 /root/sb/dolphin_ladder 2>/dev/null | head -12 | tr '\n' ' '; echo
+    f=$(ls -t /root/sb/ladder2/*.out /root/sb/dolphin_ladder/*.out 2>/dev/null | head -1); [ -n "$f" ] && { echo "== $f"; grep -E "^\[eval|^\[best|^\[plateau|^\[init\]|Error|Traceback" $f | tail -8 | cut -c1-300; echo "pool fields:"; grep -E "^\[eval" $f | tail -6 | sed -E 's/^(\[eval [0-9]+\]).*page_top1 ([0-9.]+).*(pool_top1.*)$/\1 2000: \2 | \3/' | cut -c1-200; grep "^\[step" $f | tail -1 | cut -c1-200; }
     [ -s /root/sb/dolphin_e2e/train.log ] && { echo "--- dolphin e2e (train.log) ---"; grep -E "^\[eval|^\[best|^\[plateau|^\[init\]|^\[e2e\]|Error|Traceback" /root/sb/dolphin_e2e/train.log | tail -8 | sed -E 's/^(\[eval [0-9]+\]).*page_top1 ([0-9.]+).*page_base_top1 ([0-9.]+).*(next_top1 [0-9.]+).*(pool_top1 [0-9.]+ pool_top10 [0-9.]+).*$/\1 2000: \2 (base \3) \4 \5/' | cut -c1-300; grep "^\[step" /root/sb/dolphin_e2e/train.log | tail -1 | cut -c1-200; }
     echo "--- ladder2 rungs (ladder.json) and dev guards ---"; python3 -c "
 import json,glob
 try:
-    L=json.load(open('/root/sb/ladder2/ladder.json'))
+    import os; L=json.load(open('/root/sb/dolphin_ladder/ladder.json' if os.path.exists('/root/sb/dolphin_ladder/ladder.json') else '/root/sb/ladder2/ladder.json'))
     for r in L.get('rungs',[]): print(' ', r.get('name'), 'select', r.get('pool_top1'), '2000:', r.get('page_top1'), 'step', r.get('step'), 'kept' if r.get('kept') else '', r.get('dev') or '')
     print('  cap:', json.dumps(L.get('cap',{}))[:400]); print('  cur:', json.dumps(L.get('cur'))[:300])
 except Exception as e: print('  (no ladder.json yet)', e)
@@ -1107,11 +1107,12 @@ RK
 fi
 # ---- ladderlog (2026-10-06 03:50 JST): the running rung's training log on the hub every 20 minutes (the ladder's own
 # log only speaks between rungs).
+if [ ! -e /root/.ladderlog_r2 ]; then touch /root/.ladderlog_r2; pkill -f "ladderlogkee[p].sh"; sleep 1; fi   # restarted once for the Dolphin ladder's logs
 if ! pgrep -f "ladderlogkee[p].sh" >/dev/null; then
   cat > /root/ladderlogkeep.sh <<'RK'
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); R=baya1116/hypernet-sp-distill
 while :; do
-  f=$(ls -t /root/sb/ladder/r*/train.log /root/sb/ladder2/r*/train.log 2>/dev/null | head -1)
+  f=$(ls -t /root/sb/ladder/r*/train.log /root/sb/ladder2/r*/train.log /root/sb/dolphin_ladder/r*/train.log 2>/dev/null | head -1)
   [ -n "$f" ] && { echo "== $f $(date -u)"; grep -E "^\[eval|^\[best|^\[plateau|^\[e2e\]" $f | tail -20 | cut -c1-400; grep "^\[step" $f | tail -2; } > /root/ladder_current.txt && hf upload $R /root/ladder_current.txt sentbart/e2e/ladder/current.txt >/dev/null 2>&1
   sleep 1200
 done
@@ -1214,6 +1215,33 @@ echo "DOLPHIN_JOB_DONE $(date -u)"
 DK
   setsid nohup bash -c 'bash /root/dolphinkeep.sh 2>&1 | tee -a /root/sb_dolphin.log' > /dev/null 2>&1 < /dev/null &
   echo "DOLPHIN_LAUNCHED $(date -u)"
+fi
+# ---- 2026-10-07 21:40 JST (the user: if this works, a 1 GB-class model is fine - the capacity scheduler as before). The single
+# e2e run is replaced by the ladder on the Dolphin conversations: negatives -> bge layers -> BART layers (doubling, up to 64),
+# a rung kept on the pool gain (20,000 conversations), the best per capacity on the hub under sentbart/dolphin. No real-query
+# guard (not Wikipedia). The stock vectors are re-stored as int8 first (the disk: 4 GB free, large checkpoints to come).
+if [ ! -e /root/.dolphin_ladder ] && [ -e /root/.dolphin_e2e ] && grep -q -- "--guard" /root/sb/e2e_ladder.py; then touch /root/.dolphin_ladder
+  cat > /root/dolphinladderkeep.sh <<'DL'
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); R=baya1116/hypernet-sp-distill; cd /root/sb; D=/root/sb/data/dolphin
+pkill -f "dolphinkee[p].sh"; pkill -f "train_e2e.py.*/root/sb/dolphin_e2e"; sleep 15
+echo "DOLPHIN_JOB_DONE replaced by the ladder $(date -u)" >> /root/sb_dolphin.log
+until [ -s $D/vec_001.npy ] && ! pgrep -f "embed.py --dir $D" >/dev/null; do sleep 60; done
+if [ ! -s $D/scl_000.npy ]; then
+  echo "[dolphinladder] int8 vectors $(date -u +%H:%M); $(df -h /root | tail -1 | awk '{print $4}') free"
+  mkdir -p $D/q8; ln -sf $D/docs_000.jsonl $D/q8/docs_000.jsonl; ln -sf $D/docs_001.jsonl $D/q8/docs_001.jsonl
+  python3 /root/sb/embed.py --dir $D/q8 --int8 1 2>&1 | grep -E "^\[embed\]|EMBED_DONE|Error" | cut -c1-200
+  [ -s $D/q8/scl_001.npy ] && { rm -f $D/vec_000.npy $D/vec_001.npy $D/off_000.npy $D/off_001.npy; mv $D/q8/vec_*.npy $D/q8/scl_*.npy $D/q8/off_*.npy $D/; rm -rf $D/q8; }
+fi
+[ -s $D/scl_001.npy ] || { echo "DOLPHINLADDER_JOB_DONE no int8 vectors"; exit 1; }
+rm -rf /root/sb/dolphin_e2e
+I0=/root/sb/abl_one32/model_best.pt; [ -s $I0 ] || I0=/root/sb/hfdl/sentbart/abl/one32/model_best.pt
+echo "[dolphinladder] from $I0 $(date -u +%H:%M); $(df -h /root | tail -1 | awk '{print $4}') free"
+python3 -u /root/sb/e2e_ladder.py --start $I0 --work /root/sb/dolphin_ladder --vec $D --text $D --eval-text $D/docs_001.jsonl --pool 20000 \
+  --guard 0 --anchor-q 0 --hub sentbart/dolphin --max-layers 64 --max-enc 20 --select pool_top1 2>&1 | grep --line-buffered -E "^\[ladder\]|LADDER_DONE|Error|Traceback|out of memory" | sed -u 's/^\[ladder\]/[dolphinladder]/'
+echo "DOLPHINLADDER_JOB_DONE $(date -u)"
+DL
+  setsid nohup bash -c 'bash /root/dolphinladderkeep.sh 2>&1 | tee -a /root/sb_dolphinladder.log' > /dev/null 2>&1 < /dev/null &
+  echo "DOLPHINLADDER_LAUNCHED $(date -u)"
 fi
 echo "BOXI_OK serial $BOXI_SERIAL $(date -u)"
 # CTL-END

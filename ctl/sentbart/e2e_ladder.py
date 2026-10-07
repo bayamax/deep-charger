@@ -33,6 +33,8 @@ ap.add_argument("--anchor-q", type=int, default=256)
 ap.add_argument("--qfile", default="", help="qgen.py's queries.jsonl: train_e2e --queries (the query -> article losses)")
 ap.add_argument("--select", default="pool_top1", help="the metric rungs are selected on (pool_top1, or pool_qh_top1 with --qfile)")
 ap.add_argument("--queries", default="/root/sb/se2/dl/sentbart/searcheval/dcq.jsonl"); ap.add_argument("--dev", type=int, default=300)
+ap.add_argument("--guard", type=int, default=1, help="0: no real-query search check between rungs (documents that are not Wikipedia articles)")
+ap.add_argument("--hub", default="sentbart/e2e", help="where the rungs' logs, the state and the best per capacity go on the hub")
 A = ap.parse_args()
 os.makedirs(A.work, exist_ok=True)
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -62,7 +64,7 @@ def run(name, init, layers, enc_layers, neg, grow=False, steps=None):
         for line in open(tl):
             m = re.match(r"\[eval (\d+)\] .*page_top1 ([0-9.]+).*" + re.escape(A.select) + r" ([0-9.]+)", line)
             if m and float(m.group(3)) > best: best, p2k, step = float(m.group(3)), float(m.group(2)), int(m.group(1))
-        upload(tl, f"sentbart/e2e/ladder/{name}/train.log")
+        upload(tl, f"{A.hub}/ladder/{name}/train.log")
     tail = open(os.path.join(A.work, name + ".out")).read()[-400:].replace("\n", " | ")
     if rc != 0: log(f"{name}: exit {rc}: {tail[-250:]}")
     return {"name": name, "rc": rc, "pool_top1": best, "page_top1": p2k, "step": step,
@@ -70,7 +72,7 @@ def run(name, init, layers, enc_layers, neg, grow=False, steps=None):
 
 
 DEV = os.path.join(A.work, "dcq_dev.jsonl")
-if not os.path.exists(DEV):
+if A.guard and not os.path.exists(DEV):
     rows = [json.loads(l) for l in open(A.queries) if l.strip()]
     rows = [{"idx": r["idx"], "q_api": r["q_api"]} for r in rows if r.get("q_api")][:A.dev]
     open(DEV, "w").write("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in rows))
@@ -78,19 +80,20 @@ if not os.path.exists(DEV):
 
 def guard(r):
     """the real-query check: the rung's best on the dev queries (two-stage search over all 118,398 held-out articles)"""
+    if not A.guard: r["dev_page50"] = r["dev_lead10"] = r["dev_page10"] = -1.0; return r
     o = os.path.join(A.work, r["name"] + "_dev.json")
     with open(os.path.join(A.work, r["name"] + "_dev.out"), "w") as fo:
         subprocess.run([sys.executable, os.path.join(HERE, "search_cascade.py"), "--vec", A.vec, "--text", A.eval_text, "--ckpt", r["ckpt"],
                         "--queries", DEV, "--out", o], stdout=fo, stderr=subprocess.STDOUT)
     if not os.path.exists(o): r["dev_page50"] = r["dev_lead10"] = -1.0; return r
     d = json.load(open(o)); r["dev_page50"] = d["q_api|page"]["recall@50"]; r["dev_lead10"] = d["q_api|lead"]["recall@10"]
-    r["dev_page10"] = d["q_api|page"]["recall@10"]; upload(o, f"sentbart/e2e/ladder/{r['name']}_dev.json")
+    r["dev_page10"] = d["q_api|page"]["recall@10"]; upload(o, f"{A.hub}/ladder/{r['name']}_dev.json")
     log(f"{r['name']} dev queries: page recall@10 {r['dev_page10']:.3f} @50 {r['dev_page50']:.3f}, lead recall@10 {r['dev_lead10']:.3f}")
     return r
 
 
 rec = json.load(open(REC)) if os.path.exists(REC) else {"rungs": [], "cur": None, "cap": {}}
-def save_rec(): json.dump(rec, open(REC, "w"), indent=1); upload(REC, "sentbart/e2e/ladder/ladder.json")
+def save_rec(): json.dump(rec, open(REC, "w"), indent=1); upload(REC, f"{A.hub}/ladder/ladder.json")
 
 
 def keep_cap(r):
@@ -98,9 +101,9 @@ def keep_cap(r):
     if r["pool_top1"] > rec["cap"].get(key, {}).get("pool_top1", -1) and os.path.exists(r["ckpt"]):
         d = os.path.join(A.work, "cap_" + key); os.makedirs(d, exist_ok=True)
         try: shutil.copy(r["ckpt"], os.path.join(d, "model_best.pt"))
-        except OSError as e: log(f"could not keep {key} locally ({e}); the hub copy follows"); upload(r["ckpt"], f"sentbart/e2e/cap_{key}/model_best.pt"); return
+        except OSError as e: log(f"could not keep {key} locally ({e}); the hub copy follows"); upload(r["ckpt"], f"{A.hub}/cap_{key}/model_best.pt"); return
         rec["cap"][key] = {k: r[k] for k in ("name", "pool_top1", "page_top1", "step", "neg")}
-        upload(os.path.join(d, "model_best.pt"), f"sentbart/e2e/cap_{key}/model_best.pt")
+        upload(os.path.join(d, "model_best.pt"), f"{A.hub}/cap_{key}/model_best.pt")
         log(f"best for {key}: pool {r['pool_top1']:.3f} (2000: {r['page_top1']:.3f}) from {r['name']}")
 
 
