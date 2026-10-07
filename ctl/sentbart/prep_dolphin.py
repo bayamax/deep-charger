@@ -6,7 +6,7 @@ Source: dolphin-r1's deepseek reasoning set (question -> reasoning -> answer), s
 conversation: the user's question split into sentences (nq of them), then the reasoning's sentences, then the answer's.
 "nq" marks the prefix train.py never hides or predicts. Excluded: the questions of dolphin_v1 (the GRPO set, its held-out
 hundred inside). Written like prep.py: docs_000.jsonl (training) and docs_001.jsonl (held-out: the 2000 evaluated and
-the pool); embed.py then adds the stock bge vectors, and train_e2e.py runs as on Wikipedia.
+the pool); train_e2e.py runs as on Wikipedia - no stored vectors, off_XXX.npy carries the layout and the text is embedded in the step.
 
   python3 prep_dolphin.py --out /root/sb/data/dolphin --n-train 50000 --n-eval 22000 --exclude /root/sb/dl/dolphin_v1.jsonl
 """
@@ -64,9 +64,11 @@ for raw in src:
     if len(docs) >= want * 2: break          # read past the need, then draw at random for an even mix of the set
 rng.shuffle(docs); docs = docs[:want]
 ev, tr = docs[:A.n_eval], docs[A.n_eval:]
+import numpy as np  # noqa: E402
 for name, part in (("000", tr), ("001", ev)):
     with open(os.path.join(A.out, f"docs_{name}.jsonl"), "w") as f:
         for d in part: f.write(json.dumps(d, ensure_ascii=False) + "\n")
+    np.save(os.path.join(A.out, f"off_{name}.npy"), np.cumsum([0] + [len(d["sents"]) for d in part]).astype(np.int64))   # the layout train.py reads; no vectors (e2e embeds the text itself)
 ls = sorted(len(d["sents"]) for d in docs); lq = sorted(d["nq"] for d in docs)
 print(f"PREP_DOLPHIN_DONE {len(tr)} training + {len(ev)} held-out conversations of {n_read} read ({n_dup} excluded, {n_longq} long questions, {n_short} short); "
       f"sentences median {ls[len(ls)//2]} (90% {ls[int(len(ls)*0.9)]}), question sentences median {lq[len(lq)//2]}", flush=True)

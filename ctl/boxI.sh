@@ -8,7 +8,7 @@ cd /root
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null)
 R=baya1116/hypernet-sp-distill
 RAW="https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl"
-BOXI_SERIAL=65
+BOXI_SERIAL=66
 if [ -f /root/.boxi_serial ] && [ "$(cat /root/.boxi_serial)" -gt "$BOXI_SERIAL" ] 2>/dev/null; then echo "BOXI_STALE $BOXI_SERIAL"; exit 0; fi
 echo $BOXI_SERIAL > /root/.boxi_serial
 mkdir -p /root/sb /root/work
@@ -1242,6 +1242,13 @@ echo "DOLPHINLADDER_JOB_DONE $(date -u)"
 DL
   setsid nohup bash -c 'bash /root/dolphinladderkeep.sh 2>&1 | tee -a /root/sb_dolphinladder.log' > /dev/null 2>&1 < /dev/null &
   echo "DOLPHINLADDER_LAUNCHED $(date -u)"
+fi
+# ---- 2026-10-07 22:10 JST (the user: why store vectors at all - e2e embeds on the fly): train.py now takes a shard's layout alone
+# (off_XXX.npy). Once the ladder's first training process is up (its mmap keeps what it opened), the stored vectors go.
+if [ ! -e /root/.dolphin_novec ] && [ -e /root/.dolphin_ladder ] && grep -q "class NoVec" /root/sb/train.py; then touch /root/.dolphin_novec
+  ( D=/root/sb/data/dolphin; until pgrep -f "train_e2e.py.*/root/sb/dolphin_ladder/" >/dev/null; do sleep 60; done; sleep 120
+    rm -f $D/vec_000.npy $D/vec_001.npy $D/scl_000.npy $D/scl_001.npy; rm -rf $D/q8
+    echo "[dolphinladder] stored vectors removed $(date -u +%H:%M); $(df -h /root | tail -1 | awk '{print $4}') free" >> /root/sb_dolphinladder.log ) > /dev/null 2>&1 &
 fi
 echo "BOXI_OK serial $BOXI_SERIAL $(date -u)"
 # CTL-END
