@@ -8,7 +8,7 @@ cd /root
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null)
 R=baya1116/hypernet-sp-distill
 RAW="https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl"
-BOXI_SERIAL=60
+BOXI_SERIAL=61
 if [ -f /root/.boxi_serial ] && [ "$(cat /root/.boxi_serial)" -gt "$BOXI_SERIAL" ] 2>/dev/null; then echo "BOXI_STALE $BOXI_SERIAL"; exit 0; fi
 echo $BOXI_SERIAL > /root/.boxi_serial
 mkdir -p /root/sb /root/work
@@ -32,7 +32,8 @@ ls /root/sb
 
 # ---- the mirror: what this box is doing, on the hub every 10 minutes ----
 if [ ! -e /root/.mirror_r2 ]; then touch /root/.mirror_r2; pkill -f "mirrorkee[p].sh"; sleep 1; fi
-if [ ! -e /root/.mirror_r3 ]; then touch /root/.mirror_r3; pkill -f "mirrorkee[p].sh"; sleep 1; fi   # again for the pool fields   # 2026-10-07: restarted once for the ladder2 lines
+if [ ! -e /root/.mirror_r3 ]; then touch /root/.mirror_r3; pkill -f "mirrorkee[p].sh"; sleep 1; fi   # again for the pool fields
+if [ ! -e /root/.mirror_r4 ]; then touch /root/.mirror_r4; pkill -f "mirrorkee[p].sh"; sleep 1; fi   # again for the rung records   # 2026-10-07: restarted once for the ladder2 lines
 if ! pgrep -f "mirrorkee[p].sh" >/dev/null; then
   cat > /root/mirrorkeep.sh <<'MK'
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); R=baya1116/hypernet-sp-distill
@@ -43,6 +44,15 @@ while :; do
     echo "--- disk ---"; df -h /root | tail -1; du -sh /root/sb/data 2>/dev/null
     echo "--- ladder2 ---"; ls -t /root/sb/ladder2 2>/dev/null | head -8 | tr '\n' ' '; echo
     f=$(ls -t /root/sb/ladder2/*.out 2>/dev/null | head -1); [ -n "$f" ] && { echo "== $f"; grep -E "^\[eval|^\[best|^\[plateau|^\[init\]|Error|Traceback" $f | tail -8 | cut -c1-300; echo "pool fields:"; grep -E "^\[eval" $f | tail -6 | sed -E 's/^(\[eval [0-9]+\]).*page_top1 ([0-9.]+).*(pool_top1.*)$/\1 2000: \2 | \3/' | cut -c1-200; grep "^\[step" $f | tail -1 | cut -c1-200; }
+    echo "--- ladder2 rungs (ladder.json) and dev guards ---"; python3 -c "
+import json,glob
+try:
+    L=json.load(open('/root/sb/ladder2/ladder.json'))
+    for r in L.get('rungs',[]): print(' ', r.get('name'), 'select', r.get('pool_top1'), '2000:', r.get('page_top1'), 'step', r.get('step'), 'kept' if r.get('kept') else '', r.get('dev') or '')
+    print('  cap:', json.dumps(L.get('cap',{}))[:400]); print('  cur:', json.dumps(L.get('cur'))[:300])
+except Exception as e: print('  (no ladder.json yet)', e)
+for f in sorted(glob.glob('/root/sb/ladder2/*_dev.json')): print(' ', f.split('/')[-1], open(f).read().strip()[:300])
+" 2>&1
     echo "--- processes ---"; pgrep -fa "python3 /root/sb/" | cut -c1-300; } > /root/boxlog.txt 2>&1
   hf upload $R /root/boxlog.txt sentbart/audit/boxlog_I.txt >/dev/null 2>&1
   sleep 600
