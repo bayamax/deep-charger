@@ -3,7 +3,7 @@
 # renter and the start sat in Vast's queue (the user: that is no good, move house). Only what the routine needs is here:
 # the 4-bit base, s100, the evaluation sets, the data, the loop; then mtg7 and the rounds after it. Pull-based as the
 # others (ctl.sh runs this file whenever it changes).
-BOXG2_SERIAL=9
+BOXG2_SERIAL=10
 if [ -f /root/.boxg2_serial ] && [ "$(cat /root/.boxg2_serial)" -gt "$BOXG2_SERIAL" ] 2>/dev/null; then echo "BOXG2_STALE $BOXG2_SERIAL"; exit 0; fi
 echo $BOXG2_SERIAL > /root/.boxg2_serial
 mkdir -p /root/work/runtime /root/work/fft_out /root/hfdl; cd /root/work
@@ -14,7 +14,7 @@ export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); R=baya1116/h
 RAW="https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl"
 
 # ---- the code, fresh on every control run ----
-for f in online_loop.py pool_eval.py r1_traj.py tqa_items.py musique_items.py nq_items.py web_search.py dl_judge.py gptq.py q4.py packmlx.py checkmlx.py dequant_state.py build_merged.py memfit.py mt_sim.py; do
+for f in online_loop.py pool_eval.py r1_traj.py tqa_items.py musique_items.py nq_items.py web_search.py dl_judge.py gptq.py q4.py packmlx.py checkmlx.py dequant_state.py build_merged.py memfit.py mt_sim.py versioner.py; do
   for try in 1 2 3; do curl -sS -o /root/work/$f "$RAW/$f?nocache=$(date +%s)" && python3 -m py_compile /root/work/$f && break; sleep 5; done
 done
 cp /root/work/web_search.py /root/work/runtime/web_search.py 2>/dev/null; touch /root/work/runtime/__init__.py
@@ -93,6 +93,7 @@ fi
 # (the keeper runs the script it was started with: a changed mirror needs a restart - bump the marker's number for the next one)
 if [ ! -e /root/.mirror_r2 ]; then touch /root/.mirror_r2; pkill -f "mirrorkee[p].sh"; sleep 1; fi
 if [ ! -e /root/.mirror_r3 ]; then touch /root/.mirror_r3; pkill -f "mirrorkee[p].sh"; sleep 1; fi   # the rounds' lines
+if [ ! -e /root/.mirror_r4 ]; then touch /root/.mirror_r4; pkill -f "mirrorkee[p].sh"; sleep 1; fi   # the versions' lines
 if ! pgrep -f "mirrorkee[p].sh" >/dev/null; then
   cat > /root/mirrorkeep.sh <<'MK'
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); R=baya1116/hypernet-sp-distill
@@ -102,6 +103,7 @@ while :; do
     [ -s /root/mtg7_run.log ] && { echo "--- mtg7 steps ---"; grep -E "^\[step|rollback|^\[guard\]|Traceback|out of memory" /root/mtg7_run.log | sed -E 's/\| ce=.*cumulative/| cum/' | tail -n 8 | cut -c1-220
       echo "--- mtg7 teacher lines ---"; grep -E "^\[r1\]|^\[followup\]|^\[warn\]" /root/mtg7_run.log | tail -n 8 | cut -c1-250; }
     [ -s /root/r1chk.log ] && { echo "--- r1 check ---"; tail -n 6 /root/r1chk.log | cut -c1-250; }
+    [ -s /root/versions.log ] && { echo "--- versions.log ---"; tail -n 6 /root/versions.log | cut -c1-200; }
     [ -s /root/rounds.log ] && { echo "--- rounds.log ---"; tail -n 16 /root/rounds.log | cut -c1-260; RN=$(cat /root/round_n.txt 2>/dev/null)
       [ -s /root/mtg${RN}_run.log ] && { echo "--- mtg$RN steps ---"; grep -E "^\[step|rollback|Traceback|out of memory" /root/mtg${RN}_run.log | sed -E 's/\| ce=.*cumulative/| cum/' | tail -n 8 | cut -c1-240
         echo "--- mtg$RN teacher lines ---"; grep -E "^\[r1\]|^\[followup\]|^\[warn\]" /root/mtg${RN}_run.log | tail -n 5 | cut -c1-220; }; }
@@ -248,6 +250,13 @@ exec bash /root/work/grpo_round.sh
 RK
   setsid nohup bash -c 'bash /root/roundskeep.sh 2>&1 | tee -a /root/rounds.log' >> /proc/1/fd/1 2>&1 < /dev/null 9>&- &
   echo "ROUNDS_LAUNCHED $(date -u)"
+fi
+# ---- 2026-10-09 08:30 JST (the user: label the models like software versions, the recent ones too). versioner.py lays the
+# history down under versions/<MAJOR.MINOR.PATCH>/ on the hub (server-side copies; the old paths stay) and then follows the
+# rounds: each copy a candidate X.Y.Z-mtgN.sS, each accepted copy the next minor. versions/INDEX.md lists them.
+if [ -s /root/work/versioner.py ] && ! pgrep -f "versioner.p[y]" >/dev/null; then
+  setsid nohup bash -c 'python3 /root/work/versioner.py --watch >> /root/versions.log 2>&1' > /dev/null 2>&1 < /dev/null &
+  echo "VERSIONER_LAUNCHED $(date -u)"
 fi
 echo "BOXG2_OK serial $BOXG2_SERIAL $(date -u)"
 # CTL-END
