@@ -50,6 +50,17 @@ def upload(src, dst):
 
 
 def run(name, init, layers, enc_layers, neg, grow=False, steps=None):
+    """one rung; a rung that runs out of GPU memory is tried again with half the batch (the queue kept), down to 8"""
+    r = run1(name, init, layers, enc_layers, neg, grow, steps)
+    while r["rc"] != 0 and r.get("oom") and neg[0] > 8:
+        neg = (neg[0] // 2, neg[1])
+        log(f"{name}: out of GPU memory - again with batch {neg[0]}")
+        shutil.rmtree(os.path.join(A.work, name), ignore_errors=True)
+        r = run1(name, init, layers, enc_layers, neg, grow, steps)
+    return r
+
+
+def run1(name, init, layers, enc_layers, neg, grow=False, steps=None):
     out = os.path.join(A.work, name)
     cmd = [sys.executable, os.path.join(HERE, "train_e2e.py"), "--vec", A.vec, "--text", A.text, "--eval-text", A.eval_text,
            "--out", out, "--steps", str(A.steps if steps is None else steps), "--batch", str(neg[0]), "--page-queue", str(neg[1]),
@@ -67,7 +78,9 @@ def run(name, init, layers, enc_layers, neg, grow=False, steps=None):
         upload(tl, f"{A.hub}/ladder/{name}/train.log")
     tail = open(os.path.join(A.work, name + ".out")).read()[-400:].replace("\n", " | ")
     if rc != 0: log(f"{name}: exit {rc}: {tail[-250:]}")
-    return {"name": name, "rc": rc, "pool_top1": best, "page_top1": p2k, "step": step,
+    full = open(os.path.join(A.work, name + ".out")).read()
+    oom = rc != 0 and ("out of memory" in full or "OutOfMemoryError" in full)
+    return {"name": name, "rc": rc, "oom": oom, "pool_top1": best, "page_top1": p2k, "step": step,
             "ckpt": os.path.join(out, "model_best.pt"), "layers": layers, "enc_layers": enc_layers, "neg": list(neg)}
 
 
