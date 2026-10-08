@@ -8,7 +8,7 @@ cd /root
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null)
 R=baya1116/hypernet-sp-distill
 RAW="https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl"
-BOXI_SERIAL=71
+BOXI_SERIAL=72
 if [ -f /root/.boxi_serial ] && [ "$(cat /root/.boxi_serial)" -gt "$BOXI_SERIAL" ] 2>/dev/null; then echo "BOXI_STALE $BOXI_SERIAL"; exit 0; fi
 echo $BOXI_SERIAL > /root/.boxi_serial
 mkdir -p /root/sb /root/work
@@ -1308,6 +1308,13 @@ if [ ! -e /root/.dolphin_dec ] && grep -q -- "--select recon_top1" /root/dolphin
     sed -i 's/--select recon_top1/--select dec_top1/' /root/dolphinladderkeep.sh
     grep -q -- "--select dec_top1" /root/dolphinladderkeep.sh && echo "[dolphinladder] restarted to select on the continuation (dec_top1) $(date -u +%H:%M)" >> /root/sb_dolphinladder.log
     setsid nohup bash -c 'bash /root/dolphinladderkeep.sh 2>&1 | tee -a /root/sb_dolphinladder.log' > /dev/null 2>&1 < /dev/null & ) > /dev/null 2>&1 &
+fi
+# ---- 2026-10-09 00:30 JST (the user: double the layers first). The Dolphin ladder's turn becomes BART x2 -> bge +2 -> negatives.
+# The running ladder is left alone: the keeper is edited, and the restart already armed for the first rung after r01 (the
+# out-of-memory retry) relaunches it with the new code and order - its next rung is then the BART doubling.
+if [ ! -e /root/.dolphin_order ] && grep -q -- "--order" /root/sb/e2e_ladder.py; then touch /root/.dolphin_order
+  sed -i 's/--select dec_top1 /--select dec_top1 --order bart,bge,neg /' /root/dolphinladderkeep.sh
+  grep -q -- "--order bart,bge,neg" /root/dolphinladderkeep.sh && echo "[dolphinladder] the next rungs: BART x2 first, then bge +2, then negatives $(date -u +%H:%M)" >> /root/sb_dolphinladder.log
 fi
 echo "BOXI_OK serial $BOXI_SERIAL $(date -u)"
 # CTL-END

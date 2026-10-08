@@ -33,6 +33,7 @@ ap.add_argument("--anchor-q", type=int, default=256)
 ap.add_argument("--qfile", default="", help="qgen.py's queries.jsonl: train_e2e --queries (the query -> article losses)")
 ap.add_argument("--select", default="pool_top1", help="the metric rungs are selected on (pool_top1, or pool_qh_top1 with --qfile)")
 ap.add_argument("--queries", default="/root/sb/se2/dl/sentbart/searcheval/dcq.jsonl"); ap.add_argument("--dev", type=int, default=300)
+ap.add_argument("--order", default="neg,bge,bart", help="the rungs' turn: which kind comes first (the Dolphin ladder: bart,bge,neg - capacity for the continuation first)")
 ap.add_argument("--guard", type=int, default=1, help="0: no real-query search check between rungs (documents that are not Wikipedia articles)")
 ap.add_argument("--hub", default="sentbart/e2e", help="where the rungs' logs, the state and the best per capacity go on the hub")
 A = ap.parse_args()
@@ -131,7 +132,8 @@ if rec["cur"] is None:   # the start measured (no training), then rung 0: e2e fr
     cur_ck = os.path.join(A.work, "cur.pt"); shutil.copy(r["ckpt"], cur_ck)
     rec["cur"] = {**r, "ckpt": cur_ck, "neg_i": 0, "turn": 0, "fails": 0}; rec["rungs"].append(r); keep_cap(r); save_rec()
 
-ORDER = ["neg", "bge", "bart"]
+ORDER = A.order.split(",")
+assert sorted(ORDER) == ["bart", "bge", "neg"], ORDER
 while rec["cur"]["fails"] < 3:
     cur = rec["cur"]; kind = ORDER[cur["turn"] % 3]; n = len(rec["rungs"])
     neg_i, layers, enc_layers, grow = cur["neg_i"], cur["layers"], cur["enc_layers"], False
