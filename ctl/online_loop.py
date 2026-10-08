@@ -74,6 +74,11 @@ ap.add_argument("--demo-per-step", type=int, default=4)
 ap.add_argument("--demo-on-fail", type=float, default=0.0, help=">0 (with --search-demo): teacher-mixed GRPO - a search group none of whose samples passes also takes one supervised step on that question's teacher trajectory (searching trained, pages and reply masked) at this weight, beside its policy gradient")
 ap.add_argument("--followup", type=float, default=0.0, help="with --mt-items: after a search step on a question without history that at least one sample passed, with this probability the teacher writes the user's follow-up (refers to the exchange by pronoun, asks one new fact with a short answer an English Wikipedia article states; the page is fetched and the answer checked to be on it); it becomes the next search step's item, the exchange as its history - follow-ups on the fly, never seen before")
 ap.add_argument("--search-g", type=int, default=0, help=">0: samples per search question on the multi-turn path (the original search GRPO used 12; the multi-turn runs used --reason-g for both kinds); 0 = --reason-g")
+ap.add_argument("--reason-search-cost", type=float, default=0.0, help=">0: on a reasoning step, each search a sample made costs this much in its advantage (not in its pass/fail): "
+                "mtg7 (2026-10-08) learnt to search on maths problems, get an unrelated page, ignore it and answer - rewarded in full, the habit "
+                "spread (4 -> 43 of 60 samples a block) and on the search side the found-but-answered-wrong count grew with it (16 -> 27 of 100). "
+                "A search that helps still wins its group (a pass outweighs the cost); one that does not, loses to the sample that solved it straight")
+ap.add_argument("--reason-search-cap", type=int, default=4, help="searches counted for --reason-search-cost at most")
 ap.add_argument("--cot-on-fail", type=float, default=0.0, help=">0: a reasoning group none of whose samples passes takes one supervised step on the problem's own reference thinking and answer (Dolphin's CoT), at this weight - the teacher shows the way where the model found none")
 ap.add_argument("--r1-on-fail", type=int, default=0, help="1 (with --demo-on-fail): a search group none of whose samples passes, with no teacher trajectory on file, has R1 solve the question now in the student's environment (r1_traj.py, up to 5 searches, kept at <= 3); a verified trajectory is shown at once (as --demo-on-fail) and kept for the run. Follow-ups written on the fly get theirs this way")
 ap.add_argument("--loop-break", default="", choices=["", "stop", "answer"], help="a thinking span whose last 256 tokens are under 25%% distinct is a repetition loop (g14 step 400: 22 of 100 held-out replies never finished, tail repetition 0.84). stop: end the row there; answer: close the thinking and let it answer")
@@ -863,7 +868,9 @@ if A.mt_items:
         except Exception: continue
         q, gold = (r.get("q") or "").strip(), (r.get("gold") or "").strip()
         if q and gold and q not in held:
-            pool.append({"q": q, "gold": gold}); HIST[q] = list(r.get("hist") or [])
+            it_ = {"q": q, "gold": gold}
+            if r.get("golds"): it_["golds"] = list(r["golds"])      # the accepted forms (TriviaQA, MuSiQue aliases) - mtg7 dropped them here
+            pool.append(it_); HIST[q] = list(r.get("hist") or [])
     random.Random(1).shuffle(pool)
     print(f"[data] multi-turn: {len(pool)} search turns, {sum(1 for x in pool if HIST.get(x['q']))} with history in the prompt", flush=True)
 
@@ -1427,8 +1434,11 @@ for step in range(state["step"] + 1, A.steps + 1) if (reason or A.mt_items) else
     if searching and A.followup > 0 and A.mt_items and not HIST.get(qtext) and rw and max(rw) >= 1.0 and random.random() < A.followup:
         try: make_followup(step, qtext, item["gold"], rolls[max(range(len(rw)), key=lambda i_: rw[i_])])
         except Exception as e_: print(f"[followup] failed: {type(e_).__name__}: {str(e_)[:100]}", flush=True)
-    mu = sum(rw) / max(len(rw), 1)
-    sd = (sum((x - mu) ** 2 for x in rw) / max(len(rw), 1)) ** 0.5
+    rwa = list(rw)   # the rewards the advantage is built from; rw itself keeps pass/fail for the bookkeeping and the teachers
+    if not searching and A.reason_search_cost > 0:
+        rwa = [x - A.reason_search_cost * min(int(r.get("ns", 0) or 0), A.reason_search_cap) for r, x in zip(rolls, rw)]
+    mu = sum(rwa) / max(len(rwa), 1)
+    sd = (sum((x - mu) ** 2 for x in rwa) / max(len(rwa), 1)) ** 0.5
     losses = []; wheel = 0.0
     n_err = sum(1 for v in notes if isinstance(v, dict) and "error" in v)
     if n_err * 2 > len(notes):
@@ -1447,7 +1457,7 @@ for step in range(state["step"] + 1, A.steps + 1) if (reason or A.mt_items) else
             losses.append(guarded(replay_backward, rep[ri % len(rep)], A.rft_replay / A.accum)); ri += 1; clear()
     elif sd > 1e-6:
         model.train()
-        for r, x in zip(rolls, rw):
+        for r, x in zip(rolls, rwa):
             losses.append(guarded(pg_backward, r, (x - mu) / (sd if A.adv_std else 1.0) / (len(rolls) * A.accum))); clear()
     elif max(rw) <= 0.0 and A.wheels:      # every rollout failed (0 on the reasoning side, -0.5 or a page-hit -0.1 on the search side)
         # nothing of its own to learn from: the teacher demonstrates instead
@@ -1488,6 +1498,8 @@ for step in range(state["step"] + 1, A.steps + 1) if (reason or A.mt_items) else
     unfin = sum(1 for v in notes if v.get("unfinished")); err = sum(1 for v in notes if v.get("error"))
     line = (f"[step {step}] {k} pass {sum(1 for x in rw if x >= 1.0)}/{len(rw)} mean {mu:+.2f}"
             + (f" unfinished={unfin}" if unfin else "") + (f" judge-error={err}" if err else "")
+            + (f" searched={sum(1 for r_ in rolls if (r_.get('ns') or 0) > 0)}" if not searching and any((r_.get('ns') or 0) > 0 for r_ in rolls) else "")
+            + (f" found-wrong={sum(1 for v_ in notes if isinstance(v_, dict) and v_.get('grounded') and not v_.get('correct'))}" if searching else "")
             + (" wheels" if wheel else "")
             + f" | ce={sum(losses)/max(len(losses),1):.3f} wheel_ce={wheel:.3f} dolphin_ce={sum(dl)/max(len(dl),1):.3f}"
             + f" | cumulative reason {100*cum.get('reason pass',0)/max(cum.get('reason n',0),1):.0f}% (mean {cum.get('reason sum',0)/max(cum.get('reason n',0),1):+.2f}) of {cum.get('reason n',0)}"

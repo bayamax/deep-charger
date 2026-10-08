@@ -3,7 +3,7 @@
 # renter and the start sat in Vast's queue (the user: that is no good, move house). Only what the routine needs is here:
 # the 4-bit base, s100, the evaluation sets, the data, the loop; then mtg7 and the rounds after it. Pull-based as the
 # others (ctl.sh runs this file whenever it changes).
-BOXG2_SERIAL=6
+BOXG2_SERIAL=7
 if [ -f /root/.boxg2_serial ] && [ "$(cat /root/.boxg2_serial)" -gt "$BOXG2_SERIAL" ] 2>/dev/null; then echo "BOXG2_STALE $BOXG2_SERIAL"; exit 0; fi
 echo $BOXG2_SERIAL > /root/.boxg2_serial
 mkdir -p /root/work/runtime /root/work/fft_out /root/hfdl; cd /root/work
@@ -18,6 +18,9 @@ for f in online_loop.py pool_eval.py r1_traj.py tqa_items.py musique_items.py nq
   for try in 1 2 3; do curl -sS -o /root/work/$f "$RAW/$f?nocache=$(date +%s)" && python3 -m py_compile /root/work/$f && break; sleep 5; done
 done
 cp /root/work/web_search.py /root/work/runtime/web_search.py 2>/dev/null; touch /root/work/runtime/__init__.py
+for f in grpo_screen.sh grpo_round.sh; do
+  for try in 1 2 3; do curl -sS -o /root/work/$f.new "$RAW/$f?nocache=$(date +%s)" && bash -n /root/work/$f.new && head -1 /root/work/$f.new | grep -q "^#!/bin/bash" && mv /root/work/$f.new /root/work/$f && break; sleep 5; done
+done
 
 # ---- one-time bootstrap: libraries, the harness, the data ----
 if [ ! -f /root/.bootstrapped ]; then
@@ -89,6 +92,7 @@ fi
 # ---- the mirror: what this box is doing, on the hub every ten minutes ----
 # (the keeper runs the script it was started with: a changed mirror needs a restart - bump the marker's number for the next one)
 if [ ! -e /root/.mirror_r2 ]; then touch /root/.mirror_r2; pkill -f "mirrorkee[p].sh"; sleep 1; fi
+if [ ! -e /root/.mirror_r3 ]; then touch /root/.mirror_r3; pkill -f "mirrorkee[p].sh"; sleep 1; fi   # the rounds' lines
 if ! pgrep -f "mirrorkee[p].sh" >/dev/null; then
   cat > /root/mirrorkeep.sh <<'MK'
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); R=baya1116/hypernet-sp-distill
@@ -98,6 +102,9 @@ while :; do
     [ -s /root/mtg7_run.log ] && { echo "--- mtg7 steps ---"; grep -E "^\[step|rollback|^\[guard\]|Traceback|out of memory" /root/mtg7_run.log | sed -E 's/\| ce=.*cumulative/| cum/' | tail -n 8 | cut -c1-220
       echo "--- mtg7 teacher lines ---"; grep -E "^\[r1\]|^\[followup\]|^\[warn\]" /root/mtg7_run.log | tail -n 8 | cut -c1-250; }
     [ -s /root/r1chk.log ] && { echo "--- r1 check ---"; tail -n 6 /root/r1chk.log | cut -c1-250; }
+    [ -s /root/rounds.log ] && { echo "--- rounds.log ---"; tail -n 16 /root/rounds.log | cut -c1-260; RN=$(cat /root/round_n.txt 2>/dev/null)
+      [ -s /root/mtg${RN}_run.log ] && { echo "--- mtg$RN steps ---"; grep -E "^\[step|rollback|Traceback|out of memory" /root/mtg${RN}_run.log | sed -E 's/\| ce=.*cumulative/| cum/' | tail -n 8 | cut -c1-240
+        echo "--- mtg$RN teacher lines ---"; grep -E "^\[r1\]|^\[followup\]|^\[warn\]" /root/mtg${RN}_run.log | tail -n 5 | cut -c1-220; }; }
     echo "--- r1 on the fly: why no trajectory ---"; tail -n 5 /root/online_mtg7/r1_fly_out.jsonl.why 2>/dev/null | cut -c1-300
     echo "--- mtg7 by source (fresh questions) ---"
     python3 - <<'PQ' 2>/dev/null
@@ -216,6 +223,31 @@ fi
 if [ ! -e /root/.m7ana ] && [ -s /root/work/mtg7_s120st_0.jsonl ]; then touch /root/.m7ana
   ( for f in /root/work/s100st_0.jsonl /root/work/mtg7_s40st_0.jsonl /root/work/mtg7_s80st_0.jsonl /root/work/mtg7_s120st_0.jsonl /root/mtg7_run.log; do
       [ -s $f ] && hf upload $R $f pooler_distill/chatsft/multiturn/analysis/m7_$(basename $f) >/dev/null 2>&1; done; echo "M7ANA_UP $(date -u)" ) >> /root/mtg7.log 2>&1 &
+fi
+# ---- the rounds (2026-10-08 20:30 JST, the user: find the cause of mtg7's fall and design the training on it). After mtg7's
+# screens: s100 is screened in full on this box's base (the fair line), mtg7_s40 becomes the start if it holds against it,
+# then grpo_round.sh trains in 60-step rounds that only move forward. Stop with: touch /root/.rounds_stop
+if [ ! -e /root/.rounds ] && grep -q "MTG7_JOB_DONE" /root/mtg7.log 2>/dev/null && [ -s /root/work/grpo_round.sh ] && [ -s /root/work/grpo_screen.sh ] \
+   && grep -q "reason-search-cost" /root/work/online_loop.py; then touch /root/.rounds
+  cat > /root/roundskeep.sh <<'RK'
+cd /root/work
+while pgrep -f "pool_eval.p[y]|online_loop.p[y]" >/dev/null; do sleep 30; done
+echo "[rounds] s100 screened in full on this base $(date -u +%H:%M)"
+read _ s0 s300 sb1 sb2 sdl < <(bash /root/work/grpo_screen.sh /root/mtg3_s100.safetensors s100)
+echo "[rounds] s100: shard 0 $s0, single $s300/300, br3 $sb1/$sb2, Dolphin $sdl"
+START="/root/mtg3_s100.safetensors s100"
+if [ -s /root/mtg7_s40.safetensors ]; then
+  read _ m0 m300 mb1 mb2 mdl < <(bash /root/work/grpo_screen.sh /root/mtg7_s40.safetensors mtg7_s40)
+  echo "[rounds] mtg7_s40: shard 0 $m0, single $m300/300, br3 $mb1/$mb2, Dolphin $mdl"
+  if [ "$m0" -gt "$s0" ] && [ "$m300" -ge "$s300" ] && [ $((mb1 + mb2)) -ge $((sb1 + sb2 - 2)) ] && [ "$mdl" -ge $((sdl - 3)) ]; then
+    cp /root/mtg7_s40.safetensors /root/start_mtg7.safetensors; START="/root/start_mtg7.safetensors mtg7_s40"; echo "[rounds] mtg7_s40 is the first start"
+  else echo "[rounds] mtg7_s40 does not hold against s100 - s100 is the first start"; fi
+fi
+echo "$START" > /root/round_start.txt; [ -s /root/round_n.txt ] || echo 8 > /root/round_n.txt
+exec bash /root/work/grpo_round.sh
+RK
+  setsid nohup bash -c 'bash /root/roundskeep.sh 2>&1 | tee -a /root/rounds.log' >> /proc/1/fd/1 2>&1 < /dev/null 9>&- &
+  echo "ROUNDS_LAUNCHED $(date -u)"
 fi
 echo "BOXG2_OK serial $BOXG2_SERIAL $(date -u)"
 # CTL-END
