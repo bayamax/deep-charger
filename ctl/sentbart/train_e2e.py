@@ -151,6 +151,9 @@ def eval_now():
     ns["eval_sh"] = ("001", V, np.array(off)); ns["edocs"] = [(off[k], off[k + 1]) for k in range(len(ev_text))]
     r = ns["evaluate"](); enc.train()
     if POOL: r.update(eval_pool())
+    # the reconstruction of the sentence-vector sequence: masked sentences named by the encoder (infilling) and hidden
+    # tails by the decoder (continuation), each among every sentence of the eval batch - what the context model is for
+    r["recon_top1"] = (r["enc_top1"] + r["dec_top1"]) / 2; r["recon_top10"] = (r["enc_top10"] + r["dec_top10"]) / 2
     return r
 
 

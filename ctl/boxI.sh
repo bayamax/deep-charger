@@ -8,7 +8,7 @@ cd /root
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null)
 R=baya1116/hypernet-sp-distill
 RAW="https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl"
-BOXI_SERIAL=69
+BOXI_SERIAL=70
 if [ -f /root/.boxi_serial ] && [ "$(cat /root/.boxi_serial)" -gt "$BOXI_SERIAL" ] 2>/dev/null; then echo "BOXI_STALE $BOXI_SERIAL"; exit 0; fi
 echo $BOXI_SERIAL > /root/.boxi_serial
 mkdir -p /root/sb /root/work
@@ -1288,6 +1288,16 @@ if [ ! -e /root/.dolphin_ladder_oom ] && grep -q "def run1" /root/sb/e2e_ladder.
     pkill -f "dolphinladderkee[p].sh"; pkill -f "e2e_ladder.py --start"; pkill -f "train_e2e.py.*/root/sb/dolphin_ladder/"; sleep 20
     echo "[dolphinladder] restarted for the out-of-memory retry $(date -u +%H:%M)" >> /root/sb_dolphinladder.log
     setsid nohup bash -c 'bash /root/dolphinladderkeep.sh 2>&1 | tee -a /root/sb_dolphinladder.log' > /dev/null 2>&1 < /dev/null & ) > /dev/null 2>&1 &
+fi
+# ---- 2026-10-08 17:30 JST (the user: what matters is the reconstruction of the context-vector sequence, not finding the
+# conversation a sentence came from). The Dolphin ladder selects and judges rungs on recon_top1 = the mean of the masked-
+# sentence (encoder) and hidden-tail (decoder) top-1 among the eval batch's sentences. Restarted now: r01 resumes from its
+# step-16000 state, r00_ref is measured again on the new metric.
+if [ ! -e /root/.dolphin_recon ] && grep -q "recon_top1" /root/sb/train_e2e.py; then touch /root/.dolphin_recon
+  pkill -f "dolphinladderkee[p].sh"; pkill -f "e2e_ladder.py --start"; pkill -f "train_e2e.py.*/root/sb/dolphin_ladder/"; sleep 20
+  sed -i 's/--select pool_top1/--select recon_top1/' /root/dolphinladderkeep.sh
+  grep -q -- "--select recon_top1" /root/dolphinladderkeep.sh && echo "[dolphinladder] restarted to select on the reconstruction (recon_top1) $(date -u +%H:%M)" >> /root/sb_dolphinladder.log
+  setsid nohup bash -c 'bash /root/dolphinladderkeep.sh 2>&1 | tee -a /root/sb_dolphinladder.log' > /dev/null 2>&1 < /dev/null &
 fi
 echo "BOXI_OK serial $BOXI_SERIAL $(date -u)"
 # CTL-END
