@@ -8,7 +8,7 @@ cd /root
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null)
 R=baya1116/hypernet-sp-distill
 RAW="https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl"
-BOXI_SERIAL=68
+BOXI_SERIAL=69
 if [ -f /root/.boxi_serial ] && [ "$(cat /root/.boxi_serial)" -gt "$BOXI_SERIAL" ] 2>/dev/null; then echo "BOXI_STALE $BOXI_SERIAL"; exit 0; fi
 echo $BOXI_SERIAL > /root/.boxi_serial
 mkdir -p /root/sb /root/work
@@ -1279,6 +1279,15 @@ if [ -s /root/dolphinladderkeep.sh ] && ! pgrep -f "dolphinladderkee[p].sh" >/de
    && ! grep -q "DOLPHINLADDER_JOB_DONE [A-Z][a-z][a-z] " /root/sb_dolphinladder.log 2>/dev/null; then
   echo "[dolphinladder] relaunched after the box stopped $(date -u +%H:%M)" >> /root/sb_dolphinladder.log
   setsid nohup bash -c 'bash /root/dolphinladderkeep.sh 2>&1 | tee -a /root/sb_dolphinladder.log' > /dev/null 2>&1 < /dev/null &
+fi
+# ---- 2026-10-08 12:40 JST: e2e_ladder.py retries a rung that runs out of GPU memory with half the batch (the BART-doubling rungs
+# on this 12 GB card). The running ladder loaded the old file; it is restarted once at the first rung boundary after r01
+# (ladder.json then holds r01, and a rung resumes from its own state), losing minutes at most.
+if [ ! -e /root/.dolphin_ladder_oom ] && grep -q "def run1" /root/sb/e2e_ladder.py; then touch /root/.dolphin_ladder_oom
+  ( until grep -qE "^\[dolphinladder\] r0[2-9]_" /root/sb_dolphinladder.log 2>/dev/null; do sleep 120; done; sleep 60
+    pkill -f "dolphinladderkee[p].sh"; pkill -f "e2e_ladder.py --start"; pkill -f "train_e2e.py.*/root/sb/dolphin_ladder/"; sleep 20
+    echo "[dolphinladder] restarted for the out-of-memory retry $(date -u +%H:%M)" >> /root/sb_dolphinladder.log
+    setsid nohup bash -c 'bash /root/dolphinladderkeep.sh 2>&1 | tee -a /root/sb_dolphinladder.log' > /dev/null 2>&1 < /dev/null & ) > /dev/null 2>&1 &
 fi
 echo "BOXI_OK serial $BOXI_SERIAL $(date -u)"
 # CTL-END
