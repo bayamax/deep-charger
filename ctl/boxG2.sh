@@ -3,7 +3,7 @@
 # renter and the start sat in Vast's queue (the user: that is no good, move house). Only what the routine needs is here:
 # the 4-bit base, s100, the evaluation sets, the data, the loop; then mtg7 and the rounds after it. Pull-based as the
 # others (ctl.sh runs this file whenever it changes).
-BOXG2_SERIAL=5
+BOXG2_SERIAL=6
 if [ -f /root/.boxg2_serial ] && [ "$(cat /root/.boxg2_serial)" -gt "$BOXG2_SERIAL" ] 2>/dev/null; then echo "BOXG2_STALE $BOXG2_SERIAL"; exit 0; fi
 echo $BOXG2_SERIAL > /root/.boxg2_serial
 mkdir -p /root/work/runtime /root/work/fft_out /root/hfdl; cd /root/work
@@ -210,6 +210,12 @@ if [ ! -e /root/.r1chk ] && [ -s /root/work/mtg7_items.jsonl ]; then touch /root
   ( head -1 /root/work/mtg7_items.jsonl | python3 -c "import json,sys; r=json.loads(sys.stdin.readline()); r['pass']=0; print(json.dumps(r))" > /root/r1chk_in.jsonl
     cd /root/work && timeout 600 python3 /root/work/r1_traj.py --probe /root/r1chk_in.jsonl --out /root/r1chk_out.jsonl --max-pass 0 --workers 1 --maxsrch 5 --tok /root/gptq_hf_gq14 2>&1 | tail -n 5 | cut -c1-250
     echo "out: $(wc -c < /root/r1chk_out.jsonl 2>/dev/null) bytes; why: $(cat /root/r1chk_out.jsonl.why 2>/dev/null | cut -c1-200)"; echo "R1CHK_DONE $(date -u)" ) > /root/r1chk.log 2>&1 &
+fi
+# ---- 2026-10-08 19:10 JST: why mtg7's copies fell after step 40 (shard 0: 56, 47, 44 against s100's 49) - the screens' per-question
+# output and the run log go to the hub for the analysis
+if [ ! -e /root/.m7ana ] && [ -s /root/work/mtg7_s120st_0.jsonl ]; then touch /root/.m7ana
+  ( for f in /root/work/s100st_0.jsonl /root/work/mtg7_s40st_0.jsonl /root/work/mtg7_s80st_0.jsonl /root/work/mtg7_s120st_0.jsonl /root/mtg7_run.log; do
+      [ -s $f ] && hf upload $R $f pooler_distill/chatsft/multiturn/analysis/m7_$(basename $f) >/dev/null 2>&1; done; echo "M7ANA_UP $(date -u)" ) >> /root/mtg7.log 2>&1 &
 fi
 echo "BOXG2_OK serial $BOXG2_SERIAL $(date -u)"
 # CTL-END
