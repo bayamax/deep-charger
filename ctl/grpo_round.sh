@@ -4,7 +4,8 @@
 # questions (40 TriviaQA + 20 MuSiQue two-hop from the pools), copies every 20 steps (on the hub), the shard-0 screen for
 # each; the best copy above the start's shard 0 gets the full screens and becomes the next start only if it holds the
 # single-turn 300, the two-turn br3 (within 2) and the Dolphin hundred (within 3). Otherwise the start is kept and the
-# next round takes the next questions. The reasoning steps pay for searches they make (--reason-search-cost).
+# next round takes the next questions. The Dolphin (reasoning) problems get no search at all (--reason-no-search: a sample
+# that writes a search tag is cut there, unfinished) - the user, after mtg7's searches on maths problems.
 #   state: /root/round_n.txt (the round's number), /root/round_start.txt ("<ckpt> <tag of its lines>"), /root/lines/<tag>.txt
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); R=baya1116/hypernet-sp-distill; cd /root/work
 EVARGS="--rw 768 --maxd 384 --samepage 1 --decode plain --temp 0.6 --gen 4000 --stop eos --replycap 600"
@@ -31,7 +32,7 @@ PI
   env SP_BASE=/root/gptq_hf_gq14 SP_NOSYS=1 SP_EPISODIC=1 OAI_KEY=$(cat /root/.oai 2>/dev/null) DSK_KEY=$(cat /root/.dsk 2>/dev/null) PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
     python3 /root/work/online_loop.py $START $OUT --pooler none --lora-layers all --lora-rank 16 --save-lora-only 1 \
     --mt-items /root/work/mtg${N}_items.jsonl --heldout /root/work/eval300.jsonl --reason /root/work/dolphin_rft.jsonl --reason-every 4 --reason-g 12 --search-g 12 \
-    --demo-on-fail 0.5 --followup 0.5 --r1-on-fail 1 --cot-on-fail 0.5 --reason-search-cost 0.15 \
+    --demo-on-fail 0.5 --followup 0.5 --r1-on-fail 1 --cot-on-fail 0.5 --reason-no-search 1 \
     --steps 60 --save-every 20 --lr 5e-6 --search-lr 5e-6 --search-temp 0.9 --search-gen 2000 --temp 0.6 --gen 7000 --budget 3600 --maxsrch 7 --stop eos \
     --judge-api openai --judge-model gpt-5-nano --w-talk 0.5 --dolphin-min 0 --adv-std 1 --pg-norm mean --kl 0 \
     --guard 1 --guard-steps 20 > $RUN 2>&1

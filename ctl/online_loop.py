@@ -78,6 +78,8 @@ ap.add_argument("--reason-search-cost", type=float, default=0.0, help=">0: on a 
                 "mtg7 (2026-10-08) learnt to search on maths problems, get an unrelated page, ignore it and answer - rewarded in full, the habit "
                 "spread (4 -> 43 of 60 samples a block) and on the search side the found-but-answered-wrong count grew with it (16 -> 27 of 100). "
                 "A search that helps still wins its group (a pass outweighs the cost); one that does not, loses to the sample that solved it straight")
+ap.add_argument("--reason-no-search", type=int, default=0, help="1: the reasoning (Dolphin) problems get no search: a sample that writes a search tag is cut there "
+                "(unfinished, 0) - the user, 2026-10-08, after mtg7 learnt to search maths problems and ignore the pages. Also the --eval-file screen")
 ap.add_argument("--reason-search-cap", type=int, default=4, help="searches counted for --reason-search-cost at most")
 ap.add_argument("--cot-on-fail", type=float, default=0.0, help=">0: a reasoning group none of whose samples passes takes one supervised step on the problem's own reference thinking and answer (Dolphin's CoT), at this weight - the teacher shows the way where the model found none")
 ap.add_argument("--r1-on-fail", type=int, default=0, help="1 (with --demo-on-fail): a search group none of whose samples passes, with no teacher trajectory on file, has R1 solve the question now in the student's environment (r1_traj.py, up to 5 searches, kept at <= 3); a verified trajectory is shown at once (as --demo-on-fail) and kept for the run. Follow-ups written on the fly get theirs this way")
@@ -538,7 +540,7 @@ def seed_from_roll(roll):
 
 
 @torch.no_grad()
-def rollout_batch(question, B, seed=None):
+def rollout_batch(question, B, seed=None, allow_search=True):
     """B independent rollouts decoded in lockstep: one question for all rows (str), or one question per row (list).
     seed (multi-turn, the win scheme the app runs): {gen, kept} - the conversation so far as one stream; its newest --rw
     tokens start in the raw window, the rest is absorbed by the pooler, and only this question is pinned. Memory is then
@@ -601,6 +603,8 @@ def rollout_batch(question, B, seed=None):
             body = mclose.group(1).strip()
             kw, ask = ([x.strip() for x in body.split("||", 1)] if "||" in body else (body, body))
             st["queries"].append(kw)
+            if not allow_search:   # a problem without search (--reason-no-search): the sample ends here, unfinished
+                st["cut"] = True; return True
             if A.maxsrch and st["ns_"] >= A.maxsrch:
                 st["cut"] = True; return True
             if not kw:
@@ -1276,7 +1280,7 @@ if A.eval_file:
     with open(A.eval_out, "a") as fo:
         for k in range(0, len(todo), A.b):
             chunk = todo[k:k + A.b]
-            try: outs = rollout_batch([r["q"] for r in chunk], len(chunk))
+            try: outs = rollout_batch([r["q"] for r in chunk], len(chunk), allow_search=not A.reason_no_search)
             except Exception as e:
                 print(f"[eval] batch {k} failed: {type(e).__name__}: {str(e)[:120]}", flush=True); clear(); continue
             for r, o in zip(chunk, outs):
@@ -1414,7 +1418,8 @@ for step in range(state["step"] + 1, A.steps + 1) if (reason or A.mt_items) else
     if searching:
         seed = item.get("seed") or (seed_from_hist(HIST[qtext]) if HIST.get(qtext) else None)
     try:
-        rolls = rollout_batch(qtext, A.search_g if (searching and A.search_g > 0) else A.reason_g, seed=seed)
+        rolls = rollout_batch(qtext, A.search_g if (searching and A.search_g > 0) else A.reason_g, seed=seed,
+                              allow_search=searching or not A.reason_no_search)
     except (KeyboardInterrupt, SystemExit):
         raise
     except BaseException as e:
