@@ -8,7 +8,7 @@ cd /root
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null)
 R=baya1116/hypernet-sp-distill
 RAW="https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl"
-BOXI_SERIAL=70
+BOXI_SERIAL=71
 if [ -f /root/.boxi_serial ] && [ "$(cat /root/.boxi_serial)" -gt "$BOXI_SERIAL" ] 2>/dev/null; then echo "BOXI_STALE $BOXI_SERIAL"; exit 0; fi
 echo $BOXI_SERIAL > /root/.boxi_serial
 mkdir -p /root/sb /root/work
@@ -1298,6 +1298,16 @@ if [ ! -e /root/.dolphin_recon ] && grep -q "recon_top1" /root/sb/train_e2e.py; 
   sed -i 's/--select pool_top1/--select recon_top1/' /root/dolphinladderkeep.sh
   grep -q -- "--select recon_top1" /root/dolphinladderkeep.sh && echo "[dolphinladder] restarted to select on the reconstruction (recon_top1) $(date -u +%H:%M)" >> /root/sb_dolphinladder.log
   setsid nohup bash -c 'bash /root/dolphinladderkeep.sh 2>&1 | tee -a /root/sb_dolphinladder.log' > /dev/null 2>&1 < /dev/null &
+fi
+# ---- 2026-10-08 19:40 JST (the user: in use it is the continuation that matters). The Dolphin ladder selects and judges rungs
+# on dec_top1 - each hidden tail sentence predicted from the true ones before it, named among the eval batch's sentences.
+# Restarted just after r01's step-20000 save, so nothing is lost.
+if [ ! -e /root/.dolphin_dec ] && grep -q -- "--select recon_top1" /root/dolphinladderkeep.sh 2>/dev/null; then touch /root/.dolphin_dec
+  ( until grep -qE "^\[step 20[1-9]00\]" /root/sb/dolphin_ladder/r01_e2e/train.log 2>/dev/null || grep -qE "^\[dolphinladder\] r0[2-9]_" /root/sb_dolphinladder.log; do sleep 60; done
+    pkill -f "dolphinladderkee[p].sh"; pkill -f "e2e_ladder.py --start"; pkill -f "train_e2e.py.*/root/sb/dolphin_ladder/"; sleep 20
+    sed -i 's/--select recon_top1/--select dec_top1/' /root/dolphinladderkeep.sh
+    grep -q -- "--select dec_top1" /root/dolphinladderkeep.sh && echo "[dolphinladder] restarted to select on the continuation (dec_top1) $(date -u +%H:%M)" >> /root/sb_dolphinladder.log
+    setsid nohup bash -c 'bash /root/dolphinladderkeep.sh 2>&1 | tee -a /root/sb_dolphinladder.log' > /dev/null 2>&1 < /dev/null & ) > /dev/null 2>&1 &
 fi
 echo "BOXI_OK serial $BOXI_SERIAL $(date -u)"
 # CTL-END
