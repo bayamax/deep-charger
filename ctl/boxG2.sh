@@ -3,7 +3,7 @@
 # renter and the start sat in Vast's queue (the user: that is no good, move house). Only what the routine needs is here:
 # the 4-bit base, s100, the evaluation sets, the data, the loop; then mtg7 and the rounds after it. Pull-based as the
 # others (ctl.sh runs this file whenever it changes).
-BOXG2_SERIAL=7
+BOXG2_SERIAL=8
 if [ -f /root/.boxg2_serial ] && [ "$(cat /root/.boxg2_serial)" -gt "$BOXG2_SERIAL" ] 2>/dev/null; then echo "BOXG2_STALE $BOXG2_SERIAL"; exit 0; fi
 echo $BOXG2_SERIAL > /root/.boxg2_serial
 mkdir -p /root/work/runtime /root/work/fft_out /root/hfdl; cd /root/work
@@ -228,7 +228,7 @@ fi
 # screens: s100 is screened in full on this box's base (the fair line), mtg7_s40 becomes the start if it holds against it,
 # then grpo_round.sh trains in 60-step rounds that only move forward. Stop with: touch /root/.rounds_stop
 if [ ! -e /root/.rounds ] && grep -q "MTG7_JOB_DONE" /root/mtg7.log 2>/dev/null && [ -s /root/work/grpo_round.sh ] && [ -s /root/work/grpo_screen.sh ] \
-   && grep -q "reason-search-cost" /root/work/online_loop.py; then touch /root/.rounds
+   && grep -q "reason-no-search" /root/work/online_loop.py && grep -q -- "--reason-no-search 1" /root/work/grpo_round.sh; then touch /root/.rounds
   cat > /root/roundskeep.sh <<'RK'
 cd /root/work
 while pgrep -f "pool_eval.p[y]|online_loop.p[y]" >/dev/null; do sleep 30; done
