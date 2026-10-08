@@ -33,6 +33,7 @@ ap.add_argument("--min-gain", type=float, default=0.002)
 ap.add_argument("--pool", type=int, default=0, help=">0: also page retrieval among this many held-out articles (the 2000 + others of shard 001), one sentence hidden in each, the 2000's hidden sentences as queries")
 ap.add_argument("--select", default="page_top1", help="the metric the best checkpoint and the patience follow (page_top1, or pool_top1 with --pool)")
 ap.add_argument("--steps", type=int, default=30000); ap.add_argument("--batch", type=int, default=32)
+ap.add_argument("--eval-batch", type=int, default=32, help="documents per evaluation batch, fixed (a halved training batch must not change the yardstick)")
 ap.add_argument("--lr", type=float, default=3e-5, help="the BART"); ap.add_argument("--lr-enc", type=float, default=1e-5, help="bge")
 ap.add_argument("--w-anchor", type=float, default=1.0); ap.add_argument("--tau-anchor", type=float, default=0.05)
 ap.add_argument("--anchor-q", type=int, default=0, help=">0: the anchor also on this many of the step's sentences in QUERY form (bge's query instruction in front) - the path real searches take, which the BART losses never see; without it e2e1 drifted there (app-query search fell)")
@@ -50,7 +51,7 @@ TP = os.path.join(os.path.dirname(os.path.abspath(__file__)), "train.py")
 src = open(TP).read(); cut = src.index("\nif A.search_eval:")
 sys.argv = ["train.py", "--data", E.vec, "--out", E.out, "--eval-shard", "001", "--batch", str(E.batch), "--seq", "128", "--d", "512",
             "--layers", str(E.layers), "--heads", "8", "--ffn", "2048", "--lr", str(E.lr), "--warmup", "500", "--steps", str(max(1, E.steps)),
-            "--page", "1", "--page-queue", str(E.page_queue), "--page-input", "one", "--skip-grad", "100"] + (["--grow", E.grow] if E.grow else ["--init", E.init])
+            "--page", "1", "--page-queue", str(E.page_queue), "--page-input", "one", "--skip-grad", "100", "--eval-batch", str(E.eval_batch)] + (["--grow", E.grow] if E.grow else ["--init", E.init])
 ns = {"__name__": "train_e2e", "__file__": TP}
 exec(compile(src[:cut], TP, "exec"), ns)
 A, model, DEV, DIM = ns["A"], ns["model"], ns["DEV"], ns["DIM"]

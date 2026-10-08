@@ -61,6 +61,8 @@ ap.add_argument("--link-frac", type=float, default=0.5, help="share of each batc
 ap.add_argument("--page-queue", type=int, default=0, help="N: the last N batches' page vectors (detached) as extra negatives for the page loss")
 ap.add_argument("--prev-skip", type=int, default=0, help="1: the decoder's output is (its head + a learned gate x the previous sentence's vector), normalised")
 ap.add_argument("--p-suffix", type=float, default=0.5, help="share of documents whose tail is hidden (continuation) instead of spans")
+ap.add_argument("--eval-batch", type=int, default=0, help="documents per evaluation batch (the candidates of every top-k), fixed whatever the training batch: 0 = --batch. "
+                "The ladder halves the training batch when a rung runs out of memory; the evaluation must not shrink with it (fewer candidates, higher top-1)")
 ap.add_argument("--dim", type=int, default=384, help="the sentence vectors' width, for a shard that has only its layout (off_XXX.npy, no vec_XXX.npy)")
 A = ap.parse_args()
 os.makedirs(A.out, exist_ok=True)
@@ -381,6 +383,7 @@ def losses(x, valid, masked):
 
 
 LP = [None]; PQ = []; PQI = []; R_CURVE = {}; SKIPPED = [0]; BEST = [-1.0]; STEP = [0]
+EB = A.eval_batch or A.batch                       # the evaluation's documents per batch
 NQ_EVAL = []                                       # the held-out documents' prefix lengths (train_e2e sets them for conversations)
 
 
@@ -392,9 +395,9 @@ def evaluate():
     model.eval(); r = {}
     for mode in ("span", "suffix"):
         random.seed(123); np.random.seed(123)
-        for i in range(0, len(edocs), A.batch):
-            items = [crop(eval_sh[1], a, b, NQ_EVAL[i + k] if NQ_EVAL else 0) for k, (a, b) in enumerate(edocs[i:i + A.batch])]
-            x, valid, masked, cut = make_batch(items, mode, NQ_EVAL[i:i + A.batch] if NQ_EVAL else None)
+        for i in range(0, len(edocs), EB):
+            items = [crop(eval_sh[1], a, b, NQ_EVAL[i + k] if NQ_EVAL else 0) for k, (a, b) in enumerate(edocs[i:i + EB])]
+            x, valid, masked, cut = make_batch(items, mode, NQ_EVAL[i:i + EB] if NQ_EVAL else None)
             with torch.autocast("cuda", dtype=torch.bfloat16):
                 le, ld, lge, lgd, pos = losses(x, valid, masked)
             lg, idx, k = (lge, pos[masked], "enc") if mode == "span" else (lgd, pos[masked], "dec")
@@ -433,9 +436,9 @@ def evaluate():
     # its document must come first among every held-out page. Baseline: the mean of the document's other sentences.
     if A.page:
         random.seed(321); np.random.seed(321); pv, bv, qv = [], [], []
-        for i in range(0, len(edocs), A.batch):
-            items = [crop(eval_sh[1], a, b, NQ_EVAL[i + k] if NQ_EVAL else 0) for k, (a, b) in enumerate(edocs[i:i + A.batch])]
-            x, valid, masked, cut = make_batch(items, "one", NQ_EVAL[i:i + A.batch] if NQ_EVAL else None)
+        for i in range(0, len(edocs), EB):
+            items = [crop(eval_sh[1], a, b, NQ_EVAL[i + k] if NQ_EVAL else 0) for k, (a, b) in enumerate(edocs[i:i + EB])]
+            x, valid, masked, cut = make_batch(items, "one", NQ_EVAL[i:i + EB] if NQ_EVAL else None)
             with torch.autocast("cuda", dtype=torch.bfloat16):
                 model(x, valid, masked)
             pv.append(model.last_page.float()); qv.append(x[masked].float())

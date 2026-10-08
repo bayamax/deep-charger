@@ -8,7 +8,7 @@ cd /root
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null)
 R=baya1116/hypernet-sp-distill
 RAW="https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl"
-BOXI_SERIAL=72
+BOXI_SERIAL=73
 if [ -f /root/.boxi_serial ] && [ "$(cat /root/.boxi_serial)" -gt "$BOXI_SERIAL" ] 2>/dev/null; then echo "BOXI_STALE $BOXI_SERIAL"; exit 0; fi
 echo $BOXI_SERIAL > /root/.boxi_serial
 mkdir -p /root/sb /root/work
@@ -1315,6 +1315,15 @@ fi
 if [ ! -e /root/.dolphin_order ] && grep -q -- "--order" /root/sb/e2e_ladder.py; then touch /root/.dolphin_order
   sed -i 's/--select dec_top1 /--select dec_top1 --order bart,bge,neg /' /root/dolphinladderkeep.sh
   grep -q -- "--order bart,bge,neg" /root/dolphinladderkeep.sh && echo "[dolphinladder] the next rungs: BART x2 first, then bge +2, then negatives $(date -u +%H:%M)" >> /root/sb_dolphinladder.log
+fi
+# ---- 2026-10-09 05:30 JST: r02_bart ran out of memory at batch 32 and was retried at 16 - and its evaluation shrank with it
+# (16 documents, 1,624 candidates instead of 3,223), so its step 0 read 16.6% against r01's 16.0% with nothing learnt.
+# The evaluation batch is now fixed at 32 (train.py --eval-batch); r02 starts again on the fixed yardstick.
+if [ ! -e /root/.dolphin_evalbatch ] && grep -q -- "--eval-batch" /root/sb/train_e2e.py; then touch /root/.dolphin_evalbatch
+  pkill -f "dolphinladderkee[p].sh"; pkill -f "e2e_ladder.py --start"; pkill -f "train_e2e.py.*/root/sb/dolphin_ladder/"; sleep 20
+  rm -rf /root/sb/dolphin_ladder/r02_bart /root/sb/dolphin_ladder/r02_bart.out
+  echo "[dolphinladder] restarted: the evaluation batch fixed at 32 (r02 had measured on 16) $(date -u +%H:%M)" >> /root/sb_dolphinladder.log
+  setsid nohup bash -c 'bash /root/dolphinladderkeep.sh 2>&1 | tee -a /root/sb_dolphinladder.log' > /dev/null 2>&1 < /dev/null &
 fi
 echo "BOXI_OK serial $BOXI_SERIAL $(date -u)"
 # CTL-END
