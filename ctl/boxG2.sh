@@ -3,7 +3,7 @@
 # renter and the start sat in Vast's queue (the user: that is no good, move house). Only what the routine needs is here:
 # the 4-bit base, s100, the evaluation sets, the data, the loop; then mtg7 and the rounds after it. Pull-based as the
 # others (ctl.sh runs this file whenever it changes).
-BOXG2_SERIAL=11
+BOXG2_SERIAL=12
 if [ -f /root/.boxg2_serial ] && [ "$(cat /root/.boxg2_serial)" -gt "$BOXG2_SERIAL" ] 2>/dev/null; then echo "BOXG2_STALE $BOXG2_SERIAL"; exit 0; fi
 echo $BOXG2_SERIAL > /root/.boxg2_serial
 mkdir -p /root/work/runtime /root/work/fft_out /root/hfdl; cd /root/work
@@ -94,6 +94,7 @@ fi
 if [ ! -e /root/.mirror_r2 ]; then touch /root/.mirror_r2; pkill -f "mirrorkee[p].sh"; sleep 1; fi
 if [ ! -e /root/.mirror_r3 ]; then touch /root/.mirror_r3; pkill -f "mirrorkee[p].sh"; sleep 1; fi   # the rounds' lines
 if [ ! -e /root/.mirror_r4 ]; then touch /root/.mirror_r4; pkill -f "mirrorkee[p].sh"; sleep 1; fi   # the versions' lines
+if [ ! -e /root/.mirror_r5 ]; then touch /root/.mirror_r5; pkill -f "mirrorkee[p].sh"; sleep 1; fi   # the round's 20-step blocks
 if ! pgrep -f "mirrorkee[p].sh" >/dev/null; then
   cat > /root/mirrorkeep.sh <<'MK'
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); R=baya1116/hypernet-sp-distill
@@ -106,7 +107,19 @@ while :; do
     [ -s /root/versions.log ] && { echo "--- versions.log ---"; tail -n 6 /root/versions.log | cut -c1-200; }
     [ -s /root/rounds.log ] && { echo "--- rounds.log ---"; tail -n 16 /root/rounds.log | cut -c1-260; RN=$(cat /root/round_n.txt 2>/dev/null)
       [ -s /root/mtg${RN}_run.log ] && { echo "--- mtg$RN steps ---"; grep -E "^\[step|rollback|Traceback|out of memory" /root/mtg${RN}_run.log | sed -E 's/\| ce=.*cumulative/| cum/' | tail -n 8 | cut -c1-240
-        echo "--- mtg$RN teacher lines ---"; grep -E "^\[r1\]|^\[followup\]|^\[warn\]" /root/mtg${RN}_run.log | tail -n 5 | cut -c1-220; }; }
+        echo "--- mtg$RN teacher lines ---"; grep -E "^\[r1\]|^\[followup\]|^\[warn\]" /root/mtg${RN}_run.log | tail -n 5 | cut -c1-220; 
+      [ -s /root/online_mtg$RN/rollouts.jsonl ] && { echo "--- mtg$RN by 20-step block (search side) ---"; python3 - /root/online_mtg$RN/rollouts.jsonl <<'PB' 2>/dev/null
+import json, sys, collections
+b = collections.defaultdict(lambda: [0, 0, 0, 0])   # samples, passing, unfinished, searches
+for l in open(sys.argv[1]):
+    if not l.strip(): continue
+    x = json.loads(l)
+    if x.get("kind") != "search": continue
+    v = b[(x["step"] - 1) // 20]; v[0] += 1; v[1] += x.get("reward", 0) >= 1.0; v[2] += bool(x.get("why", {}).get("unfinished")); v[3] += x.get("ns", 0)
+for k in sorted(b):
+    n, p, u, s = b[k]; print(f"  steps {20*k+1:3d}-{20*k+20:3d}: {n:3d} rollouts, pass {100*p/n:3.0f}%, unfinished {100*u/n:3.0f}%, searches {s/n:.2f}")
+PB
+      }; }; }
     echo "--- r1 on the fly: why no trajectory ---"; tail -n 5 /root/online_mtg7/r1_fly_out.jsonl.why 2>/dev/null | cut -c1-300
     echo "--- mtg7 by source (fresh questions) ---"
     python3 - <<'PQ' 2>/dev/null
