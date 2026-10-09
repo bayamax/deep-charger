@@ -98,6 +98,8 @@ ap.add_argument("--search-lr", type=float, default=0.0, help=">0: the search sid
 ap.add_argument("--search-temp", type=float, default=0.0, help=">0: sampling temperature for the search rollouts (pool3: 0.9); 0 = --temp")
 ap.add_argument("--search-gen", type=int, default=0, help=">0: generation cap for the search rollouts (pool3: 1500); 0 = --gen")
 ap.add_argument("--pg-norm-len", type=int, default=1024, help="the fixed divisor for --pg-norm const")
+ap.add_argument("--search-pg-norm", default="", choices=["", "mean", "const"], help="the search side's own --pg-norm (empty: the same as --pg-norm). mtg8 (2026-10-09), mean on both sides: the search rollouts that kept searching and never answered went 11%% -> 18%% -> 35%% over its three 20-step blocks, searches per rollout 2.75 -> 4.06, pass 56%% -> 34%% -> 18%%, and the shard-0 screens fell 53 -> 51 -> 46 against the start's 56 - the g5 pattern under this flag's help: an unfinished rollout runs ~220 words against a passing one's ~120, so mean norm punishes each of its tokens about half as hard")
+ap.add_argument("--search-pg-norm-len", type=int, default=256, help="the fixed divisor for --search-pg-norm const (a passing search rollout trains ~160 tokens)")
 ap.add_argument("--adv-std", type=int, default=1, help="1: advantage = (r - mean) / std within the group. 0: r - mean only, so an all-wrong group with one slightly-less-wrong rollout does not get blown up into a +3 sigma push toward that rollout.")
 ap.add_argument("--accum", type=int, default=1, help="steps whose gradients are accumulated before one optimizer update (both the search-side and the Dolphin part)")
 ap.add_argument("--judge-correct", type=int, default=0, help="1: a search reply the gold string does not match is also shown to the teacher with the gold; when it gives the same answer in another form (Claire for Claire Casey, Jamie Dornan for James \"Jamie\" Dornan) it counts as correct - all or nothing, no partial credit. The evaluation keeps the strict string match.")
@@ -249,7 +251,7 @@ if A.gradckpt:
     print("[init] gradient checkpointing ON for the policy-gradient pass", flush=True)
 nT = sum(p.numel() for p in model.parameters() if p.requires_grad) / 1e6
 nP = sum(p.numel() for p in pooler_params) / 1e6
-print(f"[cfg] G={A.g} sft_only={A.sft_only} rft={A.rft}/{A.rft_replay} wheel_max_think={A.wheel_max_think} reason_verify={A.reason_verify} kl={A.kl} reason_every={A.reason_every} dolphin_on={A.dolphin_on} pool_order={A.pool_order}+{A.pool_offset} pg_norm={A.pg_norm}/{A.pg_norm_len} adv_std={A.adv_std} search_lr={A.search_lr} search_temp={A.search_temp} search_gen={A.search_gen} accum={A.accum} steps={A.steps} budget={A.budget} rw={A.rw} maxd={A.maxd} chunk={A.chunk} temp={A.temp} gen={A.gen} maxs={A.maxs} maxm={A.maxm} samepage={A.samepage} maxsrch={A.maxsrch} phantom={A.phantom}x{A.phantom_scale} "
+print(f"[cfg] G={A.g} sft_only={A.sft_only} rft={A.rft}/{A.rft_replay} wheel_max_think={A.wheel_max_think} reason_verify={A.reason_verify} kl={A.kl} reason_every={A.reason_every} dolphin_on={A.dolphin_on} pool_order={A.pool_order}+{A.pool_offset} pg_norm={A.pg_norm}/{A.pg_norm_len} search_pg_norm={A.search_pg_norm or 'same'}/{A.search_pg_norm_len} adv_std={A.adv_std} search_lr={A.search_lr} search_temp={A.search_temp} search_gen={A.search_gen} accum={A.accum} steps={A.steps} budget={A.budget} rw={A.rw} maxd={A.maxd} chunk={A.chunk} temp={A.temp} gen={A.gen} maxs={A.maxs} maxm={A.maxm} samepage={A.samepage} maxsrch={A.maxsrch} phantom={A.phantom}x{A.phantom_scale} "
       f"lr={A.lr} pooler_lr={A.pooler_lr} pooler={A.pooler}(r={A.pooler_rank}) trainable lora={nT:.1f}M pooler={nP:.2f}M", flush=True)
 # ---- environment: verbatim grpo_ep_more serve() ----
 WAPI = "https://en.wikipedia.org/w/api.php"
@@ -746,7 +748,9 @@ def pg_backward(r, coef):
         pr = HEAD(h).float()
         tgt = torch.tensor([gen[c0:c1]], device=DEV); tm = torch.tensor([msk[c0:c1]], device=DEV, dtype=torch.float32)
         ce = torch.nn.functional.cross_entropy(pr.reshape(-1, pr.shape[-1]), tgt.reshape(-1), reduction="none")
-        denom = (A.pg_norm_len if A.pg_norm == "const" else ntot)
+        srch = bool(A.search_pg_norm) and bool(globals().get("searching"))
+        norm, nlen = (A.search_pg_norm, A.search_pg_norm_len) if srch else (A.pg_norm, A.pg_norm_len)
+        denom = (nlen if norm == "const" else ntot)
         loss = (ce * tm.reshape(-1)).sum() / denom
         if A.kl > 0:
             # the same block under the base policy (LoRA off; the pooled set is the rollout's own either way), then

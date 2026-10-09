@@ -3,7 +3,7 @@
 # renter and the start sat in Vast's queue (the user: that is no good, move house). Only what the routine needs is here:
 # the 4-bit base, s100, the evaluation sets, the data, the loop; then mtg7 and the rounds after it. Pull-based as the
 # others (ctl.sh runs this file whenever it changes).
-BOXG2_SERIAL=10
+BOXG2_SERIAL=11
 if [ -f /root/.boxg2_serial ] && [ "$(cat /root/.boxg2_serial)" -gt "$BOXG2_SERIAL" ] 2>/dev/null; then echo "BOXG2_STALE $BOXG2_SERIAL"; exit 0; fi
 echo $BOXG2_SERIAL > /root/.boxg2_serial
 mkdir -p /root/work/runtime /root/work/fft_out /root/hfdl; cd /root/work
@@ -250,6 +250,25 @@ exec bash /root/work/grpo_round.sh
 RK
   setsid nohup bash -c 'bash /root/roundskeep.sh 2>&1 | tee -a /root/rounds.log' >> /proc/1/fd/1 2>&1 < /dev/null 9>&- &
   echo "ROUNDS_LAUNCHED $(date -u)"
+fi
+# ---- 2026-10-09 17:40 JST: the rounds restarted on the search side's fixed-length gradient (grpo_round.sh, --search-pg-norm
+# const). The running grpo_round.sh keeps its old arguments, so it is stopped once it is training (never mid-screen) and run
+# again: the round in progress starts over on the same questions, or - if it already put a copy on the hub, which the
+# versioner has taken - the next round number takes over.
+if [ ! -e /root/.rounds_pgn ] && [ -e /root/.rounds ] && grep -q -- "--search-pg-norm const" /root/work/grpo_round.sh && grep -q "search_pg_norm" /root/work/online_loop.py; then touch /root/.rounds_pgn
+  cat > /root/roundsre.sh <<'RR'
+until pgrep -f "online_loop.p[y] .*online_mtg" >/dev/null && ! pgrep -f "grpo_screen.s[h]|pool_eval.p[y]|dl_judge.p[y]" >/dev/null; do sleep 30; done   # training, not screening
+pkill -f "grpo_round.s[h]"; pkill -f "roundskeep.s[h]"; sleep 2; pkill -f "online_loop.p[y] .*online_mtg"; sleep 20
+N=$(cat /root/round_n.txt)
+if ls /root/mtg${N}_s*.safetensors >/dev/null 2>&1 || grep -q "^\[mtg$N\] copy at step" /root/rounds.log; then
+  rm -f /root/mtg${N}_s*.safetensors; echo $((N + 1)) > /root/round_n.txt; echo "[rounds] mtg$N stopped after its first copy - mtg$((N + 1)) takes over"
+else echo "[rounds] mtg$N stopped at step $(python3 -c "import json;print(json.load(open('/root/online_mtg$N/state.json'))['step'])" 2>/dev/null) - run again from the start"; fi
+rm -rf /root/online_mtg$N
+echo "[rounds] restarted with the search side's gradient divided by a fixed 256 tokens (--search-pg-norm const) $(date -u +%H:%M)"
+exec bash /root/work/grpo_round.sh
+RR
+  setsid nohup bash -c 'bash /root/roundsre.sh 2>&1 | tee -a /root/rounds.log' >> /proc/1/fd/1 2>&1 < /dev/null 9>&- &
+  echo "ROUNDS_PGN_ARMED $(date -u)"
 fi
 # ---- 2026-10-09 08:30 JST (the user: label the models like software versions, the recent ones too). versioner.py lays the
 # history down under versions/<MAJOR.MINOR.PATCH>/ on the hub (server-side copies; the old paths stay) and then follows the
