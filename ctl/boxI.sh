@@ -8,7 +8,7 @@ cd /root
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null)
 R=baya1116/hypernet-sp-distill
 RAW="https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl"
-BOXI_SERIAL=79
+BOXI_SERIAL=80
 if [ -f /root/.boxi_serial ] && [ "$(cat /root/.boxi_serial)" -gt "$BOXI_SERIAL" ] 2>/dev/null; then echo "BOXI_STALE $BOXI_SERIAL"; exit 0; fi
 echo $BOXI_SERIAL > /root/.boxi_serial
 mkdir -p /root/sb /root/work
@@ -1354,6 +1354,25 @@ fi
 if [ ! -e /root/.wiki_rm ] && ! pgrep -f "sb/data/docs|sb/data/e2e" >/dev/null; then touch /root/.wiki_rm
   rm -rf /root/sb/data/docs /root/sb/data/e2e
   { date -u; echo "wiki data removed"; df -h /root | tail -1; } >> /root/du_I.txt; hf upload $R /root/du_I.txt sentbart/audit/du_I.txt >/dev/null 2>&1 &
+fi
+# ---- 2026-10-11 01:00 JST (the user: run the BART doubling again). r05 (BART 32+32) died at step 4000 on the full disk while
+# still rising (22.1 -> 22.7) and was scored "not kept"; the disk now has 31 GB free. r06 (bge 16, a few hundred steps in)
+# is stopped, ladder.json's turn is put back on the BART doubling with r05's failure undone, and the ladder resumes from
+# cur.pt (r03/r04's 16+16) - the next rung is BART 32+32 from scratch.
+if [ ! -e /root/.dolphin_redo_bart ] && [ -s /root/sb/dolphin_ladder/ladder.json ]; then touch /root/.dolphin_redo_bart
+  pkill -f "dolphinladderkee[p].sh"; pkill -f "e2e_ladder.py --start"; pkill -f "train_e2e.py.*/root/sb/dolphin_ladder/"; sleep 20
+  python3 - <<'PJ' >> /root/sb_dolphinladder.log 2>&1
+import json
+p = "/root/sb/dolphin_ladder/ladder.json"; rec = json.load(open(p)); cur = rec["cur"]
+order = ["bart", "bge", "neg"]
+while order[cur["turn"] % 3] != "bart": cur["turn"] -= 1
+cur["fails"] = max(0, cur["fails"] - 1)
+json.dump(rec, open(p, "w"), indent=1)
+print(f"[dolphinladder] turn put back on the BART doubling (turn {cur['turn']}, fails {cur['fails']}, from {cur['name']} at {cur['pool_top1']:.3f})", flush=True)
+PJ
+  rm -rf /root/sb/dolphin_ladder/r06_bge /root/sb/dolphin_ladder/r06_bge.out /root/sb/dolphin_ladder/cap_bge14_bart32
+  echo "[dolphinladder] restarted to run the BART doubling again (r05 died on the full disk) $(date -u +%H:%M); $(df -h /root | tail -1 | awk '{print $4}') free" >> /root/sb_dolphinladder.log
+  setsid nohup bash -c 'bash /root/dolphinladderkeep.sh 2>&1 | tee -a /root/sb_dolphinladder.log' > /dev/null 2>&1 < /dev/null &
 fi
 echo "BOXI_OK serial $BOXI_SERIAL $(date -u)"
 # CTL-END
