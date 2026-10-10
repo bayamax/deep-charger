@@ -8,7 +8,7 @@ cd /root
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null)
 R=baya1116/hypernet-sp-distill
 RAW="https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl"
-BOXI_SERIAL=78
+BOXI_SERIAL=79
 if [ -f /root/.boxi_serial ] && [ "$(cat /root/.boxi_serial)" -gt "$BOXI_SERIAL" ] 2>/dev/null; then echo "BOXI_STALE $BOXI_SERIAL"; exit 0; fi
 echo $BOXI_SERIAL > /root/.boxi_serial
 mkdir -p /root/sb /root/work
@@ -1347,6 +1347,13 @@ fi
 if [ ! -e /root/.disk_r05c ]; then touch /root/.disk_r05c
   rm -f /root/sb/dolphin_ladder/r01_e2e/*.pt /root/sb/dolphin_ladder/r00_ref/*.pt /root/sb/dolphin_ladder/r05_bart/*.pt
   { date -u; df -h /root | tail -1; } >> /root/du_I.txt; hf upload $R /root/du_I.txt sentbart/audit/du_I.txt >/dev/null 2>&1 &
+fi
+# ---- 2026-10-11 00:50 JST (the user: delete the Wikipedia data). The Wikipedia shards' text and vectors (data/docs, 22 GB)
+# and the e2e text (data/e2e) go; the Dolphin ladder reads data/dolphin only. The keepers that built them are guarded by
+# their logs (DATA_JOB_DONE ...), so nothing rebuilds them.
+if [ ! -e /root/.wiki_rm ] && ! pgrep -f "sb/data/docs|sb/data/e2e" >/dev/null; then touch /root/.wiki_rm
+  rm -rf /root/sb/data/docs /root/sb/data/e2e
+  { date -u; echo "wiki data removed"; df -h /root | tail -1; } >> /root/du_I.txt; hf upload $R /root/du_I.txt sentbart/audit/du_I.txt >/dev/null 2>&1 &
 fi
 echo "BOXI_OK serial $BOXI_SERIAL $(date -u)"
 # CTL-END
