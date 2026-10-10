@@ -8,7 +8,7 @@ cd /root
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null)
 R=baya1116/hypernet-sp-distill
 RAW="https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl"
-BOXI_SERIAL=75
+BOXI_SERIAL=76
 if [ -f /root/.boxi_serial ] && [ "$(cat /root/.boxi_serial)" -gt "$BOXI_SERIAL" ] 2>/dev/null; then echo "BOXI_STALE $BOXI_SERIAL"; exit 0; fi
 echo $BOXI_SERIAL > /root/.boxi_serial
 mkdir -p /root/sb /root/work
@@ -1329,6 +1329,14 @@ fi
 # context BART has to go when GPT-2 writes each sentence from its vector - runs off the box, on CPU, from it)
 if [ ! -e /root/.dl001_up ] && [ -s /root/sb/data/dolphin/docs_001.jsonl ]; then touch /root/.dl001_up
   ( hf upload $R /root/sb/data/dolphin/docs_001.jsonl sentbart/dolphin/data/docs_001.jsonl >/dev/null 2>&1 && echo "DL001_UP $(ls -la /root/sb/data/dolphin/docs_001.jsonl | awk '{print $5}') $(date -u)" ) >> /root/boxI_extra.log 2>&1 &
+fi
+# ---- 2026-10-11 00:30 JST: the disk ran out under r05 (BART 32+32: its state file and checkpoints at step 4000), which
+# died writing model_best.pt and was scored as "not kept". The capacity copies already on the hub (cap_bge12_bart8,
+# cap_bge12_bart16, cap_bge14_bart16 = cur.pt) are dropped locally, and what holds the rest of the disk goes to the hub.
+if [ ! -e /root/.disk_r05 ]; then touch /root/.disk_r05
+  for c in cap_bge12_bart8 cap_bge12_bart16 cap_bge14_bart16; do rm -f /root/sb/dolphin_ladder/$c/model_best.pt; done
+  { date -u; df -h /root | tail -1; du -xsh /root/* /root/sb/* /root/sb/data/* /root/sb/dolphin_ladder/* 2>/dev/null | sort -h | tail -40; } > /root/du_I.txt 2>&1
+  hf upload $R /root/du_I.txt sentbart/audit/du_I.txt >/dev/null 2>&1 &
 fi
 echo "BOXI_OK serial $BOXI_SERIAL $(date -u)"
 # CTL-END
