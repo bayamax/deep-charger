@@ -3,7 +3,7 @@
 # renter and the start sat in Vast's queue (the user: that is no good, move house). Only what the routine needs is here:
 # the 4-bit base, s100, the evaluation sets, the data, the loop; then mtg7 and the rounds after it. Pull-based as the
 # others (ctl.sh runs this file whenever it changes).
-BOXG2_SERIAL=16
+BOXG2_SERIAL=17
 if [ -f /root/.boxg2_serial ] && [ "$(cat /root/.boxg2_serial)" -gt "$BOXG2_SERIAL" ] 2>/dev/null; then echo "BOXG2_STALE $BOXG2_SERIAL"; exit 0; fi
 echo $BOXG2_SERIAL > /root/.boxg2_serial
 mkdir -p /root/work/runtime /root/work/fft_out /root/hfdl; cd /root/work
@@ -96,6 +96,7 @@ if [ ! -e /root/.mirror_r3 ]; then touch /root/.mirror_r3; pkill -f "mirrorkee[p
 if [ ! -e /root/.mirror_r4 ]; then touch /root/.mirror_r4; pkill -f "mirrorkee[p].sh"; sleep 1; fi   # the versions' lines
 if [ ! -e /root/.mirror_r5 ]; then touch /root/.mirror_r5; pkill -f "mirrorkee[p].sh"; sleep 1; fi   # the round's 20-step blocks
 if [ ! -e /root/.mirror_r6 ]; then touch /root/.mirror_r6; pkill -f "mirrorkee[p].sh"; sleep 1; fi   # the conversation screens' progress
+if [ ! -e /root/.mirror_r7 ]; then touch /root/.mirror_r7; pkill -f "mirrorkee[p].sh"; sleep 1; fi   # the disk keeper's lines
 if ! pgrep -f "mirrorkee[p].sh" >/dev/null; then
   cat > /root/mirrorkeep.sh <<'MK'
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); R=baya1116/hypernet-sp-distill
@@ -360,7 +361,6 @@ DKG
   setsid nohup bash /root/diskkeep.sh > /dev/null 2>&1 < /dev/null &
   echo "DISKKEEP_LAUNCHED $(date -u)"
 fi
-if [ ! -e /root/.mirror_r7 ]; then touch /root/.mirror_r7; pkill -f "mirrorkee[p].sh"; sleep 1; fi   # the disk keeper's lines
 # ---- 2026-10-09 08:30 JST (the user: label the models like software versions, the recent ones too). versioner.py lays the
 # history down under versions/<MAJOR.MINOR.PATCH>/ on the hub (server-side copies; the old paths stay) and then follows the
 # rounds: each copy a candidate X.Y.Z-mtgN.sS, each accepted copy the next minor. versions/INDEX.md lists them.
