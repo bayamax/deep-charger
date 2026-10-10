@@ -219,7 +219,8 @@ def save(tag, step):
     meta = {"enc_layers": len(enc.encoder.layer), "layers": E.layers, "step": step, "args": vars(E)}
     torch.save({"model": model.state_dict(), "enc": enc.state_dict(), "opt": opt.state_dict(), "sched": sched.state_dict(), **meta}, STATE + ".tmp")
     os.replace(STATE + ".tmp", STATE)
-    torch.save({"model": model.state_dict(), "enc": enc.state_dict(), **meta}, os.path.join(E.out, f"model_{tag}.pt"))
+    if tag != "latest":   # the state file above already holds the latest weights (2026-10-11: the disk ran out under BART 32+32)
+        torch.save({"model": model.state_dict(), "enc": enc.state_dict(), **meta}, os.path.join(E.out, f"model_{tag}.pt"))
 
 
 log = open(os.path.join(E.out, "train.log"), "a")

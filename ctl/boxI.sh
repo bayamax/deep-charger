@@ -8,7 +8,7 @@ cd /root
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null)
 R=baya1116/hypernet-sp-distill
 RAW="https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl"
-BOXI_SERIAL=77
+BOXI_SERIAL=78
 if [ -f /root/.boxi_serial ] && [ "$(cat /root/.boxi_serial)" -gt "$BOXI_SERIAL" ] 2>/dev/null; then echo "BOXI_STALE $BOXI_SERIAL"; exit 0; fi
 echo $BOXI_SERIAL > /root/.boxi_serial
 mkdir -p /root/sb /root/work
@@ -1341,6 +1341,12 @@ fi
 if [ ! -e /root/.disk_r05b ]; then touch /root/.disk_r05b   # du counts a path once across its arguments: one call per level
   { date -u; df -h /root | tail -1; for d in /root/sb /root/sb/data /root/sb/dolphin_ladder; do echo "== $d"; du -xsh $d/* 2>/dev/null | sort -h | tail -15; done; } > /root/du_I.txt 2>&1
   hf upload $R /root/du_I.txt sentbart/audit/du_I.txt >/dev/null 2>&1 &
+fi
+# ---- 2026-10-11 00:40 JST: what the Dolphin ladder left behind: r01's checkpoints (its best is on the hub as cap_bge12_bart8),
+# r00_ref's (the start's own reading) and r05's broken write (BART 32+32 died at step 4000 on the full disk) - about 3.6 GB.
+if [ ! -e /root/.disk_r05c ]; then touch /root/.disk_r05c
+  rm -f /root/sb/dolphin_ladder/r01_e2e/*.pt /root/sb/dolphin_ladder/r00_ref/*.pt /root/sb/dolphin_ladder/r05_bart/*.pt
+  { date -u; df -h /root | tail -1; } >> /root/du_I.txt; hf upload $R /root/du_I.txt sentbart/audit/du_I.txt >/dev/null 2>&1 &
 fi
 echo "BOXI_OK serial $BOXI_SERIAL $(date -u)"
 # CTL-END
