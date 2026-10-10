@@ -1387,7 +1387,7 @@ if ! pgrep -f "diskkee[p].sh" >/dev/null; then
   cat > /root/diskkeep.sh <<'DKI'
 while :; do
   CUR=$(pgrep -fa "train_e2e.py" | grep -oE "dolphin_ladder/r[0-9]+_[a-z]+" | head -1 | sed 's#.*/##')
-  for d in /root/sb/dolphin_ladder/r[0-9]*_*/; do n=$(basename $d); [ "$n" != "$CUR" ] && rm -f $d/*.pt; done
+  for d in /root/sb/dolphin_ladder/r[0-9]*_*/; do n=$(basename $d); [ "$n" != "$CUR" ] && find $d -maxdepth 1 -name "*.pt" -mmin +180 -delete; done   # 3 h old: never a rung the ladder is still copying from
   F=$(df -BG --output=avail /root | tail -1 | tr -dc 0-9)
   [ "${F:-99}" -lt 8 ] && { rm -rf /root/.cache/huggingface/hub; echo "$(date -u +%m-%d_%H:%M) LOW ${F}G free: HF cache cleared" >> /root/disk.log; }
   echo "$(date -u +%m-%d_%H:%M) $(df -h /root | tail -1 | awk '{print $4" free of "$2}')" >> /root/disk.log; tail -n 200 /root/disk.log > /root/disk.log.t && mv /root/disk.log.t /root/disk.log
