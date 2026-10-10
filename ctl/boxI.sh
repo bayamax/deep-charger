@@ -8,7 +8,7 @@ cd /root
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null)
 R=baya1116/hypernet-sp-distill
 RAW="https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl"
-BOXI_SERIAL=80
+BOXI_SERIAL=81
 if [ -f /root/.boxi_serial ] && [ "$(cat /root/.boxi_serial)" -gt "$BOXI_SERIAL" ] 2>/dev/null; then echo "BOXI_STALE $BOXI_SERIAL"; exit 0; fi
 echo $BOXI_SERIAL > /root/.boxi_serial
 mkdir -p /root/sb /root/work
@@ -34,6 +34,7 @@ ls /root/sb
 if [ ! -e /root/.mirror_r2 ]; then touch /root/.mirror_r2; pkill -f "mirrorkee[p].sh"; sleep 1; fi
 if [ ! -e /root/.mirror_r3 ]; then touch /root/.mirror_r3; pkill -f "mirrorkee[p].sh"; sleep 1; fi   # again for the pool fields
 if [ ! -e /root/.mirror_r4 ]; then touch /root/.mirror_r4; pkill -f "mirrorkee[p].sh"; sleep 1; fi   # again for the rung records   # 2026-10-07: restarted once for the ladder2 lines
+if [ ! -e /root/.mirror_r5 ]; then touch /root/.mirror_r5; pkill -f "mirrorkee[p].sh"; sleep 1; fi   # the disk keeper's lines
 if ! pgrep -f "mirrorkee[p].sh" >/dev/null; then
   cat > /root/mirrorkeep.sh <<'MK'
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); R=baya1116/hypernet-sp-distill
@@ -41,7 +42,7 @@ while :; do
   { echo "=== boxI $(date -u) ==="; echo "--- ctl.log ---"; tail -n 60 /root/ctl.log 2>/dev/null | cut -c1-300
     for f in /root/sb_*.log; do [ -e $f ] && { echo "--- $f ---"; tail -n 25 $f | cut -c1-300; }; done
     echo "--- gpu ---"; nvidia-smi --query-gpu=memory.used,memory.total,utilization.gpu --format=csv,noheader
-    echo "--- disk ---"; df -h /root | tail -1; du -sh /root/sb/data 2>/dev/null
+    echo "--- disk ---"; df -h /root | tail -1; du -sh /root/sb/data 2>/dev/null; tail -n 3 /root/disk.log 2>/dev/null
     echo "--- ladder2 / dolphin ladder ---"; ls -t /root/sb/ladder2 /root/sb/dolphin_ladder 2>/dev/null | head -12 | tr '\n' ' '; echo
     f=$(ls -t /root/sb/ladder2/*.out /root/sb/dolphin_ladder/*.out 2>/dev/null | head -1); [ -n "$f" ] && { echo "== $f"; grep -E "^\[eval|^\[best|^\[plateau|^\[init\]|Error|Traceback" $f | tail -8 | cut -c1-300; echo "pool fields:"; grep -E "^\[eval" $f | tail -6 | sed -E 's/^(\[eval [0-9]+\]).*page_top1 ([0-9.]+).*(pool_top1.*)$/\1 2000: \2 | \3/' | cut -c1-200; grep "^\[step" $f | tail -1 | cut -c1-200; }
     [ -s /root/sb/dolphin_e2e/train.log ] && { echo "--- dolphin e2e (train.log) ---"; grep -E "^\[eval|^\[best|^\[plateau|^\[init\]|^\[e2e\]|Error|Traceback" /root/sb/dolphin_e2e/train.log | tail -8 | sed -E 's/^(\[eval [0-9]+\]).*page_top1 ([0-9.]+).*page_base_top1 ([0-9.]+).*(next_top1 [0-9.]+).*(pool_top1 [0-9.]+ pool_top10 [0-9.]+).*$/\1 2000: \2 (base \3) \4 \5/' | cut -c1-300; grep "^\[step" /root/sb/dolphin_e2e/train.log | tail -1 | cut -c1-200; }
@@ -1373,6 +1374,28 @@ PJ
   rm -rf /root/sb/dolphin_ladder/r06_bge /root/sb/dolphin_ladder/r06_bge.out /root/sb/dolphin_ladder/cap_bge14_bart32
   echo "[dolphinladder] restarted to run the BART doubling again (r05 died on the full disk) $(date -u +%H:%M); $(df -h /root | tail -1 | awk '{print $4}') free" >> /root/sb_dolphinladder.log
   setsid nohup bash -c 'bash /root/dolphinladderkeep.sh 2>&1 | tee -a /root/sb_dolphinladder.log' > /dev/null 2>&1 < /dev/null &
+fi
+# ---- 2026-10-11 01:10 JST (the user: mind every box's disk). The Wikipedia-era runs go with the Wikipedia data (their
+# results are on the hub): the ladders, clusters, run4/abl ablations (abl_one32 stays: the Dolphin keeper's start). A disk
+# keeper every 30 minutes: finished rungs' leftover weights, and the HF cache when under 8 GB is free; /root/disk.log.
+if [ ! -e /root/.wiki_rm2 ] && ! pgrep -f "/root/sb/(ladder|ladder2|doc_clusters|run4|e2e1|bgectl1|abl_(maskcur|ph))" >/dev/null; then touch /root/.wiki_rm2
+  rm -rf /root/sb/ladder /root/sb/ladder2 /root/sb/doc_clusters /root/sb/run4s1 /root/sb/run4h1 /root/sb/e2e1 /root/sb/bgectl1 \
+         /root/sb/abl_maskcur /root/sb/abl_ph1 /root/sb/abl_ph2 /root/sb/links.npz
+  echo "$(date -u +%m-%d_%H:%M) wiki-era runs removed: $(df -h /root | tail -1 | awk '{print $4}') free" >> /root/disk.log
+fi
+if ! pgrep -f "diskkee[p].sh" >/dev/null; then
+  cat > /root/diskkeep.sh <<'DKI'
+while :; do
+  CUR=$(pgrep -fa "train_e2e.py" | grep -oE "dolphin_ladder/r[0-9]+_[a-z]+" | head -1 | sed 's#.*/##')
+  for d in /root/sb/dolphin_ladder/r[0-9]*_*/; do n=$(basename $d); [ "$n" != "$CUR" ] && rm -f $d/*.pt; done
+  F=$(df -BG --output=avail /root | tail -1 | tr -dc 0-9)
+  [ "${F:-99}" -lt 8 ] && { rm -rf /root/.cache/huggingface/hub; echo "$(date -u +%m-%d_%H:%M) LOW ${F}G free: HF cache cleared" >> /root/disk.log; }
+  echo "$(date -u +%m-%d_%H:%M) $(df -h /root | tail -1 | awk '{print $4" free of "$2}')" >> /root/disk.log; tail -n 200 /root/disk.log > /root/disk.log.t && mv /root/disk.log.t /root/disk.log
+  sleep 1800
+done
+DKI
+  setsid nohup bash /root/diskkeep.sh > /dev/null 2>&1 < /dev/null &
+  echo "DISKKEEP_LAUNCHED $(date -u)"
 fi
 echo "BOXI_OK serial $BOXI_SERIAL $(date -u)"
 # CTL-END

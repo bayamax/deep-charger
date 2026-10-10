@@ -3,7 +3,7 @@
 # renter and the start sat in Vast's queue (the user: that is no good, move house). Only what the routine needs is here:
 # the 4-bit base, s100, the evaluation sets, the data, the loop; then mtg7 and the rounds after it. Pull-based as the
 # others (ctl.sh runs this file whenever it changes).
-BOXG2_SERIAL=15
+BOXG2_SERIAL=16
 if [ -f /root/.boxg2_serial ] && [ "$(cat /root/.boxg2_serial)" -gt "$BOXG2_SERIAL" ] 2>/dev/null; then echo "BOXG2_STALE $BOXG2_SERIAL"; exit 0; fi
 echo $BOXG2_SERIAL > /root/.boxg2_serial
 mkdir -p /root/work/runtime /root/work/fft_out /root/hfdl; cd /root/work
@@ -140,7 +140,7 @@ for q, v in seen.items():
     s = src.get(q, "follow-up"); b = by[s]; b[0] += len(v); b[1] += sum(v); b[2] += 1; b[3] += any(v)
 for s, b in sorted(by.items()): print(f"  {s:10s}: {b[2]:3d} questions, {b[3]:3d} with a pass, samples {b[1]}/{b[0]} = {100*b[1]/max(b[0],1):.0f}%")
 PQ
-    echo "--- gpu/disk ---"; nvidia-smi --query-gpu=memory.used,memory.total,utilization.gpu --format=csv,noheader; df -h /root | tail -1
+    echo "--- gpu/disk ---"; nvidia-smi --query-gpu=memory.used,memory.total,utilization.gpu --format=csv,noheader; df -h /root | tail -1; tail -n 3 /root/disk.log 2>/dev/null
     echo "--- processes ---"; pgrep -fa "python3 /root/work/" | cut -c1-200; } > /root/boxlog.txt 2>&1
   hf upload $R /root/boxlog.txt pooler_distill/chatsft/audit/boxlog_G2.txt >/dev/null 2>&1
   sleep 600
@@ -339,6 +339,28 @@ RQ
   setsid nohup bash -c 'bash /root/roundscq.sh 2>&1 | tee -a /root/rounds.log' >> /proc/1/fd/1 2>&1 < /dev/null 9>&- &
   echo "ROUNDS_CQ_ARMED $(date -u)"
 fi
+# ---- 2026-10-11 01:10 JST (the user: mind every box's disk, what is left behind and what is still to come). Each round
+# leaves /root/online_mtgN with its last LoRA (~340 MB) and optimizer files; the copies are on the hub. Every 30 minutes:
+# rounds before the current one lose their weights (their rollouts and logs stay), and when under 8 GB is free the HF
+# cache and stray eval runs go too. Logged to /root/disk.log (the mirror shows its tail).
+if ! pgrep -f "diskkee[p].sh" >/dev/null; then
+  cat > /root/diskkeep.sh <<'DKG'
+while :; do
+  N=$(cat /root/round_n.txt 2>/dev/null || echo 0)
+  for d in /root/online_mtg*; do n=${d##*online_mtg}; [ "$n" -lt "$N" ] 2>/dev/null && rm -f $d/*.safetensors $d/*.pt; done
+  F=$(df -BG --output=avail /root | tail -1 | tr -dc 0-9)
+  if [ "${F:-99}" -lt 8 ]; then
+    pgrep -f "grpo_screen.s[h]|dl_judge.p[y]" >/dev/null || rm -rf /root/evalrun_*
+    rm -rf /root/.cache/huggingface/hub /root/hfdl/.cache; echo "$(date -u +%m-%d_%H:%M) LOW ${F}G free: caches cleared" >> /root/disk.log
+  fi
+  echo "$(date -u +%m-%d_%H:%M) $(df -h /root | tail -1 | awk '{print $4" free of "$2}')" >> /root/disk.log; tail -n 200 /root/disk.log > /root/disk.log.t && mv /root/disk.log.t /root/disk.log
+  sleep 1800
+done
+DKG
+  setsid nohup bash /root/diskkeep.sh > /dev/null 2>&1 < /dev/null &
+  echo "DISKKEEP_LAUNCHED $(date -u)"
+fi
+if [ ! -e /root/.mirror_r7 ]; then touch /root/.mirror_r7; pkill -f "mirrorkee[p].sh"; sleep 1; fi   # the disk keeper's lines
 # ---- 2026-10-09 08:30 JST (the user: label the models like software versions, the recent ones too). versioner.py lays the
 # history down under versions/<MAJOR.MINOR.PATCH>/ on the hub (server-side copies; the old paths stay) and then follows the
 # rounds: each copy a candidate X.Y.Z-mtgN.sS, each accepted copy the next minor. versions/INDEX.md lists them.
