@@ -68,11 +68,13 @@ PYL
   # (the start's own shard 0 was picked as the best of its round's copies, 56 against 54 per hundred over its 300), and the
   # full 300 within 6 of the start. Of the copies that hold shard 0, the two best get the conversation screens
   # (grpo_mtscreen.sh); the one that gains most on the later turns (br3 follow-up + chain3 turns 2 and 3) plus the judged
-  # good replies (shard 0 + br3 + chain3), losing on neither, by at least 4 in all, gets the full screens.
+  # good replies (shard 0 + br3 + chain3) plus the conversations judged whole (br3 + chain3, conv_judge.py, from mtg10),
+  # none of the three down by more than 3, by at least 4 in all, gets the full screens.
   [ -s /root/lines/${ST}_mt.txt ] || { echo "[mtg$N] conversation screens for the start $ST $(date -u +%H:%M)"; bash /root/work/grpo_mtscreen.sh $START $ST > /dev/null; }
-  read _ M1 M2 MC1 MC2 MC3 MQ0 MQ1 MQ2 < /root/lines/${ST}_mt.txt
-  M0=$((M2 + MC2 + MC3)); Q0=$((MQ0 + MQ1 + MQ2)); FLOOR=$((L300 / 3 - 6))
-  echo "[mtg$N] start $ST conversation: br3 $M1/$M2, chain3 $MC1/$MC2/$MC3, good replies $MQ0+$MQ1+$MQ2 = $Q0"
+  [ -s /root/lines/${ST}_conv.txt ] || bash /root/work/grpo_mtscreen.sh $START $ST > /dev/null   # the whole-conversation judge (2026-10-10), reusing the rest
+  read _ M1 M2 MC1 MC2 MC3 MQ0 MQ1 MQ2 < /root/lines/${ST}_mt.txt; read _ CB0 CC0 < /root/lines/${ST}_conv.txt
+  M0=$((M2 + MC2 + MC3)); Q0=$((MQ0 + MQ1 + MQ2)); C0=$((CB0 + CC0)); FLOOR=$((L300 / 3 - 6))
+  echo "[mtg$N] start $ST conversation: br3 $M1/$M2, chain3 $MC1/$MC2/$MC3, good replies $MQ0+$MQ1+$MQ2 = $Q0, good conversations $CB0+$CC0 = $C0"
   CANDS=""
   for CK in $(ls /root/mtg${N}_s*.safetensors 2>/dev/null | sort -V); do
     T=$(basename $CK .safetensors)
@@ -82,10 +84,10 @@ PYL
   BEST=; BS=3
   for CK in $(printf '%s' "$CANDS" | grep . | sort -k1,1nr -k2,2Vr | head -2 | awk '{print $2}'); do
     T=$(basename $CK .safetensors); echo "[mtg$N] conversation screens for $T $(date -u +%H:%M)"
-    read _ a1 a2 k1 k2 k3 p0 p1 p2 < <(bash /root/work/grpo_mtscreen.sh $CK $T)
-    M=$((a2 + k2 + k3)); Q=$((p0 + p1 + p2)); S=$((M - M0 + Q - Q0))
-    echo "[mtg$N] $T conversation: br3 $a1/$a2, chain3 $k1/$k2/$k3, good replies $p0+$p1+$p2 = $Q; later turns $M vs $M0, good $Q vs $Q0, gain $S"
-    [ "$M" -ge "$M0" ] && [ "$Q" -ge "$Q0" ] && [ "$S" -gt "$BS" ] && { BS=$S; BEST=$CK; }
+    read _ a1 a2 k1 k2 k3 p0 p1 p2 < <(bash /root/work/grpo_mtscreen.sh $CK $T); read _ e1 e2 < /root/lines/${T}_conv.txt
+    M=$((a2 + k2 + k3)); Q=$((p0 + p1 + p2)); C=$((e1 + e2)); S=$((M - M0 + Q - Q0 + C - C0))
+    echo "[mtg$N] $T conversation: br3 $a1/$a2, chain3 $k1/$k2/$k3, good replies $p0+$p1+$p2 = $Q, good conversations $e1+$e2 = $C; later turns $M vs $M0, good replies $Q vs $Q0, good conversations $C vs $C0, gain $S"
+    [ $((M - M0)) -ge -3 ] && [ $((Q - Q0)) -ge -3 ] && [ $((C - C0)) -ge -3 ] && [ "$S" -gt "$BS" ] && { BS=$S; BEST=$CK; }
   done
   ACC=0
   if [ -n "$BEST" ]; then

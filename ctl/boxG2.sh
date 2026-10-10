@@ -3,7 +3,7 @@
 # renter and the start sat in Vast's queue (the user: that is no good, move house). Only what the routine needs is here:
 # the 4-bit base, s100, the evaluation sets, the data, the loop; then mtg7 and the rounds after it. Pull-based as the
 # others (ctl.sh runs this file whenever it changes).
-BOXG2_SERIAL=14
+BOXG2_SERIAL=15
 if [ -f /root/.boxg2_serial ] && [ "$(cat /root/.boxg2_serial)" -gt "$BOXG2_SERIAL" ] 2>/dev/null; then echo "BOXG2_STALE $BOXG2_SERIAL"; exit 0; fi
 echo $BOXG2_SERIAL > /root/.boxg2_serial
 mkdir -p /root/work/runtime /root/work/fft_out /root/hfdl; cd /root/work
@@ -14,7 +14,7 @@ export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); R=baya1116/h
 RAW="https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl"
 
 # ---- the code, fresh on every control run ----
-for f in online_loop.py pool_eval.py r1_traj.py tqa_items.py musique_items.py nq_items.py web_search.py dl_judge.py gptq.py q4.py packmlx.py checkmlx.py dequant_state.py build_merged.py memfit.py mt_sim.py versioner.py chain3_items.py reply_judge.py; do
+for f in online_loop.py pool_eval.py r1_traj.py tqa_items.py musique_items.py nq_items.py web_search.py dl_judge.py gptq.py q4.py packmlx.py checkmlx.py dequant_state.py build_merged.py memfit.py mt_sim.py versioner.py chain3_items.py reply_judge.py conv_judge.py; do
   for try in 1 2 3; do curl -sS -o /root/work/$f "$RAW/$f?nocache=$(date +%s)" && python3 -m py_compile /root/work/$f && break; sleep 5; done
 done
 cp /root/work/web_search.py /root/work/runtime/web_search.py 2>/dev/null; touch /root/work/runtime/__init__.py
@@ -319,6 +319,25 @@ exec bash /root/work/grpo_round.sh
 RC
   setsid nohup bash -c 'bash /root/roundsconv.sh 2>&1 | tee -a /root/rounds.log' >> /proc/1/fd/1 2>&1 < /dev/null 9>&- &
   echo "ROUNDS_CONV_ARMED $(date -u)"
+fi
+# ---- 2026-10-10 14:45 JST (the user: with the replies LLM-scored, score the conversations' quality too - from the next
+# round). conv_judge.py reads each br3 / chain3 dialogue whole; grpo_round.sh adds it to the gate. The running round loop
+# keeps its old gate, so once mtg9 is done and the next round is training, that round is stopped and run again from its
+# start (no copy yet) on the new loop.
+if [ ! -e /root/.rounds_cq ] && [ -e /root/.rounds_conv ] && [ -s /root/work/conv_judge.py ] && grep -q "conv_judge" /root/work/grpo_round.sh; then touch /root/.rounds_cq
+  cat > /root/roundscq.sh <<'RQ'
+until [ "$(cat /root/round_n.txt)" -ge 10 ] && pgrep -f "online_loop.p[y] .*online_mtg" >/dev/null; do sleep 60; done
+pkill -f "grpo_round.s[h]"; pkill -f "roundsconv.s[h]"; pkill -f "roundskeep.s[h]"; sleep 2; pkill -f "online_loop.p[y] .*online_mtg"; sleep 20
+N=$(cat /root/round_n.txt)
+if ls /root/mtg${N}_s*.safetensors >/dev/null 2>&1 || grep -q "^\[mtg$N\] copy at step" /root/rounds.log; then
+  rm -f /root/mtg${N}_s*.safetensors; echo $((N + 1)) > /root/round_n.txt; echo "[rounds] mtg$N stopped after its first copy - mtg$((N + 1)) takes over"
+else echo "[rounds] mtg$N stopped while training - run again from the start"; fi
+rm -rf /root/online_mtg$N
+echo "[rounds] restarted with the conversations judged whole in the gate $(date -u +%H:%M)"
+exec bash /root/work/grpo_round.sh
+RQ
+  setsid nohup bash -c 'bash /root/roundscq.sh 2>&1 | tee -a /root/rounds.log' >> /proc/1/fd/1 2>&1 < /dev/null 9>&- &
+  echo "ROUNDS_CQ_ARMED $(date -u)"
 fi
 # ---- 2026-10-09 08:30 JST (the user: label the models like software versions, the recent ones too). versioner.py lays the
 # history down under versions/<MAJOR.MINOR.PATCH>/ on the hub (server-side copies; the old paths stay) and then follows the
