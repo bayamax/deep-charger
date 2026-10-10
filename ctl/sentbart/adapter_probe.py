@@ -23,6 +23,8 @@ ap.add_argument("--n", type=int, default=8, help="soft tokens"); ap.add_argument
 ap.add_argument("--lr", type=float, default=1e-3); ap.add_argument("--ctx-tokens", type=int, default=160); ap.add_argument("--tgt-tokens", type=int, default=48)
 ap.add_argument("--lams", default="0.15,0.3"); ap.add_argument("--gpt2", default="openai-community/gpt2")
 ap.add_argument("--bge", default="BAAI/bge-small-en-v1.5"); ap.add_argument("--threads", type=int, default=3); ap.add_argument("--seed", type=int, default=5)
+ap.add_argument("--sft", type=int, default=0, help="1: GPT-2 itself is trained too (the user, 2026-10-10: SFT GPT-2 with the BART's input added), at --lr-gpt")
+ap.add_argument("--lr-gpt", type=float, default=3e-5); ap.add_argument("--p-none", type=float, default=0.0, help="share of training rows with no vector, so the same model's no-vector writing is a fair floor")
 X = ap.parse_args()
 torch.set_num_threads(X.threads); torch.manual_seed(0); os.makedirs(X.work, exist_ok=True)
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -83,7 +85,7 @@ print(f"[pairs] {len(P['train'])} training pairs, {len(P['eval'])} evaluation po
 
 # ---- GPT-2 and the adapter ----
 gtok = AutoTokenizer.from_pretrained(X.gpt2); gpt = AutoModelForCausalLM.from_pretrained(X.gpt2)
-for p in gpt.parameters(): p.requires_grad_(False)
+for p in gpt.parameters(): p.requires_grad_(bool(X.sft))
 gpt.eval(); H = gpt.config.n_embd; NL = gtok.encode("\n")
 adapter = nn.Sequential(nn.Linear(384, 1024), nn.GELU(), nn.Linear(1024, X.n * H))
 WTE = gpt.get_input_embeddings()
@@ -99,7 +101,7 @@ def inputs(vecs, ctxs, tgts=None):
     for v, c, t in zip(vecs, ctxs, tgts or [None] * len(ctxs)):
         ci = gtok.encode("\n".join(c) + "\n")[-X.ctx_tokens:]; ti = (gtok.encode(t)[:X.tgt_tokens] + NL) if t is not None else []
         rows.append((v, ci, ti))
-    M = max(len(c) + len(t) for _, c, t in rows) + (X.n if vecs[0] is not None else 0)
+    M = max(len(c) + len(t) + (X.n if v is not None else 0) for v, c, t in rows)
     E = torch.zeros(len(rows), M, H); att = torch.zeros(len(rows), M, dtype=torch.long); lab = torch.full((len(rows), M), -100)
     for r, (v, c, t) in enumerate(rows):
         ids = torch.tensor(c + t); e = WTE(ids)
@@ -111,20 +113,24 @@ def inputs(vecs, ctxs, tgts=None):
 
 ack = os.path.join(X.work, "adapter.pt")
 if os.path.exists(ack):
-    adapter.load_state_dict(torch.load(ack))
+    ck_ = torch.load(ack); adapter.load_state_dict(ck_["adapter"] if "adapter" in ck_ else ck_)
+    if "gpt" in ck_: gpt.load_state_dict(ck_["gpt"])
 else:
-    opt = torch.optim.AdamW(adapter.parameters(), lr=X.lr, weight_decay=0.01)
+    groups = [{"params": adapter.parameters(), "lr": X.lr}] + ([{"params": gpt.parameters(), "lr": X.lr_gpt}] if X.sft else [])
+    opt = torch.optim.AdamW(groups, weight_decay=0.01)
+    if X.sft: gpt.train()
     sched = torch.optim.lr_scheduler.LambdaLR(opt, lambda s: min(1.0, (s + 1) / 100) * 0.5 * (1 + math.cos(math.pi * s / X.steps)))
     tr = P["train"]; r3 = random.Random(1); t0 = time.time(); acc = []
     for step in range(1, X.steps + 1):
         bt = r3.sample(tr, X.batch)
-        vecs = [mix(r["true"], r["pred"], 1.0 if r3.random() < 0.25 else r3.random()) for r in bt]   # a quarter the true vector, the rest anywhere between
+        vecs = [None if r3.random() < X.p_none else mix(r["true"], r["pred"], 1.0 if r3.random() < 0.25 else r3.random()) for r in bt]   # a quarter the true vector, the rest anywhere between
         E, att, lab = inputs(vecs, [r["ctx"] for r in bt], [r["tgt"] for r in bt])
         out = gpt(inputs_embeds=E, attention_mask=att, position_ids=(att.cumsum(1) - 1).clamp(min=0), labels=lab)
-        opt.zero_grad(); out.loss.backward(); torch.nn.utils.clip_grad_norm_(adapter.parameters(), 1.0); opt.step(); sched.step(); acc.append(float(out.loss))
+        opt.zero_grad(); out.loss.backward(); torch.nn.utils.clip_grad_norm_(list(adapter.parameters()) + ([p for p in gpt.parameters()] if X.sft else []), 1.0); opt.step(); sched.step(); acc.append(float(out.loss.detach()))
         if step % 50 == 0:
             print(f"[train] step {step} loss {np.mean(acc):.3f} ({(time.time() - t0) / 60:.1f} min)", flush=True); acc = []
-    torch.save(adapter.state_dict(), ack)
+            if step % 500 == 0: torch.save({"adapter": adapter.state_dict(), **({"gpt": gpt.state_dict()} if X.sft else {})}, ack + ".partial")
+    torch.save({"adapter": adapter.state_dict(), **({"gpt": gpt.state_dict()} if X.sft else {})}, ack); gpt.eval()
 
 
 @torch.no_grad()
