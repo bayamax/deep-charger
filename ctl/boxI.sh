@@ -8,7 +8,7 @@ cd /root
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null)
 R=baya1116/hypernet-sp-distill
 RAW="https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl"
-BOXI_SERIAL=74
+BOXI_SERIAL=75
 if [ -f /root/.boxi_serial ] && [ "$(cat /root/.boxi_serial)" -gt "$BOXI_SERIAL" ] 2>/dev/null; then echo "BOXI_STALE $BOXI_SERIAL"; exit 0; fi
 echo $BOXI_SERIAL > /root/.boxi_serial
 mkdir -p /root/sb /root/work
@@ -1325,5 +1325,11 @@ if [ ! -e /root/.dolphin_evalbatch ] && grep -q -- "--eval-batch" /root/sb/train
   echo "[dolphinladder] restarted: the evaluation batch fixed at 32 (r02 had measured on 16) $(date -u +%H:%M)" >> /root/sb_dolphinladder.log
   setsid nohup bash -c 'bash /root/dolphinladderkeep.sh 2>&1 | tee -a /root/sb_dolphinladder.log' > /dev/null 2>&1 < /dev/null &
 fi
+# ---- 2026-10-10 18:00 JST: the Dolphin held-out shard's text on the hub, once (the GPT-2 rerank estimate - how far the
+# context BART has to go when GPT-2 writes each sentence from its vector - runs off the box, on CPU, from it)
+if [ ! -e /root/.dl001_up ] && [ -s /root/sb/data/dolphin/docs_001.jsonl ]; then touch /root/.dl001_up
+  ( hf upload $R /root/sb/data/dolphin/docs_001.jsonl sentbart/dolphin/data/docs_001.jsonl >/dev/null 2>&1 && echo "DL001_UP $(ls -la /root/sb/data/dolphin/docs_001.jsonl | awk '{print $5}') $(date -u)" ) >> /root/boxI_extra.log 2>&1 &
+fi
 echo "BOXI_OK serial $BOXI_SERIAL $(date -u)"
 # CTL-END
+
