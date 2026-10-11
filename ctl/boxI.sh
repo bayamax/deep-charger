@@ -8,7 +8,7 @@ cd /root
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null)
 R=baya1116/hypernet-sp-distill
 RAW="https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl"
-BOXI_SERIAL=82
+BOXI_SERIAL=83
 if [ -f /root/.boxi_serial ] && [ "$(cat /root/.boxi_serial)" -gt "$BOXI_SERIAL" ] 2>/dev/null; then echo "BOXI_STALE $BOXI_SERIAL"; exit 0; fi
 echo $BOXI_SERIAL > /root/.boxi_serial
 mkdir -p /root/sb /root/work
@@ -1430,7 +1430,7 @@ I0=/root/sb/abl_one32/model_best.pt; [ -s $I0 ] || I0=/root/sb/hfdl/sentbart/abl
 echo "[once] training from $I0 (BART 8+8, stock bge 12), batch 32, one epoch $(date -u +%H:%M)"
 python3 -u /root/sb/train_e2e.py --vec $D --text $D --eval-text $D/docs_001.jsonl --out /root/sb/dolphin_once --init $I0 --layers 8 --enc-layers 0 \
   --batch 32 --page-queue 16 --pool 20000 --anchor-q 0 --select dec_top1 --patience 0 --once 1 --eval-every 1000 --save-every 1000 \
-  2>&1 | grep --line-buffered -E "^\[e2e\]|^\[eval|^\[best|^\[init|^\[model|TRAIN_DONE|Error|Traceback|out of memory" | cut -c1-400
+  2>&1 | grep --line-buffered -E "^\[e2e\]|^\[eval|^\[best|^\[init|^\[model|TRAIN_DONE|Error|Traceback|out of memory" | sed -u 's/^\(.\{400\}\).*/\1/'
 [ -s /root/sb/dolphin_once/model_best.pt ] && hf upload $R /root/sb/dolphin_once/model_best.pt sentbart/dolphin/once/model_best.pt >/dev/null 2>&1 && echo "[once] best on the hub: sentbart/dolphin/once/model_best.pt"
 hf upload $R /root/sb/dolphin_once/train.log sentbart/dolphin/once/train.log >/dev/null 2>&1
 echo "ONCE_JOB_DONE $(date -u)"
@@ -1442,6 +1442,19 @@ fi
 if [ -e /root/.dolphin_once ] && [ -s /root/dolphinoncekeep.sh ] && ! pgrep -f "dolphinoncekee[p].sh" >/dev/null && ! grep -q "ONCE_JOB_DONE" /root/sb_dolphinonce.log 2>/dev/null; then
   echo "[once] relaunched $(date -u +%H:%M)" >> /root/sb_dolphinonce.log
   setsid nohup bash -c 'bash /root/dolphinoncekeep.sh 2>&1 | tee -a /root/sb_dolphinonce.log' > /dev/null 2>&1 < /dev/null &
+fi
+# ---- 2026-10-12 03:30 JST: the mirror and the log uploader went quiet at 17:44 / 17:34 UTC (the box runs, GPU 97%). A
+# snapshot of the box to the container's stdout (Vast's log channel) and to the hub, and the keepers relaunched.
+if [ ! -e /root/.snap83 ]; then touch /root/.snap83
+  { echo "=== SNAP $(date -u)"; nvidia-smi --query-gpu=memory.used,utilization.gpu --format=csv,noheader; df -h /root | tail -1
+    echo "--- keepers"; pgrep -fa "mirrorkee[p]|ladderlogkee[p]|dolphinoncekee[p]|diskkee[p]|train_e2e" | cut -c1-120
+    echo "--- sb_dolphinonce.log"; tail -n 5 /root/sb_dolphinonce.log 2>/dev/null | cut -c1-200
+    echo "--- dolphin_once/"; ls -la /root/sb/dolphin_once/ 2>&1 | tail -n 8; echo "--- train.log"; tail -n 6 /root/sb/dolphin_once/train.log 2>&1 | cut -c1-300
+    echo "--- hf test"; echo "$(date -u)" > /root/hf_test.txt; hf upload $R /root/hf_test.txt sentbart/audit/hf_test.txt 2>&1 | tail -n 2 | cut -c1-300
+  } > /root/snap83.txt 2>&1
+  cat /root/snap83.txt > /proc/1/fd/1 2>/dev/null; cat /root/snap83.txt >> /root/ctl.log
+  hf upload $R /root/snap83.txt sentbart/audit/snap83.txt >/dev/null 2>&1 &
+  pkill -f "mirrorkee[p].sh"; pkill -f "ladderlogkee[p].sh"; sleep 1   # relaunched by their blocks on the next control run
 fi
 echo "BOXI_OK serial $BOXI_SERIAL $(date -u)"
 # CTL-END
