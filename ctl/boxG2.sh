@@ -3,7 +3,7 @@
 # renter and the start sat in Vast's queue (the user: that is no good, move house). Only what the routine needs is here:
 # the 4-bit base, s100, the evaluation sets, the data, the loop; then mtg7 and the rounds after it. Pull-based as the
 # others (ctl.sh runs this file whenever it changes).
-BOXG2_SERIAL=17
+BOXG2_SERIAL=18
 if [ -f /root/.boxg2_serial ] && [ "$(cat /root/.boxg2_serial)" -gt "$BOXG2_SERIAL" ] 2>/dev/null; then echo "BOXG2_STALE $BOXG2_SERIAL"; exit 0; fi
 echo $BOXG2_SERIAL > /root/.boxg2_serial
 mkdir -p /root/work/runtime /root/work/fft_out /root/hfdl; cd /root/work
@@ -97,6 +97,7 @@ if [ ! -e /root/.mirror_r4 ]; then touch /root/.mirror_r4; pkill -f "mirrorkee[p
 if [ ! -e /root/.mirror_r5 ]; then touch /root/.mirror_r5; pkill -f "mirrorkee[p].sh"; sleep 1; fi   # the round's 20-step blocks
 if [ ! -e /root/.mirror_r6 ]; then touch /root/.mirror_r6; pkill -f "mirrorkee[p].sh"; sleep 1; fi   # the conversation screens' progress
 if [ ! -e /root/.mirror_r7 ]; then touch /root/.mirror_r7; pkill -f "mirrorkee[p].sh"; sleep 1; fi   # the disk keeper's lines
+if [ ! -e /root/.mirror_r8 ]; then touch /root/.mirror_r8; pkill -f "mirrorkee[p].sh"; sleep 1; fi   # the 4-bit 2.1.1's lines
 if ! pgrep -f "mirrorkee[p].sh" >/dev/null; then
   cat > /root/mirrorkeep.sh <<'MK'
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); R=baya1116/hypernet-sp-distill
@@ -107,6 +108,7 @@ while :; do
       echo "--- mtg7 teacher lines ---"; grep -E "^\[r1\]|^\[followup\]|^\[warn\]" /root/mtg7_run.log | tail -n 8 | cut -c1-250; }
     [ -s /root/r1chk.log ] && { echo "--- r1 check ---"; tail -n 6 /root/r1chk.log | cut -c1-250; }
     [ -s /root/versions.log ] && { echo "--- versions.log ---"; tail -n 6 /root/versions.log | cut -c1-200; }
+    [ -s /root/q211.log ] && { echo "--- q211.log ---"; tail -n 25 /root/q211.log | cut -c1-260; }
     [ -s /root/rounds.log ] && { echo "--- rounds.log ---"; tail -n 16 /root/rounds.log | cut -c1-260; RN=$(cat /root/round_n.txt 2>/dev/null)
       [ -s /root/mtg${RN}_run.log ] && { echo "--- mtg$RN steps ---"; grep -E "^\[step|rollback|Traceback|out of memory" /root/mtg${RN}_run.log | sed -E 's/\| ce=.*cumulative/| cum/' | tail -n 8 | cut -c1-240
         echo "--- mtg$RN teacher lines ---"; grep -E "^\[r1\]|^\[followup\]|^\[warn\]" /root/mtg${RN}_run.log | tail -n 5 | cut -c1-220; 
@@ -360,6 +362,86 @@ done
 DKG
   setsid nohup bash /root/diskkeep.sh > /dev/null 2>&1 < /dev/null &
   echo "DISKKEEP_LAUNCHED $(date -u)"
+fi
+# ---- 2026-10-11 10:30 JST (the user: mtg10 can go; the best model to 4 bits the usual way). The rounds stop (mtg10's
+# step-20 screen is dropped). 2.1.0 = mtg7_s40, a rank-16 LoRA on all layers over gq14's dequantized weights: folded in
+# (build_merged.py), GPTQ'd onto the app's grid again (gptq.py, the lineage's own traces qcal_g2 as gq14 was), packed and
+# checked (checkmlx.py), with the pooler 2.1.0 ran with (it trained none: the harness's fft_out pooler) - published as
+# versions/2.1.1 and chatsft/v211_mlx4g. Then the screens on the 4-bit itself against 2.1.0 in float: single-turn 300,
+# br3, chain3, Dolphin 100, the judged replies and conversations.
+if [ ! -e /root/.q211 ] && [ -s /root/start_mtg7.safetensors ] && [ -s /root/work/qcal_g2.jsonl ]; then touch /root/.q211
+  touch /root/.rounds_stop
+  pkill -f "roundscq.s[h]"; pkill -f "roundsconv.s[h]"; pkill -f "grpo_round.s[h]"; pkill -f "grpo_mtscreen.s[h]"; pkill -f "grpo_screen.s[h]"; sleep 2
+  pkill -f "pool_eval.p[y]"; pkill -f "online_loop.p[y]"; pkill -f "reply_judge.p[y]|conv_judge.p[y]|dl_judge.p[y]"; sleep 10; rm -rf /root/evalrun_*
+  echo "[rounds] stopped (the user: mtg10 can go; 2.1.0 to 4 bits first) $(date -u +%H:%M)" >> /root/rounds.log
+  cat > /root/q211keep.sh <<'QK'
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); R=baya1116/hypernet-sp-distill; cd /root/work
+CK=/root/start_mtg7.safetensors; HFM=/root/m211_hf; PCK=/root/m211_pooler.safetensors; HF=/root/gptq_hf_211; MLX=/root/gptq_mlx4_211
+EVARGS="--rw 768 --maxd 384 --samepage 1 --decode plain --temp 0.6 --gen 4000 --stop eos --replycap 600"
+ENV="SP_BASE=$HF SP_RANK=16 SP_NOSYS=1 SP_EPISODIC=1 OMP_NUM_THREADS=1 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True"
+cnt() { python3 -c "import json,sys;print(sum(bool(json.loads(l).get('correct')) for l in open(sys.argv[1]) if l.strip()))" "$1" 2>/dev/null || echo 0; }
+echo "[q211] start $(date -u +%H:%M); $(df -h /root | tail -1 | awk '{print $4}') free"
+[ -s /root/work/grpo_e2e_torch.py ] || { hf download $R box_recover/scripts/grpo_e2e_torch.py --local-dir /root/hfdl >/dev/null 2>&1; cp /root/hfdl/box_recover/scripts/grpo_e2e_torch.py /root/work/ 2>/dev/null; }
+if [ ! -s $HF/model.safetensors ]; then
+  if [ ! -s $HFM/model.safetensors ]; then
+    SP_BASE=/root/gptq_hf_gq14 SP_NOSYS=1 SP_EPISODIC=1 OMP_NUM_THREADS=1 python3 /root/work/build_merged.py $CK $HFM $PCK 16 all 2>&1 | grep -E "^\[merge\]|MERGE_DONE|Error|assert|unexpected" | tail -4
+    [ -s $HFM/model.safetensors ] || { echo "Q211_JOB_DONE merge failed"; exit 1; }
+  fi
+  PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python3 /root/work/gptq.py --base $HFM --data /root/work/qcal_g2.jsonl --out-hf $HF --out-mlx $MLX --state /root/gptq_state_211.pt > /root/gptq_211.log 2>&1
+  grep -q GPTQ_DONE /root/gptq_211.log || { echo "Q211_JOB_DONE gptq failed: $(grep -E 'Error|error' /root/gptq_211.log | tail -1 | cut -c1-200)"; exit 1; }
+  echo "[q211] $(grep -E '^\[gptq\] (layer 27|lm_head)' /root/gptq_211.log | tail -1 | cut -c1-200)"
+fi
+python3 /root/work/checkmlx.py $MLX $HF 2>&1 | tail -3 | tee /root/checkmlx_211.txt
+grep -q MLX_CHECK_OK /root/checkmlx_211.txt || { echo "Q211_JOB_DONE pack check failed"; exit 1; }
+# the pooler 2.1.0 ran with: its checkpoint has none (--pooler none), so the harness's fft_out/pooler.pt - set against the
+# 4-bit g14's shipped pooler file
+hf download $R pooler_distill/chatsft/g14_mlx4g/pooler.safetensors --local-dir /root/hfdl >/dev/null 2>&1
+python3 - $PCK /root/work/fft_out/pooler.pt /root/hfdl/pooler_distill/chatsft/g14_mlx4g/pooler.safetensors $MLX/pooler.safetensors <<'PYP'
+import sys, os, torch
+from safetensors.torch import load_file, save_file
+pck, fft, ship, out = sys.argv[1:5]
+own = load_file(pck) if os.path.exists(pck) else {}
+strip = lambda d: {k[len("pooler."):] if k.startswith("pooler.") else k: v for k, v in d.items()}
+if own:
+    src, name = strip(own), "the checkpoint's own"
+else:
+    sd = torch.load(fft, map_location="cpu", weights_only=False); sd = sd.get("pooler", sd.get("state_dict", sd)) if isinstance(sd, dict) else sd
+    src, name = strip({k: v for k, v in sd.items() if torch.is_tensor(v)}), "fft_out/pooler.pt (the harness's, what 2.1.0 ran with)"
+sh = strip(load_file(ship)) if os.path.exists(ship) else {}
+same = set(src) == set(sh); d = max((float((src[k].float() - sh[k].float()).abs().max()) for k in src if k in sh), default=-1)
+print(f"[q211] pooler: {name}, {len(src)} tensors; vs the shipped g14 pooler ({len(sh)}): {'same keys' if same else 'different keys'}, max |diff| {d:.3g}", flush=True)
+save_file({k: v.contiguous() for k, v in (sh if same and d == 0 else src).items()}, out)
+PYP
+for try in 1 2 3; do hf upload $R $MLX pooler_distill/chatsft/v211_mlx4g >/dev/null 2>&1 && break; sleep 30; done
+for try in 1 2 3; do hf upload $R $MLX versions/2.1.1 >/dev/null 2>&1 && break; sleep 30; done
+printf '{"version": "2.1.1", "what": "2.1.0 merged into the weights and quantised again to 4 bits (GPTQ, MLX)", "parent": "2.1.0", "status": "screens running"}\n' > /root/version_211.json
+hf upload $R /root/version_211.json versions/2.1.1/version.json >/dev/null 2>&1; hf upload $R /root/gptq_211.log pooler_distill/chatsft/logs/gptq_211.log >/dev/null 2>&1
+echo "[q211] uploaded versions/2.1.1 and chatsft/v211_mlx4g $(date -u +%H:%M)"
+rm -rf $HFM; rm -f /root/gptq_state_211.pt
+SN=0; for i in 0 1 2; do env $ENV python3 /root/work/pool_eval.py $PCK /root/work/ev_$i.jsonl /root/work/q211st_$i.jsonl --n 100 $EVARGS --tag "[q211st$i]" > /root/q211st_$i.log 2>&1
+  c=$(cnt /root/work/q211st_$i.jsonl); SN=$((SN + c)); echo "[q211] single shard $i: $c/100 $(grep -h -m1 'pooler restored\|WARNING: no pooler' /root/q211st_$i.log | cut -c1-80)"; done
+echo "[q211] single-turn: $SN/300 (2.1.0 in float 162)"
+for b in "br3:/root/work/mt_eval_bridge3.jsonl:2" "ch3:/root/work/mt_eval_chain3.jsonl:3"; do T=${b%%:*}; r=${b#*:}; F=${r%%:*}; NT=${r#*:}
+  env $ENV python3 /root/work/pool_eval.py $PCK /root/work/eval300.jsonl /root/work/${T}_q211.jsonl --multiturn $F --mt-mode win --n 1000 $EVARGS --tag "[$T-q211]" > /root/${T}_q211.log 2>&1
+  echo "[q211] $T (win), correct by turn: $(python3 -c "
+import json,sys; r=[json.loads(l) for l in open(sys.argv[1]) if l.strip()]
+print(' / '.join(str(sum(bool(x['correct']) for x in r if x['turn']==t)) for t in range(int(sys.argv[2]))))" /root/work/${T}_q211.jsonl $NT)"
+done
+echo "[q211] (2.1.0 in float: br3 35 / 31, chain3 28 / 17 / 4)"
+env SP_BASE=$HF SP_NOSYS=1 SP_EPISODIC=1 OMP_NUM_THREADS=1 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python3 /root/work/online_loop.py $HF /root/evalrun_dl_q211 \
+  --questions /root/work/eval300.jsonl --dolphin /root/work/dolphin_v1.jsonl --heldout /root/work/eval300.jsonl --pooler-init $PCK \
+  --b 12 --gen 7000 --budget 2400 --temp 0.6 --maxsrch 7 --pooler none --lora-rank 16 --lora-layers all --stop eos --loop-break answer --reason-no-search 1 \
+  --eval-file /root/work/dolphinq.jsonl --eval-out /root/work/dl_q211_ns.jsonl > /root/dl_q211.log 2>&1
+OAI_KEY=$(cat /root/.oai 2>/dev/null) python3 /root/work/dl_judge.py /root/work/dl_q211_ns.jsonl q211 | sed 's/\[mix0\]/[q211]/'
+echo "[q211] (2.1.0 in float: Dolphin 49)"; rm -rf /root/evalrun_dl_q211
+for f in /root/work/q211st_0.jsonl /root/work/br3_q211.jsonl /root/work/ch3_q211.jsonl; do OAI_KEY=$(cat /root/.oai 2>/dev/null) python3 /root/work/reply_judge.py $f q211_$(basename $f .jsonl) | sed 's/^/[q211] /'; done
+for f in /root/work/br3_q211.jsonl /root/work/ch3_q211.jsonl; do OAI_KEY=$(cat /root/.oai 2>/dev/null) python3 /root/work/conv_judge.py $f q211_$(basename $f .jsonl) | sed 's/^/[q211] /'; done
+echo "[q211] (2.1.0 in float: good replies 45 + 55 + 40, good conversations 52 + 26)"
+for f in /root/work/q211st_*.jsonl /root/work/br3_q211.jsonl /root/work/ch3_q211.jsonl /root/work/dl_q211_ns*.jsonl; do [ -s $f ] && hf upload $R $f pooler_distill/chatsft/q211/$(basename $f) >/dev/null 2>&1; done
+echo "Q211_JOB_DONE $(date -u)"
+QK
+  setsid nohup bash -c 'bash /root/q211keep.sh 2>&1 | tee -a /root/q211.log' >> /proc/1/fd/1 2>&1 < /dev/null 9>&- &
+  echo "Q211_LAUNCHED $(date -u)"
 fi
 # ---- 2026-10-09 08:30 JST (the user: label the models like software versions, the recent ones too). versioner.py lays the
 # history down under versions/<MAJOR.MINOR.PATCH>/ on the hub (server-side copies; the old paths stay) and then follows the
