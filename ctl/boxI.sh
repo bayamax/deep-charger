@@ -8,7 +8,7 @@ cd /root
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null)
 R=baya1116/hypernet-sp-distill
 RAW="https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl"
-BOXI_SERIAL=81
+BOXI_SERIAL=82
 if [ -f /root/.boxi_serial ] && [ "$(cat /root/.boxi_serial)" -gt "$BOXI_SERIAL" ] 2>/dev/null; then echo "BOXI_STALE $BOXI_SERIAL"; exit 0; fi
 echo $BOXI_SERIAL > /root/.boxi_serial
 mkdir -p /root/sb /root/work
@@ -35,6 +35,7 @@ if [ ! -e /root/.mirror_r2 ]; then touch /root/.mirror_r2; pkill -f "mirrorkee[p
 if [ ! -e /root/.mirror_r3 ]; then touch /root/.mirror_r3; pkill -f "mirrorkee[p].sh"; sleep 1; fi   # again for the pool fields
 if [ ! -e /root/.mirror_r4 ]; then touch /root/.mirror_r4; pkill -f "mirrorkee[p].sh"; sleep 1; fi   # again for the rung records   # 2026-10-07: restarted once for the ladder2 lines
 if [ ! -e /root/.mirror_r5 ]; then touch /root/.mirror_r5; pkill -f "mirrorkee[p].sh"; sleep 1; fi   # the disk keeper's lines
+if [ ! -e /root/.mirror_r6 ]; then touch /root/.mirror_r6; pkill -f "mirrorkee[p].sh"; sleep 1; fi   # the one-epoch run's lines
 if ! pgrep -f "mirrorkee[p].sh" >/dev/null; then
   cat > /root/mirrorkeep.sh <<'MK'
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); R=baya1116/hypernet-sp-distill
@@ -45,6 +46,7 @@ while :; do
     echo "--- disk ---"; df -h /root | tail -1; du -sh /root/sb/data 2>/dev/null; tail -n 3 /root/disk.log 2>/dev/null
     echo "--- ladder2 / dolphin ladder ---"; ls -t /root/sb/ladder2 /root/sb/dolphin_ladder 2>/dev/null | head -12 | tr '\n' ' '; echo
     f=$(ls -t /root/sb/ladder2/*.out /root/sb/dolphin_ladder/*.out 2>/dev/null | head -1); [ -n "$f" ] && { echo "== $f"; grep -E "^\[eval|^\[best|^\[plateau|^\[init\]|Error|Traceback" $f | tail -8 | cut -c1-300; echo "pool fields:"; grep -E "^\[eval" $f | tail -6 | sed -E 's/^(\[eval [0-9]+\]).*page_top1 ([0-9.]+).*(pool_top1.*)$/\1 2000: \2 | \3/' | cut -c1-200; grep "^\[step" $f | tail -1 | cut -c1-200; }
+    [ -s /root/sb_dolphinonce.log ] && { echo "--- dolphin once (the whole corpus, one epoch) ---"; tail -n 8 /root/sb_dolphinonce.log | cut -c1-300; grep -E "^\[eval|^\[best|^\[e2e\]|Error|Traceback" /root/sb/dolphin_once/train.log 2>/dev/null | tail -8 | cut -c1-300; grep "^\[step" /root/sb/dolphin_once/train.log 2>/dev/null | tail -1 | cut -c1-200; }
     [ -s /root/sb/dolphin_e2e/train.log ] && { echo "--- dolphin e2e (train.log) ---"; grep -E "^\[eval|^\[best|^\[plateau|^\[init\]|^\[e2e\]|Error|Traceback" /root/sb/dolphin_e2e/train.log | tail -8 | sed -E 's/^(\[eval [0-9]+\]).*page_top1 ([0-9.]+).*page_base_top1 ([0-9.]+).*(next_top1 [0-9.]+).*(pool_top1 [0-9.]+ pool_top10 [0-9.]+).*$/\1 2000: \2 (base \3) \4 \5/' | cut -c1-300; grep "^\[step" /root/sb/dolphin_e2e/train.log | tail -1 | cut -c1-200; }
     echo "--- ladder2 rungs (ladder.json) and dev guards ---"; python3 -c "
 import json,glob
@@ -1109,11 +1111,12 @@ fi
 # ---- ladderlog (2026-10-06 03:50 JST): the running rung's training log on the hub every 20 minutes (the ladder's own
 # log only speaks between rungs).
 if [ ! -e /root/.ladderlog_r2 ]; then touch /root/.ladderlog_r2; pkill -f "ladderlogkee[p].sh"; sleep 1; fi   # restarted once for the Dolphin ladder's logs
+if [ ! -e /root/.ladderlog_r3 ]; then touch /root/.ladderlog_r3; pkill -f "ladderlogkee[p].sh"; sleep 1; fi   # the one-epoch run's log
 if ! pgrep -f "ladderlogkee[p].sh" >/dev/null; then
   cat > /root/ladderlogkeep.sh <<'RK'
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); R=baya1116/hypernet-sp-distill
 while :; do
-  f=$(ls -t /root/sb/ladder/r*/train.log /root/sb/ladder2/r*/train.log /root/sb/dolphin_ladder/r*/train.log 2>/dev/null | head -1)
+  f=$(ls -t /root/sb/ladder/r*/train.log /root/sb/ladder2/r*/train.log /root/sb/dolphin_ladder/r*/train.log /root/sb/dolphin_once/train.log 2>/dev/null | head -1)
   [ -n "$f" ] && { echo "== $f $(date -u)"; grep -E "^\[eval|^\[best|^\[plateau|^\[e2e\]" $f | tail -20 | cut -c1-400; grep "^\[step" $f | tail -2; } > /root/ladder_current.txt && hf upload $R /root/ladder_current.txt sentbart/e2e/ladder/current.txt >/dev/null 2>&1
   sleep 1200
 done
@@ -1277,7 +1280,7 @@ fi
 # ---- 2026-10-08 00:00 JST: the Vast credit ran out and the box stopped six minutes into r01. After the restart the ladder keeper
 # is relaunched (e2e_ladder.py resumes from ladder.json: r00_ref again, briefly, then r01 from the start).
 if [ -s /root/dolphinladderkeep.sh ] && ! pgrep -f "dolphinladderkee[p].sh" >/dev/null && grep -q "text + layout" /root/sb_dolphinladder.log 2>/dev/null \
-   && ! grep -q "DOLPHINLADDER_JOB_DONE [A-Z][a-z][a-z] " /root/sb_dolphinladder.log 2>/dev/null; then
+   && ! grep -q "DOLPHINLADDER_JOB_DONE [A-Z][a-z][a-z] " /root/sb_dolphinladder.log 2>/dev/null && [ ! -e /root/.dolphin_once ]; then
   echo "[dolphinladder] relaunched after the box stopped $(date -u +%H:%M)" >> /root/sb_dolphinladder.log
   setsid nohup bash -c 'bash /root/dolphinladderkeep.sh 2>&1 | tee -a /root/sb_dolphinladder.log' > /dev/null 2>&1 < /dev/null &
 fi
@@ -1396,6 +1399,49 @@ done
 DKI
   setsid nohup bash /root/diskkeep.sh > /dev/null 2>&1 < /dev/null &
   echo "DISKKEEP_LAUNCHED $(date -u)"
+fi
+# ---- 2026-10-12 01:30 JST (the user: this is a start-over - the 50k had been gone round ~45 times and the ladder's gains
+# were the model learning the same conversations; take the whole deepseek reasoning corpus, good ones only, ONE epoch,
+# the BART and bge at their starting shape, and judge from that). The ladder is stopped; r06's best (BART 32+32, 24.3%)
+# goes to the hub as cap_bge14_bart32. Then: the corpus (3.85 GB) to disk, prep_dolphin.py --all --keep-eval (the same
+# held-out docs_001: the same 2000 evaluated, the same pool - comparable numbers), train_e2e.py --once from abl_one32
+# (BART 8+8, stock bge 12 layers), batch 32, evaluated every 1000 steps. /root/sb_dolphinonce.log, /root/sb/dolphin_once/.
+if [ ! -e /root/.dolphin_once ] && [ -s /root/sb/prep_dolphin.py ] && grep -q -- "--all" /root/sb/prep_dolphin.py && grep -q -- "--once" /root/sb/train_e2e.py; then touch /root/.dolphin_once
+  pkill -f "dolphinladderkee[p].sh"; pkill -f "e2e_ladder.py --start"; pkill -f "train_e2e.py.*/root/sb/dolphin_ladder/"; sleep 15
+  mkdir -p /root/sb/dolphin_ladder/cap_bge14_bart32; cp /root/sb/dolphin_ladder/r06_bart/model_best.pt /root/sb/dolphin_ladder/cap_bge14_bart32/model_best.pt 2>/dev/null
+  echo "[dolphinladder] stopped for the start-over (r06_bart's best kept: cap_bge14_bart32) $(date -u +%H:%M)" >> /root/sb_dolphinladder.log
+  cat > /root/dolphinoncekeep.sh <<'DO'
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); R=baya1116/hypernet-sp-distill; cd /root/sb; D=/root/sb/data/dolphin
+[ -s /root/sb/dolphin_ladder/cap_bge14_bart32/model_best.pt ] && hf upload $R /root/sb/dolphin_ladder/cap_bge14_bart32/model_best.pt sentbart/dolphin/cap_bge14_bart32/model_best.pt >/dev/null 2>&1 && echo "[once] r06_bart's best (24.3%) on the hub as cap_bge14_bart32"
+echo "[once] start $(date -u +%H:%M); $(df -h /root | tail -1 | awk '{print $4}') free"
+J=/root/sb/data/dr1_deepseek.jsonl
+if [ ! -s $D/docs_000_all.ok ]; then
+  for try in 1 2 3 4; do [ -s $J ] && [ "$(stat -c %s $J)" -ge 3848000000 ] && break
+    curl -sSfL -C - -o $J https://huggingface.co/datasets/cognitivecomputations/dolphin-r1/resolve/main/dolphin-r1-reasoning-deepseek.jsonl || sleep 60; done
+  [ "$(stat -c %s $J 2>/dev/null || echo 0)" -ge 3848000000 ] || { echo "ONCE_JOB_DONE download failed"; exit 1; }
+  echo "[once] corpus on disk $(date -u +%H:%M)"
+  cp $D/docs_000.jsonl $D/docs_000_50k.jsonl 2>/dev/null; cp $D/off_000.npy $D/off_000_50k.npy 2>/dev/null
+  python3 /root/sb/prep_dolphin.py --out $D --all 1 --keep-eval $D/docs_001.jsonl --exclude /root/sb/dl/dolphin_v1.jsonl --jsonl $J 2>&1 | grep --line-buffered -E "prep_dolphin|PREP_DOLPHIN|Error|Traceback" | cut -c1-300
+  [ -s $D/docs_000.jsonl ] && [ "$(wc -l < $D/docs_000.jsonl)" -gt 100000 ] && touch $D/docs_000_all.ok || { echo "ONCE_JOB_DONE prep failed ($(wc -l < $D/docs_000.jsonl 2>/dev/null) lines)"; exit 1; }
+  rm -f $J; echo "[once] training set: $(wc -l < $D/docs_000.jsonl) conversations; held-out docs_001 unchanged ($(wc -l < $D/docs_001.jsonl)); $(df -h /root | tail -1 | awk '{print $4}') free"
+fi
+I0=/root/sb/abl_one32/model_best.pt; [ -s $I0 ] || I0=/root/sb/hfdl/sentbart/abl/one32/model_best.pt
+[ -s $I0 ] || { hf download $R sentbart/abl/one32/model_best.pt --local-dir /root/sb/hfdl >/dev/null 2>&1; I0=/root/sb/hfdl/sentbart/abl/one32/model_best.pt; }
+echo "[once] training from $I0 (BART 8+8, stock bge 12), batch 32, one epoch $(date -u +%H:%M)"
+python3 -u /root/sb/train_e2e.py --vec $D --text $D --eval-text $D/docs_001.jsonl --out /root/sb/dolphin_once --init $I0 --layers 8 --enc-layers 0 \
+  --batch 32 --page-queue 16 --pool 20000 --anchor-q 0 --select dec_top1 --patience 0 --once 1 --eval-every 1000 --save-every 1000 \
+  2>&1 | grep --line-buffered -E "^\[e2e\]|^\[eval|^\[best|^\[init|^\[model|TRAIN_DONE|Error|Traceback|out of memory" | cut -c1-400
+[ -s /root/sb/dolphin_once/model_best.pt ] && hf upload $R /root/sb/dolphin_once/model_best.pt sentbart/dolphin/once/model_best.pt >/dev/null 2>&1 && echo "[once] best on the hub: sentbart/dolphin/once/model_best.pt"
+hf upload $R /root/sb/dolphin_once/train.log sentbart/dolphin/once/train.log >/dev/null 2>&1
+echo "ONCE_JOB_DONE $(date -u)"
+DO
+  setsid nohup bash -c 'bash /root/dolphinoncekeep.sh 2>&1 | tee -a /root/sb_dolphinonce.log' > /dev/null 2>&1 < /dev/null &
+  echo "DOLPHINONCE_LAUNCHED $(date -u)"
+fi
+# the keeper comes back after a box restart (train_e2e.py resumes from state_e2e.pt)
+if [ -e /root/.dolphin_once ] && [ -s /root/dolphinoncekeep.sh ] && ! pgrep -f "dolphinoncekee[p].sh" >/dev/null && ! grep -q "ONCE_JOB_DONE" /root/sb_dolphinonce.log 2>/dev/null; then
+  echo "[once] relaunched $(date -u +%H:%M)" >> /root/sb_dolphinonce.log
+  setsid nohup bash -c 'bash /root/dolphinoncekeep.sh 2>&1 | tee -a /root/sb_dolphinonce.log' > /dev/null 2>&1 < /dev/null &
 fi
 echo "BOXI_OK serial $BOXI_SERIAL $(date -u)"
 # CTL-END
