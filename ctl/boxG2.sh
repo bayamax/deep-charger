@@ -3,7 +3,7 @@
 # renter and the start sat in Vast's queue (the user: that is no good, move house). Only what the routine needs is here:
 # the 4-bit base, s100, the evaluation sets, the data, the loop; then mtg7 and the rounds after it. Pull-based as the
 # others (ctl.sh runs this file whenever it changes).
-BOXG2_SERIAL=19
+BOXG2_SERIAL=20
 if [ -f /root/.boxg2_serial ] && [ "$(cat /root/.boxg2_serial)" -gt "$BOXG2_SERIAL" ] 2>/dev/null; then echo "BOXG2_STALE $BOXG2_SERIAL"; exit 0; fi
 echo $BOXG2_SERIAL > /root/.boxg2_serial
 mkdir -p /root/work/runtime /root/work/fft_out /root/hfdl; cd /root/work
@@ -98,6 +98,7 @@ if [ ! -e /root/.mirror_r5 ]; then touch /root/.mirror_r5; pkill -f "mirrorkee[p
 if [ ! -e /root/.mirror_r6 ]; then touch /root/.mirror_r6; pkill -f "mirrorkee[p].sh"; sleep 1; fi   # the conversation screens' progress
 if [ ! -e /root/.mirror_r7 ]; then touch /root/.mirror_r7; pkill -f "mirrorkee[p].sh"; sleep 1; fi   # the disk keeper's lines
 if [ ! -e /root/.mirror_r8 ]; then touch /root/.mirror_r8; pkill -f "mirrorkee[p].sh"; sleep 1; fi   # the 4-bit 2.1.1's lines
+if [ ! -e /root/.mirror_r9 ]; then touch /root/.mirror_r9; pkill -f "mirrorkee[p].sh"; sleep 1; fi   # the parallel screens' lanes
 if ! pgrep -f "mirrorkee[p].sh" >/dev/null; then
   cat > /root/mirrorkeep.sh <<'MK'
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); R=baya1116/hypernet-sp-distill
@@ -109,6 +110,7 @@ while :; do
     [ -s /root/r1chk.log ] && { echo "--- r1 check ---"; tail -n 6 /root/r1chk.log | cut -c1-250; }
     [ -s /root/versions.log ] && { echo "--- versions.log ---"; tail -n 6 /root/versions.log | cut -c1-200; }
     [ -s /root/q211.log ] && { echo "--- q211.log ---"; tail -n 25 /root/q211.log | cut -c1-260; }
+    [ -e /root/par_eval.status ] && { echo "--- par_eval lanes ---"; cat /root/par_eval.status /root/par_eval.retry 2>/dev/null | cut -c1-160; for f in /root/work/*.p[0-9].log /root/work/q211st_*.log; do [ -s $f ] && echo "$(basename $f): $(grep -cE 'out of memory|OutOfMemoryError' $f) OOM, $(grep -c '' $f) lines"; done; }
     [ -s /root/rounds.log ] && { echo "--- rounds.log ---"; tail -n 16 /root/rounds.log | cut -c1-260; RN=$(cat /root/round_n.txt 2>/dev/null)
       [ -s /root/mtg${RN}_run.log ] && { echo "--- mtg$RN steps ---"; grep -E "^\[step|rollback|Traceback|out of memory" /root/mtg${RN}_run.log | sed -E 's/\| ce=.*cumulative/| cum/' | tail -n 8 | cut -c1-240
         echo "--- mtg$RN teacher lines ---"; grep -E "^\[r1\]|^\[followup\]|^\[warn\]" /root/mtg${RN}_run.log | tail -n 5 | cut -c1-220; 
