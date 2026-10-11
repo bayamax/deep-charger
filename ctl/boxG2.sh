@@ -3,7 +3,7 @@
 # renter and the start sat in Vast's queue (the user: that is no good, move house). Only what the routine needs is here:
 # the 4-bit base, s100, the evaluation sets, the data, the loop; then mtg7 and the rounds after it. Pull-based as the
 # others (ctl.sh runs this file whenever it changes).
-BOXG2_SERIAL=20
+BOXG2_SERIAL=21
 if [ -f /root/.boxg2_serial ] && [ "$(cat /root/.boxg2_serial)" -gt "$BOXG2_SERIAL" ] 2>/dev/null; then echo "BOXG2_STALE $BOXG2_SERIAL"; exit 0; fi
 echo $BOXG2_SERIAL > /root/.boxg2_serial
 mkdir -p /root/work/runtime /root/work/fft_out /root/hfdl; cd /root/work
@@ -482,6 +482,23 @@ echo "Q211_JOB_DONE $(date -u) - all screens $(( ($(date +%s) - T0) / 60 )) min"
 QP
   setsid nohup bash -c 'bash /root/q211par.sh 2>&1 | tee -a /root/q211.log' >> /proc/1/fd/1 2>&1 < /dev/null 9>&- &
   echo "Q211PAR_LAUNCHED $(date -u)"
+fi
+# ---- 2026-10-11 20:20 JST (the user: the 4-bit fell on single turn - close the GRPO for now; put everything on the hub, then
+# the instance goes). Everything the box holds that the hub does not: the screens' outputs and logs, the lines, the round
+# and version records, the judged files; 2.1.1's record gets its screens. Then ARCHIVE_G2_DONE (the instance is destroyed
+# from outside once the mirror shows it).
+if [ ! -e /root/.archive_g2 ]; then touch /root/.archive_g2
+  pkill -f "versioner.p[y]"; pkill -f "diskkee[p].sh"
+  ( A=/root/archive_g2; rm -rf $A; mkdir -p $A/work $A/logs $A/lines
+    cp /root/work/*.jsonl $A/work/ 2>/dev/null; rm -f $A/work/eval300.jsonl $A/work/dolphin_v*.jsonl $A/work/replay_v1.jsonl $A/work/pool_eval_cache.jsonl $A/work/qcal_*.jsonl $A/work/tqa_pool.jsonl $A/work/musique_pool.jsonl
+    cp /root/*.log /root/version_state.json /root/version_211.json /root/round_*.txt $A/logs/ 2>/dev/null; cp /root/lines/* $A/lines/ 2>/dev/null
+    for d in /root/online_mtg*; do [ -d $d ] && mkdir -p $A/online/$(basename $d) && cp $d/*.jsonl $d/*.json $d/*.why $A/online/$(basename $d)/ 2>/dev/null; done
+    printf '{"version": "2.1.1", "what": "2.1.0 merged into the weights and quantised again to 4 bits (GPTQ, MLX)", "parent": "2.1.0", "status": "not shipped (single 139/300)", "screens": {"single300": 139, "br3": [36, 38], "chain3": [32, 21, 6], "dolphin": 52, "good_replies": [34, 56, 41], "good_conversations": [46, 33]}, "float_2.1.0": {"single300": 162, "br3": [35, 31], "chain3": [28, 17, 4], "dolphin": 49, "good_replies": [45, 55, 40], "good_conversations": [52, 26]}}\n' > /root/version_211.json
+    ok=1
+    hf upload $R /root/version_211.json versions/2.1.1/version.json >/dev/null 2>&1 || ok=0
+    for try in 1 2 3; do hf upload $R $A pooler_distill/chatsft/archive_G2 >/dev/null 2>&1 && break; [ $try = 3 ] && ok=0; sleep 30; done
+    echo "ARCHIVE_G2 files $(find $A -type f | wc -l), $(du -sh $A | cut -f1); upload ok=$ok"
+    [ $ok = 1 ] && echo "ARCHIVE_G2_DONE $(date -u)" ) >> /root/rounds.log 2>&1 &
 fi
 # ---- 2026-10-09 08:30 JST (the user: label the models like software versions, the recent ones too). versioner.py lays the
 # history down under versions/<MAJOR.MINOR.PATCH>/ on the hub (server-side copies; the old paths stay) and then follows the
