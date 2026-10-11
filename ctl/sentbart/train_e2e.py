@@ -30,6 +30,10 @@ ap.add_argument("--enc-layers", type=int, default=0, help="bge layers: 0 = what 
 ap.add_argument("--page-queue", type=int, default=16, help="earlier batches' page vectors kept as extra negatives for the page loss")
 ap.add_argument("--accum", type=int, default=0, help="micro-batches of --batch per update; 0: --eff-batch // --batch, so a batch the ladder halved for memory still updates on --eff-batch documents (2026-10-10: r02 on ran at 16 and saw half per step - and the plateau rule, counted in steps, judged on half the data)")
 ap.add_argument("--eff-batch", type=int, default=32)
+ap.add_argument("--buckets", default="", help="2026-10-12 (the user: sort by length, widen the window when it overflows). Sentence-count bounds, ascending (e.g. 64,128,192,256,384,512): the epoch runs bucket by bucket from the shortest, shuffled within a bucket; each batch holds --sent-budget sentences (more short documents, fewer long ones, at most --max-bs); the position table is built for the last bound and the window in use is the bucket's bound. Implies --once; --accum 1")
+ap.add_argument("--sent-budget", type=int, default=3800); ap.add_argument("--max-bs", type=int, default=64)
+ap.add_argument("--eval-seq", type=int, default=0, help=">0: the evaluation crops documents to this many sentences whatever the training window (128 keeps the numbers comparable)")
+ap.add_argument("--lr-flat", type=int, default=0, help="1: warm up, then a flat learning rate, falling only over the last tenth of the steps (with --buckets the longest documents come last and would otherwise meet a learning rate near zero)")
 ap.add_argument("--once", type=int, default=0, help="1: one pass over the training documents without replacement (a fixed shuffle), --steps set to what one epoch takes - 2026-10-11, the user: the whole corpus, one epoch, the BART and bge at their starting shape, nothing repeated")
 ap.add_argument("--patience", type=int, default=0, help=">0: stop after this many evaluations in a row without a new best (the selection metric)")
 ap.add_argument("--min-gain", type=float, default=0.002)
@@ -48,7 +52,25 @@ ap.add_argument("--eval-every", type=int, default=2000); ap.add_argument("--save
 ap.add_argument("--bge", default="BAAI/bge-small-en-v1.5")
 E = ap.parse_args()
 E.accum = E.accum or max(1, E.eff_batch // E.batch)
-if E.once:   # one epoch: the training documents counted before train.py's schedule is built from --steps
+PLAN = None; SEQ_MAX = 128
+if E.buckets:   # the epoch as a plan of batches: bucket by bucket from the shortest, each batch --sent-budget sentences
+    import glob as _g, numpy as _np
+    E.once = 1; E.accum = 1
+    _bounds = [int(x) for x in E.buckets.split(",")]; SEQ_MAX = _bounds[-1]
+    _lens = []
+    for _p in sorted(_g.glob(os.path.join(E.text, "docs_*.jsonl"))):
+        if _p.endswith("docs_001.jsonl"): continue
+        _off = os.path.join(E.vec, "off_" + os.path.basename(_p)[5:-6] + ".npy")
+        _lens += [int(v) for v in _np.diff(_np.load(_off))] if os.path.exists(_off) else [len(json.loads(_l)["sents"]) for _l in open(_p) if _l.strip()]
+    _rng = random.Random(7); _lo = 0; PLAN = []; _summary = []
+    for _U in _bounds:
+        _idx = [k for k, n_ in enumerate(_lens) if _lo < n_ <= _U] if _U != _bounds[-1] else [k for k, n_ in enumerate(_lens) if _lo < n_]
+        _rng.shuffle(_idx); _bs = max(1, min(E.max_bs, E.sent_budget // _U)); _nb = 0
+        for _i in range(0, len(_idx), _bs): PLAN.append((_U, _idx[_i:_i + _bs])); _nb += 1
+        _summary.append(f"<={_U}: {len(_idx)} docs, batch {_bs}, {_nb} steps"); _lo = _U
+    E.steps = len(PLAN)
+    print(f"[e2e] --buckets: {len(_lens)} training documents, {E.sent_budget} sentences per batch -> {E.steps} steps for one epoch; " + "; ".join(_summary), flush=True)
+elif E.once:   # one epoch: the training documents counted before train.py's schedule is built from --steps
     import glob as _g
     _n = sum(1 for _p in sorted(_g.glob(os.path.join(E.text, "docs_*.jsonl"))) if not _p.endswith("docs_001.jsonl") for _l in open(_p) if _l.strip())
     E.steps = max(1, _n // (E.batch * E.accum)); print(f"[e2e] --once: {_n} training documents, {E.batch} x {E.accum} per update -> {E.steps} steps for one epoch", flush=True)
@@ -57,14 +79,22 @@ os.makedirs(E.out, exist_ok=True)
 # ---- train.py's definitions (data layout, model, losses, evaluation), its own arguments ----
 TP = os.path.join(os.path.dirname(os.path.abspath(__file__)), "train.py")
 src = open(TP).read(); cut = src.index("\nif A.search_eval:")
-sys.argv = ["train.py", "--data", E.vec, "--out", E.out, "--eval-shard", "001", "--batch", str(E.batch), "--seq", "128", "--d", "512",
+sys.argv = ["train.py", "--data", E.vec, "--out", E.out, "--eval-shard", "001", "--batch", str(E.batch), "--seq", str(SEQ_MAX), "--d", "512",
             "--layers", str(E.layers), "--heads", "8", "--ffn", "2048", "--lr", str(E.lr), "--warmup", "500", "--steps", str(max(1, E.steps)),
-            "--page", "1", "--page-queue", str(E.page_queue), "--page-input", "one", "--skip-grad", "100", "--eval-batch", str(E.eval_batch)] + (["--grow", E.grow] if E.grow else ["--init", E.init])
+            "--page", "1", "--page-queue", str(E.page_queue), "--page-input", "one", "--skip-grad", "100", "--eval-batch", str(E.eval_batch)] + (["--grow", E.grow] if E.grow else ["--init", E.init] if (E.init and not PLAN) else [])
 ns = {"__name__": "train_e2e", "__file__": TP}
 exec(compile(src[:cut], TP, "exec"), ns)
 A, model, DEV, DIM = ns["A"], ns["model"], ns["DEV"], ns["DIM"]
 import numpy as np, torch, torch.nn.functional as F  # noqa: E402
 from transformers import AutoModel, AutoTokenizer  # noqa: E402
+if PLAN and E.init and not os.path.exists(os.path.join(E.out, "state_e2e.pt")):   # the BART from --init, its position table widened to SEQ_MAX (new rows start as the last row)
+    _sd = torch.load(E.init, map_location=DEV)["model"]; _pw = model.pos.weight
+    if "pos.weight" in _sd and _sd["pos.weight"].shape[0] != _pw.shape[0]:
+        _old = _sd["pos.weight"].to(_pw.device, _pw.dtype); _new = _pw.data.clone(); _n = min(_old.shape[0], _new.shape[0])
+        _new[:_n] = _old[:_n]; _new[_n:] = _old[-1]; _sd["pos.weight"] = _new
+        print(f"[e2e] position table {_old.shape[0]} -> {_new.shape[0]} rows (the new ones start as the last)", flush=True)
+    _miss = model.load_state_dict(_sd, strict=False)
+    print(f"[init] weights from {E.init} (missing {list(_miss.missing_keys)}, unexpected {list(_miss.unexpected_keys)})", flush=True)
 assert DIM == 384, DIM
 
 btok = AutoTokenizer.from_pretrained(E.bge)
@@ -125,7 +155,8 @@ def draw_doc():
     """--once: the next document of the fixed shuffle (around again only if the epoch is overrun); else at random"""
     if not E.once: return random.choice(tdocs)
     k = PERM[PTR[0] % len(PERM)]; PTR[0] += 1; return tdocs[k]
-print(f"[e2e] {len(tdocs)} training documents as text in {len(TR)} shards; batch {E.batch} x {E.accum} per update", flush=True)
+print(f"[e2e] {len(tdocs)} training documents as text in {len(TR)} shards; " + (f"{len(PLAN)} planned batches, window up to {SEQ_MAX}" if PLAN else f"batch {E.batch} x {E.accum} per update"), flush=True)
+if PLAN: assert len(PLAN) and max(k for _, r_ in PLAN for k in r_) < len(tdocs), "the plan's document indices do not match the text"
 
 # ---- the queries: training documents' by (shard, line); the evaluation documents' by line of shard 001 ----
 QT, QE_LINE = {}, {}
@@ -157,7 +188,8 @@ if E.queries: print(f"[e2e] {len(EQ)} of the {len(ev_text)} evaluation documents
 @torch.no_grad()
 def eval_now():
     """embed the held-out documents with the current bge, hand them to train.py's evaluate()"""
-    enc.eval(); vs, off = [], [0]
+    enc.eval(); vs, off = [], [0]; seq0 = A.seq
+    if E.eval_seq: A.seq = E.eval_seq   # the same crop every time, whatever the training window
     flat = [s for d in ev_text for s in d]
     for i in range(0, len(flat), 1024): vs.append(embed(enc, flat[i:i + 1024]).cpu().numpy())
     for d in ev_text: off.append(off[-1] + len(d))
@@ -165,6 +197,7 @@ def eval_now():
     ns["eval_sh"] = ("001", V, np.array(off)); ns["edocs"] = [(off[k], off[k + 1]) for k in range(len(ev_text))]
     r = ns["evaluate"](); enc.train()
     if POOL: r.update(eval_pool())
+    A.seq = seq0
     # the reconstruction of the sentence-vector sequence: masked sentences named by the encoder (infilling) and hidden
     # tails by the decoder (continuation), each among every sentence of the eval batch - what the context model is for
     r["recon_top1"] = (r["enc_top1"] + r["dec_top1"]) / 2; r["recon_top10"] = (r["enc_top10"] + r["dec_top10"]) / 2
@@ -218,7 +251,8 @@ def eval_pool():
 
 opt = torch.optim.AdamW([{"params": [p for p in model.parameters()], "lr": E.lr},
                          {"params": [p for p in enc.parameters()], "lr": E.lr_enc}], betas=(0.9, 0.98), weight_decay=0.01)
-sched = torch.optim.lr_scheduler.LambdaLR(opt, lambda s: min(1.0, (s + 1) / 500) * 0.5 * (1 + np.cos(np.pi * min(1.0, s / max(1, E.steps)))))
+sched = torch.optim.lr_scheduler.LambdaLR(opt, (lambda s: min(1.0, (s + 1) / 500) * (1.0 if s < 0.9 * E.steps else max(0.1, 1.0 - 0.9 * (s - 0.9 * E.steps) / max(1, 0.1 * E.steps)))) if E.lr_flat
+                                          else (lambda s: min(1.0, (s + 1) / 500) * 0.5 * (1 + np.cos(np.pi * min(1.0, s / max(1, E.steps))))))
 STATE = os.path.join(E.out, "state_e2e.pt"); step0 = 0
 if os.path.exists(STATE):
     st = torch.load(STATE, map_location=DEV); model.load_state_dict(st["model"]); enc.load_state_dict(st["enc"])
@@ -246,12 +280,16 @@ if E.once and step0: PTR[0] = step0 * E.batch * E.accum
 for step in range(step0 + 1, E.steps + 1) if E.steps > 0 else []:
     ns["STEP"][0] = step
     opt.zero_grad(set_to_none=True); parts = []
+    rows = None
+    if PLAN:
+        U, rows = PLAN[step - 1]
+        if A.seq != U: A.seq = U; out(f"[window] {U} sentences from step {step}")
     for _mb in range(E.accum):   # --accum: micro-batches of --batch, one update (the ladder's OOM halving keeps the batch per update)
         sents, items, qrows, nqs = [], [], [], []                 # qrows: (batch row, query row, the passage's first sentence's position in the crop or -1)
-        for b in range(E.batch):
-            from_q = bool(qdocs) and random.random() < E.q_frac
-            i, j = random.choice(qdocs) if from_q else draw_doc(); d_ = TR[i][j]; s_ = d_["sents"]
-            while len(s_) < A.min_sents: i, j = draw_doc(); d_ = TR[i][j]; s_ = d_["sents"]; from_q = (i, j) in QT
+        for b in range(len(rows) if rows else E.batch):
+            from_q = bool(qdocs) and not rows and random.random() < E.q_frac
+            i, j = tdocs[rows[b]] if rows else (random.choice(qdocs) if from_q else draw_doc()); d_ = TR[i][j]; s_ = d_["sents"]
+            while len(s_) < A.min_sents and not rows: i, j = draw_doc(); d_ = TR[i][j]; s_ = d_["sents"]; from_q = (i, j) in QT
             nq_ = int(d_.get("nq", 0) or 0)
             k = random.randint(0, len(s_) - A.seq) if len(s_) > A.seq and not nq_ else 0; s_ = s_[k:k + A.seq]
             items.append(np.zeros((len(s_), DIM), np.float32)); sents.append(s_); nqs.append(nq_)

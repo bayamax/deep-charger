@@ -8,7 +8,7 @@ cd /root
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null)
 R=baya1116/hypernet-sp-distill
 RAW="https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl"
-BOXI_SERIAL=84
+BOXI_SERIAL=85
 if [ -f /root/.boxi_serial ] && [ "$(cat /root/.boxi_serial)" -gt "$BOXI_SERIAL" ] 2>/dev/null; then echo "BOXI_STALE $BOXI_SERIAL"; exit 0; fi
 echo $BOXI_SERIAL > /root/.boxi_serial
 mkdir -p /root/sb /root/work
@@ -36,6 +36,7 @@ if [ ! -e /root/.mirror_r3 ]; then touch /root/.mirror_r3; pkill -f "mirrorkee[p
 if [ ! -e /root/.mirror_r4 ]; then touch /root/.mirror_r4; pkill -f "mirrorkee[p].sh"; sleep 1; fi   # again for the rung records   # 2026-10-07: restarted once for the ladder2 lines
 if [ ! -e /root/.mirror_r5 ]; then touch /root/.mirror_r5; pkill -f "mirrorkee[p].sh"; sleep 1; fi   # the disk keeper's lines
 if [ ! -e /root/.mirror_r6 ]; then touch /root/.mirror_r6; pkill -f "mirrorkee[p].sh"; sleep 1; fi   # the one-epoch run's lines
+if [ ! -e /root/.mirror_r7 ]; then touch /root/.mirror_r7; pkill -f "mirrorkee[p].sh"; sleep 1; fi   # the second run's lines
 if ! pgrep -f "mirrorkee[p].sh" >/dev/null; then
   cat > /root/mirrorkeep.sh <<'MK'
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); R=baya1116/hypernet-sp-distill
@@ -46,6 +47,7 @@ while :; do
     echo "--- disk ---"; df -h /root | tail -1; du -sh /root/sb/data 2>/dev/null; tail -n 3 /root/disk.log 2>/dev/null
     echo "--- ladder2 / dolphin ladder ---"; ls -t /root/sb/ladder2 /root/sb/dolphin_ladder 2>/dev/null | head -12 | tr '\n' ' '; echo
     f=$(ls -t /root/sb/ladder2/*.out /root/sb/dolphin_ladder/*.out 2>/dev/null | head -1); [ -n "$f" ] && { echo "== $f"; grep -E "^\[eval|^\[best|^\[plateau|^\[init\]|Error|Traceback" $f | tail -8 | cut -c1-300; echo "pool fields:"; grep -E "^\[eval" $f | tail -6 | sed -E 's/^(\[eval [0-9]+\]).*page_top1 ([0-9.]+).*(pool_top1.*)$/\1 2000: \2 | \3/' | cut -c1-200; grep "^\[step" $f | tail -1 | cut -c1-200; }
+    [ -s /root/sb_dolphinonce2.log ] && { echo "--- dolphin once2 (length buckets, the window widened) ---"; tail -n 6 /root/sb_dolphinonce2.log | cut -c1-300; grep -E "^\[eval|^\[best|^\[window|Error|Traceback" /root/sb/dolphin_once2/train.log 2>/dev/null | tail -8 | cut -c1-300; grep "^\[step" /root/sb/dolphin_once2/train.log 2>/dev/null | tail -1 | cut -c1-200; }
     [ -s /root/sb_dolphinonce.log ] && { echo "--- dolphin once (the whole corpus, one epoch) ---"; tail -n 8 /root/sb_dolphinonce.log | cut -c1-300; grep -E "^\[eval|^\[best|^\[e2e\]|Error|Traceback" /root/sb/dolphin_once/train.log 2>/dev/null | tail -8 | cut -c1-300; grep "^\[step" /root/sb/dolphin_once/train.log 2>/dev/null | tail -1 | cut -c1-200; }
     [ -s /root/sb/dolphin_e2e/train.log ] && { echo "--- dolphin e2e (train.log) ---"; grep -E "^\[eval|^\[best|^\[plateau|^\[init\]|^\[e2e\]|Error|Traceback" /root/sb/dolphin_e2e/train.log | tail -8 | sed -E 's/^(\[eval [0-9]+\]).*page_top1 ([0-9.]+).*page_base_top1 ([0-9.]+).*(next_top1 [0-9.]+).*(pool_top1 [0-9.]+ pool_top10 [0-9.]+).*$/\1 2000: \2 (base \3) \4 \5/' | cut -c1-300; grep "^\[step" /root/sb/dolphin_e2e/train.log | tail -1 | cut -c1-200; }
     echo "--- ladder2 rungs (ladder.json) and dev guards ---"; python3 -c "
@@ -1112,11 +1114,12 @@ fi
 # log only speaks between rungs).
 if [ ! -e /root/.ladderlog_r2 ]; then touch /root/.ladderlog_r2; pkill -f "ladderlogkee[p].sh"; sleep 1; fi   # restarted once for the Dolphin ladder's logs
 if [ ! -e /root/.ladderlog_r3 ]; then touch /root/.ladderlog_r3; pkill -f "ladderlogkee[p].sh"; sleep 1; fi   # the one-epoch run's log
+if [ ! -e /root/.ladderlog_r4 ]; then touch /root/.ladderlog_r4; pkill -f "ladderlogkee[p].sh"; sleep 1; fi   # the second run's log
 if ! pgrep -f "ladderlogkee[p].sh" >/dev/null; then
   cat > /root/ladderlogkeep.sh <<'RK'
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); R=baya1116/hypernet-sp-distill
 while :; do
-  f=$(ls -t /root/sb/ladder/r*/train.log /root/sb/ladder2/r*/train.log /root/sb/dolphin_ladder/r*/train.log /root/sb/dolphin_once/train.log 2>/dev/null | head -1)
+  f=$(ls -t /root/sb/ladder/r*/train.log /root/sb/ladder2/r*/train.log /root/sb/dolphin_ladder/r*/train.log /root/sb/dolphin_once/train.log /root/sb/dolphin_once2/train.log 2>/dev/null | head -1)
   [ -n "$f" ] && { echo "== $f $(date -u)"; grep -E "^\[eval|^\[best|^\[plateau|^\[e2e\]" $f | tail -20 | cut -c1-400; grep "^\[step" $f | tail -2; } > /root/ladder_current.txt && { hf upload $R /root/ladder_current.txt sentbart/e2e/ladder/current.txt > /root/ladderlog_up.txt 2>&1 || echo "LADDERLOG_UP_FAIL $(date -u): $(tail -c 300 /root/ladderlog_up.txt | tr '\n' ' ')" | tee -a /root/ctl.log > /proc/1/fd/1; }
   sleep 1200
 done
@@ -1460,6 +1463,42 @@ fi
 # and the control script runs only when it changes - so they are relaunched here, and their uploads now report failures.
 if ! pgrep -f "mirrorkee[p].sh" >/dev/null && [ -s /root/mirrorkeep.sh ]; then setsid nohup bash /root/mirrorkeep.sh > /dev/null 2>&1 < /dev/null & echo "MIRROR_RELAUNCHED $(date -u)"; fi
 if ! pgrep -f "ladderlogkee[p].sh" >/dev/null && [ -s /root/ladderlogkeep.sh ]; then setsid nohup bash /root/ladderlogkeep.sh > /dev/null 2>&1 < /dev/null & echo "LADDERLOG_RELAUNCHED $(date -u)"; fi
+# ---- 2026-10-12 08:30 JST (the user: sort by length and widen the window when it overflows; once the epoch is round, swap
+# to it - a second pass over these documents is allowed). After the 128-window epoch (ONCE_JOB_DONE): the corpus again,
+# prepped with conversations kept whole up to 512 sentences (data/dolphin512; the held-out docs_001 unchanged), then
+# train_e2e.py --buckets 64,128,192,256,384,512 from the epoch's final weights (state_e2e.pt), 3800 sentences a batch,
+# the evaluation cropped to 128 as before, a flat learning rate. /root/sb_dolphinonce2.log, /root/sb/dolphin_once2/.
+if [ ! -e /root/.dolphin_once2 ] && grep -q -- "--buckets" /root/sb/train_e2e.py && [ -s /root/sb_dolphinonce.log ]; then touch /root/.dolphin_once2
+  cat > /root/dolphinonce2keep.sh <<'DT'
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); R=baya1116/hypernet-sp-distill; cd /root/sb; D=/root/sb/data/dolphin; D2=/root/sb/data/dolphin512
+until grep -q "ONCE_JOB_DONE" /root/sb_dolphinonce.log 2>/dev/null; do sleep 120; done
+echo "[once2] start $(date -u +%H:%M); $(df -h /root | tail -1 | awk '{print $4}') free"
+mkdir -p $D2; [ -s $D2/docs_001.jsonl ] || { cp $D/docs_001.jsonl $D2/; cp $D/off_001.npy $D2/; }
+J=/root/sb/data/dr1_deepseek.jsonl
+if [ ! -s $D2/docs_000.ok ]; then
+  for try in 1 2 3 4; do [ -s $J ] && [ "$(stat -c %s $J)" -ge 3848000000 ] && break
+    curl -sSfL -C - -o $J https://huggingface.co/datasets/cognitivecomputations/dolphin-r1/resolve/main/dolphin-r1-reasoning-deepseek.jsonl || sleep 60; done
+  [ "$(stat -c %s $J 2>/dev/null || echo 0)" -ge 3848000000 ] || { echo "ONCE2_JOB_DONE download failed"; exit 1; }
+  python3 /root/sb/prep_dolphin.py --out $D2 --all 1 --max-sents 512 --keep-eval $D/docs_001.jsonl --exclude /root/sb/dl/dolphin_v1.jsonl --jsonl $J 2>&1 | grep --line-buffered -E "PREP_DOLPHIN|Error|Traceback" | cut -c1-300
+  [ -s $D2/docs_000.jsonl ] && [ "$(wc -l < $D2/docs_000.jsonl)" -gt 100000 ] && touch $D2/docs_000.ok || { echo "ONCE2_JOB_DONE prep failed"; exit 1; }
+  rm -f $J; echo "[once2] training set: $(wc -l < $D2/docs_000.jsonl) conversations, whole up to 512 sentences; $(df -h /root | tail -1 | awk '{print $4}') free"
+fi
+I0=/root/sb/dolphin_once/state_e2e.pt; [ -s $I0 ] || I0=/root/sb/dolphin_once/model_best.pt
+echo "[once2] training from $I0 (the 128-window epoch's end), buckets 64..512, 3800 sentences a batch, one epoch $(date -u +%H:%M)"
+python3 -u /root/sb/train_e2e.py --vec $D2 --text $D2 --eval-text $D2/docs_001.jsonl --out /root/sb/dolphin_once2 --init $I0 --layers 8 --enc-layers 0 \
+  --buckets 64,128,192,256,384,512 --sent-budget 3800 --max-bs 64 --eval-seq 128 --lr-flat 1 --page-queue 16 --pool 20000 --anchor-q 0 --select dec_top1 --patience 0 \
+  --eval-every 1000 --save-every 1000 2>&1 | grep --line-buffered -E "^\[e2e\]|^\[eval|^\[best|^\[init|^\[model|^\[window|TRAIN_DONE|Error|Traceback|out of memory" | sed -u 's/^\(.\{400\}\).*/\1/'
+[ -s /root/sb/dolphin_once2/model_best.pt ] && hf upload $R /root/sb/dolphin_once2/model_best.pt sentbart/dolphin/once2/model_best.pt >/dev/null 2>&1 && echo "[once2] best on the hub: sentbart/dolphin/once2/model_best.pt"
+hf upload $R /root/sb/dolphin_once2/train.log sentbart/dolphin/once2/train.log >/dev/null 2>&1
+echo "ONCE2_JOB_DONE $(date -u)"
+DT
+  setsid nohup bash -c 'bash /root/dolphinonce2keep.sh 2>&1 | tee -a /root/sb_dolphinonce2.log' > /dev/null 2>&1 < /dev/null &
+  echo "DOLPHINONCE2_LAUNCHED $(date -u)"
+fi
+if [ -e /root/.dolphin_once2 ] && [ -s /root/dolphinonce2keep.sh ] && ! pgrep -f "dolphinonce2kee[p].sh" >/dev/null && ! grep -q "ONCE2_JOB_DONE" /root/sb_dolphinonce2.log 2>/dev/null; then
+  echo "[once2] relaunched $(date -u +%H:%M)" >> /root/sb_dolphinonce2.log
+  setsid nohup bash -c 'bash /root/dolphinonce2keep.sh 2>&1 | tee -a /root/sb_dolphinonce2.log' > /dev/null 2>&1 < /dev/null &
+fi
 echo "BOXI_OK serial $BOXI_SERIAL $(date -u)"
 # CTL-END
 
