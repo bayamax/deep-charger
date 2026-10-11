@@ -3,7 +3,7 @@
 # renter and the start sat in Vast's queue (the user: that is no good, move house). Only what the routine needs is here:
 # the 4-bit base, s100, the evaluation sets, the data, the loop; then mtg7 and the rounds after it. Pull-based as the
 # others (ctl.sh runs this file whenever it changes).
-BOXG2_SERIAL=18
+BOXG2_SERIAL=19
 if [ -f /root/.boxg2_serial ] && [ "$(cat /root/.boxg2_serial)" -gt "$BOXG2_SERIAL" ] 2>/dev/null; then echo "BOXG2_STALE $BOXG2_SERIAL"; exit 0; fi
 echo $BOXG2_SERIAL > /root/.boxg2_serial
 mkdir -p /root/work/runtime /root/work/fft_out /root/hfdl; cd /root/work
@@ -18,7 +18,7 @@ for f in online_loop.py pool_eval.py r1_traj.py tqa_items.py musique_items.py nq
   for try in 1 2 3; do curl -sS -o /root/work/$f "$RAW/$f?nocache=$(date +%s)" && python3 -m py_compile /root/work/$f && break; sleep 5; done
 done
 cp /root/work/web_search.py /root/work/runtime/web_search.py 2>/dev/null; touch /root/work/runtime/__init__.py
-for f in grpo_screen.sh grpo_round.sh grpo_mtscreen.sh; do
+for f in grpo_screen.sh grpo_round.sh grpo_mtscreen.sh par_eval.sh; do
   for try in 1 2 3; do curl -sS -o /root/work/$f.new "$RAW/$f?nocache=$(date +%s)" && bash -n /root/work/$f.new && head -1 /root/work/$f.new | grep -q "^#!/bin/bash" && mv /root/work/$f.new /root/work/$f && break; sleep 5; done
 done
 
@@ -442,6 +442,44 @@ echo "Q211_JOB_DONE $(date -u)"
 QK
   setsid nohup bash -c 'bash /root/q211keep.sh 2>&1 | tee -a /root/q211.log' >> /proc/1/fd/1 2>&1 < /dev/null 9>&- &
   echo "Q211_LAUNCHED $(date -u)"
+fi
+# ---- 2026-10-11 11:00 JST (the user: nine hours of screens is not sane - parallelise). The 4-bit 2.1.1's screens move to
+# par_eval.sh: up to three pool_evals side by side on the card (one holds ~6.5 GB at ~25% use), the multi-turn sets split
+# by dialogue; same questions, same settings. The serial keeper is stopped (its finished outputs are reused).
+if [ ! -e /root/.q211par ] && [ -s /root/work/par_eval.sh ] && grep -q "uploaded versions/2.1.1" /root/q211.log 2>/dev/null; then touch /root/.q211par
+  pkill -f "q211kee[p].sh"; sleep 2; pkill -f "pool_eval.p[y]"; sleep 10
+  cat > /root/q211par.sh <<'QP'
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); R=baya1116/hypernet-sp-distill; cd /root/work
+PCK=/root/m211_pooler.safetensors; HF=/root/gptq_hf_211; T0=$(date +%s)
+export EVARGS="--rw 768 --maxd 384 --samepage 1 --decode plain --temp 0.6 --gen 4000 --stop eos --replycap 600"
+export ENV="SP_BASE=$HF SP_RANK=16 SP_NOSYS=1 SP_EPISODIC=1 OMP_NUM_THREADS=1 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True"
+cnt() { python3 -c "import json,sys;print(sum(bool(json.loads(l).get('correct')) for l in open(sys.argv[1]) if l.strip()))" "$1" 2>/dev/null || echo 0; }
+printf 'single /root/work/ev_0.jsonl /root/work/q211st_0.jsonl 100\nsingle /root/work/ev_1.jsonl /root/work/q211st_1.jsonl 100\nsingle /root/work/ev_2.jsonl /root/work/q211st_2.jsonl 100\nmulti /root/work/mt_eval_bridge3.jsonl /root/work/br3_q211.jsonl\nmulti /root/work/mt_eval_chain3.jsonl /root/work/ch3_q211.jsonl\n' > /root/q211.jobs
+echo "[q211] screens in parallel (3 lanes) $(date -u +%H:%M)"
+bash /root/work/par_eval.sh 3 $PCK /root/q211.jobs
+SN=0; for i in 0 1 2; do c=$(cnt /root/work/q211st_$i.jsonl); SN=$((SN + c)); echo "[q211] single shard $i: $c/100"; done
+echo "[q211] single-turn: $SN/300 (2.1.0 in float 162)"
+for b in "br3:2" "ch3:3"; do T=${b%%:*}; NT=${b#*:}
+  echo "[q211] $T (win), correct by turn: $(python3 -c "
+import json,sys; r=[json.loads(l) for l in open(sys.argv[1]) if l.strip()]
+print(' / '.join(str(sum(bool(x['correct']) for x in r if x['turn']==t)) for t in range(int(sys.argv[2]))), f'({len(r)} turns)')" /root/work/${T}_q211.jsonl $NT)"
+done
+echo "[q211] (2.1.0 in float: br3 35 / 31, chain3 28 / 17 / 4) - screens took $(( ($(date +%s) - T0) / 60 )) min"
+env SP_BASE=$HF SP_NOSYS=1 SP_EPISODIC=1 OMP_NUM_THREADS=1 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python3 /root/work/online_loop.py $HF /root/evalrun_dl_q211 \
+  --questions /root/work/eval300.jsonl --dolphin /root/work/dolphin_v1.jsonl --heldout /root/work/eval300.jsonl --pooler-init $PCK \
+  --b 12 --gen 7000 --budget 2400 --temp 0.6 --maxsrch 7 --pooler none --lora-rank 16 --lora-layers all --stop eos --loop-break answer --reason-no-search 1 \
+  --eval-file /root/work/dolphinq.jsonl --eval-out /root/work/dl_q211_ns.jsonl > /root/dl_q211.log 2>&1 &
+DLP=$!
+for f in /root/work/q211st_0.jsonl /root/work/br3_q211.jsonl /root/work/ch3_q211.jsonl; do OAI_KEY=$(cat /root/.oai 2>/dev/null) python3 /root/work/reply_judge.py $f q211_$(basename $f .jsonl) | sed 's/^/[q211] /'; done
+for f in /root/work/br3_q211.jsonl /root/work/ch3_q211.jsonl; do OAI_KEY=$(cat /root/.oai 2>/dev/null) python3 /root/work/conv_judge.py $f q211_$(basename $f .jsonl) | sed 's/^/[q211] /'; done
+echo "[q211] (2.1.0 in float: good replies 45 + 55 + 40, good conversations 52 + 26)"
+wait $DLP; OAI_KEY=$(cat /root/.oai 2>/dev/null) python3 /root/work/dl_judge.py /root/work/dl_q211_ns.jsonl q211 | sed 's/\[mix0\]/[q211]/'
+echo "[q211] (2.1.0 in float: Dolphin 49)"; rm -rf /root/evalrun_dl_q211
+for f in /root/work/q211st_*.jsonl /root/work/br3_q211.jsonl /root/work/ch3_q211.jsonl /root/work/dl_q211_ns*.jsonl; do [ -s $f ] && hf upload $R $f pooler_distill/chatsft/q211/$(basename $f) >/dev/null 2>&1; done
+echo "Q211_JOB_DONE $(date -u) - all screens $(( ($(date +%s) - T0) / 60 )) min"
+QP
+  setsid nohup bash -c 'bash /root/q211par.sh 2>&1 | tee -a /root/q211.log' >> /proc/1/fd/1 2>&1 < /dev/null 9>&- &
+  echo "Q211PAR_LAUNCHED $(date -u)"
 fi
 # ---- 2026-10-09 08:30 JST (the user: label the models like software versions, the recent ones too). versioner.py lays the
 # history down under versions/<MAJOR.MINOR.PATCH>/ on the hub (server-side copies; the old paths stay) and then follows the
