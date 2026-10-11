@@ -8,7 +8,7 @@ cd /root
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null)
 R=baya1116/hypernet-sp-distill
 RAW="https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl"
-BOXI_SERIAL=83
+BOXI_SERIAL=84
 if [ -f /root/.boxi_serial ] && [ "$(cat /root/.boxi_serial)" -gt "$BOXI_SERIAL" ] 2>/dev/null; then echo "BOXI_STALE $BOXI_SERIAL"; exit 0; fi
 echo $BOXI_SERIAL > /root/.boxi_serial
 mkdir -p /root/sb /root/work
@@ -58,7 +58,7 @@ except Exception as e: print('  (no ladder.json yet)', e)
 for f in sorted(glob.glob('/root/sb/ladder2/*_dev.json')): print(' ', f.split('/')[-1], open(f).read().strip()[:300])
 " 2>&1
     echo "--- processes ---"; pgrep -fa "python3 /root/sb/" | cut -c1-300; } > /root/boxlog.txt 2>&1
-  hf upload $R /root/boxlog.txt sentbart/audit/boxlog_I.txt >/dev/null 2>&1
+  hf upload $R /root/boxlog.txt sentbart/audit/boxlog_I.txt > /root/mirror_up.txt 2>&1 || { echo "MIRROR_UP_FAIL $(date -u): $(tail -c 300 /root/mirror_up.txt | tr '\n' ' ')" | tee -a /root/ctl.log > /proc/1/fd/1; }
   sleep 600
 done
 MK
@@ -1117,7 +1117,7 @@ if ! pgrep -f "ladderlogkee[p].sh" >/dev/null; then
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); R=baya1116/hypernet-sp-distill
 while :; do
   f=$(ls -t /root/sb/ladder/r*/train.log /root/sb/ladder2/r*/train.log /root/sb/dolphin_ladder/r*/train.log /root/sb/dolphin_once/train.log 2>/dev/null | head -1)
-  [ -n "$f" ] && { echo "== $f $(date -u)"; grep -E "^\[eval|^\[best|^\[plateau|^\[e2e\]" $f | tail -20 | cut -c1-400; grep "^\[step" $f | tail -2; } > /root/ladder_current.txt && hf upload $R /root/ladder_current.txt sentbart/e2e/ladder/current.txt >/dev/null 2>&1
+  [ -n "$f" ] && { echo "== $f $(date -u)"; grep -E "^\[eval|^\[best|^\[plateau|^\[e2e\]" $f | tail -20 | cut -c1-400; grep "^\[step" $f | tail -2; } > /root/ladder_current.txt && { hf upload $R /root/ladder_current.txt sentbart/e2e/ladder/current.txt > /root/ladderlog_up.txt 2>&1 || echo "LADDERLOG_UP_FAIL $(date -u): $(tail -c 300 /root/ladderlog_up.txt | tr '\n' ' ')" | tee -a /root/ctl.log > /proc/1/fd/1; }
   sleep 1200
 done
 RK
@@ -1456,6 +1456,10 @@ if [ ! -e /root/.snap83 ]; then touch /root/.snap83
   hf upload $R /root/snap83.txt sentbart/audit/snap83.txt >/dev/null 2>&1 &
   pkill -f "mirrorkee[p].sh"; pkill -f "ladderlogkee[p].sh"; sleep 1   # relaunched by their blocks on the next control run
 fi
+# ---- 2026-10-12 03:45 JST: serial 83's snapshot killed the mirror and the log uploader after their launch blocks had run,
+# and the control script runs only when it changes - so they are relaunched here, and their uploads now report failures.
+if ! pgrep -f "mirrorkee[p].sh" >/dev/null && [ -s /root/mirrorkeep.sh ]; then setsid nohup bash /root/mirrorkeep.sh > /dev/null 2>&1 < /dev/null & echo "MIRROR_RELAUNCHED $(date -u)"; fi
+if ! pgrep -f "ladderlogkee[p].sh" >/dev/null && [ -s /root/ladderlogkeep.sh ]; then setsid nohup bash /root/ladderlogkeep.sh > /dev/null 2>&1 < /dev/null & echo "LADDERLOG_RELAUNCHED $(date -u)"; fi
 echo "BOXI_OK serial $BOXI_SERIAL $(date -u)"
 # CTL-END
 
