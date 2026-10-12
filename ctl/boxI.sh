@@ -8,7 +8,7 @@ cd /root
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null)
 R=baya1116/hypernet-sp-distill
 RAW="https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl"
-BOXI_SERIAL=88
+BOXI_SERIAL=89
 if [ -f /root/.boxi_serial ] && [ "$(cat /root/.boxi_serial)" -gt "$BOXI_SERIAL" ] 2>/dev/null; then echo "BOXI_STALE $BOXI_SERIAL"; exit 0; fi
 echo $BOXI_SERIAL > /root/.boxi_serial
 mkdir -p /root/sb /root/work
@@ -39,6 +39,7 @@ if [ ! -e /root/.mirror_r6 ]; then touch /root/.mirror_r6; pkill -f "mirrorkee[p
 if [ ! -e /root/.mirror_r7 ]; then touch /root/.mirror_r7; pkill -f "mirrorkee[p].sh"; sleep 1; fi   # the second run's lines
 if [ ! -e /root/.mirror_r8 ]; then touch /root/.mirror_r8; pkill -f "mirrorkee[p].sh"; sleep 1; fi   # the second run's plan
 if [ ! -e /root/.mirror_r9 ]; then touch /root/.mirror_r9; pkill -f "mirrorkee[p].sh"; sleep 1; fi   # the long-context evaluation
+if [ ! -e /root/.mirror_r10 ]; then touch /root/.mirror_r10; pkill -f "mirrorkee[p].sh"; sleep 1; fi   # the third run
 if ! pgrep -f "mirrorkee[p].sh" >/dev/null; then
   cat > /root/mirrorkeep.sh <<'MK'
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); R=baya1116/hypernet-sp-distill
@@ -49,6 +50,7 @@ while :; do
     echo "--- disk ---"; df -h /root | tail -1; du -sh /root/sb/data 2>/dev/null; tail -n 3 /root/disk.log 2>/dev/null
     echo "--- ladder2 / dolphin ladder ---"; ls -t /root/sb/ladder2 /root/sb/dolphin_ladder 2>/dev/null | head -12 | tr '\n' ' '; echo
     f=$(ls -t /root/sb/ladder2/*.out /root/sb/dolphin_ladder/*.out 2>/dev/null | head -1); [ -n "$f" ] && { echo "== $f"; grep -E "^\[eval|^\[best|^\[plateau|^\[init\]|Error|Traceback" $f | tail -8 | cut -c1-300; echo "pool fields:"; grep -E "^\[eval" $f | tail -6 | sed -E 's/^(\[eval [0-9]+\]).*page_top1 ([0-9.]+).*(pool_top1.*)$/\1 2000: \2 | \3/' | cut -c1-200; grep "^\[step" $f | tail -1 | cut -c1-200; }
+    [ -s /root/sb_dolphinonce3.log ] && { echo "--- dolphin once3 (length bands in a random order) ---"; grep -E "buckets|training from" /root/sb_dolphinonce3.log | tail -n 2 | cut -c1-400; grep -E "^\[eval|^\[best|^\[window|Error|Traceback|longeval|ONCE3" /root/sb/dolphin_once3/train.log /root/sb_dolphinonce3.log 2>/dev/null | sed 's#^/root/[^:]*:##' | tail -8 | cut -c1-300; grep "^\[step" /root/sb/dolphin_once3/train.log 2>/dev/null | tail -1 | cut -c1-200; }
     [ -s /root/sb_longeval.log ] && { echo "--- long-context evaluation ---"; grep -vE "^\[eval 0\]" /root/sb_longeval.log | tail -n 10 | cut -c1-300; }
     [ -s /root/sb_dolphinonce2.log ] && { echo "--- dolphin once2 (length buckets, the window widened) ---"; grep -E "training set:|buckets:" /root/sb_dolphinonce2.log | tail -n 2 | cut -c1-400; tail -n 4 /root/sb_dolphinonce2.log | cut -c1-300; grep -E "^\[eval|^\[best|^\[window|Error|Traceback" /root/sb/dolphin_once2/train.log 2>/dev/null | tail -8 | cut -c1-300; grep "^\[step" /root/sb/dolphin_once2/train.log 2>/dev/null | tail -1 | cut -c1-200; }
     [ -s /root/sb_dolphinonce.log ] && { echo "--- dolphin once (the whole corpus, one epoch) ---"; tail -n 8 /root/sb_dolphinonce.log | cut -c1-300; grep -E "^\[eval|^\[best|^\[e2e\]|Error|Traceback" /root/sb/dolphin_once/train.log 2>/dev/null | tail -8 | cut -c1-300; grep "^\[step" /root/sb/dolphin_once/train.log 2>/dev/null | tail -1 | cut -c1-200; }
@@ -1118,11 +1120,12 @@ fi
 if [ ! -e /root/.ladderlog_r2 ]; then touch /root/.ladderlog_r2; pkill -f "ladderlogkee[p].sh"; sleep 1; fi   # restarted once for the Dolphin ladder's logs
 if [ ! -e /root/.ladderlog_r3 ]; then touch /root/.ladderlog_r3; pkill -f "ladderlogkee[p].sh"; sleep 1; fi   # the one-epoch run's log
 if [ ! -e /root/.ladderlog_r4 ]; then touch /root/.ladderlog_r4; pkill -f "ladderlogkee[p].sh"; sleep 1; fi   # the second run's log
+if [ ! -e /root/.ladderlog_r5 ]; then touch /root/.ladderlog_r5; pkill -f "ladderlogkee[p].sh"; sleep 1; fi   # the third run's log
 if ! pgrep -f "ladderlogkee[p].sh" >/dev/null; then
   cat > /root/ladderlogkeep.sh <<'RK'
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); R=baya1116/hypernet-sp-distill
 while :; do
-  f=$(ls -t /root/sb/ladder/r*/train.log /root/sb/ladder2/r*/train.log /root/sb/dolphin_ladder/r*/train.log /root/sb/dolphin_once/train.log /root/sb/dolphin_once2/train.log 2>/dev/null | head -1)
+  f=$(ls -t /root/sb/ladder/r*/train.log /root/sb/ladder2/r*/train.log /root/sb/dolphin_ladder/r*/train.log /root/sb/dolphin_once/train.log /root/sb/dolphin_once2/train.log /root/sb/dolphin_once3/train.log 2>/dev/null | head -1)
   [ -n "$f" ] && { echo "== $f $(date -u)"; grep -E "^\[eval|^\[best|^\[plateau|^\[e2e\]" $f | tail -20 | cut -c1-400; grep "^\[step" $f | tail -2; } > /root/ladder_current.txt && { hf upload $R /root/ladder_current.txt sentbart/e2e/ladder/current.txt > /root/ladderlog_up.txt 2>&1 || echo "LADDERLOG_UP_FAIL $(date -u): $(tail -c 300 /root/ladderlog_up.txt | tr '\n' ' ')" | tee -a /root/ctl.log > /proc/1/fd/1; }
   sleep 1200
 done
@@ -1544,6 +1547,41 @@ fi
 if [ -e /root/.longeval ] && [ -s /root/longevalkeep.sh ] && ! pgrep -f "longevalkee[p].sh" >/dev/null && ! grep -q "LONGEVAL_JOB_DONE" /root/sb_longeval.log 2>/dev/null; then
   echo "[longeval] relaunched $(date -u +%H:%M)" >> /root/sb_longeval.log
   setsid nohup bash -c 'bash /root/longevalkeep.sh 2>&1 | tee -a /root/sb_longeval.log' > /dev/null 2>&1 < /dev/null &
+fi
+# ---- 2026-10-13 01:30 JST (the user: the rest is ours to decide). The second epoch's long buckets lifted the whole-length
+# reading (8.4 -> 9.3%) and cost the 128-crop one (12.1 -> 11.4%): sorted buckets are a curriculum, and the model ends
+# shaped by whatever came last. Third run: the same length-banded batches in a RANDOM order (--bucket-order random; the
+# position table holds 512 from the start), one epoch from the stock start (abl_one32, bge 12) - comparable with the two
+# runs before it - cosine schedule, evaluated every 1000 steps at the 128 crop; then its best and its end evaluated whole.
+# /root/sb_dolphinonce3.log, /root/sb/dolphin_once3/.
+if [ ! -e /root/.dolphin_once3 ] && grep -q -- "--bucket-order" /root/sb/train_e2e.py && grep -q "LONGEVAL_JOB_DONE" /root/sb_longeval.log 2>/dev/null; then touch /root/.dolphin_once3
+  cat > /root/dolphinonce3keep.sh <<'D3'
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); R=baya1116/hypernet-sp-distill; cd /root/sb; D2=/root/sb/data/dolphin512; DF=/root/sb/data/dolphin512full
+while pgrep -f "train_e2e.py" >/dev/null; do sleep 60; done
+I0=/root/sb/abl_one32/model_best.pt; [ -s $I0 ] || I0=/root/sb/hfdl/sentbart/abl/one32/model_best.pt
+echo "[once3] training from $I0 (BART 8+8, stock bge 12): length-banded batches in a random order, one epoch $(date -u +%H:%M); $(df -h /root | tail -1 | awk '{print $4}') free"
+python3 -u /root/sb/train_e2e.py --vec $D2 --text $D2 --eval-text $D2/docs_001.jsonl --out /root/sb/dolphin_once3 --init $I0 --layers 8 --enc-layers 0 \
+  --buckets 64,128,192,256,384,512 --bucket-order random --sent-budget 3800 --max-bs 64 --eval-seq 128 --page-queue 16 --pool 20000 --anchor-q 0 --select dec_top1 --patience 0 \
+  --eval-every 1000 --save-every 1000 2>&1 | grep --line-buffered -E "^\[e2e\]|^\[eval|^\[best|^\[init|^\[model|^\[window|TRAIN_DONE|Error|Traceback|out of memory" | sed -u 's/^\(.\{400\}\).*/\1/'
+[ -s /root/sb/dolphin_once3/model_best.pt ] && hf upload $R /root/sb/dolphin_once3/model_best.pt sentbart/dolphin/once3/model_best.pt >/dev/null 2>&1 && echo "[once3] best on the hub: sentbart/dolphin/once3/model_best.pt"
+hf upload $R /root/sb/dolphin_once3/train.log sentbart/dolphin/once3/train.log >/dev/null 2>&1
+for spec in "once3_best:/root/sb/dolphin_once3/model_best.pt" "once3_end:/root/sb/dolphin_once3/state_e2e.pt"; do
+  T=${spec%%:*}; CK=${spec#*:}; [ -s $CK ] || continue
+  for cfg in "128:128:$D2" "whole:0:$DF"; do W=${cfg%%:*}; r=${cfg#*:}; ES=${r%%:*}; DD=${r#*:}
+    rm -rf /root/sb/longeval_tmp
+    python3 -u /root/sb/train_e2e.py --vec $DD --text $DD --eval-text $DD/docs_001.jsonl --out /root/sb/longeval_tmp --init $CK --layers 8 --enc-layers 0 \
+      --buckets 512 --eval-seq $ES --eval-only 1 --pool 20000 --anchor-q 0 --select dec_top1 2>&1 | grep -E "EVAL_ONLY_DONE|Error|Traceback|out of memory" | sed -E "s/^/[once3 longeval] $T $W: /" | cut -c1-300
+  done
+done
+rm -rf /root/sb/longeval_tmp
+echo "ONCE3_JOB_DONE $(date -u)"
+D3
+  setsid nohup bash -c 'bash /root/dolphinonce3keep.sh 2>&1 | tee -a /root/sb_dolphinonce3.log' > /dev/null 2>&1 < /dev/null &
+  echo "DOLPHINONCE3_LAUNCHED $(date -u)"
+fi
+if [ -e /root/.dolphin_once3 ] && [ -s /root/dolphinonce3keep.sh ] && ! pgrep -f "dolphinonce3kee[p].sh" >/dev/null && ! grep -q "ONCE3_JOB_DONE" /root/sb_dolphinonce3.log 2>/dev/null; then
+  echo "[once3] relaunched $(date -u +%H:%M)" >> /root/sb_dolphinonce3.log
+  setsid nohup bash -c 'bash /root/dolphinonce3keep.sh 2>&1 | tee -a /root/sb_dolphinonce3.log' > /dev/null 2>&1 < /dev/null &
 fi
 echo "BOXI_OK serial $BOXI_SERIAL $(date -u)"
 # CTL-END
