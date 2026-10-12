@@ -33,6 +33,7 @@ ap.add_argument("--eff-batch", type=int, default=32)
 ap.add_argument("--buckets", default="", help="2026-10-12 (the user: sort by length, widen the window when it overflows). Sentence-count bounds, ascending (e.g. 64,128,192,256,384,512): the epoch runs bucket by bucket from the shortest, shuffled within a bucket; each batch holds --sent-budget sentences (more short documents, fewer long ones, at most --max-bs); the position table is built for the last bound and the window in use is the bucket's bound. Implies --once; --accum 1")
 ap.add_argument("--sent-budget", type=int, default=3800); ap.add_argument("--max-bs", type=int, default=64)
 ap.add_argument("--eval-seq", type=int, default=0, help=">0: the evaluation crops documents to this many sentences whatever the training window (128 keeps the numbers comparable)")
+ap.add_argument("--eval-only", type=int, default=0, help="1: the evaluation of --init at step 0 (with --eval-seq, or whole documents up to the last --buckets bound when 0), then stop")
 ap.add_argument("--lr-flat", type=int, default=0, help="1: warm up, then a flat learning rate, falling only over the last tenth of the steps (with --buckets the longest documents come last and would otherwise meet a learning rate near zero)")
 ap.add_argument("--once", type=int, default=0, help="1: one pass over the training documents without replacement (a fixed shuffle), --steps set to what one epoch takes - 2026-10-11, the user: the whole corpus, one epoch, the BART and bge at their starting shape, nothing repeated")
 ap.add_argument("--patience", type=int, default=0, help=">0: stop after this many evaluations in a row without a new best (the selection metric)")
@@ -68,7 +69,7 @@ if E.buckets:   # the epoch as a plan of batches: bucket by bucket from the shor
         _rng.shuffle(_idx); _bs = max(1, min(E.max_bs, E.sent_budget // _U)); _nb = 0
         for _i in range(0, len(_idx), _bs): PLAN.append((_U, _idx[_i:_i + _bs])); _nb += 1
         _summary.append(f"<={_U}: {len(_idx)} docs, batch {_bs}, {_nb} steps"); _lo = _U
-    E.steps = len(PLAN)
+    E.steps = 0 if E.eval_only else len(PLAN)
     print(f"[e2e] --buckets: {len(_lens)} training documents, {E.sent_budget} sentences per batch -> {E.steps} steps for one epoch; " + "; ".join(_summary), flush=True)
 elif E.once:   # one epoch: the training documents counted before train.py's schedule is built from --steps
     import glob as _g
@@ -274,7 +275,9 @@ def out(line): print(line, flush=True); log.write(line + "\n"); log.flush()
 fmt = lambda r: " ".join(f"{k} {v:.3f}" if isinstance(v, float) else f"{k} {v}" for k, v in r.items())
 BEST = -1.0; STALE = 0
 if step0 == 0:
-    r = eval_now(); BEST = r[E.select]; out(f"[eval 0] {fmt(r)}"); save("best", 0); out(f"[best] step 0 {E.select} {BEST:.3f}")
+    r = eval_now(); BEST = r[E.select]; out(f"[eval 0] {fmt(r)}")
+    if E.eval_only: out(f"EVAL_ONLY_DONE {E.init} eval_seq {E.eval_seq or 'whole'} {E.select} {BEST:.3f}"); raise SystemExit(0)
+    save("best", 0); out(f"[best] step 0 {E.select} {BEST:.3f}")
 model.train(); t0 = time.time(); acc = []
 if E.once and step0: PTR[0] = step0 * E.batch * E.accum
 for step in range(step0 + 1, E.steps + 1) if E.steps > 0 else []:

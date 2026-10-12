@@ -19,6 +19,7 @@ ap.add_argument("--max-q", type=int, default=12, help="question sentences at mos
 ap.add_argument("--url", default="https://huggingface.co/datasets/cognitivecomputations/dolphin-r1/resolve/main/dolphin-r1-reasoning-deepseek.jsonl")
 ap.add_argument("--jsonl", default="", help="a local copy instead of streaming --url")
 ap.add_argument("--keep-eval", default="", help="an existing docs_001.jsonl: kept as the held-out set unchanged (same 2000 evaluated, same pool), its conversations excluded from the training set - the numbers stay comparable")
+ap.add_argument("--rewrite-eval", default="", help="an existing docs_001.jsonl: the same conversations, in the same order, written again whole up to --max-sents as docs_001.jsonl (+ off_001.npy) in --out - the held-out set at full length, the same 2000 evaluated (2026-10-12: how the long-window training reads on long contexts)")
 ap.add_argument("--all", type=int, default=0, help="1: every qualifying conversation goes to the training set (2026-10-11, the user: the whole corpus, one epoch; 50k had been gone round ~45 times)")
 A = ap.parse_args()
 from blingfire import text_to_sentences  # noqa: E402
@@ -47,6 +48,26 @@ for f in A.exclude:
         if r.get("q"): seen.add(norm(r["q"])[:300])
 os.makedirs(A.out, exist_ok=True)
 import numpy as np  # noqa: E402
+if A.rewrite_eval:
+    order = [json.loads(l)["id"] for l in open(A.rewrite_eval) if l.strip()]; want_ids = set(order); got = {}
+    src = open(A.jsonl, "rb") if A.jsonl else urllib.request.urlopen(urllib.request.Request(A.url, headers={"User-Agent": "deep-charger/1.0"}), timeout=120)
+    n_read = 0
+    for raw in src:
+        n_read += 1
+        if f"dr1:{n_read}" not in want_ids: continue
+        r = json.loads(raw); msgs = r.get("messages") or []
+        user = next((m.get("content", "") for m in reversed(msgs) if m.get("role") == "user"), "")
+        qs = split(user); body = split(r.get("reasoning", "")) + split(r.get("answer", ""))
+        got[f"dr1:{n_read}"] = {"id": f"dr1:{n_read}", "title": "", "sents": (qs + body)[:A.max_sents], "nq": len(qs)}
+        if len(got) == len(want_ids): break
+    miss = [i for i in order if i not in got]
+    if miss: raise SystemExit(f"PREP_DOLPHIN_FAILED {len(miss)} held-out conversations not found in the corpus (first {miss[:3]})")
+    with open(os.path.join(A.out, "docs_001.jsonl"), "w") as f:
+        for i in order: f.write(json.dumps(got[i], ensure_ascii=False) + "\n")
+    np.save(os.path.join(A.out, "off_001.npy"), np.cumsum([0] + [len(got[i]["sents"]) for i in order]).astype(np.int64))
+    ls = sorted(len(got[i]["sents"]) for i in order)
+    print(f"PREP_DOLPHIN_DONE held-out rewritten whole: {len(order)} conversations, sentences median {ls[len(ls)//2]} (90% {ls[int(len(ls)*0.9)]}, max {ls[-1]}) -> {A.out}", flush=True)
+    raise SystemExit(0)
 keep_ids = set()
 if A.keep_eval:   # the held-out set stays: its ids (dr1:<line of the source>) and questions are out of the training set
     for l in open(A.keep_eval):
