@@ -8,7 +8,7 @@ cd /root
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null)
 R=baya1116/hypernet-sp-distill
 RAW="https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl"
-BOXI_SERIAL=85
+BOXI_SERIAL=86
 if [ -f /root/.boxi_serial ] && [ "$(cat /root/.boxi_serial)" -gt "$BOXI_SERIAL" ] 2>/dev/null; then echo "BOXI_STALE $BOXI_SERIAL"; exit 0; fi
 echo $BOXI_SERIAL > /root/.boxi_serial
 mkdir -p /root/sb /root/work
@@ -1499,6 +1499,10 @@ if [ -e /root/.dolphin_once2 ] && [ -s /root/dolphinonce2keep.sh ] && ! pgrep -f
   echo "[once2] relaunched $(date -u +%H:%M)" >> /root/sb_dolphinonce2.log
   setsid nohup bash -c 'bash /root/dolphinonce2keep.sh 2>&1 | tee -a /root/sb_dolphinonce2.log' > /dev/null 2>&1 < /dev/null &
 fi
+# ---- 2026-10-12 10:20 JST: the 50k set's backup (docs_000_50k.jsonl, made before the re-prep) matched the trainer's
+# docs_*.jsonl glob, so the "one epoch" is 221,305 fresh + the 50,000 again (8,478 steps). Renamed out of the glob's way
+# for anything that reads the directory later; the running epoch finishes as it is.
+if [ -s /root/sb/data/dolphin/docs_000_50k.jsonl ]; then mv /root/sb/data/dolphin/docs_000_50k.jsonl /root/sb/data/dolphin/bak50k_docs.jsonl; mv /root/sb/data/dolphin/off_000_50k.npy /root/sb/data/dolphin/bak50k_off.npy 2>/dev/null; echo "[once] the 50k backup renamed out of the glob"; fi
 echo "BOXI_OK serial $BOXI_SERIAL $(date -u)"
 # CTL-END
 
