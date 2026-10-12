@@ -8,7 +8,7 @@ cd /root
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null)
 R=baya1116/hypernet-sp-distill
 RAW="https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl"
-BOXI_SERIAL=86
+BOXI_SERIAL=87
 if [ -f /root/.boxi_serial ] && [ "$(cat /root/.boxi_serial)" -gt "$BOXI_SERIAL" ] 2>/dev/null; then echo "BOXI_STALE $BOXI_SERIAL"; exit 0; fi
 echo $BOXI_SERIAL > /root/.boxi_serial
 mkdir -p /root/sb /root/work
@@ -37,6 +37,7 @@ if [ ! -e /root/.mirror_r4 ]; then touch /root/.mirror_r4; pkill -f "mirrorkee[p
 if [ ! -e /root/.mirror_r5 ]; then touch /root/.mirror_r5; pkill -f "mirrorkee[p].sh"; sleep 1; fi   # the disk keeper's lines
 if [ ! -e /root/.mirror_r6 ]; then touch /root/.mirror_r6; pkill -f "mirrorkee[p].sh"; sleep 1; fi   # the one-epoch run's lines
 if [ ! -e /root/.mirror_r7 ]; then touch /root/.mirror_r7; pkill -f "mirrorkee[p].sh"; sleep 1; fi   # the second run's lines
+if [ ! -e /root/.mirror_r8 ]; then touch /root/.mirror_r8; pkill -f "mirrorkee[p].sh"; sleep 1; fi   # the second run's plan
 if ! pgrep -f "mirrorkee[p].sh" >/dev/null; then
   cat > /root/mirrorkeep.sh <<'MK'
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); R=baya1116/hypernet-sp-distill
@@ -47,7 +48,7 @@ while :; do
     echo "--- disk ---"; df -h /root | tail -1; du -sh /root/sb/data 2>/dev/null; tail -n 3 /root/disk.log 2>/dev/null
     echo "--- ladder2 / dolphin ladder ---"; ls -t /root/sb/ladder2 /root/sb/dolphin_ladder 2>/dev/null | head -12 | tr '\n' ' '; echo
     f=$(ls -t /root/sb/ladder2/*.out /root/sb/dolphin_ladder/*.out 2>/dev/null | head -1); [ -n "$f" ] && { echo "== $f"; grep -E "^\[eval|^\[best|^\[plateau|^\[init\]|Error|Traceback" $f | tail -8 | cut -c1-300; echo "pool fields:"; grep -E "^\[eval" $f | tail -6 | sed -E 's/^(\[eval [0-9]+\]).*page_top1 ([0-9.]+).*(pool_top1.*)$/\1 2000: \2 | \3/' | cut -c1-200; grep "^\[step" $f | tail -1 | cut -c1-200; }
-    [ -s /root/sb_dolphinonce2.log ] && { echo "--- dolphin once2 (length buckets, the window widened) ---"; tail -n 6 /root/sb_dolphinonce2.log | cut -c1-300; grep -E "^\[eval|^\[best|^\[window|Error|Traceback" /root/sb/dolphin_once2/train.log 2>/dev/null | tail -8 | cut -c1-300; grep "^\[step" /root/sb/dolphin_once2/train.log 2>/dev/null | tail -1 | cut -c1-200; }
+    [ -s /root/sb_dolphinonce2.log ] && { echo "--- dolphin once2 (length buckets, the window widened) ---"; grep -E "training set:|buckets:" /root/sb_dolphinonce2.log | tail -n 2 | cut -c1-400; tail -n 4 /root/sb_dolphinonce2.log | cut -c1-300; grep -E "^\[eval|^\[best|^\[window|Error|Traceback" /root/sb/dolphin_once2/train.log 2>/dev/null | tail -8 | cut -c1-300; grep "^\[step" /root/sb/dolphin_once2/train.log 2>/dev/null | tail -1 | cut -c1-200; }
     [ -s /root/sb_dolphinonce.log ] && { echo "--- dolphin once (the whole corpus, one epoch) ---"; tail -n 8 /root/sb_dolphinonce.log | cut -c1-300; grep -E "^\[eval|^\[best|^\[e2e\]|Error|Traceback" /root/sb/dolphin_once/train.log 2>/dev/null | tail -8 | cut -c1-300; grep "^\[step" /root/sb/dolphin_once/train.log 2>/dev/null | tail -1 | cut -c1-200; }
     [ -s /root/sb/dolphin_e2e/train.log ] && { echo "--- dolphin e2e (train.log) ---"; grep -E "^\[eval|^\[best|^\[plateau|^\[init\]|^\[e2e\]|Error|Traceback" /root/sb/dolphin_e2e/train.log | tail -8 | sed -E 's/^(\[eval [0-9]+\]).*page_top1 ([0-9.]+).*page_base_top1 ([0-9.]+).*(next_top1 [0-9.]+).*(pool_top1 [0-9.]+ pool_top10 [0-9.]+).*$/\1 2000: \2 (base \3) \4 \5/' | cut -c1-300; grep "^\[step" /root/sb/dolphin_e2e/train.log | tail -1 | cut -c1-200; }
     echo "--- ladder2 rungs (ladder.json) and dev guards ---"; python3 -c "
