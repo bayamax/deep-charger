@@ -8,7 +8,7 @@ cd /root
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null)
 R=baya1116/hypernet-sp-distill
 RAW="https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl"
-BOXI_SERIAL=90
+BOXI_SERIAL=91
 if [ -f /root/.boxi_serial ] && [ "$(cat /root/.boxi_serial)" -gt "$BOXI_SERIAL" ] 2>/dev/null; then echo "BOXI_STALE $BOXI_SERIAL"; exit 0; fi
 echo $BOXI_SERIAL > /root/.boxi_serial
 mkdir -p /root/sb /root/work
@@ -25,7 +25,7 @@ if [ ! -f /root/.bootstrapped ]; then
 fi
 
 # the code, fresh from the branch on every control run
-for f in prep.py embed.py train.py train_e2e.py e2e_ladder.py search_cascade.py pick_docs.py evalsb.py links.py prep_dolphin.py; do
+for f in prep.py embed.py train.py train_e2e.py e2e_ladder.py search_cascade.py pick_docs.py evalsb.py links.py prep_dolphin.py sb_eval.py; do
   curl -sS -L -o /root/sb/$f.new "$RAW/sentbart/$f?$(date +%s)" && grep -q "^#!/usr/bin/env python3" /root/sb/$f.new && mv /root/sb/$f.new /root/sb/$f || rm -f /root/sb/$f.new
 done
 ls /root/sb
@@ -41,6 +41,7 @@ if [ ! -e /root/.mirror_r8 ]; then touch /root/.mirror_r8; pkill -f "mirrorkee[p
 if [ ! -e /root/.mirror_r9 ]; then touch /root/.mirror_r9; pkill -f "mirrorkee[p].sh"; sleep 1; fi   # the long-context evaluation
 if [ ! -e /root/.mirror_r10 ]; then touch /root/.mirror_r10; pkill -f "mirrorkee[p].sh"; sleep 1; fi   # the third run
 if [ ! -e /root/.mirror_r11 ]; then touch /root/.mirror_r11; pkill -f "mirrorkee[p].sh"; sleep 1; fi   # the fourth run
+if [ ! -e /root/.mirror_r12 ]; then touch /root/.mirror_r12; pkill -f "mirrorkee[p].sh"; sleep 1; fi   # sb_eval
 if ! pgrep -f "mirrorkee[p].sh" >/dev/null; then
   cat > /root/mirrorkeep.sh <<'MK'
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); R=baya1116/hypernet-sp-distill
@@ -51,6 +52,7 @@ while :; do
     echo "--- disk ---"; df -h /root | tail -1; du -sh /root/sb/data 2>/dev/null; tail -n 3 /root/disk.log 2>/dev/null
     echo "--- ladder2 / dolphin ladder ---"; ls -t /root/sb/ladder2 /root/sb/dolphin_ladder 2>/dev/null | head -12 | tr '\n' ' '; echo
     f=$(ls -t /root/sb/ladder2/*.out /root/sb/dolphin_ladder/*.out 2>/dev/null | head -1); [ -n "$f" ] && { echo "== $f"; grep -E "^\[eval|^\[best|^\[plateau|^\[init\]|Error|Traceback" $f | tail -8 | cut -c1-300; echo "pool fields:"; grep -E "^\[eval" $f | tail -6 | sed -E 's/^(\[eval [0-9]+\]).*page_top1 ([0-9.]+).*(pool_top1.*)$/\1 2000: \2 | \3/' | cut -c1-200; grep "^\[step" $f | tail -1 | cut -c1-200; }
+    [ -s /root/sb_sbeval.log ] && { echo "--- sb_eval (fixed candidates, by position) ---"; tail -n 14 /root/sb_sbeval.log | cut -c1-300; }
     [ -s /root/sb_dolphinonce4.log ] && { echo "--- dolphin once4 (random order, from the second epoch's end) ---"; grep -E "buckets|training from" /root/sb_dolphinonce4.log | tail -n 2 | cut -c1-400; grep -E "^\[eval|^\[best|^\[window|Error|Traceback|longeval|ONCE4" /root/sb/dolphin_once4/train.log /root/sb_dolphinonce4.log 2>/dev/null | sed 's#^/root/[^:]*:##' | tail -8 | cut -c1-300; grep "^\[step" /root/sb/dolphin_once4/train.log 2>/dev/null | tail -1 | cut -c1-200; }
     [ -s /root/sb_dolphinonce3.log ] && { echo "--- dolphin once3 (length bands in a random order) ---"; grep -E "buckets|training from" /root/sb_dolphinonce3.log | tail -n 2 | cut -c1-400; grep -E "^\[eval|^\[best|^\[window|Error|Traceback|longeval|ONCE3" /root/sb/dolphin_once3/train.log /root/sb_dolphinonce3.log 2>/dev/null | sed 's#^/root/[^:]*:##' | tail -8 | cut -c1-300; grep "^\[step" /root/sb/dolphin_once3/train.log 2>/dev/null | tail -1 | cut -c1-200; }
     [ -s /root/sb_longeval.log ] && { echo "--- long-context evaluation ---"; grep -vE "^\[eval 0\]" /root/sb_longeval.log | tail -n 10 | cut -c1-300; }
@@ -1623,6 +1625,33 @@ fi
 if [ -e /root/.dolphin_once4 ] && [ -s /root/dolphinonce4keep.sh ] && ! pgrep -f "dolphinonce4kee[p].sh" >/dev/null && ! grep -q "ONCE4_JOB_DONE" /root/sb_dolphinonce4.log 2>/dev/null; then
   echo "[once4] relaunched $(date -u +%H:%M)" >> /root/sb_dolphinonce4.log
   setsid nohup bash -c 'bash /root/dolphinonce4keep.sh 2>&1 | tee -a /root/sb_dolphinonce4.log' > /dev/null 2>&1 < /dev/null &
+fi
+# ---- 2026-10-13 10:30 JST (the user: the trouble is the evaluation). sb_eval.py measures every checkpoint on one fixed
+# yardstick: whole documents, the tail from a fixed cut, each prediction against the same 3,223 drawn candidates + the
+# truth, cosine to the truth, by position band. After the fourth run (ONCE4_JOB_DONE): the 128-window epoch's end, the
+# second epoch's best and end, the fresh random-order run's best, the fourth run's best and end, and the old ladder's
+# 16+16 / 32+32 for reference. /root/sb_sbeval.log, /root/sb_eval.json -> the hub (sentbart/dolphin/sb_eval/).
+if [ ! -e /root/.sbeval ] && [ -s /root/sb/sb_eval.py ]; then touch /root/.sbeval
+  cat > /root/sbevalkeep.sh <<'SE'
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); R=baya1116/hypernet-sp-distill; cd /root/sb; DF=/root/sb/data/dolphin512full
+until grep -q "ONCE4_JOB_DONE" /root/sb_dolphinonce4.log 2>/dev/null; do sleep 120; done
+while pgrep -f "train_e2e.py" >/dev/null; do sleep 60; done
+for c in cap_bge14_bart16 cap_bge14_bart32; do [ -s /root/sb/dolphin_ladder/$c/model_best.pt ] || { mkdir -p /root/sb/dolphin_ladder/$c; hf download $R sentbart/dolphin/$c/model_best.pt --local-dir /root/sb/hfdl >/dev/null 2>&1 && cp /root/sb/hfdl/sentbart/dolphin/$c/model_best.pt /root/sb/dolphin_ladder/$c/; }; done
+CK=""
+for spec in run1_end=/root/sb/dolphin_once/state_e2e.pt run2_best=/root/sb/dolphin_once2/model_best.pt run2_end=/root/sb/dolphin_once2/state_e2e.pt run3_half=/root/sb/dolphin_once3/model_best.pt \
+            run4_best=/root/sb/dolphin_once4/model_best.pt run4_end=/root/sb/dolphin_once4/state_e2e.pt ladder16=/root/sb/dolphin_ladder/cap_bge14_bart16/model_best.pt ladder32=/root/sb/dolphin_ladder/cap_bge14_bart32/model_best.pt; do
+  [ -s "${spec#*=}" ] && CK="$CK $spec" || echo "[sb_eval] missing: $spec"; done
+echo "[sb_eval] start $(date -u +%H:%M): $CK"
+python3 -u /root/sb/sb_eval.py --docs $DF/docs_001.jsonl --ckpt $CK --out /root/sb_eval.json 2>&1 | grep --line-buffered -vE "Warning|warn|documents \(" | cut -c1-300
+hf upload $R /root/sb_eval.json sentbart/dolphin/sb_eval/sb_eval.json >/dev/null 2>&1; hf upload $R /root/sb_sbeval.log sentbart/dolphin/sb_eval/log.txt >/dev/null 2>&1
+echo "SBEVAL_JOB_DONE $(date -u)"
+SE
+  setsid nohup bash -c 'bash /root/sbevalkeep.sh 2>&1 | tee -a /root/sb_sbeval.log' > /dev/null 2>&1 < /dev/null &
+  echo "SBEVAL_LAUNCHED $(date -u)"
+fi
+if [ -e /root/.sbeval ] && [ -s /root/sbevalkeep.sh ] && ! pgrep -f "sbevalkee[p].sh" >/dev/null && ! grep -q "SBEVAL_JOB_DONE" /root/sb_sbeval.log 2>/dev/null; then
+  echo "[sb_eval] relaunched $(date -u +%H:%M)" >> /root/sb_sbeval.log
+  setsid nohup bash -c 'bash /root/sbevalkeep.sh 2>&1 | tee -a /root/sb_sbeval.log' > /dev/null 2>&1 < /dev/null &
 fi
 echo "BOXI_OK serial $BOXI_SERIAL $(date -u)"
 # CTL-END
