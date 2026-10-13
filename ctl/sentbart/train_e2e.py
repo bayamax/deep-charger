@@ -92,7 +92,7 @@ A, model, DEV, DIM = ns["A"], ns["model"], ns["DEV"], ns["DIM"]
 import numpy as np, torch, torch.nn.functional as F  # noqa: E402
 from transformers import AutoModel, AutoTokenizer  # noqa: E402
 if PLAN and (E.init or E.grow) and not os.path.exists(os.path.join(E.out, "state_e2e.pt")):   # the BART from --init / --grow, its position table widened to SEQ_MAX (new rows start as the last row)
-    _sd = torch.load(E.grow or E.init, map_location=DEV)["model"]; _pw = model.pos.weight
+    _sd = torch.load(E.grow or E.init, map_location=DEV, weights_only=False)["model"]; _pw = model.pos.weight
     if E.grow:   # train.py's --grow under a plan: layer i of the smaller BART becomes layer i*k, the layers between start as the identity
         _nold = 1 + max(int(k.split(".")[2]) for k in _sd if k.startswith("enc.layers.")); assert E.layers % _nold == 0, (E.layers, _nold); _kk = E.layers // _nold
         _g = {}
@@ -129,7 +129,7 @@ def grow_bge(m, n):
     m.config.num_hidden_layers = len(L)
 
 
-CK0 = torch.load(E.grow or E.init, map_location="cpu") if (E.grow or E.init) else {}
+CK0 = torch.load(E.grow or E.init, map_location="cpu", weights_only=False) if (E.grow or E.init) else {}
 n0 = CK0.get("enc_layers", 12) if "enc" in CK0 else 12
 grow_bge(enc, n0)
 if "enc" in CK0: enc.load_state_dict(CK0["enc"]); print(f"[e2e] encoder from {E.grow or E.init} ({n0} layers)", flush=True)
@@ -274,7 +274,7 @@ sched = torch.optim.lr_scheduler.LambdaLR(opt, (lambda s: min(1.0, (s + 1) / 500
                                           else (lambda s: min(1.0, (s + 1) / 500) * 0.5 * (1 + np.cos(np.pi * min(1.0, s / max(1, E.steps))))))
 STATE = os.path.join(E.out, "state_e2e.pt"); step0 = 0
 if os.path.exists(STATE):
-    st = torch.load(STATE, map_location=DEV); model.load_state_dict(st["model"]); enc.load_state_dict(st["enc"])
+    st = torch.load(STATE, map_location=DEV, weights_only=False); model.load_state_dict(st["model"]); enc.load_state_dict(st["enc"])
     opt.load_state_dict(st["opt"]); sched.load_state_dict(st["sched"]); step0 = st["step"]
     BEST0 = float(st.get("best", -1.0))   # the best so far, so a resumed run does not overwrite model_best.pt with a worse one
 
