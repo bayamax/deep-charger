@@ -8,7 +8,7 @@ cd /root
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null)
 R=baya1116/hypernet-sp-distill
 RAW="https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl"
-BOXI_SERIAL=96
+BOXI_SERIAL=97
 if [ -f /root/.boxi_serial ] && [ "$(cat /root/.boxi_serial)" -gt "$BOXI_SERIAL" ] 2>/dev/null; then echo "BOXI_STALE $BOXI_SERIAL"; exit 0; fi
 echo $BOXI_SERIAL > /root/.boxi_serial
 mkdir -p /root/sb /root/work
@@ -1772,9 +1772,13 @@ D5
   setsid nohup bash -c 'bash /root/dolphinonce5keep.sh 2>&1 | tee -a /root/sb_dolphinonce5.log' > /dev/null 2>&1 < /dev/null &
   echo "DOLPHINONCE5B_LAUNCHED $(date -u)"
 fi
-if [ ! -e /root/.dolphin_once5c ] && [ -e /root/.dolphin_once5b ] && grep -q "plan-accum" /root/sb/train_e2e.py; then touch /root/.dolphin_once5c
+ONCE5_FROM_LADDER32=0   # 1: the fifth run starts from the ladder's bge14 + BART32 (24.3%) instead of growing the fourth run's end
+if [ ! -e /root/.dolphin_once5d ] && [ -e /root/.dolphin_once5c ] && grep -q "plan-accum" /root/sb/train_e2e.py; then touch /root/.dolphin_once5d
   pkill -f "dolphinonce5kee[p].sh"; sleep 2
-  cat > /root/dolphinonce5keep.sh <<'D5'
+  cat > /root/dolphinonce5keep.sh <<D5H
+ONCE5_FROM_LADDER32=$ONCE5_FROM_LADDER32
+D5H
+  cat >> /root/dolphinonce5keep.sh <<'D5'
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); R=baya1116/hypernet-sp-distill; cd /root/sb; D=/root/sb/data/dolphin; D2=/root/sb/data/dolphin512; DN=/root/sb/data/dolphin768new; DF7=/root/sb/data/dolphin768full
 until grep -q "SBEVAL_JOB_DONE" /root/sb_sbeval.log 2>/dev/null; do sleep 120; done
 while pgrep -f "train_e2e.py|sb_eval.py" >/dev/null; do sleep 60; done
@@ -1814,15 +1818,19 @@ I0=/root/sb/dolphin_once4/state_e2e.pt; [ -s $I0 ] || I0=/root/sb/dolphin_once4/
 # at 3800 sentences per update, the run restarts with two planned batches of 1900 per update (the same sentences per update).
 LAYERS=$(cat /root/once5_layers.txt 2>/dev/null | tr -dc 0-9); LAYERS=${LAYERS:-16}
 if [ "$LAYERS" -gt 8 ]; then INITARG="--grow $I0 --layers $LAYERS"; else INITARG="--init $I0 --layers 8"; fi
+B1=3800; B2=1900; A2=2
+# the user's alternative (2026-10-13): the best existing model (the ladder's bge14 + BART 32+32, 24.3%) fed the new corpus as it is
+L32=/root/sb/dolphin_ladder/cap_bge14_bart32/model_best.pt
+if [ "$ONCE5_FROM_LADDER32" = "1" ] && [ -s $L32 ]; then I0=$L32; LAYERS=32; INITARG="--init $I0 --layers 32"; B1=950; A1=4; B2=475; A2=8; fi
 run5() {   # $1 = sentences per planned batch, $2 = planned batches per update
   PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python3 -u /root/sb/train_e2e.py --vec $DN --text $DN --eval-text $DN/docs_001.jsonl --out /root/sb/dolphin_once5 $INITARG --enc-layers 0 \
     --buckets 64,128,192,256,384,512,768 --bucket-order random --sent-budget $1 --plan-accum $2 --max-bs 64 --eval-seq 128 --page-queue 16 --pool 20000 --anchor-q 0 --select dec_top1 --patience 0 \
     --eval-every 1000 --save-every 1000 2>&1 | grep --line-buffered -E "^\[e2e\]|^\[eval|^\[best|^\[val\]|^\[init|^\[grow|^\[model|^\[window|TRAIN_DONE|Error|Traceback|out of memory" | sed -u 's/^\(.\{400\}\).*/\1/' | tee /root/once5_run.txt
 }
-echo "[once5] training from $I0 (the fourth run's end), BART $LAYERS+$LAYERS$([ "$LAYERS" -gt 8 ] && echo " (grown from 8+8)"), bge 12, window 768, random order, one pass over the new conversations $(date -u +%H:%M)"
-run5 3800 1
+echo "[once5] training from $I0, BART $LAYERS+$LAYERS$([ "$LAYERS" -gt 8 ] && [ "$LAYERS" -lt 32 ] && echo " (grown from 8+8)"), bge as the checkpoint, window 768, random order, one pass over the new conversations $(date -u +%H:%M)"
+run5 $B1 ${A1:-1}
 if grep -q "out of memory" /root/once5_run.txt && ! grep -q "TRAIN_DONE" /root/once5_run.txt; then
-  echo "[once5] out of memory at 3800 sentences per update - again as 2 x 1900 (the same sentences per update; a saved state resumes from its step) $(date -u +%H:%M)"; run5 1900 2
+  echo "[once5] out of memory at $B1 x ${A1:-1} - again as $A2 x $B2 (the same sentences per update; a saved state resumes from its step) $(date -u +%H:%M)"; run5 $B2 $A2
 fi
 [ -s /root/sb/dolphin_once5/model_best.pt ] && hf upload $R /root/sb/dolphin_once5/model_best.pt sentbart/dolphin/once5/model_best.pt >/dev/null 2>&1 && echo "[once5] best on the hub: sentbart/dolphin/once5/model_best.pt"
 hf upload $R /root/sb/dolphin_once5/train.log sentbart/dolphin/once5/train.log >/dev/null 2>&1
@@ -1833,7 +1841,7 @@ hf upload $R /root/sb_eval768.json sentbart/dolphin/sb_eval/sb_eval768.json >/de
 echo "ONCE5_JOB_DONE $(date -u)"
 D5
   setsid nohup bash -c 'bash /root/dolphinonce5keep.sh 2>&1 | tee -a /root/sb_dolphinonce5.log' > /dev/null 2>&1 < /dev/null &
-  echo "DOLPHINONCE5C_LAUNCHED $(date -u)"
+  echo "DOLPHINONCE5D_LAUNCHED $(date -u) from_ladder32=$ONCE5_FROM_LADDER32"
 fi
 echo "BOXI_OK serial $BOXI_SERIAL $(date -u)"
 # CTL-END
