@@ -8,7 +8,7 @@ cd /root
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null)
 R=baya1116/hypernet-sp-distill
 RAW="https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl"
-BOXI_SERIAL=93
+BOXI_SERIAL=94
 if [ -f /root/.boxi_serial ] && [ "$(cat /root/.boxi_serial)" -gt "$BOXI_SERIAL" ] 2>/dev/null; then echo "BOXI_STALE $BOXI_SERIAL"; exit 0; fi
 echo $BOXI_SERIAL > /root/.boxi_serial
 mkdir -p /root/sb /root/work
@@ -44,6 +44,7 @@ if [ ! -e /root/.mirror_r11 ]; then touch /root/.mirror_r11; pkill -f "mirrorkee
 if [ ! -e /root/.mirror_r12 ]; then touch /root/.mirror_r12; pkill -f "mirrorkee[p].sh"; sleep 1; fi   # sb_eval
 if [ ! -e /root/.mirror_r13 ]; then touch /root/.mirror_r13; pkill -f "mirrorkee[p].sh"; sleep 1; fi   # the fifth run
 if [ ! -e /root/.mirror_r14 ]; then touch /root/.mirror_r14; pkill -f "mirrorkee[p].sh"; sleep 1; fi   # the validation lines
+if [ ! -e /root/.mirror_r15 ]; then touch /root/.mirror_r15; pkill -f "mirrorkee[p].sh"; sleep 1; fi   # the fourth run's gap from its log
 if ! pgrep -f "mirrorkee[p].sh" >/dev/null; then
   cat > /root/mirrorkeep.sh <<'MK'
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); R=baya1116/hypernet-sp-distill
@@ -56,6 +57,19 @@ while :; do
     f=$(ls -t /root/sb/ladder2/*.out /root/sb/dolphin_ladder/*.out 2>/dev/null | head -1); [ -n "$f" ] && { echo "== $f"; grep -E "^\[eval|^\[best|^\[plateau|^\[init\]|Error|Traceback" $f | tail -8 | cut -c1-300; echo "pool fields:"; grep -E "^\[eval" $f | tail -6 | sed -E 's/^(\[eval [0-9]+\]).*page_top1 ([0-9.]+).*(pool_top1.*)$/\1 2000: \2 | \3/' | cut -c1-200; grep "^\[step" $f | tail -1 | cut -c1-200; }
     [ -s /root/sb_dolphinonce5.log ] && { echo "--- dolphin once5 (window 768, random order, from the fourth run's end) ---"; grep -E "buckets|training from|training set" /root/sb_dolphinonce5.log | tail -n 3 | cut -c1-400; grep -E "^\[eval|^\[best|^\[val\]|^\[window|Error|Traceback|sb_eval|ONCE5|^  " /root/sb/dolphin_once5/train.log /root/sb_dolphinonce5.log 2>/dev/null | sed 's#^/root/[^:]*:##' | tail -12 | cut -c1-300; grep "^\[step" /root/sb/dolphin_once5/train.log 2>/dev/null | tail -1 | cut -c1-200; }
     [ -s /root/sb_sbeval.log ] && { echo "--- sb_eval (fixed candidates, by position) ---"; tail -n 14 /root/sb_sbeval.log | cut -c1-300; }
+    [ -s /root/sb/dolphin_once4/train.log ] && { echo "--- validation gap, the fourth run (from its log: training decoder loss over the 1000 steps before each evaluation vs the held-out's) ---"; python3 - <<'PV' 2>/dev/null
+import re
+tr, ev = {}, []
+for l in open("/root/sb/dolphin_once4/train.log"):
+    m = re.match(r"\[step (\d+)\] enc [\d.]+ dec ([\d.]+)", l)
+    if m: tr[int(m.group(1))] = float(m.group(2)); continue
+    m = re.match(r"\[eval (\d+)\] .*dec_loss ([\d.]+)", l)
+    if m: ev.append((int(m.group(1)), float(m.group(2))))
+for n, d in ev:
+    w = [v for k, v in tr.items() if n - 1000 < k <= n]
+    if w: print(f"  step {n:5d}: train_dec {sum(w)/len(w):.3f}  heldout_dec {d:.3f}  gap {d - sum(w)/len(w):+.3f}")
+PV
+    }
     [ -s /root/sb_dolphinonce4.log ] && { echo "--- dolphin once4 (random order, from the second epoch's end) ---"; grep -E "buckets|training from" /root/sb_dolphinonce4.log | tail -n 2 | cut -c1-400; grep -E "^\[eval|^\[best|^\[val\]|^\[window|Error|Traceback|longeval|ONCE4" /root/sb/dolphin_once4/train.log /root/sb_dolphinonce4.log 2>/dev/null | sed 's#^/root/[^:]*:##' | tail -8 | cut -c1-300; grep "^\[step" /root/sb/dolphin_once4/train.log 2>/dev/null | tail -1 | cut -c1-200; }
     [ -s /root/sb_dolphinonce3.log ] && { echo "--- dolphin once3 (length bands in a random order) ---"; grep -E "buckets|training from" /root/sb_dolphinonce3.log | tail -n 2 | cut -c1-400; grep -E "^\[eval|^\[best|^\[window|Error|Traceback|longeval|ONCE3" /root/sb/dolphin_once3/train.log /root/sb_dolphinonce3.log 2>/dev/null | sed 's#^/root/[^:]*:##' | tail -8 | cut -c1-300; grep "^\[step" /root/sb/dolphin_once3/train.log 2>/dev/null | tail -1 | cut -c1-200; }
     [ -s /root/sb_longeval.log ] && { echo "--- long-context evaluation ---"; grep -vE "^\[eval 0\]" /root/sb_longeval.log | tail -n 10 | cut -c1-300; }
