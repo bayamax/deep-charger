@@ -280,7 +280,7 @@ if step0 == 0:
     r = eval_now(); BEST = r[E.select]; out(f"[eval 0] {fmt(r)}")
     if E.eval_only: out(f"EVAL_ONLY_DONE {E.init} eval_seq {E.eval_seq or 'whole'} {E.select} {BEST:.3f}"); raise SystemExit(0)
     save("best", 0); out(f"[best] step 0 {E.select} {BEST:.3f}")
-model.train(); t0 = time.time(); acc = []; SEEN_W = set()
+model.train(); t0 = time.time(); acc = []; SEEN_W = set(); TRD = []   # TRD: the training decoder loss since the last evaluation (the validation gap)
 if E.once and step0: PTR[0] = step0 * E.batch * E.accum
 for step in range(step0 + 1, E.steps + 1) if E.steps > 0 else []:
     ns["STEP"][0] = step
@@ -336,12 +336,13 @@ for step in range(step0 + 1, E.steps + 1) if E.steps > 0 else []:
     gn = float(torch.nn.utils.clip_grad_norm_(list(model.parameters()) + list(enc.parameters()), 1.0))
     if gn < 100: opt.step()
     sched.step()
-    acc.append(tuple(np.mean(parts, 0)))
+    acc.append(tuple(np.mean(parts, 0))); TRD.append(acc[-1][1])
     if step % 100 == 0:
         e, d_, p_, a_, c_, q_ = np.mean(acc, 0); acc = []
         out(f"[step {step}] enc {e:.3f} dec {d_:.3f} page {p_:.3f} anchor {a_:.3f} query {q_:.3f} cos_to_stock {c_:.3f} |grad| {gn:.2f} {(time.time()-t0)/60:.0f} min")
     if step % E.eval_every == 0 or step == E.steps:
         r = eval_now(); out(f"[eval {step}] {fmt(r)}")
+        if TRD and "dec_loss" in r: out(f"[val] step {step} train_dec {np.mean(TRD):.3f} heldout_dec {r['dec_loss']:.3f} gap {r['dec_loss'] - np.mean(TRD):+.3f} (the training loss is over mixed lengths; watch the gap's drift, not its level)"); TRD = []
         if r[E.select] > BEST + E.min_gain: STALE = 0
         else: STALE += 1
         if r[E.select] > BEST: BEST = r[E.select]; save("best", step); out(f"[best] step {step} {E.select} {BEST:.3f}")
