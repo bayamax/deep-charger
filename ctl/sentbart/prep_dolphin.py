@@ -24,6 +24,7 @@ ap.add_argument("--id-prefix", default="dr1", help="ids are <prefix>:<line of th
 ap.add_argument("--shard", default="000", help="--all writes docs_<shard>.jsonl / off_<shard>.npy (another corpus takes another shard, e.g. 002)")
 ap.add_argument("--exclude-questions", nargs="*", default=[], help="docs_*.jsonl files whose conversations' questions (the first nq sentences) are kept out, by text - the held-out set against another corpus that may share prompts")
 ap.add_argument("--schema", default="dolphin", choices=["dolphin", "am"], help="am: AM-DeepSeek-R1-Distilled rows (messages[user].content, messages[assistant].info.think_content / answer_content); rows with CJK text are skipped")
+ap.add_argument("--skip-rows", type=int, default=0, help="--all: rows of the source skipped before any is taken (a held-out set from the part of a corpus a training set did not reach)")
 ap.add_argument("--max-docs", type=int, default=0, help="--all: stop after this many kept conversations (0: the whole corpus)")
 ap.add_argument("--all", type=int, default=0, help="1: every qualifying conversation goes to the training set (2026-10-11, the user: the whole corpus, one epoch; 50k had been gone round ~45 times)")
 A = ap.parse_args()
@@ -111,6 +112,7 @@ docs = []; n_read = n_dup = n_short = n_longq = n_kept = n_unus = 0; lens = []; 
 out_all = open(os.path.join(A.out, f"docs_{A.shard}.jsonl"), "w") if A.all else None   # --all: written as read (no shuffle in memory; train_e2e --once shuffles)
 for raw in src:
     n_read += 1
+    if n_read <= A.skip_rows: continue
     try: r = json.loads(raw)
     except Exception: continue
     pr = parts(r)

@@ -8,7 +8,7 @@ cd /root
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null)
 R=baya1116/hypernet-sp-distill
 RAW="https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl"
-BOXI_SERIAL=98
+BOXI_SERIAL=99
 if [ -f /root/.boxi_serial ] && [ "$(cat /root/.boxi_serial)" -gt "$BOXI_SERIAL" ] 2>/dev/null; then echo "BOXI_STALE $BOXI_SERIAL"; exit 0; fi
 echo $BOXI_SERIAL > /root/.boxi_serial
 mkdir -p /root/sb /root/work
@@ -47,6 +47,7 @@ if [ ! -e /root/.mirror_r14 ]; then touch /root/.mirror_r14; pkill -f "mirrorkee
 if [ ! -e /root/.mirror_r15 ]; then touch /root/.mirror_r15; pkill -f "mirrorkee[p].sh"; sleep 1; fi   # the fourth run's gap from its log
 if [ ! -e /root/.mirror_r16 ]; then touch /root/.mirror_r16; pkill -f "mirrorkee[p].sh"; sleep 1; fi   # the keepers in the process list
 if [ ! -e /root/.mirror_r17 ]; then touch /root/.mirror_r17; pkill -f "mirrorkee[p].sh"; sleep 1; fi   # the sixth run
+if [ ! -e /root/.mirror_r18 ]; then touch /root/.mirror_r18; pkill -f "mirrorkee[p].sh"; sleep 1; fi   # the AM held-out
 if ! pgrep -f "mirrorkee[p].sh" >/dev/null; then
   cat > /root/mirrorkeep.sh <<'MK'
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); R=baya1116/hypernet-sp-distill
@@ -57,6 +58,7 @@ while :; do
     echo "--- disk ---"; df -h /root | tail -1; du -sh /root/sb/data 2>/dev/null; tail -n 3 /root/disk.log 2>/dev/null
     echo "--- ladder2 / dolphin ladder ---"; ls -t /root/sb/ladder2 /root/sb/dolphin_ladder 2>/dev/null | head -12 | tr '\n' ' '; echo
     f=$(ls -t /root/sb/ladder2/*.out /root/sb/dolphin_ladder/*.out 2>/dev/null | head -1); [ -n "$f" ] && { echo "== $f"; grep -E "^\[eval|^\[best|^\[plateau|^\[init\]|Error|Traceback" $f | tail -8 | cut -c1-300; echo "pool fields:"; grep -E "^\[eval" $f | tail -6 | sed -E 's/^(\[eval [0-9]+\]).*page_top1 ([0-9.]+).*(pool_top1.*)$/\1 2000: \2 | \3/' | cut -c1-200; grep "^\[step" $f | tail -1 | cut -c1-200; }
+    [ -s /root/sb_amheld.log ] && { echo "--- the AM held-out (2000 R1 conversations the sixth run never saw): the fourth run's end and the sixth run on the fixed yardstick, both held-outs ---"; grep -vE "Warning|warn" /root/sb_amheld.log | tail -n 22 | cut -c1-300; }
     [ -s /root/sb_dolphinonce6.log ] && { echo "--- dolphin once6 (R1 only: AM's R1-671B set + the unused deepseek conversations; the doubled BART from the fourth run's end, window 768) ---"; grep -E "buckets|training from|training set|PREP_DOLPHIN|unusable" /root/sb_dolphinonce6.log | tail -n 4 | cut -c1-400; grep -E "^\[eval|^\[best|^\[val\]|^\[window|^\[grow|Error|Traceback|memory|sb_eval|ONCE6|^  " /root/sb/dolphin_once6/train.log /root/sb_dolphinonce6.log 2>/dev/null | sed 's#^/root/[^:]*:##' | tail -n 24 | cut -c1-400; grep "^\[step" /root/sb/dolphin_once6/train.log 2>/dev/null | tail -1 | cut -c1-200; }
     [ -s /root/sb_dolphinonce5.log ] && { echo "--- dolphin once5 (window 768, random order, from the fourth run's end) ---"; grep -E "buckets|training from|training set" /root/sb_dolphinonce5.log | tail -n 3 | cut -c1-400; grep -E "^\[eval|^\[best|^\[val\]|^\[window|Error|Traceback|sb_eval|ONCE5|^  " /root/sb/dolphin_once5/train.log /root/sb_dolphinonce5.log 2>/dev/null | sed 's#^/root/[^:]*:##' | tail -12 | cut -c1-300; grep "^\[step" /root/sb/dolphin_once5/train.log 2>/dev/null | tail -1 | cut -c1-200; }
     [ -s /root/sb_sbeval.log ] && { echo "--- sb_eval (fixed candidates, by position) ---"; tail -n 14 /root/sb_sbeval.log | cut -c1-300; }
@@ -1894,6 +1896,31 @@ fi
 if [ -e /root/.dolphin_once6 ] && [ -s /root/dolphinonce6keep.sh ] && ! pgrep -f "dolphinonce6kee[p].sh" >/dev/null && ! grep -q "ONCE6_JOB_DONE" /root/sb_dolphinonce6.log 2>/dev/null; then
   echo "[once6] relaunched $(date -u +%H:%M)" >> /root/sb_dolphinonce6.log
   setsid nohup bash -c 'bash /root/dolphinonce6keep.sh 2>&1 | tee -a /root/sb_dolphinonce6.log' > /dev/null 2>&1 < /dev/null &
+fi
+
+# ---- 2026-10-14, the user: why did the sixth run dip (16.0 -> 15.2)? The dolphin held-out measures the fit to dolphin's
+# conversations; a second yardstick from the AM corpus itself (4,000 conversations past the 342,045 rows the training set
+# was drawn from, the held-out's questions kept out; 2,000 evaluated, the rest the candidate pool) tells whether the
+# model got better at R1 reasoning while drifting from dolphin. Runs after ONCE6_JOB_DONE (its sb_eval768 included). ----
+if [ ! -e /root/.amheld ] && [ -e /root/.dolphin_once6 ] && grep -q -- "--skip-rows" /root/sb/prep_dolphin.py; then touch /root/.amheld
+  cat > /root/amheldkeep.sh <<'AH'
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); R=baya1116/hypernet-sp-distill; cd /root/sb; D=/root/sb/data/dolphin; AH=/root/sb/data/am_held; Z=/root/sb/data/am_0.9M.jsonl.zst
+until grep -q "ONCE6_JOB_DONE" /root/sb_dolphinonce6.log 2>/dev/null; do sleep 120; done
+while pgrep -f "train_e2e.py|sb_eval.py" >/dev/null; do sleep 60; done
+echo "[amheld] start $(date -u +%H:%M); $(df -h /root | tail -1 | awk '{print $4}') free"
+mkdir -p $AH
+[ -s $AH/docs_005.jsonl ] || python3 /root/sb/prep_dolphin.py --out $AH --schema am --all 1 --shard 005 --id-prefix am1 --max-sents 768 --max-q 24 --skip-rows 342045 --max-docs 4000 --keep-eval $D/docs_001.jsonl --exclude-questions $D/docs_001.jsonl --exclude /root/sb/dl/dolphin_v1.jsonl --jsonl $Z 2>&1 | grep -E "PREP_DOLPHIN|Error|Traceback" | sed 's/^/[amheld prep] /' | cut -c1-300
+CK=""; for spec in run4_end=/root/sb/dolphin_once4/state_e2e.pt run6_best=/root/sb/dolphin_once6/model_best.pt run6_end=/root/sb/dolphin_once6/state_e2e.pt; do [ -s "${spec#*=}" ] && CK="$CK $spec"; done
+echo "[amheld] sb_eval on the AM held-out: $CK"
+python3 -u /root/sb/sb_eval.py --docs $AH/docs_005.jsonl --ckpt $CK --bands 128,256,512,768 --out /root/sb_eval_am.json 2>&1 | grep --line-buffered -vE "Warning|warn|documents \(" | cut -c1-300
+hf upload $R /root/sb_eval_am.json sentbart/dolphin/sb_eval/sb_eval_am.json >/dev/null 2>&1
+echo "AMHELD_JOB_DONE $(date -u)"
+AH
+  setsid nohup bash -c 'bash /root/amheldkeep.sh 2>&1 | tee -a /root/sb_amheld.log' > /dev/null 2>&1 < /dev/null &
+  echo "AMHELD_LAUNCHED $(date -u)"
+fi
+if [ -e /root/.amheld ] && [ -s /root/amheldkeep.sh ] && ! pgrep -f "amheldkee[p].sh" >/dev/null && ! grep -q "AMHELD_JOB_DONE" /root/sb_amheld.log 2>/dev/null; then
+  setsid nohup bash -c 'bash /root/amheldkeep.sh 2>&1 | tee -a /root/sb_amheld.log' > /dev/null 2>&1 < /dev/null &
 fi
 echo "BOXI_OK serial $BOXI_SERIAL $(date -u)"
 # CTL-END
