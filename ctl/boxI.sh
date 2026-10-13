@@ -8,7 +8,7 @@ cd /root
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null)
 R=baya1116/hypernet-sp-distill
 RAW="https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl"
-BOXI_SERIAL=97
+BOXI_SERIAL=98
 if [ -f /root/.boxi_serial ] && [ "$(cat /root/.boxi_serial)" -gt "$BOXI_SERIAL" ] 2>/dev/null; then echo "BOXI_STALE $BOXI_SERIAL"; exit 0; fi
 echo $BOXI_SERIAL > /root/.boxi_serial
 mkdir -p /root/sb /root/work
@@ -46,6 +46,7 @@ if [ ! -e /root/.mirror_r13 ]; then touch /root/.mirror_r13; pkill -f "mirrorkee
 if [ ! -e /root/.mirror_r14 ]; then touch /root/.mirror_r14; pkill -f "mirrorkee[p].sh"; sleep 1; fi   # the validation lines
 if [ ! -e /root/.mirror_r15 ]; then touch /root/.mirror_r15; pkill -f "mirrorkee[p].sh"; sleep 1; fi   # the fourth run's gap from its log
 if [ ! -e /root/.mirror_r16 ]; then touch /root/.mirror_r16; pkill -f "mirrorkee[p].sh"; sleep 1; fi   # the keepers in the process list
+if [ ! -e /root/.mirror_r17 ]; then touch /root/.mirror_r17; pkill -f "mirrorkee[p].sh"; sleep 1; fi   # the sixth run
 if ! pgrep -f "mirrorkee[p].sh" >/dev/null; then
   cat > /root/mirrorkeep.sh <<'MK'
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); R=baya1116/hypernet-sp-distill
@@ -56,6 +57,7 @@ while :; do
     echo "--- disk ---"; df -h /root | tail -1; du -sh /root/sb/data 2>/dev/null; tail -n 3 /root/disk.log 2>/dev/null
     echo "--- ladder2 / dolphin ladder ---"; ls -t /root/sb/ladder2 /root/sb/dolphin_ladder 2>/dev/null | head -12 | tr '\n' ' '; echo
     f=$(ls -t /root/sb/ladder2/*.out /root/sb/dolphin_ladder/*.out 2>/dev/null | head -1); [ -n "$f" ] && { echo "== $f"; grep -E "^\[eval|^\[best|^\[plateau|^\[init\]|Error|Traceback" $f | tail -8 | cut -c1-300; echo "pool fields:"; grep -E "^\[eval" $f | tail -6 | sed -E 's/^(\[eval [0-9]+\]).*page_top1 ([0-9.]+).*(pool_top1.*)$/\1 2000: \2 | \3/' | cut -c1-200; grep "^\[step" $f | tail -1 | cut -c1-200; }
+    [ -s /root/sb_dolphinonce6.log ] && { echo "--- dolphin once6 (R1 only: AM's R1-671B set + the unused deepseek conversations; the doubled BART from the fourth run's end, window 768) ---"; grep -E "buckets|training from|training set|PREP_DOLPHIN|unusable" /root/sb_dolphinonce6.log | tail -n 4 | cut -c1-400; grep -E "^\[eval|^\[best|^\[val\]|^\[window|^\[grow|Error|Traceback|memory|sb_eval|ONCE6|^  " /root/sb/dolphin_once6/train.log /root/sb_dolphinonce6.log 2>/dev/null | sed 's#^/root/[^:]*:##' | tail -n 24 | cut -c1-400; grep "^\[step" /root/sb/dolphin_once6/train.log 2>/dev/null | tail -1 | cut -c1-200; }
     [ -s /root/sb_dolphinonce5.log ] && { echo "--- dolphin once5 (window 768, random order, from the fourth run's end) ---"; grep -E "buckets|training from|training set" /root/sb_dolphinonce5.log | tail -n 3 | cut -c1-400; grep -E "^\[eval|^\[best|^\[val\]|^\[window|Error|Traceback|sb_eval|ONCE5|^  " /root/sb/dolphin_once5/train.log /root/sb_dolphinonce5.log 2>/dev/null | sed 's#^/root/[^:]*:##' | tail -12 | cut -c1-300; grep "^\[step" /root/sb/dolphin_once5/train.log 2>/dev/null | tail -1 | cut -c1-200; }
     [ -s /root/sb_sbeval.log ] && { echo "--- sb_eval (fixed candidates, by position) ---"; tail -n 14 /root/sb_sbeval.log | cut -c1-300; }
     [ -s /root/sb/dolphin_once4/train.log ] && { echo "--- validation gap, the fourth run (from its log: training decoder loss over the 1000 steps before each evaluation vs the held-out's) ---"; python3 - <<'PV' 2>/dev/null
@@ -1149,7 +1151,7 @@ if ! pgrep -f "ladderlogkee[p].sh" >/dev/null; then
   cat > /root/ladderlogkeep.sh <<'RK'
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); R=baya1116/hypernet-sp-distill
 while :; do
-  f=$(ls -t /root/sb/ladder/r*/train.log /root/sb/ladder2/r*/train.log /root/sb/dolphin_ladder/r*/train.log /root/sb/dolphin_once/train.log /root/sb/dolphin_once2/train.log /root/sb/dolphin_once3/train.log /root/sb/dolphin_once4/train.log /root/sb/dolphin_once5/train.log 2>/dev/null | head -1)
+  f=$(ls -t /root/sb/ladder/r*/train.log /root/sb/ladder2/r*/train.log /root/sb/dolphin_ladder/r*/train.log /root/sb/dolphin_once/train.log /root/sb/dolphin_once2/train.log /root/sb/dolphin_once3/train.log /root/sb/dolphin_once4/train.log /root/sb/dolphin_once5/train.log /root/sb/dolphin_once6/train.log 2>/dev/null | head -1)
   [ -n "$f" ] && { echo "== $f $(date -u)"; grep -E "^\[eval|^\[best|^\[val\]|^\[plateau|^\[e2e\]" $f | tail -24 | cut -c1-400; grep "^\[step" $f | tail -2; } > /root/ladder_current.txt && { hf upload $R /root/ladder_current.txt sentbart/e2e/ladder/current.txt > /root/ladderlog_up.txt 2>&1 || echo "LADDERLOG_UP_FAIL $(date -u): $(tail -c 300 /root/ladderlog_up.txt | tr '\n' ' ')" | tee -a /root/ctl.log > /proc/1/fd/1; }
   sleep 1200
 done
@@ -1842,6 +1844,56 @@ echo "ONCE5_JOB_DONE $(date -u)"
 D5
   setsid nohup bash -c 'bash /root/dolphinonce5keep.sh 2>&1 | tee -a /root/sb_dolphinonce5.log' > /dev/null 2>&1 < /dev/null &
   echo "DOLPHINONCE5D_LAUNCHED $(date -u) from_ladder32=$ONCE5_FROM_LADDER32"
+fi
+
+# ---- 2026-10-13, the user: stop the fifth run ("Gemini's reasoning is a different process - it will break the model"),
+# train on R1 only. The flash corpus and its preparation go; the sixth run takes AM-DeepSeek-R1-Distilled's am_0.9M
+# (responses from DeepSeek-R1-671B; English rows only, the held-out's and the GRPO set's questions kept out, the first
+# 280,000 qualifying conversations) plus the 23,767 unused deepseek conversations, whole up to 768 sentences; the BART
+# grown 8+8 -> 16+16 from the fourth run's end (bge 12), 1900 sentences x 2 planned batches per update (3800 ran out of
+# memory in the fifth run), one pass; then sb_eval on the 768-whole held-out beside the fourth run's end. ----
+if [ ! -e /root/.once5_stopped ]; then touch /root/.once5_stopped
+  pkill -f "dolphinonce5kee[p].sh"; sleep 1; pkill -f "train_e2e.py.*dolphin_once5"; sleep 5
+  echo "ONCE5_JOB_DONE stopped by the user $(date -u) (flash data: the held-out loss rose 4.17 -> 4.55 by step 3000)" >> /root/sb_dolphinonce5.log
+  rm -f /root/sb/data/dr1_flash.jsonl /root/sb/data/dolphin768new/docs_002.jsonl /root/sb/data/dolphin768new/off_002.npy /root/sb/data/dolphin768full/docs_002.jsonl /root/sb/data/dolphin768full/off_002.npy /root/once5_run.txt
+  rm -rf /root/sb/dolphin_once5
+  echo "ONCE5_STOPPED $(date -u); $(df -h /root | tail -1 | awk '{print $4}') free"
+fi
+if [ ! -e /root/.dolphin_once6 ] && [ -e /root/.once5_stopped ] && grep -q -- "--schema" /root/sb/prep_dolphin.py && grep -q "BEST0" /root/sb/train_e2e.py; then touch /root/.dolphin_once6
+  cat > /root/dolphinonce6keep.sh <<'D6'
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); R=baya1116/hypernet-sp-distill; cd /root/sb; D=/root/sb/data/dolphin; DN=/root/sb/data/dolphin768new; DR=/root/sb/data/r1_768; DF7=/root/sb/data/dolphin768full
+while pgrep -f "train_e2e.py|sb_eval.py" >/dev/null; do sleep 60; done
+echo "[once6] start $(date -u +%H:%M); $(df -h /root | tail -1 | awk '{print $4}') free"
+pip install -q zstandard 2>&1 | tail -1
+Z=/root/sb/data/am_0.9M.jsonl.zst
+dl() { for try in 1 2 3 4; do [ -s $1 ] && [ "$(stat -c %s $1)" -ge $3 ] && return 0; curl -sSfL -C - -o $1 $2 || sleep 60; done; [ "$(stat -c %s $1 2>/dev/null || echo 0)" -ge $3 ]; }
+mkdir -p $DR; cp $D/docs_001.jsonl $DR/; cp $D/off_001.npy $DR/; cp $DN/docs_003.jsonl $DR/; cp $DN/off_003.npy $DR/
+if [ ! -s $DR/ready.ok ]; then
+  dl $Z https://huggingface.co/datasets/a-m-team/AM-DeepSeek-R1-Distilled-1.4M/resolve/main/am_0.9M.jsonl.zst 3200000000 || { echo "ONCE6_JOB_DONE download failed"; exit 1; }
+  echo "[once6] am_0.9M.jsonl.zst $(stat -c %s $Z) bytes; $(df -h /root | tail -1 | awk '{print $4}') free"
+  python3 /root/sb/prep_dolphin.py --out $DR --schema am --all 1 --shard 004 --id-prefix am1 --max-sents 768 --max-q 24 --max-docs 280000 --keep-eval $D/docs_001.jsonl --exclude-questions $D/docs_001.jsonl --exclude /root/sb/dl/dolphin_v1.jsonl --jsonl $Z 2>&1 | grep -E "PREP_DOLPHIN|Error|Traceback" | sed 's/^/[once6 am] /' | cut -c1-300
+  [ -s $DR/docs_004.jsonl ] && [ "$(wc -l < $DR/docs_004.jsonl)" -gt 100000 ] && touch $DR/ready.ok || { echo "ONCE6_JOB_DONE prep failed"; exit 1; }
+  echo "[once6] training set: AM R1 $(wc -l < $DR/docs_004.jsonl) + unused deepseek $(wc -l < $DR/docs_003.jsonl) conversations, whole up to 768 sentences; $(df -h /root | tail -1 | awk '{print $4}') free"
+fi
+I0=/root/sb/dolphin_once4/state_e2e.pt; [ -s $I0 ] || I0=/root/sb/dolphin_once4/model_best.pt
+echo "[once6] training from $I0 (the fourth run's end), BART 16+16 (grown from 8+8), bge 12, window 768, random order, 2 x 1900 sentences per update, one pass $(date -u +%H:%M)"
+PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python3 -u /root/sb/train_e2e.py --vec $DR --text $DR --eval-text $DR/docs_001.jsonl --out /root/sb/dolphin_once6 --grow $I0 --layers 16 --enc-layers 0 \
+  --buckets 64,128,192,256,384,512,768 --bucket-order random --sent-budget 1900 --plan-accum 2 --max-bs 64 --eval-seq 128 --page-queue 16 --pool 20000 --anchor-q 0 --select dec_top1 --patience 0 \
+  --eval-every 1000 --save-every 1000 2>&1 | grep --line-buffered -E "^\[e2e\]|^\[eval|^\[best|^\[val\]|^\[init|^\[grow|^\[model|^\[window|TRAIN_DONE|Error|Traceback|out of memory" | sed -u 's/^\(.\{400\}\).*/\1/'
+[ -s /root/sb/dolphin_once6/model_best.pt ] && hf upload $R /root/sb/dolphin_once6/model_best.pt sentbart/dolphin/once6/model_best.pt >/dev/null 2>&1 && echo "[once6] best on the hub: sentbart/dolphin/once6/model_best.pt"
+hf upload $R /root/sb/dolphin_once6/train.log sentbart/dolphin/once6/train.log >/dev/null 2>&1
+CK=""; for spec in run4_end=/root/sb/dolphin_once4/state_e2e.pt run6_best=/root/sb/dolphin_once6/model_best.pt run6_end=/root/sb/dolphin_once6/state_e2e.pt; do [ -s "${spec#*=}" ] && CK="$CK $spec"; done
+echo "[once6] sb_eval on the 768-whole held-out: $CK"
+python3 -u /root/sb/sb_eval.py --docs $DF7/docs_001.jsonl --ckpt $CK --bands 128,256,512,768 --out /root/sb_eval768.json 2>&1 | grep --line-buffered -vE "Warning|warn|documents \(" | sed 's/^/[once6 /;s/^\[once6 \[sb_eval\]/[once6 sb_eval]/' | cut -c1-300
+hf upload $R /root/sb_eval768.json sentbart/dolphin/sb_eval/sb_eval768.json >/dev/null 2>&1
+echo "ONCE6_JOB_DONE $(date -u)"
+D6
+  setsid nohup bash -c 'bash /root/dolphinonce6keep.sh 2>&1 | tee -a /root/sb_dolphinonce6.log' > /dev/null 2>&1 < /dev/null &
+  echo "DOLPHINONCE6_LAUNCHED $(date -u)"
+fi
+if [ -e /root/.dolphin_once6 ] && [ -s /root/dolphinonce6keep.sh ] && ! pgrep -f "dolphinonce6kee[p].sh" >/dev/null && ! grep -q "ONCE6_JOB_DONE" /root/sb_dolphinonce6.log 2>/dev/null; then
+  echo "[once6] relaunched $(date -u +%H:%M)" >> /root/sb_dolphinonce6.log
+  setsid nohup bash -c 'bash /root/dolphinonce6keep.sh 2>&1 | tee -a /root/sb_dolphinonce6.log' > /dev/null 2>&1 < /dev/null &
 fi
 echo "BOXI_OK serial $BOXI_SERIAL $(date -u)"
 # CTL-END

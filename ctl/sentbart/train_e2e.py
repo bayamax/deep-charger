@@ -276,11 +276,12 @@ STATE = os.path.join(E.out, "state_e2e.pt"); step0 = 0
 if os.path.exists(STATE):
     st = torch.load(STATE, map_location=DEV); model.load_state_dict(st["model"]); enc.load_state_dict(st["enc"])
     opt.load_state_dict(st["opt"]); sched.load_state_dict(st["sched"]); step0 = st["step"]
+    BEST0 = float(st.get("best", -1.0))   # the best so far, so a resumed run does not overwrite model_best.pt with a worse one
 
 
 def save(tag, step):
     meta = {"enc_layers": len(enc.encoder.layer), "layers": E.layers, "step": step, "args": vars(E)}
-    torch.save({"model": model.state_dict(), "enc": enc.state_dict(), "opt": opt.state_dict(), "sched": sched.state_dict(), **meta}, STATE + ".tmp")
+    torch.save({"model": model.state_dict(), "enc": enc.state_dict(), "opt": opt.state_dict(), "sched": sched.state_dict(), "best": float(globals().get("BEST", -1.0)), **meta}, STATE + ".tmp")
     os.replace(STATE + ".tmp", STATE)
     if tag != "latest":   # the state file above already holds the latest weights (2026-10-11: the disk ran out under BART 32+32)
         torch.save({"model": model.state_dict(), "enc": enc.state_dict(), **meta}, os.path.join(E.out, f"model_{tag}.pt"))
@@ -291,7 +292,7 @@ def out(line): print(line, flush=True); log.write(line + "\n"); log.flush()
 
 
 fmt = lambda r: " ".join(f"{k} {v:.3f}" if isinstance(v, float) else f"{k} {v}" for k, v in r.items())
-BEST = -1.0; STALE = 0
+BEST = globals().get("BEST0", -1.0) if step0 else -1.0; STALE = 0
 if step0 == 0:
     r = eval_now(); BEST = r[E.select]; out(f"[eval 0] {fmt(r)}")
     if E.eval_only: out(f"EVAL_ONLY_DONE {E.init} eval_seq {E.eval_seq or 'whole'} {E.select} {BEST:.3f}"); raise SystemExit(0)
