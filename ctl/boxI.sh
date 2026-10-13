@@ -8,7 +8,7 @@ cd /root
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null)
 R=baya1116/hypernet-sp-distill
 RAW="https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl"
-BOXI_SERIAL=94
+BOXI_SERIAL=95
 if [ -f /root/.boxi_serial ] && [ "$(cat /root/.boxi_serial)" -gt "$BOXI_SERIAL" ] 2>/dev/null; then echo "BOXI_STALE $BOXI_SERIAL"; exit 0; fi
 echo $BOXI_SERIAL > /root/.boxi_serial
 mkdir -p /root/sb /root/work
@@ -45,6 +45,7 @@ if [ ! -e /root/.mirror_r12 ]; then touch /root/.mirror_r12; pkill -f "mirrorkee
 if [ ! -e /root/.mirror_r13 ]; then touch /root/.mirror_r13; pkill -f "mirrorkee[p].sh"; sleep 1; fi   # the fifth run
 if [ ! -e /root/.mirror_r14 ]; then touch /root/.mirror_r14; pkill -f "mirrorkee[p].sh"; sleep 1; fi   # the validation lines
 if [ ! -e /root/.mirror_r15 ]; then touch /root/.mirror_r15; pkill -f "mirrorkee[p].sh"; sleep 1; fi   # the fourth run's gap from its log
+if [ ! -e /root/.mirror_r16 ]; then touch /root/.mirror_r16; pkill -f "mirrorkee[p].sh"; sleep 1; fi   # the keepers in the process list
 if ! pgrep -f "mirrorkee[p].sh" >/dev/null; then
   cat > /root/mirrorkeep.sh <<'MK'
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); R=baya1116/hypernet-sp-distill
@@ -85,7 +86,7 @@ try:
 except Exception as e: print('  (no ladder.json yet)', e)
 for f in sorted(glob.glob('/root/sb/ladder2/*_dev.json')): print(' ', f.split('/')[-1], open(f).read().strip()[:300])
 " 2>&1
-    echo "--- processes ---"; pgrep -fa "python3 /root/sb/" | cut -c1-300; } > /root/boxlog.txt 2>&1
+    echo "--- processes ---"; pgrep -fa "kee[p].sh|train_e2e|sb_eval|prep_dolphin" | cut -c1-200; } > /root/boxlog.txt 2>&1
   hf upload $R /root/boxlog.txt sentbart/audit/boxlog_I.txt > /root/mirror_up.txt 2>&1 || { echo "MIRROR_UP_FAIL $(date -u): $(tail -c 300 /root/mirror_up.txt | tr '\n' ' ')" | tee -a /root/ctl.log > /proc/1/fd/1; }
   sleep 600
 done
