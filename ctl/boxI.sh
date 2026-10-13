@@ -8,7 +8,7 @@ cd /root
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null)
 R=baya1116/hypernet-sp-distill
 RAW="https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl"
-BOXI_SERIAL=95
+BOXI_SERIAL=96
 if [ -f /root/.boxi_serial ] && [ "$(cat /root/.boxi_serial)" -gt "$BOXI_SERIAL" ] 2>/dev/null; then echo "BOXI_STALE $BOXI_SERIAL"; exit 0; fi
 echo $BOXI_SERIAL > /root/.boxi_serial
 mkdir -p /root/sb /root/work
@@ -1771,6 +1771,69 @@ echo "ONCE5_JOB_DONE $(date -u)"
 D5
   setsid nohup bash -c 'bash /root/dolphinonce5keep.sh 2>&1 | tee -a /root/sb_dolphinonce5.log' > /dev/null 2>&1 < /dev/null &
   echo "DOLPHINONCE5B_LAUNCHED $(date -u)"
+fi
+if [ ! -e /root/.dolphin_once5c ] && [ -e /root/.dolphin_once5b ] && grep -q "plan-accum" /root/sb/train_e2e.py; then touch /root/.dolphin_once5c
+  pkill -f "dolphinonce5kee[p].sh"; sleep 2
+  cat > /root/dolphinonce5keep.sh <<'D5'
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); R=baya1116/hypernet-sp-distill; cd /root/sb; D=/root/sb/data/dolphin; D2=/root/sb/data/dolphin512; DN=/root/sb/data/dolphin768new; DF7=/root/sb/data/dolphin768full
+until grep -q "SBEVAL_JOB_DONE" /root/sb_sbeval.log 2>/dev/null; do sleep 120; done
+while pgrep -f "train_e2e.py|sb_eval.py" >/dev/null; do sleep 60; done
+echo "[once5] start $(date -u +%H:%M); $(df -h /root | tail -1 | awk '{print $4}') free"
+J=/root/sb/data/dr1_deepseek.jsonl; JF=/root/sb/data/dr1_flash.jsonl
+dl() { for try in 1 2 3 4; do [ -s $1 ] && [ "$(stat -c %s $1)" -ge $3 ] && return 0; curl -sSfL -C - -o $1 $2 || sleep 60; done; [ "$(stat -c %s $1 2>/dev/null || echo 0)" -ge $3 ]; }
+mkdir -p $DN $DF7; cp $D/docs_001.jsonl $DN/; cp $D/off_001.npy $DN/
+if [ ! -s $DN/ready.ok ]; then
+  dl $J https://huggingface.co/datasets/cognitivecomputations/dolphin-r1/resolve/main/dolphin-r1-reasoning-deepseek.jsonl 3848000000 || { echo "ONCE5_JOB_DONE deepseek download failed"; exit 1; }
+  dl $JF https://huggingface.co/datasets/cognitivecomputations/dolphin-r1/resolve/main/dolphin-r1-reasoning-flash.jsonl 3480000000 || { echo "ONCE5_JOB_DONE flash download failed"; exit 1; }
+  # the flash set, whole up to 768, questions up to 24 sentences, the held-out's and the GRPO set's questions kept out
+  python3 /root/sb/prep_dolphin.py --out $DN --all 1 --shard 002 --id-prefix fl1 --max-sents 768 --max-q 24 --keep-eval $D/docs_001.jsonl --exclude-questions $D/docs_001.jsonl --exclude /root/sb/dl/dolphin_v1.jsonl --jsonl $JF 2>&1 | grep -E "PREP_DOLPHIN|Error|Traceback" | sed 's/^/[once5 flash] /' | cut -c1-300
+  # the deepseek set whole up to 768 with questions up to 24 sentences, then only the conversations the earlier runs never saw
+  python3 /root/sb/prep_dolphin.py --out /root/sb/data/dolphin768 --all 1 --shard 000 --max-sents 768 --max-q 24 --keep-eval $D/docs_001.jsonl --exclude /root/sb/dl/dolphin_v1.jsonl --jsonl $J 2>&1 | grep -E "PREP_DOLPHIN|Error|Traceback" | sed 's/^/[once5 deepseek] /' | cut -c1-300
+  python3 - <<'PN'
+import json, numpy as np
+old = {json.loads(l)["id"] for l in open("/root/sb/data/dolphin512/docs_000.jsonl") if l.strip()}
+n = 0; lens = []
+with open("/root/sb/data/dolphin768new/docs_003.jsonl", "w") as f:
+    for l in open("/root/sb/data/dolphin768/docs_000.jsonl"):
+        if not l.strip(): continue
+        d = json.loads(l)
+        if d["id"] in old: continue
+        f.write(l if l.endswith("\n") else l + "\n"); lens.append(len(d["sents"])); n += 1
+np.save("/root/sb/data/dolphin768new/off_003.npy", np.cumsum([0] + lens).astype(np.int64))
+print(f"[once5 deepseek] {n} conversations never used before (questions of 13-24 sentences) -> docs_003", flush=True)
+PN
+  python3 /root/sb/prep_dolphin.py --out $DF7 --rewrite-eval $D/docs_001.jsonl --max-sents 768 --jsonl $J 2>&1 | grep -E "PREP_DOLPHIN|Error|Traceback" | sed 's/^/[once5 held-out] /' | cut -c1-300
+  ln -sf $DN/docs_002.jsonl $DF7/docs_002.jsonl; ln -sf $DN/off_002.npy $DF7/off_002.npy; ln -sf $DN/docs_003.jsonl $DF7/docs_003.jsonl; ln -sf $DN/off_003.npy $DF7/off_003.npy
+  [ -s $DN/docs_002.jsonl ] && [ "$(wc -l < $DN/docs_002.jsonl)" -gt 100000 ] && touch $DN/ready.ok || { echo "ONCE5_JOB_DONE prep failed"; exit 1; }
+  echo "[once5] training set: flash $(wc -l < $DN/docs_002.jsonl) + new deepseek $(wc -l < $DN/docs_003.jsonl) conversations, whole up to 768 sentences; $(df -h /root | tail -1 | awk '{print $4}') free"
+fi
+I0=/root/sb/dolphin_once4/state_e2e.pt; [ -s $I0 ] || I0=/root/sb/dolphin_once4/model_best.pt
+# 2026-10-13, the user: decide by growth per step - the stock-layer run is not faster than the earlier regime's, so the layers
+# come first. The BART is grown 8+8 -> 16+16 (train.py's --grow: the new layers start as the identity, so step 0 is the fourth
+# run's end), bge stays 12. /root/once5_layers.txt overrides (8 = the stock-layer plan). If the doubled BART runs out of memory
+# at 3800 sentences per update, the run restarts with two planned batches of 1900 per update (the same sentences per update).
+LAYERS=$(cat /root/once5_layers.txt 2>/dev/null | tr -dc 0-9); LAYERS=${LAYERS:-16}
+if [ "$LAYERS" -gt 8 ]; then INITARG="--grow $I0 --layers $LAYERS"; else INITARG="--init $I0 --layers 8"; fi
+run5() {   # $1 = sentences per planned batch, $2 = planned batches per update
+  PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python3 -u /root/sb/train_e2e.py --vec $DN --text $DN --eval-text $DN/docs_001.jsonl --out /root/sb/dolphin_once5 $INITARG --enc-layers 0 \
+    --buckets 64,128,192,256,384,512,768 --bucket-order random --sent-budget $1 --plan-accum $2 --max-bs 64 --eval-seq 128 --page-queue 16 --pool 20000 --anchor-q 0 --select dec_top1 --patience 0 \
+    --eval-every 1000 --save-every 1000 2>&1 | grep --line-buffered -E "^\[e2e\]|^\[eval|^\[best|^\[val\]|^\[init|^\[grow|^\[model|^\[window|TRAIN_DONE|Error|Traceback|out of memory" | sed -u 's/^\(.\{400\}\).*/\1/' | tee /root/once5_run.txt
+}
+echo "[once5] training from $I0 (the fourth run's end), BART $LAYERS+$LAYERS$([ "$LAYERS" -gt 8 ] && echo " (grown from 8+8)"), bge 12, window 768, random order, one pass over the new conversations $(date -u +%H:%M)"
+run5 3800 1
+if grep -q "out of memory" /root/once5_run.txt && ! grep -q "TRAIN_DONE" /root/once5_run.txt; then
+  echo "[once5] out of memory at 3800 sentences per update - again as 2 x 1900 (the same sentences per update; a saved state resumes from its step) $(date -u +%H:%M)"; run5 1900 2
+fi
+[ -s /root/sb/dolphin_once5/model_best.pt ] && hf upload $R /root/sb/dolphin_once5/model_best.pt sentbart/dolphin/once5/model_best.pt >/dev/null 2>&1 && echo "[once5] best on the hub: sentbart/dolphin/once5/model_best.pt"
+hf upload $R /root/sb/dolphin_once5/train.log sentbart/dolphin/once5/train.log >/dev/null 2>&1
+CK=""; for spec in run4_end=/root/sb/dolphin_once4/state_e2e.pt run5_best=/root/sb/dolphin_once5/model_best.pt run5_end=/root/sb/dolphin_once5/state_e2e.pt; do [ -s "${spec#*=}" ] && CK="$CK $spec"; done
+echo "[once5] sb_eval on the 768-whole held-out: $CK"
+python3 -u /root/sb/sb_eval.py --docs $DF7/docs_001.jsonl --ckpt $CK --bands 128,256,512,768 --out /root/sb_eval768.json 2>&1 | grep --line-buffered -vE "Warning|warn|documents \(" | sed 's/^/[once5 /;s/^\[once5 \[sb_eval\]/[once5 sb_eval]/' | cut -c1-300
+hf upload $R /root/sb_eval768.json sentbart/dolphin/sb_eval/sb_eval768.json >/dev/null 2>&1
+echo "ONCE5_JOB_DONE $(date -u)"
+D5
+  setsid nohup bash -c 'bash /root/dolphinonce5keep.sh 2>&1 | tee -a /root/sb_dolphinonce5.log' > /dev/null 2>&1 < /dev/null &
+  echo "DOLPHINONCE5C_LAUNCHED $(date -u)"
 fi
 echo "BOXI_OK serial $BOXI_SERIAL $(date -u)"
 # CTL-END
