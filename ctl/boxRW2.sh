@@ -2,13 +2,18 @@
 # box RW2 (2026-10-14, the 3090 that replaces box RW's 3060 for the GRPO round: ~2.6x the speed for 1.5x the price) - box RW, the user: rent a second box, as cheap as possible, and try GRPO with a reward model's 0-1 score as
 # the reward). First step: can a dedicated reward model tell Deep Charger's better replies from its worse ones? The
 # Skywork-Reward-V2 (Qwen3) family scores the archived GRPO rollouts of mtg7-mtg10 (rm_scan.py). Pull-based as the others.
-BOXRW2_SERIAL=6
+BOXRW2_SERIAL=7
 if [ -f /root/.boxrw2_serial ] && [ "$(cat /root/.boxrw2_serial)" -gt "$BOXRW2_SERIAL" ] 2>/dev/null; then echo "BOXRW2_STALE $BOXRW2_SERIAL"; exit 0; fi
 echo $BOXRW2_SERIAL > /root/.boxrw2_serial
 mkdir -p /root/work /root/hfdl; cd /root/work
 [ -s /root/.hf_token ] || { [ -n "$HF_TOKEN" ] && printf '%s' "$HF_TOKEN" > /root/.hf_token && chmod 600 /root/.hf_token; }
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); R=baya1116/hypernet-sp-distill
 RAW="https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl"
+for f in rm_scan.py rm_server.py rm_quality.py online_loop.py pool_eval.py web_search.py; do
+  :; done
+mkdir -p /root/sb; for f in sentbart/prep_dolphin.py sentbart/train.py sentbart/train_e2e.py sentbart/sb_eval.py; do
+  for try in 1 2 3; do curl -sS -o /root/sb/$(basename $f) "$RAW/$f?nocache=$(date +%s)" && python3 -m py_compile /root/sb/$(basename $f) && break; sleep 5; done
+done
 for f in rm_scan.py rm_server.py rm_quality.py online_loop.py pool_eval.py web_search.py; do
   for try in 1 2 3; do curl -sS -o /root/work/$f "$RAW/$f?nocache=$(date +%s)" && python3 -m py_compile /root/work/$f && break; sleep 5; done
 done
@@ -25,12 +30,13 @@ fi
 # ---- the mirror: the box log to the hub every 10 minutes ----
 if [ ! -e /root/.rwmirror_r2 ]; then touch /root/.rwmirror_r2; pkill -f "rwmirro[r].sh"; sleep 1; fi
 if [ ! -e /root/.rwmirror_r5 ]; then touch /root/.rwmirror_r5; pkill -f "rwmirro[r].sh"; sleep 1; fi
+if [ ! -e /root/.rwmirror_r6 ]; then touch /root/.rwmirror_r6; pkill -f "rwmirro[r].sh"; sleep 1; fi
 if ! pgrep -f "rwmirro[r].sh" >/dev/null; then
   cat > /root/rwmirror.sh <<'MR'
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); R=baya1116/hypernet-sp-distill
 while :; do
   { echo "=== boxRW2 $(date -u) ==="; echo "--- ctl.log ---"; tail -n 30 /root/ctl.log 2>/dev/null
-    for f in /root/fromi.log /root/rm_scan.log /root/grpoboot.log /root/rmround.log; do [ -s $f ] && { echo "--- $f ---"; grep -vE "Warning|warn|Loading weights" $f | tail -n 30 | cut -c1-600; }; done
+    for f in /root/fromi.log /root/rm_scan.log /root/grpoboot.log /root/rmround.log /root/earlyscreen.log /root/parscreen.log /root/bartprep.log /root/bart7.log; do [ -s $f ] && { echo "--- $f ---"; grep -vE "Warning|warn|Loading weights" $f | tail -n 30 | cut -c1-600; }; done
     [ -s /root/rm1_run.log ] && { echo "--- rm1 steps ---"; grep -E "^\[step|^\[rm\]|rollback|Traceback|out of memory|Error" /root/rm1_run.log | sed -E 's/\| ce=.*cumulative/| cum/' | tail -n 10 | cut -c1-240; }
     [ -s /root/online_rm1/rollouts.jsonl ] && { echo "--- rm1 by 20-step block ---"; python3 - /root/online_rm1/rollouts.jsonl <<'PB' 2>/dev/null
 import json, sys, collections
@@ -44,6 +50,7 @@ for k in sorted(b):
     n, p, u, s_, rp, rn = b[k]; print(f"  steps {20*k+1:3d}-{20*k+20:3d}: {n:3d} rollouts, pass {100*p/n:3.0f}%, unfinished {100*u/n:3.0f}%, searches {s_/n:.2f}, rm_p {rp/max(rn,1):.3f} ({rn})")
 PB
     }
+    [ -s /root/sb/dolphin_once7/train.log ] && { echo "--- once7 on this box (train.log) ---"; grep -E "^\[eval|^\[best|^\[val\]|Error|Traceback|memory" /root/sb/dolphin_once7/train.log | tail -n 8 | cut -c1-260; grep "^\[step" /root/sb/dolphin_once7/train.log | tail -1 | cut -c1-200; }
     echo "--- gpu ---"; nvidia-smi --query-gpu=memory.used,memory.total,utilization.gpu --format=csv,noheader
     echo "--- disk ---"; df -h /root | tail -1
     echo "--- processes ---"; pgrep -fa "python3|kee[p].sh" | cut -c1-200; } > /root/boxlog.txt 2>&1
@@ -195,5 +202,143 @@ FI
   setsid nohup bash -c 'bash /root/fromikeep.sh 2>&1 | tee -a /root/fromi.log' > /dev/null 2>&1 < /dev/null &
   echo "FROMI_LAUNCHED $(date -u)"
 fi
+
+# ---- 2026-10-14, the user: one box at a time (box I closes once its work is on the hub), and this one used to the full:
+# GPU and VRAM. During the round the card ran at ~23% with half its 24 GB free. ----
+# (a) each copy's single-turn shard 0 is screened as soon as the copy is written, beside the training (one lane, ~6.5 GB)
+if [ ! -e /root/.earlyscreen ]; then touch /root/.earlyscreen
+  cat > /root/earlyscreenkeep.sh <<'ES'
+cd /root/work
+EVARGS="--rw 768 --maxd 384 --samepage 1 --decode plain --temp 0.6 --gen 4000 --stop eos --replycap 600"
+ENV="SP_BASE=/root/gptq_hf_gq14 SP_RANK=16 SP_NOSYS=1 SP_EPISODIC=1 OMP_NUM_THREADS=1 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True"
+while ! grep -q "\[rm1\] stopped at step" /root/rmround.log 2>/dev/null; do
+  for k in 20 40; do
+    CK=/root/rm1_s$k.safetensors; f=/root/work/rm1_s${k}st_0.jsonl; e=/root/work/rm1_s${k}st_0e.jsonl
+    [ -s $CK ] || continue; [ "$(wc -l < $f 2>/dev/null || echo 0)" -ge 100 ] && continue; [ -e /root/.es_$k ] && continue; touch /root/.es_$k
+    echo "[early] rm1_s$k shard 0 beside the training $(date -u +%H:%M)"
+    env $ENV python3 /root/work/pool_eval.py $CK /root/work/ev_0.jsonl $e --n 100 $EVARGS --tag "[rm1_s${k}st0e]" > /root/rm1_s${k}st_0e.log 2>&1
+    [ "$(wc -l < $e 2>/dev/null || echo 0)" -ge 100 ] && [ "$(wc -l < $f 2>/dev/null || echo 0)" -lt 100 ] && cp $e $f
+    echo "[early] rm1_s$k shard 0: $(python3 -c "import json,sys;print(sum(bool(json.loads(l).get('correct')) for l in open(sys.argv[1]) if l.strip()))" $e)/100 $(date -u +%H:%M)"
+  done
+  sleep 60
+done
+echo "EARLYSCREEN_DONE $(date -u)"
+ES
+  setsid nohup bash -c 'bash /root/earlyscreenkeep.sh 2>&1 | tee -a /root/earlyscreen.log' > /dev/null 2>&1 < /dev/null &
+fi
+
+# (b) after the training the screens run side by side (up to three lanes of ~6.5 GB on the 24 GB card) instead of one after
+# another: the round keeper's serial screens are stopped and this keeper does them, with the same outputs and lines.
+if [ ! -e /root/.parscreen ]; then touch /root/.parscreen
+  cat > /root/parscreenkeep.sh <<'PS'
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); R=baya1116/hypernet-sp-distill; cd /root/work
+EVARGS="--rw 768 --maxd 384 --samepage 1 --decode plain --temp 0.6 --gen 4000 --stop eos --replycap 600"
+ENV="SP_BASE=/root/gptq_hf_gq14 SP_RANK=16 SP_NOSYS=1 SP_EPISODIC=1 OMP_NUM_THREADS=1 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True"
+read M C S D < /root/rm_choice.txt
+cnt() { python3 -c "import json,sys;print(sum(bool(json.loads(l).get('correct')) for l in open(sys.argv[1]) if l.strip()))" "$1" 2>/dev/null || echo 0; }
+turns() { python3 -c "
+import json,sys; r=[json.loads(l) for l in open(sys.argv[1]) if l.strip()]
+print(' '.join(str(sum(bool(x['correct']) for x in r if x['turn']==t)) for t in range(int(sys.argv[2]))))" "$1" "$2" 2>/dev/null; }
+lines() { wc -l < "$1" 2>/dev/null || echo 0; }
+until grep -q "\[rm1\] stopped at step" /root/rmround.log 2>/dev/null; do sleep 60; done
+grep -q "RMROUND_JOB_DONE failed" /root/rmround.log && { echo "PARSCREEN_SKIPPED (no training)"; exit 0; }
+until pgrep -f "pool_eval.py.*rm1_s[0-9]*st0\]" >/dev/null || grep -q "RMROUND_JOB_DONE" /root/rmround.log; do sleep 20; done
+pkill -f "rmroundkee[p].sh"; sleep 1; pkill -f "pool_eval.py.*\[rm1_s[0-9]*st0\]"; pkill -f "rm_quality.py"; sleep 5
+echo "[par] the round keeper's serial screens stopped; side by side from here $(date -u +%H:%M)" | tee -a /root/rmround.log
+pe() { env $ENV python3 /root/work/pool_eval.py "$@" > /root/$(basename ${3%.jsonl}).log 2>&1; }
+# shard 0 of each copy (the early keeper's run is waited for, not repeated)
+for k in 20 40 60; do f=/root/work/rm1_s${k}st_0.jsonl; [ -s /root/rm1_s$k.safetensors ] || continue
+  if pgrep -f "rm1_s${k}st_0e" >/dev/null; then ( while pgrep -f "rm1_s${k}st_0e" >/dev/null; do sleep 30; done; [ "$(lines /root/work/rm1_s${k}st_0e.jsonl)" -ge 100 ] && cp /root/work/rm1_s${k}st_0e.jsonl $f ) &
+  elif [ "$(lines $f)" -lt 100 ]; then rm -f $f; pe /root/rm1_s$k.safetensors /root/work/ev_0.jsonl $f --n 100 $EVARGS --tag "[rm1_s${k}st0]" & sleep 20; fi
+done; wait
+best=""; bc=-1
+for k in 20 40 60; do f=/root/work/rm1_s${k}st_0.jsonl; [ -s $f ] || continue; c=$(cnt $f)
+  echo "[rm1] rm1_s$k single shard 0: $c/100 (start 56; the previous rounds' copies 47-49)" | tee -a /root/rmround.log
+  [ "$c" -gt "$bc" ] && { bc=$c; best=$k; }
+done
+CK=/root/rm1_s$best.safetensors; T=rm1_s$best; echo "[rm1] best copy by shard 0: $T ($bc) - the full screens, side by side $(date -u +%H:%M)" | tee -a /root/rmround.log
+[ "$(lines /root/work/${T}st_1.jsonl)" -ge 100 ] || { rm -f /root/work/${T}st_1.jsonl; pe $CK /root/work/ev_1.jsonl /root/work/${T}st_1.jsonl --n 100 $EVARGS --tag "[${T}st1]" & sleep 20; }
+[ "$(lines /root/work/${T}st_2.jsonl)" -ge 100 ] || { rm -f /root/work/${T}st_2.jsonl; pe $CK /root/work/ev_2.jsonl /root/work/${T}st_2.jsonl --n 100 $EVARGS --tag "[${T}st2]" & sleep 20; }
+[ "$(lines /root/work/br3_$T.jsonl)" -ge 150 ] || { rm -f /root/work/br3_$T.jsonl; pe $CK /root/work/eval300.jsonl /root/work/br3_$T.jsonl --multiturn /root/work/mt_eval_bridge3.jsonl --mt-mode win --n 1000 $EVARGS --tag "[br3-$T]" & sleep 20; }
+wait
+[ "$(lines /root/work/ch3_$T.jsonl)" -ge 180 ] || pe $CK /root/work/eval300.jsonl /root/work/ch3_$T.jsonl --multiturn /root/work/mt_eval_chain3.jsonl --mt-mode win --n 1000 $EVARGS --tag "[ch3-$T]"
+s300=$(( $(cnt /root/work/${T}st_0.jsonl) + $(cnt /root/work/${T}st_1.jsonl) + $(cnt /root/work/${T}st_2.jsonl) ))
+{ echo "[rm1] $T single: $s300/300 (start 162)"; echo "[rm1] $T br3: $(turns /root/work/br3_$T.jsonl 2) (start 35 31)"; echo "[rm1] $T chain3: $(turns /root/work/ch3_$T.jsonl 3) (start 28 17 4)"; } | tee -a /root/rmround.log
+for x in "/root/work/${T}st_0.jsonl ${T}_st0" "/root/work/mtg7_s40st_0.jsonl start_st0" "/root/work/br3_$T.jsonl ${T}_br3" "/root/work/br3_mtg7_s40.jsonl start_br3" "/root/work/ch3_$T.jsonl ${T}_ch3" "/root/work/ch3_mtg7_s40.jsonl start_ch3"; do
+  set -- $x; PYTHONPATH=/root/rmenv python3 /root/work/rm_quality.py $M $1 $2 2>/dev/null | sed 's/^/[rm1] /' | tee -a /root/rmround.log; done
+for f in /root/work/rm1_s*st_*.jsonl /root/work/br3_rm1_*.jsonl /root/work/ch3_rm1_*.jsonl; do [ -s $f ] && hf upload $R $f pooler_distill/chatsft/rmgrpo/screens/$(basename $f) >/dev/null 2>&1; done
+echo "RMROUND_JOB_DONE $(date -u)" | tee -a /root/rmround.log
+PS
+  setsid nohup bash -c 'bash /root/parscreenkeep.sh 2>&1 | tee -a /root/parscreen.log' > /dev/null 2>&1 < /dev/null &
+fi
+
+# (c) the context BART moves here from box I: its data is prepared now on this box's idle CPU (the same corpora, the same
+# commands, so the same plan), and the seventh run resumes from box I's state once that is on the hub and the round's
+# screens are done (BART ~8 GB beside them would not fit).
+if [ ! -e /root/.bartprep ]; then touch /root/.bartprep
+  cat > /root/bartprepkeep.sh <<'BP'
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); R=baya1116/hypernet-sp-distill; cd /root/sb
+pip install -q blingfire zstandard 2>&1 | grep -v WARNING | tail -1
+D=/root/sb/data/dolphin; AH=/root/sb/data/am_held; DB=/root/sb/data/r1b_768; D7=/root/sb/data/dolphin768; DF7=/root/sb/data/dolphin768full
+J=/root/sb/data/dr1_deepseek.jsonl; Z=/root/sb/data/am_0.9M.jsonl.zst; mkdir -p $D $AH $DB $D7 $DF7
+dl() { for try in 1 2 3 4; do [ -s $1 ] && [ "$(stat -c %s $1)" -ge $3 ] && return 0; curl -sSfL -C - -o $1 $2 || sleep 60; done; [ "$(stat -c %s $1 2>/dev/null || echo 0)" -ge $3 ]; }
+hf download $R sentbart/dolphin/data/docs_001.jsonl --local-dir /root/hfdl >/dev/null 2>&1; cp /root/hfdl/sentbart/dolphin/data/docs_001.jsonl $D/docs_001.jsonl
+python3 -c "import json, numpy as np; L=[len(json.loads(l)['sents']) for l in open('$D/docs_001.jsonl') if l.strip()]; np.save('$D/off_001.npy', np.cumsum([0]+L).astype(np.int64)); print('[bartprep] held-out', len(L), 'conversations')"
+dl $J https://huggingface.co/datasets/cognitivecomputations/dolphin-r1/resolve/main/dolphin-r1-reasoning-deepseek.jsonl 3848000000 || { echo "BARTPREP_FAILED deepseek"; exit 1; }
+dl $Z https://huggingface.co/datasets/a-m-team/AM-DeepSeek-R1-Distilled-1.4M/resolve/main/am_0.9M.jsonl.zst 3200000000 || { echo "BARTPREP_FAILED am"; exit 1; }
+EX=/root/work/dolphin_v1.jsonl
+python3 /root/sb/prep_dolphin.py --out $D7 --all 1 --shard 000 --max-sents 768 --max-q 24 --keep-eval $D/docs_001.jsonl --exclude $EX --jsonl $J 2>&1 | grep -E "PREP_DOLPHIN|Error|Traceback" | sed 's/^/[bartprep deepseek] /' | cut -c1-300 &
+python3 /root/sb/prep_dolphin.py --out $DF7 --rewrite-eval $D/docs_001.jsonl --max-sents 768 --jsonl $J 2>&1 | grep -E "PREP_DOLPHIN|Error|Traceback" | sed 's/^/[bartprep held-out 768] /' | cut -c1-300 &
+python3 /root/sb/prep_dolphin.py --out $AH --schema am --all 1 --shard 005 --id-prefix am1 --max-sents 768 --max-q 24 --skip-rows 342045 --stride 40 --max-docs 4000 --keep-eval $D/docs_001.jsonl --exclude-questions $D/docs_001.jsonl --exclude $EX --jsonl $Z 2>&1 | grep -E "PREP_DOLPHIN|Error|Traceback" | sed 's/^/[bartprep am held-out] /' | cut -c1-300
+python3 /root/sb/prep_dolphin.py --out $DB --schema am --all 1 --shard 006 --id-prefix am1 --max-sents 768 --max-q 24 --skip-rows 342045 --keep-eval $D/docs_001.jsonl --exclude-questions $D/docs_001.jsonl $AH/docs_005.jsonl --exclude $EX --jsonl $Z 2>&1 | grep -E "PREP_DOLPHIN|Error|Traceback" | sed 's/^/[bartprep am] /' | cut -c1-300
+wait
+cp $D/docs_001.jsonl $D/off_001.npy $DB/; ln -sf $D7/docs_000.jsonl $DB/docs_000.jsonl; ln -sf $D7/off_000.npy $DB/off_000.npy
+n0=$(wc -l < $DB/docs_000.jsonl); n6=$(wc -l < $DB/docs_006.jsonl); nh=$(wc -l < $AH/docs_005.jsonl)
+echo "[bartprep] dolphin $n0 (box I: 245072), AM $n6 (box I: 505681), AM held-out $nh (4000) - $([ "$n0" = 245072 ] && [ "$n6" = 505681 ] && echo "the same set as box I's" || echo "NOT the same as box I's: the plan will differ"); $(df -h /root | tail -1 | awk '{print $4}') free"
+rm -f $J $Z
+echo ok > $DB/ready.ok; echo "BARTPREP_DONE $(date -u)"
+BP
+  setsid nohup bash -c 'bash /root/bartprepkeep.sh 2>&1 | tee -a /root/bartprep.log' > /dev/null 2>&1 < /dev/null &
+fi
+if [ ! -e /root/.bart7 ]; then touch /root/.bart7
+  cat > /root/bart7keep.sh <<'B7'
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); R=baya1116/hypernet-sp-distill; cd /root/sb
+DB=/root/sb/data/r1b_768; AH=/root/sb/data/am_held; DF7=/root/sb/data/dolphin768full
+until [ -e $DB/ready.ok ] && grep -q "RMROUND_JOB_DONE" /root/rmround.log 2>/dev/null; do sleep 120; done
+mkdir -p /root/sb/dolphin_once6 /root/sb/dolphin_once7
+until hf download $R sentbart/dolphin/once6/state_end.pt sentbart/dolphin/once7/state_latest.pt --local-dir /root/hfdl >/dev/null 2>&1 && [ -s /root/hfdl/sentbart/dolphin/once7/state_latest.pt ] && [ -s /root/hfdl/sentbart/dolphin/once6/state_end.pt ]; do sleep 600; done
+mv /root/hfdl/sentbart/dolphin/once6/state_end.pt /root/sb/dolphin_once6/state_e2e.pt; mv /root/hfdl/sentbart/dolphin/once7/state_latest.pt /root/sb/dolphin_once7/state_e2e.pt
+hf download $R sentbart/dolphin/once7/model_best_partial.pt sentbart/dolphin/once7/train_partial.log --local-dir /root/hfdl >/dev/null 2>&1
+[ -s /root/hfdl/sentbart/dolphin/once7/model_best_partial.pt ] && mv /root/hfdl/sentbart/dolphin/once7/model_best_partial.pt /root/sb/dolphin_once7/model_best.pt
+[ -s /root/hfdl/sentbart/dolphin/once7/train_partial.log ] && cp /root/hfdl/sentbart/dolphin/once7/train_partial.log /root/sb/dolphin_once7/train.log
+echo "[bart7] the seventh run resumes here from step $(python3 -c "import torch; print(torch.load('/root/sb/dolphin_once7/state_e2e.pt', map_location='cpu', weights_only=False).get('step'))") $(date -u +%H:%M)"
+( while sleep 7200; do f=/root/sb/dolphin_once7/state_e2e.pt; [ -s $f ] && cp $f /root/once7_up.pt && hf upload $R /root/once7_up.pt sentbart/dolphin/once7/state_latest.pt >/dev/null 2>&1 && echo "[bart7] state on the hub $(date -u +%H:%M)"; rm -f /root/once7_up.pt; done ) &
+PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python3 -u /root/sb/train_e2e.py --vec $DB --text $DB --eval-text $DB/docs_001.jsonl --out /root/sb/dolphin_once7 --init /root/sb/dolphin_once6/state_e2e.pt --layers 16 --enc-layers 0 \
+  --buckets 64,128,192,256,384,512,768 --bucket-order random --sent-budget 1900 --plan-accum 2 --max-bs 64 --eval-seq 128 --page-queue 16 --pool 0 --anchor-q 0 --select dec_top1 --patience 0 \
+  --eval-every 1000 --save-every 1000 2>&1 | grep --line-buffered -E "^\[e2e\]|^\[eval|^\[best|^\[val\]|^\[init|^\[model|TRAIN_DONE|Error|Traceback|out of memory" | sed -u 's/^\(.\{400\}\).*/\1/'
+[ -s /root/sb/dolphin_once7/model_best.pt ] && hf upload $R /root/sb/dolphin_once7/model_best.pt sentbart/dolphin/once7/model_best.pt >/dev/null 2>&1 && echo "[bart7] best on the hub"
+hf upload $R /root/sb/dolphin_once7/train.log sentbart/dolphin/once7/train.log >/dev/null 2>&1; hf upload $R /root/sb/dolphin_once7/state_e2e.pt sentbart/dolphin/once7/state_end.pt >/dev/null 2>&1
+hf download $R sentbart/dolphin/once4/model_best.pt --local-dir /root/hfdl >/dev/null 2>&1
+CK=""; for spec in run4_best=/root/hfdl/sentbart/dolphin/once4/model_best.pt run6_end=/root/sb/dolphin_once6/state_e2e.pt run7_best=/root/sb/dolphin_once7/model_best.pt run7_end=/root/sb/dolphin_once7/state_e2e.pt; do [ -s "${spec#*=}" ] && CK="$CK $spec"; done
+python3 -u /root/sb/sb_eval.py --docs $DF7/docs_001.jsonl --ckpt $CK --bands 128,256,512,768 --out /root/sb_eval768b.json 2>&1 | grep --line-buffered -vE "Warning|warn|documents \(" | sed 's/^/[bart7 dolphin] /' | cut -c1-300
+python3 -u /root/sb/sb_eval.py --docs $AH/docs_005.jsonl --ckpt $CK --bands 128,256,512,768 --out /root/sb_eval_amb.json 2>&1 | grep --line-buffered -vE "Warning|warn|documents \(" | sed 's/^/[bart7 am] /' | cut -c1-300
+python3 - <<'PC'
+import json
+a = json.load(open("/root/sb_eval768b.json"))["runs"]; b = json.load(open("/root/sb_eval_amb.json"))["runs"]
+print("[bart7 composite] top-1 at 3223+1 candidates, all hidden positions: dolphin | AM | mean")
+for k in a:
+    if k in b: print(f"  {k:10s} {a[k]['all']['top1']:.3f} | {b[k]['all']['top1']:.3f} | {(a[k]['all']['top1'] + b[k]['all']['top1']) / 2:.3f}")
+PC
+hf upload $R /root/sb_eval768b.json sentbart/dolphin/sb_eval/sb_eval768b.json >/dev/null 2>&1; hf upload $R /root/sb_eval_amb.json sentbart/dolphin/sb_eval/sb_eval_amb.json >/dev/null 2>&1
+echo "BART7_JOB_DONE $(date -u)"
+B7
+  setsid nohup bash -c 'bash /root/bart7keep.sh 2>&1 | tee -a /root/bart7.log' > /dev/null 2>&1 < /dev/null &
+fi
+for k in earlyscreen parscreen bartprep bart7; do
+  if [ -s /root/${k}keep.sh ] && ! pgrep -f "${k}kee[p].sh" >/dev/null && ! grep -qE "EARLYSCREEN_DONE|PARSCREEN_SKIPPED|RMROUND_JOB_DONE|BARTPREP_DONE|BARTPREP_FAILED|BART7_JOB_DONE" /root/$k.log 2>/dev/null; then
+    [ "$k" = parscreen ] && grep -q "RMROUND_JOB_DONE" /root/rmround.log 2>/dev/null && continue
+    setsid nohup bash -c "bash /root/${k}keep.sh 2>&1 | tee -a /root/$k.log" > /dev/null 2>&1 < /dev/null &
+  fi
+done
 echo "BOXRW2_OK serial $BOXRW2_SERIAL $(date -u)"
 # CTL-END
