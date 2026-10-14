@@ -8,7 +8,7 @@ cd /root
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null)
 R=baya1116/hypernet-sp-distill
 RAW="https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl"
-BOXI_SERIAL=105
+BOXI_SERIAL=106
 if [ -f /root/.boxi_serial ] && [ "$(cat /root/.boxi_serial)" -gt "$BOXI_SERIAL" ] 2>/dev/null; then echo "BOXI_STALE $BOXI_SERIAL"; exit 0; fi
 echo $BOXI_SERIAL > /root/.boxi_serial
 mkdir -p /root/sb /root/work
@@ -49,6 +49,7 @@ if [ ! -e /root/.mirror_r16 ]; then touch /root/.mirror_r16; pkill -f "mirrorkee
 if [ ! -e /root/.mirror_r17 ]; then touch /root/.mirror_r17; pkill -f "mirrorkee[p].sh"; sleep 1; fi   # the sixth run
 if [ ! -e /root/.mirror_r18 ]; then touch /root/.mirror_r18; pkill -f "mirrorkee[p].sh"; sleep 1; fi   # the AM held-out
 if [ ! -e /root/.mirror_r19 ]; then touch /root/.mirror_r19; pkill -f "mirrorkee[p].sh"; sleep 1; fi   # the seventh run
+if [ ! -e /root/.mirror_r20 ]; then touch /root/.mirror_r20; pkill -f "mirrorkee[p].sh"; sleep 1; fi   # the seventh run mixed
 if ! pgrep -f "mirrorkee[p].sh" >/dev/null; then
   cat > /root/mirrorkeep.sh <<'MK'
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); R=baya1116/hypernet-sp-distill
@@ -59,7 +60,7 @@ while :; do
     echo "--- disk ---"; df -h /root | tail -1; du -sh /root/sb/data 2>/dev/null; tail -n 3 /root/disk.log 2>/dev/null
     echo "--- ladder2 / dolphin ladder ---"; ls -t /root/sb/ladder2 /root/sb/dolphin_ladder 2>/dev/null | head -12 | tr '\n' ' '; echo
     f=$(ls -t /root/sb/ladder2/*.out /root/sb/dolphin_ladder/*.out 2>/dev/null | head -1); [ -n "$f" ] && { echo "== $f"; grep -E "^\[eval|^\[best|^\[plateau|^\[init\]|Error|Traceback" $f | tail -8 | cut -c1-300; echo "pool fields:"; grep -E "^\[eval" $f | tail -6 | sed -E 's/^(\[eval [0-9]+\]).*page_top1 ([0-9.]+).*(pool_top1.*)$/\1 2000: \2 | \3/' | cut -c1-200; grep "^\[step" $f | tail -1 | cut -c1-200; }
-    [ -s /root/sb_dolphinonce7.log ] && { echo "--- dolphin once7 (the rest of AM's R1 set, every row past the sixth run's slice; the doubled BART from the sixth run's end) ---"; grep -E "buckets|training from|training set|PREP_DOLPHIN|credit" /root/sb_dolphinonce7.log | tail -n 4 | cut -c1-400; grep -E "^\[eval|^\[best|^\[val\]|Error|Traceback|memory|sb_eval|ONCE7|composite|^  " /root/sb/dolphin_once7/train.log /root/sb_dolphinonce7.log 2>/dev/null | sed 's#^/root/[^:]*:##' | tail -n 30 | cut -c1-400; grep "^\[step" /root/sb/dolphin_once7/train.log 2>/dev/null | tail -1 | cut -c1-200; }
+    [ -s /root/sb_dolphinonce7.log ] && { echo "--- dolphin once7 (mixed: the rest of AM's R1 set + dolphin's deepseek conversations, one pass; the doubled BART from the sixth run's end) ---"; grep -E "buckets|training from|training set|PREP_DOLPHIN|credit" /root/sb_dolphinonce7.log | tail -n 4 | cut -c1-400; grep -E "^\[eval|^\[best|^\[val\]|Error|Traceback|memory|sb_eval|ONCE7|composite|^  " /root/sb/dolphin_once7/train.log /root/sb_dolphinonce7.log 2>/dev/null | sed 's#^/root/[^:]*:##' | tail -n 30 | cut -c1-400; grep "^\[step" /root/sb/dolphin_once7/train.log 2>/dev/null | tail -1 | cut -c1-200; }
     [ -s /root/sb_amheld.log ] && { echo "--- the AM held-out (2000 R1 conversations the sixth run never saw): the fourth run's end and the sixth run on the fixed yardstick, both held-outs ---"; grep -vE "Warning|warn" /root/sb_amheld.log | tail -n 22 | cut -c1-300; }
     [ -s /root/sb_dolphinonce6.log ] && { echo "--- dolphin once6 (R1 only: AM's R1-671B set + the unused deepseek conversations; the doubled BART from the fourth run's end, window 768) ---"; grep -E "buckets|training from|training set|PREP_DOLPHIN|unusable" /root/sb_dolphinonce6.log | tail -n 4 | cut -c1-400; grep -E "^\[eval|^\[best|^\[val\]|^\[window|^\[grow|Error|Traceback|memory|sb_eval|ONCE6|^  " /root/sb/dolphin_once6/train.log /root/sb_dolphinonce6.log 2>/dev/null | sed 's#^/root/[^:]*:##' | tail -n 24 | cut -c1-400; grep "^\[step" /root/sb/dolphin_once6/train.log 2>/dev/null | tail -1 | cut -c1-200; }
     [ -s /root/sb_dolphinonce5.log ] && { echo "--- dolphin once5 (window 768, random order, from the fourth run's end) ---"; grep -E "buckets|training from|training set" /root/sb_dolphinonce5.log | tail -n 3 | cut -c1-400; grep -E "^\[eval|^\[best|^\[val\]|^\[window|Error|Traceback|sb_eval|ONCE5|^  " /root/sb/dolphin_once5/train.log /root/sb_dolphinonce5.log 2>/dev/null | sed 's#^/root/[^:]*:##' | tail -12 | cut -c1-300; grep "^\[step" /root/sb/dolphin_once5/train.log 2>/dev/null | tail -1 | cut -c1-200; }
@@ -2004,6 +2005,26 @@ fi
 if [ -e /root/.dolphin_once7 ] && [ -s /root/dolphinonce7keep.sh ] && ! pgrep -f "dolphinonce7kee[p].sh" >/dev/null && ! grep -q "ONCE7_JOB_DONE" /root/sb_dolphinonce7.log 2>/dev/null; then
   echo "[once7] relaunched $(date -u +%H:%M)" >> /root/sb_dolphinonce7.log
   setsid nohup bash -c 'bash /root/dolphinonce7keep.sh 2>&1 | tee -a /root/sb_dolphinonce7.log' > /dev/null 2>&1 < /dev/null &
+fi
+
+# ---- 2026-10-14, the user (after the sixth run: AM +11 points, dolphin -9): mix so both are kept. AM has nothing new left
+# after the seventh run, so the seventh run itself becomes the mixed pass: dolphin's deepseek conversations (the 768-whole
+# set, 245,072, the held-out kept out) join the rest of AM by a link in its data directory (train_e2e reads every
+# docs_*.jsonl but docs_001). If the training had already started, it restarts from step 0 on the mixed set. ----
+if [ ! -e /root/.once7_mixed ] && [ -e /root/.dolphin_once7 ]; then
+  S7=/root/sb/data/dolphin768/docs_000.jsonl; O7=/root/sb/data/dolphin768/off_000.npy; DB=/root/sb/data/r1b_768
+  if [ -s $S7 ] && [ -s $O7 ]; then touch /root/.once7_mixed
+    if pgrep -f "train_e2e.py.*dolphin_once7" >/dev/null; then
+      pkill -f "dolphinonce7kee[p].sh"; sleep 1; pkill -f "train_e2e.py.*dolphin_once7"; sleep 8; rm -rf /root/sb/dolphin_once7; RL=1
+    fi
+    mkdir -p $DB; ln -sf $S7 $DB/docs_000.jsonl; ln -sf $O7 $DB/off_000.npy
+    sed -i 's/echo "\[once7\] training set: AM R1 $(wc -l < $DB\/docs_006.jsonl) conversations (the rest of the set)/echo "[once7] training set: AM R1 $(wc -l < $DB\/docs_006.jsonl) (the rest of the set) + dolphin deepseek $(wc -l < $DB\/docs_000.jsonl) conversations/' /root/dolphinonce7keep.sh 2>/dev/null
+    [ "$RL" = "1" ] && setsid nohup bash -c 'bash /root/dolphinonce7keep.sh 2>&1 | tee -a /root/sb_dolphinonce7.log' > /dev/null 2>&1 < /dev/null &
+    echo "[once7] mixed: dolphin deepseek $(wc -l < $S7) conversations linked into $DB$([ "$RL" = "1" ] && echo ", the started training restarted from step 0") $(date -u +%H:%M)" >> /root/sb_dolphinonce7.log
+    echo "ONCE7_MIXED $(wc -l < $S7) restarted=${RL:-0} $(date -u)"
+  else
+    echo "ONCE7_MIXED_MISSING $S7 $(ls -la /root/sb/data/dolphin768 2>&1 | tr '\n' ' ' | cut -c1-300)"
+  fi
 fi
 echo "BOXI_OK serial $BOXI_SERIAL $(date -u)"
 # CTL-END
