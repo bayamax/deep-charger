@@ -2,7 +2,7 @@
 # box RW2 (2026-10-14, the 3090 that replaces box RW's 3060 for the GRPO round: ~2.6x the speed for 1.5x the price) - box RW, the user: rent a second box, as cheap as possible, and try GRPO with a reward model's 0-1 score as
 # the reward). First step: can a dedicated reward model tell Deep Charger's better replies from its worse ones? The
 # Skywork-Reward-V2 (Qwen3) family scores the archived GRPO rollouts of mtg7-mtg10 (rm_scan.py). Pull-based as the others.
-BOXRW2_SERIAL=12
+BOXRW2_SERIAL=13
 if [ -f /root/.boxrw2_serial ] && [ "$(cat /root/.boxrw2_serial)" -gt "$BOXRW2_SERIAL" ] 2>/dev/null; then echo "BOXRW2_STALE $BOXRW2_SERIAL"; exit 0; fi
 echo $BOXRW2_SERIAL > /root/.boxrw2_serial
 mkdir -p /root/work /root/hfdl; cd /root/work
@@ -420,8 +420,10 @@ it = a + [{"q": x["q"], "gold": x["gold"], "golds": [x["gold"]], "hist": x["hist
 open("/root/work/mix10_items.jsonl", "w").write("".join(json.dumps(x, ensure_ascii=False) + "\n" for x in it))
 print(f"[rm7] items: {len(a)} mtg10 + {len(b)} later turns", flush=True)
 PM
-  grep -q "^rm7 " /root/rm_queue.txt || echo "rm7 /root/work/mix10_items.jsonl --qbatch 3 --steps 90" >> /root/rm_queue.txt
+  grep -q "^rm7 " /root/rm_queue.txt || echo "rm7 /root/work/mix10_items.jsonl --qbatch 3" >> /root/rm_queue.txt
   echo "RM7_QUEUED $(date -u)"
 fi
+# rm7 stays at 60 steps (the runner screens the copies at 20/40/60): 60 of the 90 mixed items
+[ -e /root/.rm7b ] || { touch /root/.rm7b; sed -i "s#^rm7 /root/work/mix10_items.jsonl --qbatch 3 --steps 90#rm7 /root/work/mix10_items.jsonl --qbatch 3#" /root/rm_queue.txt; grep "^rm7" /root/rm_queue.txt; }
 echo "BOXRW2_OK serial $BOXRW2_SERIAL $(date -u)"
 # CTL-END
