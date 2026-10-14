@@ -2,7 +2,7 @@
 # box RW2 (2026-10-14, the 3090 that replaces box RW's 3060 for the GRPO round: ~2.6x the speed for 1.5x the price) - box RW, the user: rent a second box, as cheap as possible, and try GRPO with a reward model's 0-1 score as
 # the reward). First step: can a dedicated reward model tell Deep Charger's better replies from its worse ones? The
 # Skywork-Reward-V2 (Qwen3) family scores the archived GRPO rollouts of mtg7-mtg10 (rm_scan.py). Pull-based as the others.
-BOXRW2_SERIAL=3
+BOXRW2_SERIAL=4
 if [ -f /root/.boxrw2_serial ] && [ "$(cat /root/.boxrw2_serial)" -gt "$BOXRW2_SERIAL" ] 2>/dev/null; then echo "BOXRW2_STALE $BOXRW2_SERIAL"; exit 0; fi
 echo $BOXRW2_SERIAL > /root/.boxrw2_serial
 mkdir -p /root/work /root/hfdl; cd /root/work
@@ -89,6 +89,18 @@ GB
   echo "GRPOBOOT_LAUNCHED $(date -u)"
 fi
 
+# the loop's default inputs (box G2 had them from its bootstrap): the self-generated questions and Dolphin; the first try,
+# stopped at step 0 for want of them, is cleared so the round starts again
+if [ ! -e /root/.rw2_fix1 ] && grep -q "GRPOBOOT_DONE" /root/grpoboot.log 2>/dev/null; then touch /root/.rw2_fix1
+  export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null)
+  for f in "pooler_distill/selfq_*.jsonl" "pooler_distill/chatsft/dolphin_v1.jsonl" "pooler_distill/chatsft/replay_v1.jsonl"; do
+    for try in 1 2 3; do hf download baya1116/hypernet-sp-distill --include "$f" --local-dir /root/hfdl >/dev/null 2>&1 && break; sleep 20; done; done
+  cat /root/hfdl/pooler_distill/selfq_*.jsonl > /root/work/selfq_all.jsonl; cp /root/hfdl/pooler_distill/chatsft/dolphin_v1.jsonl /root/hfdl/pooler_distill/chatsft/replay_v1.jsonl /root/work/
+  echo "RW2_FIX1 selfq $(wc -l < /root/work/selfq_all.jsonl) dolphin $(wc -l < /root/work/dolphin_v1.jsonl) $(date -u)"
+  if grep -q "RMROUND_JOB_DONE" /root/rmround.log 2>/dev/null && [ ! -s /root/rm1_s20.safetensors ]; then
+    pkill -f "rmroundkee[p].sh"; mv /root/rmround.log /root/rmround_try1.log; mv /root/rm1_run.log /root/rm1_run_try1.log 2>/dev/null; rm -f /root/.rmround /root/work/rm1_s*st_*.jsonl; echo "RW2_RMROUND_RESET $(date -u)"
+  fi
+fi
 # ---- step 3: one round of GRPO with the reward model's score (2.1.0 = mtg7_s40 as the start, mtg11's fresh 60 questions,
 # search turns only, the previous rounds' settings otherwise), then gold-scored screens: single-turn shard 0 for each copy,
 # the best copy on the full 300, br3 and chain3, and the reward model's own reading of the replies beside the start's.
@@ -122,6 +134,7 @@ if [ ! -s /root/rm1_s60.safetensors ]; then
   grep -E "Error|Traceback" $RUN | tail -2 | cut -c1-250
   ST=$(python3 -c "import json;print(json.load(open('$OUT/state.json'))['step'])" 2>/dev/null); echo "[rm1] stopped at step ${ST:-0} $(date -u +%H:%M)"
   [ "${ST:-0}" -gt 0 ] && [ ! -s /root/rm1_s$ST.safetensors ] && cp $OUT/latest.safetensors /root/rm1_s$ST.safetensors
+  [ "${ST:-0}" -gt 0 ] || { echo "[rm1] the training did not start: $(grep -E "Error|Traceback" $RUN | tail -1 | cut -c1-200)"; echo "RMROUND_JOB_DONE failed $(date -u)"; exit 1; }
   [ -s $OUT/rollouts.jsonl ] && hf upload $R $OUT/rollouts.jsonl pooler_distill/chatsft/rmgrpo/rm1_rollouts.jsonl >/dev/null 2>&1
   hf upload $R $RUN pooler_distill/chatsft/rmgrpo/rm1_run.log >/dev/null 2>&1
 fi

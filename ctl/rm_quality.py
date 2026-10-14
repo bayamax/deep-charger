@@ -25,7 +25,8 @@ def load_rm(spec, dev):
 
 tok, model = load_rm(name, dev)
 rows = [json.loads(l) for l in open(path) if l.strip()]
-rows = [r for r in rows if (r.get("reply") or "").strip()]
+for r in rows: r["reply"] = r.get("reply") or r.get("answer") or ""   # the single-turn screens call it "answer"
+rows = [r for r in rows if r["reply"].strip()]
 convs = []
 for r in rows:
     h = [{"role": m["role"], "content": m["content"]} for m in (r.get("hist") or []) if isinstance(m, dict) and m.get("role") in ("user", "assistant")]
