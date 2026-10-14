@@ -7,21 +7,10 @@ their history in "hist" when present). Run under the reward model's library path
 import json, sys
 import torch
 from transformers import AutoModelForSequenceClassification, AutoTokenizer
+import os as _os; sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
+from rm_load import load_rm
 name, path, tag = sys.argv[1], sys.argv[2], sys.argv[3]
 dev = "cuda" if torch.cuda.is_available() else "cpu"
-
-def load_rm(spec, dev):
-    """<hub name>[@8bit|@4bit]: a quantised reward model (bitsandbytes) when asked, bf16 on the card otherwise"""
-    name, _, q = spec.partition("@")
-    kw = {"num_labels": 1}
-    if q in ("8bit", "4bit"):
-        from transformers import BitsAndBytesConfig
-        kw["quantization_config"] = BitsAndBytesConfig(load_in_8bit=True) if q == "8bit" else BitsAndBytesConfig(load_in_4bit=True, bnb_4bit_quant_type="nf4", bnb_4bit_compute_dtype=torch.bfloat16, bnb_4bit_use_double_quant=True)
-        kw["device_map"] = {"": 0}; kw["torch_dtype"] = torch.bfloat16
-        m = AutoModelForSequenceClassification.from_pretrained(name, **kw)
-    else:
-        m = AutoModelForSequenceClassification.from_pretrained(name, torch_dtype=torch.bfloat16 if str(dev).startswith("cuda") else torch.float32, **kw).to(dev)
-    return AutoTokenizer.from_pretrained(name), m.eval()
 
 tok, model = load_rm(name, dev)
 rows = [json.loads(l) for l in open(path) if l.strip()]

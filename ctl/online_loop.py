@@ -107,7 +107,7 @@ ap.add_argument("--samepage", type=int, default=1, help="1: a search whose top p
 ap.add_argument("--rm-model", default="", help="2026-10-14, the user: a dedicated reward model's score as the reward. A grounded-correct search reply with no stray tags gets w_rm x sigmoid((score - rm_center) / rm_scale) instead of the teacher's fixed talk bonus (the teacher is not called); a wrong reply gets nothing from it, so correctness stays the floor")
 ap.add_argument("--rm-pure", type=int, default=0, help="1 (the user's concept as stated): the reward IS the reward model's 0-1 score (w_rm x sigmoid), for every reply that finished without stray tags, right or wrong; an unfinished reply or one with tags gets 0. Correctness is only recorded")
 ap.add_argument("--rm-mult", type=int, default=0, help="1 (the user's form, 2026-10-15): reward = the reward model's 0-1 score x correct (1 or 0): a right reply gets its score (w_rm x sigmoid), a wrong, unfinished or tagged one 0")
-ap.add_argument("--w-rm", type=float, default=0.5); ap.add_argument("--rm-center", type=float, default=0.0); ap.add_argument("--rm-scale", type=float, default=2.0)
+ap.add_argument("--w-rm", type=float, default=0.5); ap.add_argument("--rm-center", default="0.0", help="comma list for an ensemble (A+B)"); ap.add_argument("--rm-scale", default="2.0")
 ap.add_argument("--rm-device", default="cuda", help="where the reward model runs (cpu keeps the card for the policy)")
 ap.add_argument("--qbatch", type=int, default=1, help="2026-10-14: >1 on an all-search run (--mt-items, no --reason): the rollouts of this many upcoming steps' questions are decoded together in one batch (G each) and handed to their steps in turn - the update is still one question per step, the later steps' rollouts come from a policy up to qbatch-1 updates old. The GPU sat at ~23%% decoding 12 rows")
 ap.add_argument("--rm-path", default="/root/rmenv", help="the reward model process's library path (a newer transformers than the loop's)")
@@ -1143,8 +1143,11 @@ def rm_bonus(rolls, rw, notes):
     RM["p"].stdin.write(json.dumps({"convs": convs}) + "\n"); RM["p"].stdin.flush()
     d = json.loads(RM["p"].stdout.readline())
     if "error" in d: raise RuntimeError(d["error"])
+    cs = [float(v) for v in str(A.rm_center).split(",")]; ss = [float(v) for v in str(A.rm_scale).split(",")]
     for i, x in zip(idx, d["scores"]):
-        p_ = 1.0 / (1.0 + math.exp(-(x - A.rm_center) / A.rm_scale))
+        xs = x if isinstance(x, list) else [x]
+        z_ = sum((v - cs[j % len(cs)]) / ss[j % len(ss)] for j, v in enumerate(xs)) / len(xs)
+        p_ = 1.0 / (1.0 + math.exp(-z_)); x = sum(xs) / len(xs)
         rw[i] += A.w_rm * p_; notes[i] = {**notes[i], "rm": round(x, 3), "rm_p": round(p_, 3)}
 
 

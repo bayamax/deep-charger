@@ -15,8 +15,11 @@ Reported per reward model, all within a question's group of 12 (what GRPO's adva
   python3 rm_scan.py --rollouts a.jsonl b.jsonl --models Skywork/Skywork-Reward-V2-Qwen3-0.6B ... --out rm_scan.json
 """
 import argparse, itertools, json, math, os, random, time
+import sys
 import torch
 from transformers import AutoModelForSequenceClassification, AutoTokenizer
+import os as _os; sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
+from rm_load import load_rm
 
 ap = argparse.ArgumentParser()
 ap.add_argument("--rollouts", nargs="+", required=True); ap.add_argument("--models", nargs="+", required=True)
@@ -25,19 +28,6 @@ ap.add_argument("--limit", type=int, default=0, help="groups per file (0: all) -
 X = ap.parse_args()
 DEV = "cuda" if torch.cuda.is_available() else "cpu"
 
-
-def load_rm(spec, dev):
-    """<hub name>[@8bit|@4bit]: a quantised reward model (bitsandbytes) when asked, bf16 on the card otherwise"""
-    name, _, q = spec.partition("@")
-    kw = {"num_labels": 1}
-    if q in ("8bit", "4bit"):
-        from transformers import BitsAndBytesConfig
-        kw["quantization_config"] = BitsAndBytesConfig(load_in_8bit=True) if q == "8bit" else BitsAndBytesConfig(load_in_4bit=True, bnb_4bit_quant_type="nf4", bnb_4bit_compute_dtype=torch.bfloat16, bnb_4bit_use_double_quant=True)
-        kw["device_map"] = {"": 0}; kw["torch_dtype"] = torch.bfloat16
-        m = AutoModelForSequenceClassification.from_pretrained(name, **kw)
-    else:
-        m = AutoModelForSequenceClassification.from_pretrained(name, torch_dtype=torch.bfloat16 if str(dev).startswith("cuda") else torch.float32, **kw).to(dev)
-    return AutoTokenizer.from_pretrained(name), m.eval()
 
 
 rows = []
@@ -93,10 +83,10 @@ def pairwise(sel, label):
 
 
 res = {"args": vars(X), "n_rows": len(rows), "models": {}}
-for name in X.models:
-    t0 = time.time()
+
+
+def score_one(name, todo, t0):
     tok, model = load_rm(name, DEV)
-    todo = [r for r in rows if r["finished"]]
     texts = [tok.apply_chat_template([{"role": "user", "content": r["q"]}, {"role": "assistant", "content": r["reply"]}], tokenize=False) for r in todo]
     order = sorted(range(len(texts)), key=lambda i: len(texts[i]))
     scores = [0.0] * len(texts)
@@ -105,8 +95,23 @@ for name in X.models:
             idx = order[b:b + X.batch]
             enc = tok([texts[i] for i in idx], return_tensors="pt", padding=True, truncation=True, max_length=X.max_len, add_special_tokens=False).to(model.device)
             out = model(**enc).logits[:, 0].float().cpu().tolist()
-            for i, s in zip(idx, out): scores[i] = s
+            for i, s_ in zip(idx, out): scores[i] = s_
             if (b // X.batch) % 100 == 0: print(f"[rm_scan] {name}: {b + len(idx)}/{len(order)} ({(time.time() - t0) / 60:.1f} min)", flush=True)
+    del model; torch.cuda.empty_cache() if DEV == "cuda" else None
+    return scores
+
+
+for name in X.models:
+    t0 = time.time()
+    todo = [r for r in rows if r["finished"]]
+    parts = name.split("+"); comp = {}
+    if len(parts) == 1: scores = score_one(name, todo, t0)
+    else:   # an ensemble: each member standardised over all finished rows, the z-scores averaged
+        zs = []
+        for pn in parts:
+            sc_ = score_one(pn, todo, t0); mu_ = sum(sc_) / len(sc_); sd_ = (sum((x - mu_) ** 2 for x in sc_) / len(sc_)) ** 0.5 or 1.0
+            comp[pn] = {"mean": round(mu_, 3), "sd": round(sd_, 3)}; zs.append([(x - mu_) / sd_ for x in sc_])
+        scores = [sum(z[i] for z in zs) / len(zs) for i in range(len(todo))]
     for r in rows: r["s"] = -1e9
     for r, s in zip(todo, scores): r["s"] = s
     fin = [r for r in rows if r["finished"]]
@@ -126,7 +131,7 @@ for name in X.models:
     ls = [spearman([r["s"] for r in rs], [r["len"] for r in rs]) for rs in by.values() if len(rs) >= 4]
     ls = [v for v in ls if v is not None]; m["len_spearman_within_groups"] = round(sum(ls) / len(ls), 3) if ls else None
     m["score_mean"] = round(sum(scores) / len(scores), 3); m["minutes"] = round((time.time() - t0) / 60, 1)
+    if comp: m["members"] = comp
     res["models"][name] = m; json.dump(res, open(X.out, "w"), indent=1)
     print(f"[rm_scan] {name}: " + "  ".join(f"{k} {v}" for k, v in m.items()), flush=True)
-    del model; torch.cuda.empty_cache() if DEV == "cuda" else None
 print("RM_SCAN_DONE", flush=True)
