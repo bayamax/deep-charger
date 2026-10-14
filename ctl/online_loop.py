@@ -107,6 +107,7 @@ ap.add_argument("--samepage", type=int, default=1, help="1: a search whose top p
 ap.add_argument("--rm-model", default="", help="2026-10-14, the user: a dedicated reward model's score as the reward. A grounded-correct search reply with no stray tags gets w_rm x sigmoid((score - rm_center) / rm_scale) instead of the teacher's fixed talk bonus (the teacher is not called); a wrong reply gets nothing from it, so correctness stays the floor")
 ap.add_argument("--w-rm", type=float, default=0.5); ap.add_argument("--rm-center", type=float, default=0.0); ap.add_argument("--rm-scale", type=float, default=2.0)
 ap.add_argument("--rm-device", default="cuda", help="where the reward model runs (cpu keeps the card for the policy)")
+ap.add_argument("--qbatch", type=int, default=1, help="2026-10-14: >1 on an all-search run (--mt-items, no --reason): the rollouts of this many upcoming steps' questions are decoded together in one batch (G each) and handed to their steps in turn - the update is still one question per step, the later steps' rollouts come from a policy up to qbatch-1 updates old. The GPU sat at ~23%% decoding 12 rows")
 ap.add_argument("--rm-path", default="/root/rmenv", help="the reward model process's library path (a newer transformers than the loop's)")
 A = ap.parse_args()
 os.makedirs(A.outdir, exist_ok=True)
@@ -1103,6 +1104,7 @@ def score_search(r, gold):
 
 
 RM = {}
+RCACHE = {}   # --qbatch: step -> (item, its rollouts), decoded ahead together
 
 
 def rm_bonus(rolls, rw, notes):
@@ -1456,8 +1458,21 @@ for step in range(state["step"] + 1, A.steps + 1) if (reason or A.mt_items) else
     if searching:
         seed = item.get("seed") or (seed_from_hist(HIST[qtext]) if HIST.get(qtext) else None)
     try:
-        rolls = rollout_batch(qtext, A.search_g if (searching and A.search_g > 0) else A.reason_g, seed=seed,
-                              allow_search=searching or not A.reason_no_search)
+        if searching and A.qbatch > 1 and A.mt_items and not (A.reason_every and reason) and not seed:
+            if step not in RCACHE:
+                G_ = A.search_g if A.search_g > 0 else A.reason_g; grp = [(step, item)]
+                for s_ in range(step + 1, min(step + A.qbatch, A.steps + 1)):
+                    it_ = pool_item(s_)
+                    if it_.get("seed") or HIST.get(it_["q"]): break   # a later turn of a conversation is decoded on its own
+                    grp.append((s_, it_))
+                t_q = time.time()
+                allr = rollout_batch([it_["q"] for _, it_ in grp for _ in range(G_)], len(grp) * G_, seed=None, allow_search=True)
+                for j, (s_, it_) in enumerate(grp): RCACHE[s_] = (it_, allr[j * G_:(j + 1) * G_])
+                print(f"[qbatch] steps {grp[0][0]}-{grp[-1][0]}: {len(grp)} questions x {G_} rollouts in one batch, {(time.time() - t_q) / 60:.1f} min", flush=True)
+            item, rolls = RCACHE.pop(step); qtext, ref = item["q"], None
+        else:
+            rolls = rollout_batch(qtext, A.search_g if (searching and A.search_g > 0) else A.reason_g, seed=seed,
+                                  allow_search=searching or not A.reason_no_search)
     except (KeyboardInterrupt, SystemExit):
         raise
     except BaseException as e:

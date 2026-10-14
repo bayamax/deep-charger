@@ -2,7 +2,7 @@
 # box RW2 (2026-10-14, the 3090 that replaces box RW's 3060 for the GRPO round: ~2.6x the speed for 1.5x the price) - box RW, the user: rent a second box, as cheap as possible, and try GRPO with a reward model's 0-1 score as
 # the reward). First step: can a dedicated reward model tell Deep Charger's better replies from its worse ones? The
 # Skywork-Reward-V2 (Qwen3) family scores the archived GRPO rollouts of mtg7-mtg10 (rm_scan.py). Pull-based as the others.
-BOXRW2_SERIAL=7
+BOXRW2_SERIAL=8
 if [ -f /root/.boxrw2_serial ] && [ "$(cat /root/.boxrw2_serial)" -gt "$BOXRW2_SERIAL" ] 2>/dev/null; then echo "BOXRW2_STALE $BOXRW2_SERIAL"; exit 0; fi
 echo $BOXRW2_SERIAL > /root/.boxrw2_serial
 mkdir -p /root/work /root/hfdl; cd /root/work
@@ -14,6 +14,7 @@ for f in rm_scan.py rm_server.py rm_quality.py online_loop.py pool_eval.py web_s
 mkdir -p /root/sb; for f in sentbart/prep_dolphin.py sentbart/train.py sentbart/train_e2e.py sentbart/sb_eval.py; do
   for try in 1 2 3; do curl -sS -o /root/sb/$(basename $f) "$RAW/$f?nocache=$(date +%s)" && python3 -m py_compile /root/sb/$(basename $f) && break; sleep 5; done
 done
+for f in rm_rounds.sh; do curl -sS -o /root/work/$f.new "$RAW/$f?nocache=$(date +%s)" && bash -n /root/work/$f.new && mv /root/work/$f.new /root/work/$f; done
 for f in rm_scan.py rm_server.py rm_quality.py online_loop.py pool_eval.py web_search.py; do
   for try in 1 2 3; do curl -sS -o /root/work/$f "$RAW/$f?nocache=$(date +%s)" && python3 -m py_compile /root/work/$f && break; sleep 5; done
 done
@@ -31,12 +32,13 @@ fi
 if [ ! -e /root/.rwmirror_r2 ]; then touch /root/.rwmirror_r2; pkill -f "rwmirro[r].sh"; sleep 1; fi
 if [ ! -e /root/.rwmirror_r5 ]; then touch /root/.rwmirror_r5; pkill -f "rwmirro[r].sh"; sleep 1; fi
 if [ ! -e /root/.rwmirror_r6 ]; then touch /root/.rwmirror_r6; pkill -f "rwmirro[r].sh"; sleep 1; fi
+if [ ! -e /root/.rwmirror_r7 ]; then touch /root/.rwmirror_r7; pkill -f "rwmirro[r].sh"; sleep 1; fi
 if ! pgrep -f "rwmirro[r].sh" >/dev/null; then
   cat > /root/rwmirror.sh <<'MR'
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); R=baya1116/hypernet-sp-distill
 while :; do
   { echo "=== boxRW2 $(date -u) ==="; echo "--- ctl.log ---"; tail -n 30 /root/ctl.log 2>/dev/null
-    for f in /root/fromi.log /root/rm_scan.log /root/grpoboot.log /root/rmround.log /root/earlyscreen.log /root/parscreen.log /root/bartprep.log /root/bart7.log; do [ -s $f ] && { echo "--- $f ---"; grep -vE "Warning|warn|Loading weights" $f | tail -n 30 | cut -c1-600; }; done
+    for f in /root/fromi.log /root/rm_scan.log /root/grpoboot.log /root/rmround.log /root/earlyscreen.log /root/parscreen.log /root/bartprep.log /root/bart7.log /root/rm_rounds.log /root/rm_rounds.txt; do [ -s $f ] && { echo "--- $f ---"; grep -vE "Warning|warn|Loading weights" $f | tail -n 30 | cut -c1-600; }; done
     [ -s /root/rm1_run.log ] && { echo "--- rm1 steps ---"; grep -E "^\[step|^\[rm\]|rollback|Traceback|out of memory|Error" /root/rm1_run.log | sed -E 's/\| ce=.*cumulative/| cum/' | tail -n 10 | cut -c1-240; }
     [ -s /root/online_rm1/rollouts.jsonl ] && { echo "--- rm1 by 20-step block ---"; python3 - /root/online_rm1/rollouts.jsonl <<'PB' 2>/dev/null
 import json, sys, collections
@@ -50,6 +52,7 @@ for k in sorted(b):
     n, p, u, s_, rp, rn = b[k]; print(f"  steps {20*k+1:3d}-{20*k+20:3d}: {n:3d} rollouts, pass {100*p/n:3.0f}%, unfinished {100*u/n:3.0f}%, searches {s_/n:.2f}, rm_p {rp/max(rn,1):.3f} ({rn})")
 PB
     }
+    f=$(ls -t /root/rm[2-9]*_run.log /root/rm[1-9][0-9]*_run.log 2>/dev/null | head -1); [ -n "$f" ] && { echo "--- $(basename $f) steps ---"; grep -E "^\[step|^\[qbatch|^\[rm\]|rollback|Traceback|out of memory|Error" $f | sed -E "s/\| ce=.*cumulative/| cum/" | tail -n 8 | cut -c1-230; }
     [ -s /root/sb/dolphin_once7/train.log ] && { echo "--- once7 on this box (train.log) ---"; grep -E "^\[eval|^\[best|^\[val\]|Error|Traceback|memory" /root/sb/dolphin_once7/train.log | tail -n 8 | cut -c1-260; grep "^\[step" /root/sb/dolphin_once7/train.log | tail -1 | cut -c1-200; }
     echo "--- gpu ---"; nvidia-smi --query-gpu=memory.used,memory.total,utilization.gpu --format=csv,noheader
     echo "--- disk ---"; df -h /root | tail -1
@@ -340,5 +343,28 @@ for k in earlyscreen parscreen bartprep bart7; do
     setsid nohup bash -c "bash /root/${k}keep.sh 2>&1 | tee -a /root/$k.log" > /dev/null 2>&1 < /dev/null &
   fi
 done
+
+# ---- 2026-10-14, the user (asleep after this): after the first round, more rounds with the reward model - it is new, so
+# try things - each on the same questions as an earlier nano-bonus round where possible (mtg10's, mtg9's), so only the
+# reward differs; the rollouts of three steps decoded together (--qbatch 3) to fill the card. The queue can be edited. ----
+if [ ! -e /root/.rmrounds ]; then touch /root/.rmrounds
+  export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null)
+  for n in 8 9 10; do f=pooler_distill/chatsft/archive_G2/work/mtg${n}_items.jsonl; for t in 1 2 3; do hf download baya1116/hypernet-sp-distill $f --local-dir /root/hfdl >/dev/null 2>&1 && break; sleep 20; done; cp /root/hfdl/$f /root/work/; done
+  [ -s /root/rm_queue.txt ] || cat > /root/rm_queue.txt <<'QQ'
+# tag items [extra flags]  - each round from 2.1.0, 60 steps
+rm2 /root/work/mtg10_items.jsonl --qbatch 3
+rm3 /root/work/mtg10_items.jsonl --qbatch 3 --w-rm 1.0
+rm4 /root/work/mtg9_items.jsonl --qbatch 3 --w-rm 1.0 --adv-std 0
+QQ
+  cat > /root/rmroundskeep.sh <<'RK'
+until grep -q "RMROUND_JOB_DONE" /root/rmround.log 2>/dev/null; do sleep 60; done
+exec bash /root/work/rm_rounds.sh
+RK
+  setsid nohup bash -c 'bash /root/rmroundskeep.sh 2>&1 | tee -a /root/rm_rounds.log' > /dev/null 2>&1 < /dev/null &
+  echo "RMROUNDS_LAUNCHED $(date -u)"
+fi
+if [ -e /root/.rmrounds ] && ! pgrep -f "rmroundskee[p].sh|rm_rounds.sh" >/dev/null; then
+  setsid nohup bash -c 'bash /root/rmroundskeep.sh 2>&1 | tee -a /root/rm_rounds.log' > /dev/null 2>&1 < /dev/null &
+fi
 echo "BOXRW2_OK serial $BOXRW2_SERIAL $(date -u)"
 # CTL-END
