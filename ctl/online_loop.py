@@ -26,7 +26,7 @@ GRPO for the pooler lineage, in the TEACHER's recipe (grpo_ep_more.py) but with 
   usage       : python3 grpo_pool.py <init.safetensors> <outdir> [--steps 200] [--g 12] [--rw 768] [--maxd 384] [--lr 1e-5]
   resume      : if <outdir>/latest.safetensors + state.json exist, continues from there
 """
-import os, sys, json, time, re, ssl, random, argparse, threading, collections, urllib.parse, urllib.request
+import os, sys, json, time, re, ssl, random, argparse, threading, collections, urllib.parse, urllib.request, math
 from concurrent.futures import ThreadPoolExecutor
 ap = argparse.ArgumentParser()
 ap.add_argument("init"); ap.add_argument("outdir")
@@ -104,6 +104,10 @@ ap.add_argument("--adv-std", type=int, default=1, help="1: advantage = (r - mean
 ap.add_argument("--accum", type=int, default=1, help="steps whose gradients are accumulated before one optimizer update (both the search-side and the Dolphin part)")
 ap.add_argument("--judge-correct", type=int, default=0, help="1: a search reply the gold string does not match is also shown to the teacher with the gold; when it gives the same answer in another form (Claire for Claire Casey, Jamie Dornan for James \"Jamie\" Dornan) it counts as correct - all or nothing, no partial credit. The evaluation keeps the strict string match.")
 ap.add_argument("--samepage", type=int, default=1, help="1: a search whose top page was already shown in this rollout serves the NEXT chunk of that page (and says so when the page is used up); 0: teacher environment (always the head)")
+ap.add_argument("--rm-model", default="", help="2026-10-14, the user: a dedicated reward model's score as the reward. A grounded-correct search reply with no stray tags gets w_rm x sigmoid((score - rm_center) / rm_scale) instead of the teacher's fixed talk bonus (the teacher is not called); a wrong reply gets nothing from it, so correctness stays the floor")
+ap.add_argument("--w-rm", type=float, default=0.5); ap.add_argument("--rm-center", type=float, default=0.0); ap.add_argument("--rm-scale", type=float, default=2.0)
+ap.add_argument("--rm-device", default="cuda", help="where the reward model runs (cpu keeps the card for the policy)")
+ap.add_argument("--rm-path", default="/root/rmenv", help="the reward model process's library path (a newer transformers than the loop's)")
 A = ap.parse_args()
 os.makedirs(A.outdir, exist_ok=True)
 os.environ["SP_RANK"] = str(A.lora_rank); os.environ.setdefault("SP_NOSYS", "1"); os.environ.setdefault("SP_EPISODIC", "1")
@@ -1084,6 +1088,8 @@ def score_search(r, gold):
         return base, why
     if A.reason_stub:
         return base + A.w_talk, {**why, "stub": True}
+    if A.rm_model:
+        return base, {**why, "rm_pending": True}   # the reward model scores the group's passing replies together, after this
     served = "\n\n".join(r.get("served", []))[-4000:]
     h = HIST.get(r.get("q", ""), [])
     if h:   # multi-turn: the reply must answer the NEW message on its own terms, not carry the earlier topic over
@@ -1094,6 +1100,34 @@ def score_search(r, gold):
     if "error" in v: return base, {**why, **v}
     talk = A.w_talk if all(bool(v.get(k)) for k in ("sound", "natural", "clean")) else 0.0
     return base + talk, {**why, **v}
+
+
+RM = {}
+
+
+def rm_bonus(rolls, rw, notes):
+    """--rm-model: the passing replies of a group scored by the reward model together (rm_server.py, its own process
+    and library path); w_rm x a 0-1 squashing is added"""
+    idx = [i for i, v in enumerate(notes) if isinstance(v, dict) and v.get("rm_pending")]
+    if not idx: return
+    import subprocess
+    if not RM:
+        env = dict(os.environ); env["PYTHONPATH"] = A.rm_path
+        RM["p"] = subprocess.Popen([sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "rm_server.py"), A.rm_model, A.rm_device],
+                                   stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=open(os.path.join(A.outdir, "rm_server.log"), "a"), text=True, env=env)
+        ready = RM["p"].stdout.readline().strip()
+        if ready != "READY": RM.clear(); raise RuntimeError(f"rm_server did not start ({ready[:120]})")
+        print(f"[rm] {A.rm_model} on {A.rm_device}: w {A.w_rm}, center {A.rm_center}, scale {A.rm_scale}", flush=True)
+    convs = []
+    for i in idx:
+        r = rolls[i]; reply = r["text"].split("</think>")[-1].strip()
+        convs.append([{"role": m["role"], "content": m["content"]} for m in HIST.get(r.get("q", ""), [])] + [{"role": "user", "content": r.get("q", "")}, {"role": "assistant", "content": reply}])
+    RM["p"].stdin.write(json.dumps({"convs": convs}) + "\n"); RM["p"].stdin.flush()
+    d = json.loads(RM["p"].stdout.readline())
+    if "error" in d: raise RuntimeError(d["error"])
+    for i, x in zip(idx, d["scores"]):
+        p_ = 1.0 / (1.0 + math.exp(-(x - A.rm_center) / A.rm_scale))
+        rw[i] += A.w_rm * p_; notes[i] = {**notes[i], "rm": round(x, 3), "rm_p": round(p_, 3)}
 
 
 def demo_backward(q, traj, coef, hist=None):
@@ -1436,9 +1470,13 @@ for step in range(state["step"] + 1, A.steps + 1) if (reason or A.mt_items) else
     with ThreadPoolExecutor(max_workers=min(8, len(rolls))) as ex:
         for r, (sc, v) in zip(rolls, ex.map(score, rolls)):
             rw.append(sc); notes.append(v)
-            roll_fh.write(json.dumps({"step": step, "kind": "search" if searching else "reason", "q": qtext,
-                                      "reward": sc, "why": v, "ns": r["ns"], "text": r["text"]},
-                                     ensure_ascii=False) + "\n")
+    if A.rm_model and searching:
+        try: rm_bonus(rolls, rw, notes)
+        except Exception as e_: print(f"[rm] failed: {type(e_).__name__}: {str(e_)[:160]}", flush=True)
+    for r, sc, v in zip(rolls, rw, notes):
+        roll_fh.write(json.dumps({"step": step, "kind": "search" if searching else "reason", "q": qtext,
+                                  "reward": sc, "why": v, "ns": r["ns"], "text": r["text"]},
+                                 ensure_ascii=False) + "\n")
     roll_fh.flush()
     if searching and A.followup > 0 and A.mt_items and not HIST.get(qtext) and rw and max(rw) >= 1.0 and random.random() < A.followup:
         try: make_followup(step, qtext, item["gold"], rolls[max(range(len(rw)), key=lambda i_: rw[i_])])
