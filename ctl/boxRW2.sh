@@ -2,7 +2,7 @@
 # box RW2 (2026-10-14, the 3090 that replaces box RW's 3060 for the GRPO round: ~2.6x the speed for 1.5x the price) - box RW, the user: rent a second box, as cheap as possible, and try GRPO with a reward model's 0-1 score as
 # the reward). First step: can a dedicated reward model tell Deep Charger's better replies from its worse ones? The
 # Skywork-Reward-V2 (Qwen3) family scores the archived GRPO rollouts of mtg7-mtg10 (rm_scan.py). Pull-based as the others.
-BOXRW2_SERIAL=9
+BOXRW2_SERIAL=10
 if [ -f /root/.boxrw2_serial ] && [ "$(cat /root/.boxrw2_serial)" -gt "$BOXRW2_SERIAL" ] 2>/dev/null; then echo "BOXRW2_STALE $BOXRW2_SERIAL"; exit 0; fi
 echo $BOXRW2_SERIAL > /root/.boxrw2_serial
 mkdir -p /root/work /root/hfdl; cd /root/work
@@ -375,6 +375,23 @@ RK
   pkill -f "rmroundskee[p].sh"; sleep 1
   setsid nohup bash -c 'bash /root/rmroundskeep.sh 2>&1 | tee -a /root/rm_rounds.log' > /dev/null 2>&1 < /dev/null &
   echo "RMROUNDS_EARLY $(date -u)"
+fi
+# round 2 ran without its reward model (it could not load beside round 1's screens and the batched rollouts, and was
+# retried every step): it is abandoned and run again as rm2b with the loop that loads the reward model first and stops
+# when it cannot; the runner restarts with the 9 GB lane threshold
+if [ ! -e /root/.rm2_redo ] && grep -q "def rm_start" /root/work/online_loop.py && grep -q "ge 9000" /root/work/rm_rounds.sh; then touch /root/.rm2_redo
+  cat > /root/rm_queue.txt <<'QQ'
+# tag items [extra flags]  - each round from 2.1.0, 60 steps
+rm2 /root/work/mtg10_items.jsonl --qbatch 3
+rm2b /root/work/mtg10_items.jsonl --qbatch 3
+rm3 /root/work/mtg10_items.jsonl --qbatch 3 --w-rm 1.0
+rm4 /root/work/mtg9_items.jsonl --qbatch 3 --w-rm 1.0 --adv-std 0
+QQ
+  pkill -f "rmroundskee[p].sh"; pkill -f "rm_rounds.sh"; sleep 1; pkill -f "online_loop.py.*online_rm2 "; pkill -f "rm_server.py"; sleep 5
+  mkdir -p /root/rmr; touch /root/rmr/rm2.trained /root/rmr/rm2.done
+  echo "rm2 ABANDONED at step $(python3 -c "import json;print(json.load(open('/root/online_rm2/state.json'))['step'])" 2>/dev/null || echo '?'): the reward model never loaded (memory) - run again as rm2b" | tee -a /root/rm_rounds.txt
+  setsid nohup bash -c 'bash /root/rmroundskeep.sh 2>&1 | tee -a /root/rm_rounds.log' > /dev/null 2>&1 < /dev/null &
+  echo "RM2_REDO $(date -u)"
 fi
 echo "BOXRW2_OK serial $BOXRW2_SERIAL $(date -u)"
 # CTL-END

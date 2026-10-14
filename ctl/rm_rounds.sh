@@ -3,7 +3,7 @@
 # is new, so try things; and use the whole card). Each line of /root/rm_queue.txt:
 #   <tag> <items.jsonl> [extra online_loop flags, which override the defaults below]
 # Every round starts from 2.1.0 (mtg7_s40), trains 60 steps, copies at 20/40/60; the screens run whenever the card has room
-# (a lane needs ~7.5 GB free); a round's screens run in the background while the next round trains: single-turn shard 0 for each copy, then for the best copy shards 1-2, br3 and chain3, and the
+# (a lane needs ~9 GB free, so a training beside it keeps its headroom); a round's screens run in the background while the next round trains: single-turn shard 0 for each copy, then for the best copy shards 1-2, br3 and chain3, and the
 # reward model's reading of the replies. One summary line per round goes to /root/rm_rounds.txt (and the hub).
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); R=baya1116/hypernet-sp-distill; cd /root/work
 EVARGS="--rw 768 --maxd 384 --samepage 1 --decode plain --temp 0.6 --gen 4000 --stop eos --replycap 600"
@@ -17,7 +17,7 @@ lines() { wc -l < "$1" 2>/dev/null || echo 0; }
 freemb() { nvidia-smi --query-gpu=memory.free --format=csv,noheader,nounits | head -1 | tr -dc 0-9; }
 lane() {   # wait for room, then start one screen in the background: lane <out> <pool_eval args...>
   local out=$1; shift
-  until [ "$(freemb)" -ge 7500 ] && [ "$(pgrep -fc 'pool_eval.py')" -lt 3 ]; do sleep 30; done
+  until [ "$(freemb)" -ge 9000 ] && [ "$(pgrep -fc 'pool_eval.py')" -lt 3 ]; do sleep 30; done
   ( for t in 1 2; do env $ENV python3 /root/work/pool_eval.py "$@" > /root/$(basename ${out%.jsonl}).log 2>&1
       grep -qE "out of memory|OutOfMemoryError" /root/$(basename ${out%.jsonl}).log || break; echo "[lane] $(basename $out) ran out of memory - again"; sleep 120; done ) &
   sleep 90   # its memory to show before the next lane looks

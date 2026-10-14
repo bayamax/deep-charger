@@ -1107,19 +1107,28 @@ RM = {}
 RCACHE = {}   # --qbatch: step -> (item, its rollouts), decoded ahead together
 
 
-def rm_bonus(rolls, rw, notes):
-    """--rm-model: the passing replies of a group scored by the reward model together (rm_server.py, its own process
-    and library path); w_rm x a 0-1 squashing is added"""
-    idx = [i for i, v in enumerate(notes) if isinstance(v, dict) and v.get("rm_pending")]
-    if not idx: return
+def rm_start():
+    """the reward model's process, started once (at the run's start, so its memory is taken before the rollouts')"""
     import subprocess
     if not RM:
         env = dict(os.environ); env["PYTHONPATH"] = A.rm_path
         RM["p"] = subprocess.Popen([sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "rm_server.py"), A.rm_model, A.rm_device],
                                    stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=open(os.path.join(A.outdir, "rm_server.log"), "a"), text=True, env=env)
         ready = RM["p"].stdout.readline().strip()
-        if ready != "READY": RM.clear(); raise RuntimeError(f"rm_server did not start ({ready[:120]})")
+        if ready != "READY":
+            RM.clear(); tail_ = ""
+            try: tail_ = open(os.path.join(A.outdir, "rm_server.log")).read()[-300:].replace("\n", " | ")
+            except Exception: pass
+            raise RuntimeError(f"rm_server did not start ({ready[:80]}): {tail_}")
         print(f"[rm] {A.rm_model} on {A.rm_device}: w {A.w_rm}, center {A.rm_center}, scale {A.rm_scale}", flush=True)
+
+
+def rm_bonus(rolls, rw, notes):
+    """--rm-model: the passing replies of a group scored by the reward model together (rm_server.py, its own process
+    and library path); w_rm x a 0-1 squashing is added"""
+    idx = [i for i, v in enumerate(notes) if isinstance(v, dict) and v.get("rm_pending")]
+    if not idx: return
+    if not RM: raise RuntimeError("the reward model is not running")
     convs = []
     for i in idx:
         r = rolls[i]; reply = r["text"].split("</think>")[-1].strip()
@@ -1428,6 +1437,10 @@ if not (reason or A.mt_items): print("ONLINE_LOOP_DONE", flush=True)
 # against the group's own mean, so a sample below the mean is pushed down rather than ignored. A
 # group whose samples all score alike carries no signal; when they all score zero the model cannot
 # do the problem at all, so with --wheels the teacher's own answer is trained on instead.
+if A.rm_model and (reason or A.mt_items):
+    try: rm_start()
+    except Exception as e_:
+        print(f"[rm] the reward model could not start - stopping (a run without it is not the experiment): {type(e_).__name__}: {str(e_)[:300]}", flush=True); sys.exit(3)
 for step in range(state["step"] + 1, A.steps + 1) if (reason or A.mt_items) else []:
     if A.sft_only:
         # distillation: the teacher's own thinking and answer, no sampling. The search trace keeps the other side rehearsed.
