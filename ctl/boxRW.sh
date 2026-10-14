@@ -2,7 +2,7 @@
 # box RW (2026-10-14, the user: rent a second box, as cheap as possible, and try GRPO with a reward model's 0-1 score as
 # the reward). First step: can a dedicated reward model tell Deep Charger's better replies from its worse ones? The
 # Skywork-Reward-V2 (Qwen3) family scores the archived GRPO rollouts of mtg7-mtg10 (rm_scan.py). Pull-based as the others.
-BOXRW_SERIAL=2
+BOXRW_SERIAL=3
 if [ -f /root/.boxrw_serial ] && [ "$(cat /root/.boxrw_serial)" -gt "$BOXRW_SERIAL" ] 2>/dev/null; then echo "BOXRW_STALE $BOXRW_SERIAL"; exit 0; fi
 echo $BOXRW_SERIAL > /root/.boxrw_serial
 mkdir -p /root/work /root/hfdl; cd /root/work
@@ -168,9 +168,14 @@ RR
   echo "RMROUND_LAUNCHED $(date -u)"
 fi
 for k in grpoboot rmround; do
+  [ -e /root/.rw_scanonly ] && break
   if [ -e /root/.$k ] && [ -s /root/${k}keep.sh ] && ! pgrep -f "${k}kee[p].sh" >/dev/null && ! grep -qE "GRPOBOOT_DONE|GRPOBOOT_FAILED|RMROUND_JOB_DONE" /root/$k.log 2>/dev/null; then
     setsid nohup bash -c "bash /root/${k}keep.sh 2>&1 | tee -a /root/$k.log" > /dev/null 2>&1 < /dev/null &
   fi
 done
+# 2026-10-14, the user: $0.10 for a 3060 is dear - the GRPO round moves to a 3090 (box RW2); this box keeps only the scan
+if [ ! -e /root/.rw_scanonly ]; then touch /root/.rw_scanonly /root/.grpoboot /root/.rmround
+  pkill -f "grpobootkee[p].sh"; pkill -f "rmroundkee[p].sh"; echo "RW_SCAN_ONLY $(date -u)"
+fi
 echo "BOXRW_OK serial $BOXRW_SERIAL $(date -u)"
 # CTL-END
