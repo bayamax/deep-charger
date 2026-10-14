@@ -105,6 +105,7 @@ ap.add_argument("--accum", type=int, default=1, help="steps whose gradients are 
 ap.add_argument("--judge-correct", type=int, default=0, help="1: a search reply the gold string does not match is also shown to the teacher with the gold; when it gives the same answer in another form (Claire for Claire Casey, Jamie Dornan for James \"Jamie\" Dornan) it counts as correct - all or nothing, no partial credit. The evaluation keeps the strict string match.")
 ap.add_argument("--samepage", type=int, default=1, help="1: a search whose top page was already shown in this rollout serves the NEXT chunk of that page (and says so when the page is used up); 0: teacher environment (always the head)")
 ap.add_argument("--rm-model", default="", help="2026-10-14, the user: a dedicated reward model's score as the reward. A grounded-correct search reply with no stray tags gets w_rm x sigmoid((score - rm_center) / rm_scale) instead of the teacher's fixed talk bonus (the teacher is not called); a wrong reply gets nothing from it, so correctness stays the floor")
+ap.add_argument("--rm-pure", type=int, default=0, help="1 (the user's concept as stated): the reward IS the reward model's 0-1 score (w_rm x sigmoid), for every reply that finished without stray tags, right or wrong; an unfinished reply or one with tags gets 0. Correctness is only recorded")
 ap.add_argument("--w-rm", type=float, default=0.5); ap.add_argument("--rm-center", type=float, default=0.0); ap.add_argument("--rm-scale", type=float, default=2.0)
 ap.add_argument("--rm-device", default="cuda", help="where the reward model runs (cpu keeps the card for the policy)")
 ap.add_argument("--qbatch", type=int, default=1, help="2026-10-14: >1 on an all-search run (--mt-items, no --reason): the rollouts of this many upcoming steps' questions are decoded together in one batch (G each) and handed to their steps in turn - the update is still one question per step, the later steps' rollouts come from a policy up to qbatch-1 updates old. The GPU sat at ~23%% decoding 12 rows")
@@ -1085,6 +1086,8 @@ def score_search(r, gold):
     base -= W_LATE * min(late, LATECAP)
     why = {"correct": int(correct), "judged": int(judged), "grounded": int(grounded), "late": late,
            "unfinished": not landed, "tags": any(t in reply for t in TAGS)}
+    if A.rm_model and A.rm_pure:
+        return 0.0, {**why, "rm_pending": bool(landed and not why["tags"])}
     if not (correct and grounded and landed) or why["tags"]:
         return base, why
     if A.reason_stub:
@@ -1104,6 +1107,7 @@ def score_search(r, gold):
 
 
 RM = {}
+PASSED = []   # --rm-pure: which rollouts of the step were right (rw no longer says it)
 RCACHE = {}   # --qbatch: step -> (item, its rollouts), decoded ahead together
 
 
@@ -1509,6 +1513,7 @@ for step in range(state["step"] + 1, A.steps + 1) if (reason or A.mt_items) else
     if searching and A.followup > 0 and A.mt_items and not HIST.get(qtext) and rw and max(rw) >= 1.0 and random.random() < A.followup:
         try: make_followup(step, qtext, item["gold"], rolls[max(range(len(rw)), key=lambda i_: rw[i_])])
         except Exception as e_: print(f"[followup] failed: {type(e_).__name__}: {str(e_)[:100]}", flush=True)
+    if A.rm_pure: PASSED[:] = [bool(isinstance(v, dict) and v.get("correct")) for v in notes]
     rwa = list(rw)   # the rewards the advantage is built from; rw itself keeps pass/fail for the bookkeeping and the teachers
     if not searching and A.reason_search_cost > 0:
         rwa = [x - A.reason_search_cost * min(int(r.get("ns", 0) or 0), A.reason_search_cap) for r, x in zip(rolls, rw)]
@@ -1568,10 +1573,11 @@ for step in range(state["step"] + 1, A.steps + 1) if (reason or A.mt_items) else
         opt.step(); opt.zero_grad(set_to_none=True); clear()
         if opt_s is not None: opt_s.zero_grad(set_to_none=True)   # pooler grads from a reasoning rollout are not search signal
     k = "search" if searching else "reason"
-    cum[k + " pass"] = cum.get(k + " pass", 0) + sum(1 for x in rw if x >= 1.0); cum[k + " n"] = cum.get(k + " n", 0) + len(rw)
+    npass = sum(PASSED) if A.rm_pure else sum(1 for x in rw if x >= 1.0)
+    cum[k + " pass"] = cum.get(k + " pass", 0) + npass; cum[k + " n"] = cum.get(k + " n", 0) + len(rw)
     cum[k + " sum"] = cum.get(k + " sum", 0.0) + sum(rw)
     unfin = sum(1 for v in notes if v.get("unfinished")); err = sum(1 for v in notes if v.get("error"))
-    line = (f"[step {step}] {k} pass {sum(1 for x in rw if x >= 1.0)}/{len(rw)} mean {mu:+.2f}"
+    line = (f"[step {step}] {k} pass {npass}/{len(rw)} mean {mu:+.2f}"
             + (f" unfinished={unfin}" if unfin else "") + (f" judge-error={err}" if err else "")
             + (f" searched={sum(1 for r_ in rolls if (r_.get('ns') or 0) > 0)}" if not searching and any((r_.get('ns') or 0) > 0 for r_ in rolls) else "")
             + (f" found-wrong={sum(1 for v_ in notes if isinstance(v_, dict) and v_.get('grounded') and not v_.get('correct'))}" if searching else "")
@@ -1586,7 +1592,7 @@ for step in range(state["step"] + 1, A.steps + 1) if (reason or A.mt_items) else
         # rollouts never answering. Watched over the last ten search steps against the first ten.
         gw.append((sum(1 for v in notes if v.get("unfinished")) / max(len(notes), 1),
                    sum(r["ns"] for r in rolls) / max(len(rolls), 1),
-                   sum(1 for x in rw if x >= 1.0) / max(len(rw), 1)))
+                   npass / max(len(rw), 1)))
         if gbase is None and len(gw) == gw.maxlen:
             gbase = tuple(sum(x[i] for x in gw) / len(gw) for i in range(3))
             print(f"[guard] baseline over the first {gw.maxlen} search steps: unfinished {100*gbase[0]:.0f}%, {gbase[1]:.1f} searches per rollout, pass {100*gbase[2]:.0f}%", flush=True)

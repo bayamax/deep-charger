@@ -53,7 +53,7 @@ import json, sys, collections
 b = collections.defaultdict(lambda: [0, 0, 0])
 for l in open(sys.argv[1]):
     if not l.strip(): continue
-    x = json.loads(l); v = b[(x["step"] - 1) // 20]; v[0] += 1; v[1] += x.get("reward", 0) >= 1.0; v[2] += bool(x.get("why", {}).get("unfinished"))
+    x = json.loads(l); v = b[(x["step"] - 1) // 20]; v[0] += 1; v[1] += bool(x.get("why", {}).get("correct")); v[2] += bool(x.get("why", {}).get("unfinished"))
 print(" ".join(f"{100*p//n}/{100*u//n}" for n, p, u in (b[k] for k in sorted(b))))
 PB
 )

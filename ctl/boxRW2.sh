@@ -2,7 +2,7 @@
 # box RW2 (2026-10-14, the 3090 that replaces box RW's 3060 for the GRPO round: ~2.6x the speed for 1.5x the price) - box RW, the user: rent a second box, as cheap as possible, and try GRPO with a reward model's 0-1 score as
 # the reward). First step: can a dedicated reward model tell Deep Charger's better replies from its worse ones? The
 # Skywork-Reward-V2 (Qwen3) family scores the archived GRPO rollouts of mtg7-mtg10 (rm_scan.py). Pull-based as the others.
-BOXRW2_SERIAL=14
+BOXRW2_SERIAL=15
 if [ -f /root/.boxrw2_serial ] && [ "$(cat /root/.boxrw2_serial)" -gt "$BOXRW2_SERIAL" ] 2>/dev/null; then echo "BOXRW2_STALE $BOXRW2_SERIAL"; exit 0; fi
 echo $BOXRW2_SERIAL > /root/.boxrw2_serial
 mkdir -p /root/work /root/hfdl; cd /root/work
@@ -472,6 +472,22 @@ B7
 fi
 if [ -e /root/.bart7b ] && [ -s /root/bart7bkeep.sh ] && ! pgrep -f "bart7bkee[p].sh" >/dev/null && ! grep -q "BART7_JOB_DONE" /root/bart7.log 2>/dev/null; then
   setsid nohup bash -c 'bash /root/bart7bkeep.sh 2>&1 | tee -a /root/bart7.log' > /dev/null 2>&1 < /dev/null &
+fi
+# 2026-10-15, the user: is the concept itself in - the judgment model's output as the reward, its continuous value making the
+# gradient? Not yet: the rounds so far add it (x0.5) to correct replies only, on top of the right/wrong reward. rm8 is the
+# concept as stated (--rm-pure: every finished reply's reward is the reward model's 0-1 score, right or wrong), on mtg10's
+# questions like rm2c, and goes next in the queue.
+if [ ! -e /root/.rm8 ] && grep -q "rm_pure" /root/work/online_loop.py; then touch /root/.rm8
+  cat > /root/rm_queue.txt <<'QQ'
+# tag items [extra flags]  - each round from 2.1.0, 60 steps
+rm2c /root/work/mtg10_items.jsonl --qbatch 3
+rm8 /root/work/mtg10_items.jsonl --qbatch 3 --rm-pure 1 --w-rm 1.0
+rm5 /root/work/mtg10_items.jsonl --qbatch 3 --lr 2.5e-6 --search-lr 2.5e-6
+rm3b /root/work/mtg10_items.jsonl --qbatch 3 --w-rm 1.0
+rm7 /root/work/mix10_items.jsonl --qbatch 3
+rm6 /root/work/mtg9_items.jsonl --qbatch 3 --w-rm 1.0 --lr 2.5e-6 --search-lr 2.5e-6
+QQ
+  echo "RM8_QUEUED $(date -u)"
 fi
 echo "BOXRW2_OK serial $BOXRW2_SERIAL $(date -u)"
 # CTL-END
