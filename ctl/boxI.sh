@@ -8,10 +8,33 @@ cd /root
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null)
 R=baya1116/hypernet-sp-distill
 RAW="https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl"
-BOXI_SERIAL=107
+BOXI_SERIAL=108
 if [ -f /root/.boxi_serial ] && [ "$(cat /root/.boxi_serial)" -gt "$BOXI_SERIAL" ] 2>/dev/null; then echo "BOXI_STALE $BOXI_SERIAL"; exit 0; fi
 echo $BOXI_SERIAL > /root/.boxi_serial
 mkdir -p /root/sb /root/work
+
+# ---- 2026-10-14, the user: when this box comes back, put what it holds on the hub and close it (two boxes at once cost
+# too much; the work moves to box RW2). Nothing else runs: the keepers and the training are stopped first, then the sixth
+# run's end, the seventh run's state, best and log, and the logs go up; the box is deleted from outside after. ----
+if [ ! -e /root/.archived ]; then
+  pkill -f "kee[p].sh"; pkill -f "train_e2e.py"; pkill -f "sb_eval.py"; pkill -f "prep_dolphin.py"; sleep 5
+  L=/root/archive.log; : > $L
+  arch() { [ -s "$1" ] && for t in 1 2 3; do hf upload $R "$1" "$2" >/dev/null 2>&1 && { echo "[archive] $1 -> $2 ($(du -h "$1" | cut -f1))" | tee -a $L; return 0; }; sleep 20; done; echo "[archive] FAILED $1" | tee -a $L; }
+  st() { python3 -c "import torch; s=torch.load('$1', map_location='cpu', weights_only=False); print('step', s.get('step'), 'layers', s.get('layers'), 'best', s.get('best'))" 2>/dev/null; }
+  echo "[archive] once6 end: $(st /root/sb/dolphin_once6/state_e2e.pt); once7: $(st /root/sb/dolphin_once7/state_e2e.pt)" | tee -a $L
+  arch /root/sb/dolphin_once6/state_e2e.pt sentbart/dolphin/once6/state_end.pt
+  arch /root/sb/dolphin_once7/state_e2e.pt sentbart/dolphin/once7/state_latest.pt
+  arch /root/sb/dolphin_once7/model_best.pt sentbart/dolphin/once7/model_best_partial.pt
+  arch /root/sb/dolphin_once7/train.log sentbart/dolphin/once7/train_partial.log
+  arch /root/sb/data/am_held/docs_005.jsonl sentbart/dolphin/data/am_held_docs_005.jsonl
+  arch /root/sb/data/dolphin768full/docs_001.jsonl sentbart/dolphin/data/dolphin768full_docs_001.jsonl
+  for f in /root/sb_dolphinonce*.log /root/sb_amheld.log /root/sb_sbeval.log /root/ctl.log; do arch $f sentbart/dolphin/logs/boxI_$(basename $f); done
+  for f in /root/sb_eval*.json; do arch $f sentbart/dolphin/sb_eval/$(basename $f); done
+  grep -q FAILED $L || touch /root/.archived
+  echo "BOXI_ARCHIVED $(date -u) $(grep -c FAILED $L) failed" | tee -a $L > /proc/1/fd/1
+  hf upload $R $L sentbart/audit/boxI_archived.txt >/dev/null 2>&1
+fi
+[ -e /root/.archived ] && { echo "BOXI_OK serial $BOXI_SERIAL (archived; nothing else runs) $(date -u)"; exit 0; }
 
 # ---- one-time bootstrap ----
 if [ ! -f /root/.bootstrapped ]; then
