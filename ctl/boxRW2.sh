@@ -2,7 +2,7 @@
 # box RW2 (2026-10-14, the 3090 that replaces box RW's 3060 for the GRPO round: ~2.6x the speed for 1.5x the price) - box RW, the user: rent a second box, as cheap as possible, and try GRPO with a reward model's 0-1 score as
 # the reward). First step: can a dedicated reward model tell Deep Charger's better replies from its worse ones? The
 # Skywork-Reward-V2 (Qwen3) family scores the archived GRPO rollouts of mtg7-mtg10 (rm_scan.py). Pull-based as the others.
-BOXRW2_SERIAL=11
+BOXRW2_SERIAL=12
 if [ -f /root/.boxrw2_serial ] && [ "$(cat /root/.boxrw2_serial)" -gt "$BOXRW2_SERIAL" ] 2>/dev/null; then echo "BOXRW2_STALE $BOXRW2_SERIAL"; exit 0; fi
 echo $BOXRW2_SERIAL > /root/.boxrw2_serial
 mkdir -p /root/work /root/hfdl; cd /root/work
@@ -404,6 +404,24 @@ rm6 /root/work/mtg9_items.jsonl --qbatch 3 --w-rm 1.0 --lr 2.5e-6 --search-lr 2.
 QQ
   setsid nohup bash -c 'bash /root/rmroundskeep.sh 2>&1 | tee -a /root/rm_rounds.log' > /dev/null 2>&1 < /dev/null &
   echo "RMQ2 $(date -u)"
+fi
+# round 1 lifted the reward model's reading of single-turn replies (-0.41 -> -0.15) but lowered it on br3 (1.77 -> 1.21) and
+# chain3 (-0.82 -> -1.85): trained on single-turn search turns only, the later turns of a conversation suffered. rm7 mixes
+# in later turns: mtg10's 60 questions with 30 conversation turns from mtg2's items (an earlier exchange in the history).
+if [ ! -e /root/.rm7 ]; then touch /root/.rm7
+  export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null)
+  f=pooler_distill/chatsft/archive_G2/work/mtg2_items.jsonl; for t in 1 2 3; do hf download baya1116/hypernet-sp-distill $f --local-dir /root/hfdl >/dev/null 2>&1 && break; sleep 20; done
+  python3 - <<'PM'
+import json, random
+a = [json.loads(l) for l in open("/root/work/mtg10_items.jsonl") if l.strip()]
+b = [json.loads(l) for l in open("/root/hfdl/pooler_distill/chatsft/archive_G2/work/mtg2_items.jsonl") if l.strip()]
+b = [x for x in b if x.get("hist") and len(x["hist"]) in (2, 4)]; random.Random(7).shuffle(b); b = b[:30]
+it = a + [{"q": x["q"], "gold": x["gold"], "golds": [x["gold"]], "hist": x["hist"], "src": "mtg2_turn"} for x in b]; random.Random(11).shuffle(it)
+open("/root/work/mix10_items.jsonl", "w").write("".join(json.dumps(x, ensure_ascii=False) + "\n" for x in it))
+print(f"[rm7] items: {len(a)} mtg10 + {len(b)} later turns", flush=True)
+PM
+  grep -q "^rm7 " /root/rm_queue.txt || echo "rm7 /root/work/mix10_items.jsonl --qbatch 3 --steps 90" >> /root/rm_queue.txt
+  echo "RM7_QUEUED $(date -u)"
 fi
 echo "BOXRW2_OK serial $BOXRW2_SERIAL $(date -u)"
 # CTL-END
