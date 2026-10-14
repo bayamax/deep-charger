@@ -2,7 +2,7 @@
 # box RW2 (2026-10-14, the 3090 that replaces box RW's 3060 for the GRPO round: ~2.6x the speed for 1.5x the price) - box RW, the user: rent a second box, as cheap as possible, and try GRPO with a reward model's 0-1 score as
 # the reward). First step: can a dedicated reward model tell Deep Charger's better replies from its worse ones? The
 # Skywork-Reward-V2 (Qwen3) family scores the archived GRPO rollouts of mtg7-mtg10 (rm_scan.py). Pull-based as the others.
-BOXRW2_SERIAL=18
+BOXRW2_SERIAL=19
 if [ -f /root/.boxrw2_serial ] && [ "$(cat /root/.boxrw2_serial)" -gt "$BOXRW2_SERIAL" ] 2>/dev/null; then echo "BOXRW2_STALE $BOXRW2_SERIAL"; exit 0; fi
 echo $BOXRW2_SERIAL > /root/.boxrw2_serial
 mkdir -p /root/work /root/hfdl; cd /root/work
@@ -587,6 +587,9 @@ JP
   echo "JUDGEPREP_LAUNCHED $(date -u)"
 fi
 # the new runner (judge read each round, BART yields, screens at the end) takes over between rounds
+if [ ! -e /root/.holdq ] && [ ! -e /root/.runner2 ]; then touch /root/.holdq
+  printf '# held for the judge preparation; the full queue comes with the new runner\nrm2c /root/work/mtg10_items.jsonl --qbatch 3\nrm9 /root/work/mtg10_items.jsonl --qbatch 3 --rm-mult 1 --w-rm 1.0\n' > /root/rm_queue.txt
+fi
 if [ ! -e /root/.runner2 ] && ! pgrep -f "swapkee[p].sh" >/dev/null; then
   cat > /root/swapkeep.sh <<'SW'
 until [ -e /root/.judge_chosen ] && grep -q "^screens()" /root/work/rm_rounds.sh && ! pgrep -f "online_loop.py" >/dev/null; do sleep 60; done
@@ -594,6 +597,15 @@ touch /root/.runner2
 pkill -f "rmroundskee[p].sh"; pkill -f "rm_rounds.sh"; sleep 2; pkill -f "pool_eval.py.*\[rm[0-9a-z]*_s"; sleep 5
 for t in $(ls /root/rmr/*.trained 2>/dev/null | sed 's#.*/##; s#\.trained##'); do [ -e /root/rmr/$t.done ] || rm -f /root/work/${t}_s*st_*.jsonl /root/work/br3_${t}_*.jsonl /root/work/ch3_${t}_*.jsonl; done
 printf 'until [ -e /root/.judge_chosen ]; do sleep 60; done\nexec bash /root/work/rm_rounds.sh\n' > /root/rmroundskeep.sh
+cat > /root/rm_queue.txt <<'QQ'
+# tag items [extra flags]  - each round from 2.1.0, 60 steps; the judge from /root/rm_choice.txt
+rm2c /root/work/mtg10_items.jsonl --qbatch 3
+rm9 /root/work/mtg10_items.jsonl --qbatch 3 --rm-mult 1 --w-rm 1.0
+rm10 /root/work/mtg10_items.jsonl --qbatch 3 --rm-mult 1 --w-rm 1.0
+rm7m /root/work/mix10_items.jsonl --qbatch 3 --rm-mult 1 --w-rm 1.0
+rm5m /root/work/mtg10_items.jsonl --qbatch 3 --rm-mult 1 --w-rm 1.0 --lr 2.5e-6 --search-lr 2.5e-6
+rm8 /root/work/mtg10_items.jsonl --qbatch 3 --rm-pure 1 --w-rm 1.0
+QQ
 setsid nohup bash -c 'bash /root/rmroundskeep.sh 2>&1 | tee -a /root/rm_rounds.log' > /dev/null 2>&1 < /dev/null &
 echo "RUNNER2 $(date -u)"
 SW
