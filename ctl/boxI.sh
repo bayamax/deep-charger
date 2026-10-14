@@ -8,7 +8,7 @@ cd /root
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null)
 R=baya1116/hypernet-sp-distill
 RAW="https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl"
-BOXI_SERIAL=99
+BOXI_SERIAL=100
 if [ -f /root/.boxi_serial ] && [ "$(cat /root/.boxi_serial)" -gt "$BOXI_SERIAL" ] 2>/dev/null; then echo "BOXI_STALE $BOXI_SERIAL"; exit 0; fi
 echo $BOXI_SERIAL > /root/.boxi_serial
 mkdir -p /root/sb /root/work
@@ -1921,6 +1921,17 @@ AH
 fi
 if [ -e /root/.amheld ] && [ -s /root/amheldkeep.sh ] && ! pgrep -f "amheldkee[p].sh" >/dev/null && ! grep -q "AMHELD_JOB_DONE" /root/sb_amheld.log 2>/dev/null; then
   setsid nohup bash -c 'bash /root/amheldkeep.sh 2>&1 | tee -a /root/sb_amheld.log' > /dev/null 2>&1 < /dev/null &
+fi
+
+# ---- 2026-10-14, the user: too much time goes to evaluation. Each evaluation of the sixth run embedded the 18,000 pool
+# conversations whole (the pool was cropped at the training window, 768, not the evaluation's 128): ~9 of every 54 minutes.
+# The page-retrieval pool is dropped (sb_eval is the yardstick); the run resumes from its last saved state with --pool 0. ----
+if [ ! -e /root/.once6_nopool ] && [ -e /root/.dolphin_once6 ] && [ -s /root/dolphinonce6keep.sh ] && ! grep -q "ONCE6_JOB_DONE" /root/sb_dolphinonce6.log 2>/dev/null; then touch /root/.once6_nopool
+  pkill -f "dolphinonce6kee[p].sh"; sleep 1; pkill -f "train_e2e.py.*dolphin_once6"; sleep 8
+  sed -i 's/--pool 20000/--pool 0/' /root/dolphinonce6keep.sh
+  st=$(python3 -c "import torch; print(torch.load('/root/sb/dolphin_once6/state_e2e.pt', map_location='cpu', weights_only=False).get('step'))" 2>/dev/null)
+  echo "[once6] restarted without the page-retrieval pool from the saved step $st $(date -u +%H:%M)" >> /root/sb_dolphinonce6.log
+  echo "ONCE6_NOPOOL step $st $(date -u)"
 fi
 echo "BOXI_OK serial $BOXI_SERIAL $(date -u)"
 # CTL-END

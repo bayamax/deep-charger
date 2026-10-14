@@ -229,7 +229,7 @@ if E.pool > len(ev_text):   # the other documents of the pool: shard 001's, not 
     cand = [d for d in range(len(ET)) if d not in used]; random.Random(7).shuffle(cand)
     for d in cand:
         s_ = ET[d]["sents"]
-        if len(s_) >= A.min_sents: POOL.append(s_[:A.seq]); POOL_NQ.append(int(ET[d].get("nq", 0) or 0))
+        if len(s_) >= A.min_sents: POOL.append(s_[:(E.eval_seq or A.seq)]); POOL_NQ.append(int(ET[d].get("nq", 0) or 0))   # cropped as the evaluation is (A.seq is the training window here: 768 made every pool evaluation embed the pool whole)
         if len(POOL) >= E.pool - len(ev_text): break
     print(f"[e2e] pool: {len(ev_text)} + {len(POOL)} held-out articles", flush=True)
 
