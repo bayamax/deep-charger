@@ -8,7 +8,7 @@ cd /root
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null)
 R=baya1116/hypernet-sp-distill
 RAW="https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl"
-BOXI_SERIAL=100
+BOXI_SERIAL=101
 if [ -f /root/.boxi_serial ] && [ "$(cat /root/.boxi_serial)" -gt "$BOXI_SERIAL" ] 2>/dev/null; then echo "BOXI_STALE $BOXI_SERIAL"; exit 0; fi
 echo $BOXI_SERIAL > /root/.boxi_serial
 mkdir -p /root/sb /root/work
@@ -1932,6 +1932,11 @@ if [ ! -e /root/.once6_nopool ] && [ -e /root/.dolphin_once6 ] && [ -s /root/dol
   st=$(python3 -c "import torch; print(torch.load('/root/sb/dolphin_once6/state_e2e.pt', map_location='cpu', weights_only=False).get('step'))" 2>/dev/null)
   echo "[once6] restarted without the page-retrieval pool from the saved step $st $(date -u +%H:%M)" >> /root/sb_dolphinonce6.log
   echo "ONCE6_NOPOOL step $st $(date -u)"
+fi
+# the relaunch guard above ran before the stop: the keeper is started here (idempotent: only when none is running)
+if [ -e /root/.once6_nopool ] && grep -q -- "--pool 0" /root/dolphinonce6keep.sh && ! pgrep -f "dolphinonce6kee[p].sh" >/dev/null && ! grep -q "ONCE6_JOB_DONE" /root/sb_dolphinonce6.log 2>/dev/null; then
+  setsid nohup bash -c 'bash /root/dolphinonce6keep.sh 2>&1 | tee -a /root/sb_dolphinonce6.log' > /dev/null 2>&1 < /dev/null &
+  echo "ONCE6_NOPOOL_RELAUNCHED $(date -u)"
 fi
 echo "BOXI_OK serial $BOXI_SERIAL $(date -u)"
 # CTL-END
