@@ -2,7 +2,7 @@
 # box RW2 (2026-10-14, the 3090 that replaces box RW's 3060 for the GRPO round: ~2.6x the speed for 1.5x the price) - box RW, the user: rent a second box, as cheap as possible, and try GRPO with a reward model's 0-1 score as
 # the reward). First step: can a dedicated reward model tell Deep Charger's better replies from its worse ones? The
 # Skywork-Reward-V2 (Qwen3) family scores the archived GRPO rollouts of mtg7-mtg10 (rm_scan.py). Pull-based as the others.
-BOXRW2_SERIAL=4
+BOXRW2_SERIAL=5
 if [ -f /root/.boxrw2_serial ] && [ "$(cat /root/.boxrw2_serial)" -gt "$BOXRW2_SERIAL" ] 2>/dev/null; then echo "BOXRW2_STALE $BOXRW2_SERIAL"; exit 0; fi
 echo $BOXRW2_SERIAL > /root/.boxrw2_serial
 mkdir -p /root/work /root/hfdl; cd /root/work
@@ -171,5 +171,28 @@ done
 # 2026-10-14, the 8B scan (box RW): Qwen3-8B in 4 bits 0.83 / 0.80 / 0.77, in 8 bits 0.83 / 0.81 / 0.76 - above the 4B on
 # right-over-wrong and on the nano verdicts, ~5.5 GB on the card. Centred on its mean (0.13), its within-group spread (3.2).
 [ -s /root/rm_choice.txt ] || { echo "Skywork/Skywork-Reward-V2-Qwen3-8B@4bit 0.13 3.2 cuda" > /root/rm_choice.txt; echo "RM_CHOICE $(cat /root/rm_choice.txt)"; }
+# ---- 2026-10-14: box I (the context BART) stopped for the credit and its GPU went to another renter. Its sixth run's end
+# and seventh run's state were on its disk only; Vast copies them here (/root/fromI), and this box puts them on the hub. ----
+if ! pgrep -f "fromikee[p].sh" >/dev/null && [ ! -e /root/.fromi_done ]; then
+  cat > /root/fromikeep.sh <<'FI'
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); R=baya1116/hypernet-sp-distill
+up() { [ -s "$1" ] || return 1; a=$(stat -c %s "$1"); sleep 90; [ "$(stat -c %s "$1")" = "$a" ] || return 1; hf upload $R "$1" "$2" >/dev/null 2>&1 && echo "[fromI] $1 -> $2 ($(du -h "$1" | cut -f1)) $(date -u +%H:%M)"; }
+for i in $(seq 1 60); do
+  [ -e /root/.fi6 ] || { up /root/fromI/once6/state_e2e.pt sentbart/dolphin/once6/state_end.pt && touch /root/.fi6; }
+  [ -e /root/.fi7 ] || { up /root/fromI/once7/state_e2e.pt sentbart/dolphin/once7/state_latest.pt && touch /root/.fi7; }
+  [ -e /root/.fi7b ] || { up /root/fromI/once7/model_best.pt sentbart/dolphin/once7/model_best_partial.pt && touch /root/.fi7b; }
+  [ -e /root/.fi7l ] || { up /root/fromI/once7/train.log sentbart/dolphin/once7/train_partial.log && touch /root/.fi7l; }
+  [ -e /root/.fi6 ] && [ -e /root/.fi7 ] && [ -e /root/.fi7b ] && [ -e /root/.fi7l ] && break
+  sleep 60
+done
+for f in /root/fromI/logs/*.log; do [ -s $f ] && hf upload $R $f sentbart/dolphin/logs/$(basename $f) >/dev/null 2>&1; done
+python3 -c "import torch; s=torch.load('/root/fromI/once7/state_e2e.pt', map_location='cpu', weights_only=False); print('[fromI] once7 state step', s.get('step'), 'best', s.get('best'), 'layers', s.get('layers'))" 2>/dev/null
+python3 -c "import torch; s=torch.load('/root/fromI/once6/state_e2e.pt', map_location='cpu', weights_only=False); print('[fromI] once6 state step', s.get('step'), 'layers', s.get('layers'))" 2>/dev/null
+ls -la /root/fromI/once6 /root/fromI/once7 2>&1 | head -12
+touch /root/.fromi_done; echo "FROMI_DONE $(date -u)"
+FI
+  setsid nohup bash -c 'bash /root/fromikeep.sh 2>&1 | tee -a /root/fromi.log' > /dev/null 2>&1 < /dev/null &
+  echo "FROMI_LAUNCHED $(date -u)"
+fi
 echo "BOXRW2_OK serial $BOXRW2_SERIAL $(date -u)"
 # CTL-END
