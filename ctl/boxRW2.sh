@@ -2,7 +2,7 @@
 # box RW2 (2026-10-14, the 3090 that replaces box RW's 3060 for the GRPO round: ~2.6x the speed for 1.5x the price) - box RW, the user: rent a second box, as cheap as possible, and try GRPO with a reward model's 0-1 score as
 # the reward). First step: can a dedicated reward model tell Deep Charger's better replies from its worse ones? The
 # Skywork-Reward-V2 (Qwen3) family scores the archived GRPO rollouts of mtg7-mtg10 (rm_scan.py). Pull-based as the others.
-BOXRW2_SERIAL=15
+BOXRW2_SERIAL=16
 if [ -f /root/.boxrw2_serial ] && [ "$(cat /root/.boxrw2_serial)" -gt "$BOXRW2_SERIAL" ] 2>/dev/null; then echo "BOXRW2_STALE $BOXRW2_SERIAL"; exit 0; fi
 echo $BOXRW2_SERIAL > /root/.boxrw2_serial
 mkdir -p /root/work /root/hfdl; cd /root/work
@@ -488,6 +488,20 @@ rm7 /root/work/mix10_items.jsonl --qbatch 3
 rm6 /root/work/mtg9_items.jsonl --qbatch 3 --w-rm 1.0 --lr 2.5e-6 --search-lr 2.5e-6
 QQ
   echo "RM8_QUEUED $(date -u)"
+fi
+# the user's form is score x correct (1/0), not the score alone: rm9 (--rm-mult) goes first, rm8 (the score alone) later
+if [ ! -e /root/.rm9 ] && grep -q "rm_mult" /root/work/online_loop.py; then touch /root/.rm9
+  cat > /root/rm_queue.txt <<'QQ'
+# tag items [extra flags]  - each round from 2.1.0, 60 steps
+rm2c /root/work/mtg10_items.jsonl --qbatch 3
+rm9 /root/work/mtg10_items.jsonl --qbatch 3 --rm-mult 1 --w-rm 1.0
+rm5 /root/work/mtg10_items.jsonl --qbatch 3 --lr 2.5e-6 --search-lr 2.5e-6
+rm7 /root/work/mix10_items.jsonl --qbatch 3
+rm8 /root/work/mtg10_items.jsonl --qbatch 3 --rm-pure 1 --w-rm 1.0
+rm3b /root/work/mtg10_items.jsonl --qbatch 3 --w-rm 1.0
+rm6 /root/work/mtg9_items.jsonl --qbatch 3 --w-rm 1.0 --lr 2.5e-6 --search-lr 2.5e-6
+QQ
+  echo "RM9_QUEUED $(date -u)"
 fi
 echo "BOXRW2_OK serial $BOXRW2_SERIAL $(date -u)"
 # CTL-END

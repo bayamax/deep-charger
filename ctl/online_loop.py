@@ -106,6 +106,7 @@ ap.add_argument("--judge-correct", type=int, default=0, help="1: a search reply 
 ap.add_argument("--samepage", type=int, default=1, help="1: a search whose top page was already shown in this rollout serves the NEXT chunk of that page (and says so when the page is used up); 0: teacher environment (always the head)")
 ap.add_argument("--rm-model", default="", help="2026-10-14, the user: a dedicated reward model's score as the reward. A grounded-correct search reply with no stray tags gets w_rm x sigmoid((score - rm_center) / rm_scale) instead of the teacher's fixed talk bonus (the teacher is not called); a wrong reply gets nothing from it, so correctness stays the floor")
 ap.add_argument("--rm-pure", type=int, default=0, help="1 (the user's concept as stated): the reward IS the reward model's 0-1 score (w_rm x sigmoid), for every reply that finished without stray tags, right or wrong; an unfinished reply or one with tags gets 0. Correctness is only recorded")
+ap.add_argument("--rm-mult", type=int, default=0, help="1 (the user's form, 2026-10-15): reward = the reward model's 0-1 score x correct (1 or 0): a right reply gets its score (w_rm x sigmoid), a wrong, unfinished or tagged one 0")
 ap.add_argument("--w-rm", type=float, default=0.5); ap.add_argument("--rm-center", type=float, default=0.0); ap.add_argument("--rm-scale", type=float, default=2.0)
 ap.add_argument("--rm-device", default="cuda", help="where the reward model runs (cpu keeps the card for the policy)")
 ap.add_argument("--qbatch", type=int, default=1, help="2026-10-14: >1 on an all-search run (--mt-items, no --reason): the rollouts of this many upcoming steps' questions are decoded together in one batch (G each) and handed to their steps in turn - the update is still one question per step, the later steps' rollouts come from a policy up to qbatch-1 updates old. The GPU sat at ~23%% decoding 12 rows")
@@ -1088,6 +1089,8 @@ def score_search(r, gold):
            "unfinished": not landed, "tags": any(t in reply for t in TAGS)}
     if A.rm_model and A.rm_pure:
         return 0.0, {**why, "rm_pending": bool(landed and not why["tags"])}
+    if A.rm_model and A.rm_mult:
+        return 0.0, {**why, "rm_pending": bool(correct and landed and not why["tags"])}
     if not (correct and grounded and landed) or why["tags"]:
         return base, why
     if A.reason_stub:
@@ -1513,7 +1516,7 @@ for step in range(state["step"] + 1, A.steps + 1) if (reason or A.mt_items) else
     if searching and A.followup > 0 and A.mt_items and not HIST.get(qtext) and rw and max(rw) >= 1.0 and random.random() < A.followup:
         try: make_followup(step, qtext, item["gold"], rolls[max(range(len(rw)), key=lambda i_: rw[i_])])
         except Exception as e_: print(f"[followup] failed: {type(e_).__name__}: {str(e_)[:100]}", flush=True)
-    if A.rm_pure: PASSED[:] = [bool(isinstance(v, dict) and v.get("correct")) for v in notes]
+    if A.rm_pure or A.rm_mult: PASSED[:] = [bool(isinstance(v, dict) and v.get("correct")) for v in notes]
     rwa = list(rw)   # the rewards the advantage is built from; rw itself keeps pass/fail for the bookkeeping and the teachers
     if not searching and A.reason_search_cost > 0:
         rwa = [x - A.reason_search_cost * min(int(r.get("ns", 0) or 0), A.reason_search_cap) for r, x in zip(rolls, rw)]
@@ -1573,7 +1576,7 @@ for step in range(state["step"] + 1, A.steps + 1) if (reason or A.mt_items) else
         opt.step(); opt.zero_grad(set_to_none=True); clear()
         if opt_s is not None: opt_s.zero_grad(set_to_none=True)   # pooler grads from a reasoning rollout are not search signal
     k = "search" if searching else "reason"
-    npass = sum(PASSED) if A.rm_pure else sum(1 for x in rw if x >= 1.0)
+    npass = sum(PASSED) if (A.rm_pure or A.rm_mult) else sum(1 for x in rw if x >= 1.0)
     cum[k + " pass"] = cum.get(k + " pass", 0) + npass; cum[k + " n"] = cum.get(k + " n", 0) + len(rw)
     cum[k + " sum"] = cum.get(k + " sum", 0.0) + sum(rw)
     unfin = sum(1 for v in notes if v.get("unfinished")); err = sum(1 for v in notes if v.get("error"))
