@@ -25,6 +25,21 @@ ap.add_argument("--limit", type=int, default=0, help="groups per file (0: all) -
 X = ap.parse_args()
 DEV = "cuda" if torch.cuda.is_available() else "cpu"
 
+
+def load_rm(spec, dev):
+    """<hub name>[@8bit|@4bit]: a quantised reward model (bitsandbytes) when asked, bf16 on the card otherwise"""
+    name, _, q = spec.partition("@")
+    kw = {"num_labels": 1}
+    if q in ("8bit", "4bit"):
+        from transformers import BitsAndBytesConfig
+        kw["quantization_config"] = BitsAndBytesConfig(load_in_8bit=True) if q == "8bit" else BitsAndBytesConfig(load_in_4bit=True, bnb_4bit_quant_type="nf4", bnb_4bit_compute_dtype=torch.bfloat16, bnb_4bit_use_double_quant=True)
+        kw["device_map"] = {"": 0}; kw["torch_dtype"] = torch.bfloat16
+        m = AutoModelForSequenceClassification.from_pretrained(name, **kw)
+    else:
+        m = AutoModelForSequenceClassification.from_pretrained(name, torch_dtype=torch.bfloat16 if str(dev).startswith("cuda") else torch.float32, **kw).to(dev)
+    return AutoTokenizer.from_pretrained(name), m.eval()
+
+
 rows = []
 for f in X.rollouts:
     tag = os.path.basename(os.path.dirname(f)) or os.path.basename(f)
@@ -80,8 +95,7 @@ def pairwise(sel, label):
 res = {"args": vars(X), "n_rows": len(rows), "models": {}}
 for name in X.models:
     t0 = time.time()
-    tok = AutoTokenizer.from_pretrained(name)
-    model = AutoModelForSequenceClassification.from_pretrained(name, torch_dtype=torch.bfloat16 if DEV == "cuda" else torch.float32, num_labels=1).to(DEV).eval()
+    tok, model = load_rm(name, DEV)
     todo = [r for r in rows if r["finished"]]
     texts = [tok.apply_chat_template([{"role": "user", "content": r["q"]}, {"role": "assistant", "content": r["reply"]}], tokenize=False) for r in todo]
     order = sorted(range(len(texts)), key=lambda i: len(texts[i]))
@@ -89,7 +103,7 @@ for name in X.models:
     with torch.no_grad():
         for b in range(0, len(order), X.batch):
             idx = order[b:b + X.batch]
-            enc = tok([texts[i] for i in idx], return_tensors="pt", padding=True, truncation=True, max_length=X.max_len, add_special_tokens=False).to(DEV)
+            enc = tok([texts[i] for i in idx], return_tensors="pt", padding=True, truncation=True, max_length=X.max_len, add_special_tokens=False).to(model.device)
             out = model(**enc).logits[:, 0].float().cpu().tolist()
             for i, s in zip(idx, out): scores[i] = s
             if (b // X.batch) % 100 == 0: print(f"[rm_scan] {name}: {b + len(idx)}/{len(order)} ({(time.time() - t0) / 60:.1f} min)", flush=True)

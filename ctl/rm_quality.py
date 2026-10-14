@@ -9,8 +9,21 @@ import torch
 from transformers import AutoModelForSequenceClassification, AutoTokenizer
 name, path, tag = sys.argv[1], sys.argv[2], sys.argv[3]
 dev = "cuda" if torch.cuda.is_available() else "cpu"
-tok = AutoTokenizer.from_pretrained(name)
-model = AutoModelForSequenceClassification.from_pretrained(name, torch_dtype=torch.bfloat16 if dev == "cuda" else torch.float32, num_labels=1).to(dev).eval()
+
+def load_rm(spec, dev):
+    """<hub name>[@8bit|@4bit]: a quantised reward model (bitsandbytes) when asked, bf16 on the card otherwise"""
+    name, _, q = spec.partition("@")
+    kw = {"num_labels": 1}
+    if q in ("8bit", "4bit"):
+        from transformers import BitsAndBytesConfig
+        kw["quantization_config"] = BitsAndBytesConfig(load_in_8bit=True) if q == "8bit" else BitsAndBytesConfig(load_in_4bit=True, bnb_4bit_quant_type="nf4", bnb_4bit_compute_dtype=torch.bfloat16, bnb_4bit_use_double_quant=True)
+        kw["device_map"] = {"": 0}; kw["torch_dtype"] = torch.bfloat16
+        m = AutoModelForSequenceClassification.from_pretrained(name, **kw)
+    else:
+        m = AutoModelForSequenceClassification.from_pretrained(name, torch_dtype=torch.bfloat16 if str(dev).startswith("cuda") else torch.float32, **kw).to(dev)
+    return AutoTokenizer.from_pretrained(name), m.eval()
+
+tok, model = load_rm(name, dev)
 rows = [json.loads(l) for l in open(path) if l.strip()]
 rows = [r for r in rows if (r.get("reply") or "").strip()]
 convs = []
@@ -22,7 +35,7 @@ texts = [tok.apply_chat_template(c, tokenize=False) for c in convs]
 sc = []
 with torch.no_grad():
     for i in range(0, len(texts), 8):
-        enc = tok(texts[i:i + 8], return_tensors="pt", padding=True, truncation=True, max_length=2048, add_special_tokens=False).to(dev)
+        enc = tok(texts[i:i + 8], return_tensors="pt", padding=True, truncation=True, max_length=2048, add_special_tokens=False).to(model.device)
         sc += model(**enc).logits[:, 0].float().cpu().tolist()
 cor = [s for s, r in zip(sc, rows) if r.get("correct")]; lc = [len(r["reply"]) for r in rows if r.get("correct")]
 m = lambda xs: (sum(xs) / len(xs)) if xs else float("nan")

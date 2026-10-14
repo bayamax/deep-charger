@@ -2,7 +2,7 @@
 # box RW (2026-10-14, the user: rent a second box, as cheap as possible, and try GRPO with a reward model's 0-1 score as
 # the reward). First step: can a dedicated reward model tell Deep Charger's better replies from its worse ones? The
 # Skywork-Reward-V2 (Qwen3) family scores the archived GRPO rollouts of mtg7-mtg10 (rm_scan.py). Pull-based as the others.
-BOXRW_SERIAL=3
+BOXRW_SERIAL=4
 if [ -f /root/.boxrw_serial ] && [ "$(cat /root/.boxrw_serial)" -gt "$BOXRW_SERIAL" ] 2>/dev/null; then echo "BOXRW_STALE $BOXRW_SERIAL"; exit 0; fi
 echo $BOXRW_SERIAL > /root/.boxrw_serial
 mkdir -p /root/work /root/hfdl; cd /root/work
@@ -24,12 +24,13 @@ fi
 
 # ---- the mirror: the box log to the hub every 10 minutes ----
 if [ ! -e /root/.rwmirror_r2 ]; then touch /root/.rwmirror_r2; pkill -f "rwmirro[r].sh"; sleep 1; fi
+if [ ! -e /root/.rwmirror_r3 ]; then touch /root/.rwmirror_r3; pkill -f "rwmirro[r].sh"; sleep 1; fi
 if ! pgrep -f "rwmirro[r].sh" >/dev/null; then
   cat > /root/rwmirror.sh <<'MR'
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); R=baya1116/hypernet-sp-distill
 while :; do
   { echo "=== boxRW $(date -u) ==="; echo "--- ctl.log ---"; tail -n 30 /root/ctl.log 2>/dev/null
-    for f in /root/rm_scan.log /root/grpoboot.log /root/rmround.log; do [ -s $f ] && { echo "--- $f ---"; grep -vE "Warning|warn|Loading weights" $f | tail -n 30 | cut -c1-600; }; done
+    for f in /root/rm_scan.log /root/rm_scan2.log /root/grpoboot.log /root/rmround.log; do [ -s $f ] && { echo "--- $f ---"; grep -vE "Warning|warn|Loading weights" $f | tail -n 30 | cut -c1-600; }; done
     [ -s /root/rm1_run.log ] && { echo "--- rm1 steps ---"; grep -E "^\[step|^\[rm\]|rollback|Traceback|out of memory|Error" /root/rm1_run.log | sed -E 's/\| ce=.*cumulative/| cum/' | tail -n 10 | cut -c1-240; }
     [ -s /root/online_rm1/rollouts.jsonl ] && { echo "--- rm1 by 20-step block ---"; python3 - /root/online_rm1/rollouts.jsonl <<'PB' 2>/dev/null
 import json, sys, collections
@@ -176,6 +177,30 @@ done
 # 2026-10-14, the user: $0.10 for a 3060 is dear - the GRPO round moves to a 3090 (box RW2); this box keeps only the scan
 if [ ! -e /root/.rw_scanonly ]; then touch /root/.rw_scanonly /root/.grpoboot /root/.rmround
   pkill -f "grpobootkee[p].sh"; pkill -f "rmroundkee[p].sh"; echo "RW_SCAN_ONLY $(date -u)"
+fi
+# ---- 2026-10-14, the user: beyond the 4B, larger reward models quantised. The 8B ones (Skywork-Reward-V2 Qwen3-8B and
+# Llama-3.1-8B) in 8 and 4 bits on the same 3,600 rollouts, beside the 4B in bf16 (0.81 / 0.82 / 0.74). ----
+if [ ! -e /root/.rmscan2 ] && grep -q "RMSCAN_JOB_DONE" /root/rm_scan.log 2>/dev/null; then touch /root/.rmscan2
+  cat > /root/rmscan2keep.sh <<'R2'
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); R=baya1116/hypernet-sp-distill; cd /root/work
+pip install -q "transformers>=4.51,<4.57" bitsandbytes 2>&1 | grep -v WARNING | tail -1
+python3 -c "import transformers, bitsandbytes; print('[rm_scan2] transformers', transformers.__version__, 'bitsandbytes', bitsandbytes.__version__)"
+FS=$(ls /root/hfdl/pooler_distill/chatsft/archive_G2/online/online_*/rollouts.jsonl)
+for M in Skywork/Skywork-Reward-V2-Qwen3-8B@8bit Skywork/Skywork-Reward-V2-Qwen3-8B@4bit Skywork/Skywork-Reward-V2-Llama-3.1-8B@8bit Skywork/Skywork-Reward-V2-Llama-3.1-8B@4bit; do
+  python3 -u /root/work/rm_scan.py --rollouts $FS --models $M --out /root/rm_scan2_$(echo $M | tr '/@' '__').json --batch 4 2>&1 | grep -E "^\[rm_scan\] .*: search_correct|Error|Traceback|out of memory" | cut -c1-600
+  rm -rf /root/.cache/huggingface/hub/models--Skywork--Skywork-Reward-V2-Qwen3-8B 2>/dev/null; [ "${M%@*}" != "Skywork/Skywork-Reward-V2-Qwen3-8B" ] && rm -rf /root/.cache/huggingface/hub/models--Skywork--Skywork-Reward-V2-Llama-3.1-8B 2>/dev/null
+done
+python3 - <<'PJ'
+import glob, json
+out = {}
+for f in glob.glob("/root/rm_scan2_*.json"): out.update(json.load(open(f))["models"])
+json.dump(out, open("/root/rm_scan2.json", "w"), indent=1)
+PJ
+hf upload $R /root/rm_scan2.json pooler_distill/chatsft/rm_scan/rm_scan2.json >/dev/null 2>&1 && echo "[rm_scan2] on the hub: pooler_distill/chatsft/rm_scan/rm_scan2.json"
+echo "RMSCAN2_JOB_DONE $(date -u)"
+R2
+  setsid nohup bash -c 'bash /root/rmscan2keep.sh 2>&1 | tee -a /root/rm_scan2.log' > /dev/null 2>&1 < /dev/null &
+  echo "RMSCAN2_LAUNCHED $(date -u)"
 fi
 echo "BOXRW_OK serial $BOXRW_SERIAL $(date -u)"
 # CTL-END
