@@ -2,7 +2,7 @@
 # box RW2 (2026-10-14, the 3090 that replaces box RW's 3060 for the GRPO round: ~2.6x the speed for 1.5x the price) - box RW, the user: rent a second box, as cheap as possible, and try GRPO with a reward model's 0-1 score as
 # the reward). First step: can a dedicated reward model tell Deep Charger's better replies from its worse ones? The
 # Skywork-Reward-V2 (Qwen3) family scores the archived GRPO rollouts of mtg7-mtg10 (rm_scan.py). Pull-based as the others.
-BOXRW2_SERIAL=2
+BOXRW2_SERIAL=3
 if [ -f /root/.boxrw2_serial ] && [ "$(cat /root/.boxrw2_serial)" -gt "$BOXRW2_SERIAL" ] 2>/dev/null; then echo "BOXRW2_STALE $BOXRW2_SERIAL"; exit 0; fi
 echo $BOXRW2_SERIAL > /root/.boxrw2_serial
 mkdir -p /root/work /root/hfdl; cd /root/work
@@ -62,6 +62,7 @@ export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); R=baya1116/h
 until [ -f /root/.bootstrapped ]; do sleep 30; done
 echo "[grpoboot] start $(date -u +%H:%M)"
 pip install -q --target /root/rmenv "transformers>=4.51,<4.57" 2>&1 | grep -v WARNING | tail -1
+pip install -q --target /root/rmenv --no-deps bitsandbytes 2>&1 | grep -v WARNING | tail -1   # the 4-bit reward model; torch comes from the system
 pip install -q "transformers==4.44.2" "peft==0.12.0" "safetensors==0.8.0" "huggingface_hub>=0.34,<1.0" accelerate certifi datasets pyarrow scipy 2>&1 | grep -v WARNING | tail -1
 python3 -c "import transformers; print('[grpoboot] loop transformers', transformers.__version__)"; PYTHONPATH=/root/rmenv python3 -c "import transformers; print('[grpoboot] reward model transformers', transformers.__version__)"
 dl() { for try in 1 2 3 4 5 6; do hf download $R --include "$1" --local-dir /root/hfdl >/dev/null 2>&1 && return 0; sleep 20; done; echo "[grpoboot] dl failed: $1"; return 1; }
@@ -154,6 +155,8 @@ done
 # the scan (box RW, 3,600 rollouts of mtg7-mtg10, within-group pairwise): 0.6B 0.69 / 0.75 / 0.65, 1.7B 0.79 / 0.79 / 0.71,
 # 4B 0.81 / 0.82 / 0.74 (right over wrong / solved over not / nano-good over not among the right), no length bias (-0.08).
 # The 4B on the card (24 GB), centred on its mean score (5.75) with its within-group spread (3.0) as the scale.
-[ -s /root/rm_choice.txt ] || { echo "Skywork/Skywork-Reward-V2-Qwen3-4B 5.75 3.0 cuda" > /root/rm_choice.txt; echo "RM_CHOICE $(cat /root/rm_choice.txt)"; }
+# 2026-10-14, the 8B scan (box RW): Qwen3-8B in 4 bits 0.83 / 0.80 / 0.77, in 8 bits 0.83 / 0.81 / 0.76 - above the 4B on
+# right-over-wrong and on the nano verdicts, ~5.5 GB on the card. Centred on its mean (0.13), its within-group spread (3.2).
+[ -s /root/rm_choice.txt ] || { echo "Skywork/Skywork-Reward-V2-Qwen3-8B@4bit 0.13 3.2 cuda" > /root/rm_choice.txt; echo "RM_CHOICE $(cat /root/rm_choice.txt)"; }
 echo "BOXRW2_OK serial $BOXRW2_SERIAL $(date -u)"
 # CTL-END
