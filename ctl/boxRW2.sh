@@ -2,7 +2,7 @@
 # box RW2 (2026-10-14, the 3090 that replaces box RW's 3060 for the GRPO round: ~2.6x the speed for 1.5x the price) - box RW, the user: rent a second box, as cheap as possible, and try GRPO with a reward model's 0-1 score as
 # the reward). First step: can a dedicated reward model tell Deep Charger's better replies from its worse ones? The
 # Skywork-Reward-V2 (Qwen3) family scores the archived GRPO rollouts of mtg7-mtg10 (rm_scan.py). Pull-based as the others.
-BOXRW2_SERIAL=1
+BOXRW2_SERIAL=2
 if [ -f /root/.boxrw2_serial ] && [ "$(cat /root/.boxrw2_serial)" -gt "$BOXRW2_SERIAL" ] 2>/dev/null; then echo "BOXRW2_STALE $BOXRW2_SERIAL"; exit 0; fi
 echo $BOXRW2_SERIAL > /root/.boxrw2_serial
 mkdir -p /root/work /root/hfdl; cd /root/work
@@ -151,5 +151,9 @@ for k in grpoboot rmround; do
     setsid nohup bash -c "bash /root/${k}keep.sh 2>&1 | tee -a /root/$k.log" > /dev/null 2>&1 < /dev/null &
   fi
 done
+# the scan (box RW, 3,600 rollouts of mtg7-mtg10, within-group pairwise): 0.6B 0.69 / 0.75 / 0.65, 1.7B 0.79 / 0.79 / 0.71,
+# 4B 0.81 / 0.82 / 0.74 (right over wrong / solved over not / nano-good over not among the right), no length bias (-0.08).
+# The 4B on the card (24 GB), centred on its mean score (5.75) with its within-group spread (3.0) as the scale.
+[ -s /root/rm_choice.txt ] || { echo "Skywork/Skywork-Reward-V2-Qwen3-4B 5.75 3.0 cuda" > /root/rm_choice.txt; echo "RM_CHOICE $(cat /root/rm_choice.txt)"; }
 echo "BOXRW2_OK serial $BOXRW2_SERIAL $(date -u)"
 # CTL-END
