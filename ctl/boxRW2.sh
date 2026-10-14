@@ -2,7 +2,7 @@
 # box RW2 (2026-10-14, the 3090 that replaces box RW's 3060 for the GRPO round: ~2.6x the speed for 1.5x the price) - box RW, the user: rent a second box, as cheap as possible, and try GRPO with a reward model's 0-1 score as
 # the reward). First step: can a dedicated reward model tell Deep Charger's better replies from its worse ones? The
 # Skywork-Reward-V2 (Qwen3) family scores the archived GRPO rollouts of mtg7-mtg10 (rm_scan.py). Pull-based as the others.
-BOXRW2_SERIAL=16
+BOXRW2_SERIAL=17
 if [ -f /root/.boxrw2_serial ] && [ "$(cat /root/.boxrw2_serial)" -gt "$BOXRW2_SERIAL" ] 2>/dev/null; then echo "BOXRW2_STALE $BOXRW2_SERIAL"; exit 0; fi
 echo $BOXRW2_SERIAL > /root/.boxrw2_serial
 mkdir -p /root/work /root/hfdl; cd /root/work
@@ -15,7 +15,7 @@ mkdir -p /root/sb; for f in sentbart/prep_dolphin.py sentbart/train.py sentbart/
   for try in 1 2 3; do curl -sS -o /root/sb/$(basename $f) "$RAW/$f?nocache=$(date +%s)" && python3 -m py_compile /root/sb/$(basename $f) && break; sleep 5; done
 done
 for f in rm_rounds.sh; do curl -sS -o /root/work/$f.new "$RAW/$f?nocache=$(date +%s)" && bash -n /root/work/$f.new && mv /root/work/$f.new /root/work/$f; done
-for f in rm_scan.py rm_server.py rm_quality.py online_loop.py pool_eval.py web_search.py; do
+for f in rm_scan.py rm_server.py rm_quality.py rm_pair.py online_loop.py pool_eval.py web_search.py; do
   for try in 1 2 3; do curl -sS -o /root/work/$f "$RAW/$f?nocache=$(date +%s)" && python3 -m py_compile /root/work/$f && break; sleep 5; done
 done
 
@@ -33,12 +33,13 @@ if [ ! -e /root/.rwmirror_r2 ]; then touch /root/.rwmirror_r2; pkill -f "rwmirro
 if [ ! -e /root/.rwmirror_r5 ]; then touch /root/.rwmirror_r5; pkill -f "rwmirro[r].sh"; sleep 1; fi
 if [ ! -e /root/.rwmirror_r6 ]; then touch /root/.rwmirror_r6; pkill -f "rwmirro[r].sh"; sleep 1; fi
 if [ ! -e /root/.rwmirror_r7 ]; then touch /root/.rwmirror_r7; pkill -f "rwmirro[r].sh"; sleep 1; fi
+if [ ! -e /root/.rwmirror_r8 ]; then touch /root/.rwmirror_r8; pkill -f "rwmirro[r].sh"; sleep 1; fi
 if ! pgrep -f "rwmirro[r].sh" >/dev/null; then
   cat > /root/rwmirror.sh <<'MR'
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); R=baya1116/hypernet-sp-distill
 while :; do
   { echo "=== boxRW2 $(date -u) ==="; echo "--- ctl.log ---"; tail -n 30 /root/ctl.log 2>/dev/null
-    for f in /root/fromi.log /root/rm_scan.log /root/grpoboot.log /root/rmround.log /root/earlyscreen.log /root/parscreen.log /root/bartprep.log /root/bart7.log /root/rm_rounds.log /root/rm_rounds.txt; do [ -s $f ] && { echo "--- $f ---"; grep -vE "Warning|warn|Loading weights" $f | tail -n 30 | cut -c1-600; }; done
+    for f in /root/fromi.log /root/rm_scan.log /root/grpoboot.log /root/rmround.log /root/earlyscreen.log /root/parscreen.log /root/bartprep.log /root/bart7.log /root/rm_rounds.log /root/rm_rounds.txt /root/rm_pairs.txt; do [ -s $f ] && { echo "--- $f ---"; grep -vE "Warning|warn|Loading weights" $f | tail -n 30 | cut -c1-600; }; done
     [ -s /root/rm1_run.log ] && { echo "--- rm1 steps ---"; grep -E "^\[step|^\[rm\]|rollback|Traceback|out of memory|Error" /root/rm1_run.log | sed -E 's/\| ce=.*cumulative/| cum/' | tail -n 10 | cut -c1-240; }
     [ -s /root/online_rm1/rollouts.jsonl ] && { echo "--- rm1 by 20-step block ---"; python3 - /root/online_rm1/rollouts.jsonl <<'PB' 2>/dev/null
 import json, sys, collections
@@ -502,6 +503,35 @@ rm3b /root/work/mtg10_items.jsonl --qbatch 3 --w-rm 1.0
 rm6 /root/work/mtg9_items.jsonl --qbatch 3 --w-rm 1.0 --lr 2.5e-6 --search-lr 2.5e-6
 QQ
   echo "RM9_QUEUED $(date -u)"
+fi
+# ---- 2026-10-15, the user: the point is how good the replies read, so at each milestone look at that. The training reward
+# model's own reading is no yardstick; each round's best copy is set against 2.1.0 on the same questions by a reward model
+# not used in training (Skywork-Reward-V2 on Llama-3.1-8B, 4 bits): win rate where both are right, lengths; the pairs go
+# to the hub for a reader. ----
+if ! pgrep -f "pairkee[p].sh" >/dev/null; then
+  cat > /root/pairkeep.sh <<'PK'
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); R=baya1116/hypernet-sp-distill; cd /root/work
+J=Skywork/Skywork-Reward-V2-Llama-3.1-8B@4bit
+freemb() { nvidia-smi --query-gpu=memory.free --format=csv,noheader,nounits | head -1 | tr -dc 0-9; }
+lines() { wc -l < "$1" 2>/dev/null || echo 0; }
+while :; do
+  bests=$( { grep -ho "best copy by shard 0: rm1_s[0-9]*" /root/rmround.log 2>/dev/null | awk '{print $NF}'; grep -ho "full screens for rm[0-9a-z]*_s[0-9]*" /root/rm_rounds.log 2>/dev/null | awk '{print $NF}'; } | sort -u )
+  for B in $bests; do
+    for kind in st0 br3 ch3; do
+      case $kind in st0) fc=/root/work/${B}st_0.jsonl; fs=/root/work/mtg7_s40st_0.jsonl; need=100;; br3) fc=/root/work/br3_$B.jsonl; fs=/root/work/br3_mtg7_s40.jsonl; need=150;; ch3) fc=/root/work/ch3_$B.jsonl; fs=/root/work/ch3_mtg7_s40.jsonl; need=170;; esac
+      [ -e /root/.pair_${B}_$kind ] && continue; [ "$(lines $fc)" -ge $need ] || continue
+      pgrep -f "\[(br3|ch3)-$B\]|\[${B}st" >/dev/null && continue
+      until [ "$(freemb)" -ge 7500 ]; do sleep 60; done
+      PYTHONPATH=/root/rmenv python3 /root/work/rm_pair.py $J $fc $fs ${B}_$kind /root/work/pairs_${B}_$kind.jsonl 2>/dev/null | grep "^PAIR" | tee -a /root/rm_pairs.txt
+      [ -s /root/work/pairs_${B}_$kind.jsonl ] && { touch /root/.pair_${B}_$kind; hf upload $R /root/work/pairs_${B}_$kind.jsonl pooler_distill/chatsft/rmgrpo/pairs/${B}_$kind.jsonl >/dev/null 2>&1; }
+      hf upload $R /root/rm_pairs.txt pooler_distill/chatsft/rmgrpo/rm_pairs.txt >/dev/null 2>&1
+    done
+  done
+  sleep 300
+done
+PK
+  setsid nohup bash -c 'bash /root/pairkeep.sh 2>&1 | tee -a /root/pairkeep.log' > /dev/null 2>&1 < /dev/null &
+  echo "PAIRKEEP_LAUNCHED $(date -u)"
 fi
 echo "BOXRW2_OK serial $BOXRW2_SERIAL $(date -u)"
 # CTL-END
