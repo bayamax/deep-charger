@@ -25,6 +25,7 @@ ap.add_argument("--shard", default="000", help="--all writes docs_<shard>.jsonl 
 ap.add_argument("--exclude-questions", nargs="*", default=[], help="docs_*.jsonl files whose conversations' questions (the first nq sentences) are kept out, by text - the held-out set against another corpus that may share prompts")
 ap.add_argument("--schema", default="dolphin", choices=["dolphin", "am"], help="am: AM-DeepSeek-R1-Distilled rows (messages[user].content, messages[assistant].info.think_content / answer_content); rows with CJK text are skipped")
 ap.add_argument("--skip-rows", type=int, default=0, help="--all: rows of the source skipped before any is taken (a held-out set from the part of a corpus a training set did not reach)")
+ap.add_argument("--stride", type=int, default=1, help="--all: every k-th qualifying conversation is taken (a held-out spread over a corpus whose rows come grouped by source)")
 ap.add_argument("--max-docs", type=int, default=0, help="--all: stop after this many kept conversations (0: the whole corpus)")
 ap.add_argument("--all", type=int, default=0, help="1: every qualifying conversation goes to the training set (2026-10-11, the user: the whole corpus, one epoch; 50k had been gone round ~45 times)")
 A = ap.parse_args()
@@ -56,6 +57,9 @@ def rows(path_or_url):
 CJK = re.compile(r"[\u3040-\u30ff\u3400-\u9fff\uac00-\ud7af]")
 
 
+SRC = {}   # --schema am: the source of each kept conversation, counted
+
+
 def parts(r):
     """(question, reasoning, answer) of one row under --schema; None when the row is not usable"""
     msgs = r.get("messages") or []
@@ -64,6 +68,7 @@ def parts(r):
         if not u or not a_: return None
         info = a_.get("info") or {}; q = u.get("content", ""); th = info.get("think_content") or ""; an = info.get("answer_content") or ""
         if not th or CJK.search(q) or CJK.search(th[:3000]): return None
+        SRC["_last"] = (u.get("info") or {}).get("source") or "none"
         return q, th, an
     user = next((m.get("content", "") for m in reversed(msgs) if m.get("role") == "user"), "")
     return user, r.get("reasoning", ""), r.get("answer", "")
@@ -124,8 +129,11 @@ for raw in src:
     if not qs or len(qs) > A.max_q: n_longq += 1; continue
     body = split(reasoning) + split(answer)
     if len(body) < A.min_sents: n_short += 1; continue
+    n_qual = globals().get("n_qual", 0) + 1; globals()["n_qual"] = n_qual
+    if A.stride > 1 and n_qual % A.stride: continue
     sents = (qs + body)[:A.max_sents]
     d = {"id": f"{A.id_prefix}:{n_read}", "title": "", "sents": sents, "nq": len(qs)}
+    if A.schema == "am": SRC[SRC["_last"]] = SRC.get(SRC["_last"], 0) + 1
     if out_all is not None:
         out_all.write(json.dumps(d, ensure_ascii=False) + "\n"); lens.append(len(sents)); nqs.append(len(qs)); n_kept += 1
         if n_kept % 20000 == 0: print(f"[prep_dolphin] {n_read} read, {n_kept} kept", flush=True)
@@ -141,6 +149,7 @@ if out_all is not None:
     ls = sorted(lens); lq = sorted(nqs)
     print(f"PREP_DOLPHIN_DONE {n_kept} training conversations ({'the first ' + str(A.max_docs) + ' kept' if A.max_docs and n_kept >= A.max_docs else 'all of the corpus'}) of {n_read} read ({n_dup} excluded, {n_longq} long questions, {n_short} short, {n_unus} unusable, {len(keep_ids)} held out); "
           f"sentences median {ls[len(ls)//2]} (90% {ls[int(len(ls)*0.9)]}), question sentences median {lq[len(lq)//2]}", flush=True)
+    if A.schema == "am": print("PREP_DOLPHIN_SOURCES " + ", ".join(f"{k} {v}" for k, v in sorted(((k, v) for k, v in SRC.items() if k != "_last"), key=lambda kv: -kv[1])), flush=True)
     raise SystemExit(0)
 rng.shuffle(docs); docs = docs[:want]
 ev, tr = docs[:A.n_eval], docs[A.n_eval:]

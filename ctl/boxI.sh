@@ -8,7 +8,7 @@ cd /root
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null)
 R=baya1116/hypernet-sp-distill
 RAW="https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl"
-BOXI_SERIAL=102
+BOXI_SERIAL=103
 if [ -f /root/.boxi_serial ] && [ "$(cat /root/.boxi_serial)" -gt "$BOXI_SERIAL" ] 2>/dev/null; then echo "BOXI_STALE $BOXI_SERIAL"; exit 0; fi
 echo $BOXI_SERIAL > /root/.boxi_serial
 mkdir -p /root/sb /root/work
@@ -1944,6 +1944,17 @@ fi
 if [ ! -e /root/.once6_readyfix ] && [ -e /root/.once6_nopool ]; then touch /root/.once6_readyfix
   [ -e /root/sb/data/r1_768/ready.ok ] && echo ok > /root/sb/data/r1_768/ready.ok
   sed -i 's/\[ ! -s \$DR\/ready.ok \]/[ ! -e $DR\/ready.ok ]/' /root/dolphinonce6keep.sh; grep -c -- "-e \$DR/ready.ok" /root/dolphinonce6keep.sh
+fi
+
+# ---- 2026-10-14: AM's rows come grouped by source (natural_reasoning, then InfinityInstruct + code, ...), so a held-out
+# taken right after the training slice would be one source. It is spread instead: every 40th qualifying conversation
+# past row 342,045, 4,000 of them, with its source mix printed. The waiting keeper is replaced. ----
+if [ ! -e /root/.amheld_spread ] && [ -e /root/.amheld ] && grep -q -- "--stride" /root/sb/prep_dolphin.py; then touch /root/.amheld_spread
+  pkill -f "amheldkee[p].sh"; sleep 1
+  sed -i 's/--skip-rows 342045 --max-docs 4000/--skip-rows 342045 --stride 40 --max-docs 4000/; s/grep -E "PREP_DOLPHIN|Error|Traceback" | sed .s\/^\/\[amheld prep\] \/./grep -E "PREP_DOLPHIN|Error|Traceback" | sed "s\/^\/[amheld prep] \/"/' /root/amheldkeep.sh
+  rm -rf /root/sb/data/am_held
+  setsid nohup bash -c 'bash /root/amheldkeep.sh 2>&1 | tee -a /root/sb_amheld.log' > /dev/null 2>&1 < /dev/null &
+  echo "AMHELD_SPREAD $(grep -c -- "--stride 40" /root/amheldkeep.sh) $(date -u)"
 fi
 echo "BOXI_OK serial $BOXI_SERIAL $(date -u)"
 # CTL-END
