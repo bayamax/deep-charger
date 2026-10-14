@@ -67,7 +67,7 @@ def parts(r):
         u = next((m for m in msgs if m.get("role") == "user"), None); a_ = next((m for m in msgs if m.get("role") == "assistant"), None)
         if not u or not a_: return None
         info = a_.get("info") or {}; q = u.get("content", ""); th = info.get("think_content") or ""; an = info.get("answer_content") or ""
-        if not th or CJK.search(q) or CJK.search(th[:3000]): return None
+        if not th or CJK.search(q) or CJK.search(th) or CJK.search(an): return None   # Chinese / Japanese / Korean anywhere: GPT-2 cannot write it (the user, 2026-10-14)
         SRC["_last"] = (u.get("info") or {}).get("source") or "none"
         return q, th, an
     user = next((m.get("content", "") for m in reversed(msgs) if m.get("role") == "user"), "")
