@@ -26,6 +26,7 @@ while :; do
   line=$(while read -r t rest; do [ -n "$t" ] && [ "${t:0:1}" != "#" ] && [ ! -e /root/rmr/$t.trained ] && { echo "$t $rest"; break; }; done < /root/rm_queue.txt)
   [ -z "$line" ] && { sleep 300; continue; }
   set -- $line; T=$1; IT=$2; shift 2; EXTRA="$*"; mkdir -p /root/rmr; OUT=/root/online_$T; RUN=/root/${T}_run.log
+  until [ "$(freemb)" -ge 14000 ]; do sleep 60; done   # the policy and the reward model (~5.5 GB) need their room before the rollouts take it
   echo "[$T] start 2.1.0, items $IT, extra: ${EXTRA:-none} $(date -u +%H:%M)"
   t0=$(date +%s); rm -rf $OUT
   ( last=0; while sleep 60; do s=$(python3 -c "import json;print(json.load(open('$OUT/state.json'))['step'])" 2>/dev/null || echo 0)

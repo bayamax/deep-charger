@@ -2,7 +2,7 @@
 # box RW2 (2026-10-14, the 3090 that replaces box RW's 3060 for the GRPO round: ~2.6x the speed for 1.5x the price) - box RW, the user: rent a second box, as cheap as possible, and try GRPO with a reward model's 0-1 score as
 # the reward). First step: can a dedicated reward model tell Deep Charger's better replies from its worse ones? The
 # Skywork-Reward-V2 (Qwen3) family scores the archived GRPO rollouts of mtg7-mtg10 (rm_scan.py). Pull-based as the others.
-BOXRW2_SERIAL=10
+BOXRW2_SERIAL=11
 if [ -f /root/.boxrw2_serial ] && [ "$(cat /root/.boxrw2_serial)" -gt "$BOXRW2_SERIAL" ] 2>/dev/null; then echo "BOXRW2_STALE $BOXRW2_SERIAL"; exit 0; fi
 echo $BOXRW2_SERIAL > /root/.boxrw2_serial
 mkdir -p /root/work /root/hfdl; cd /root/work
@@ -171,11 +171,7 @@ RR
   setsid nohup bash -c 'bash /root/rmroundkeep.sh 2>&1 | tee -a /root/rmround.log' > /dev/null 2>&1 < /dev/null &
   echo "RMROUND_LAUNCHED $(date -u)"
 fi
-for k in grpoboot rmround; do
-  if [ -e /root/.$k ] && [ -s /root/${k}keep.sh ] && ! pgrep -f "${k}kee[p].sh" >/dev/null && ! grep -qE "GRPOBOOT_DONE|GRPOBOOT_FAILED|RMROUND_JOB_DONE" /root/$k.log 2>/dev/null; then
-    setsid nohup bash -c "bash /root/${k}keep.sh 2>&1 | tee -a /root/$k.log" > /dev/null 2>&1 < /dev/null &
-  fi
-done
+# (the relaunch guard for the first round's keepers is gone: it brought the serial screens back beside the parallel ones)
 # the scan (box RW, 3,600 rollouts of mtg7-mtg10, within-group pairwise): 0.6B 0.69 / 0.75 / 0.65, 1.7B 0.79 / 0.79 / 0.71,
 # 4B 0.81 / 0.82 / 0.74 (right over wrong / solved over not / nano-good over not among the right), no length bias (-0.08).
 # The 4B on the card (24 GB), centred on its mean score (5.75) with its within-group spread (3.0) as the scale.
@@ -392,6 +388,22 @@ QQ
   echo "rm2 ABANDONED at step $(python3 -c "import json;print(json.load(open('/root/online_rm2/state.json'))['step'])" 2>/dev/null || echo '?'): the reward model never loaded (memory) - run again as rm2b" | tee -a /root/rm_rounds.txt
   setsid nohup bash -c 'bash /root/rmroundskeep.sh 2>&1 | tee -a /root/rm_rounds.log' > /dev/null 2>&1 < /dev/null &
   echo "RM2_REDO $(date -u)"
+fi
+# rm2b, rm3 and rm4 stopped at step 0: the first round's serial screens had come back (the relaunch guard) beside the
+# parallel ones and left no room for the reward model. The serial keeper goes; the runner waits for 14 GB before a round;
+# the queue again, with a lower learning rate added (round 1: shard 0 52 at step 60, but single 153/300 and br3 31/29
+# against 2.1.0's 162 and 35/31 - the drift the nano-bonus rounds showed too)
+if [ ! -e /root/.rmq2 ] && grep -q "ge 14000" /root/work/rm_rounds.sh; then touch /root/.rmq2
+  pkill -f "rmroundkee[p].sh"; pkill -f "rm_quality.py"; pkill -f "rmroundskee[p].sh"; pkill -f "rm_rounds.sh"; sleep 3
+  cat > /root/rm_queue.txt <<'QQ'
+# tag items [extra flags]  - each round from 2.1.0, 60 steps
+rm2c /root/work/mtg10_items.jsonl --qbatch 3
+rm5 /root/work/mtg10_items.jsonl --qbatch 3 --lr 2.5e-6 --search-lr 2.5e-6
+rm3b /root/work/mtg10_items.jsonl --qbatch 3 --w-rm 1.0
+rm6 /root/work/mtg9_items.jsonl --qbatch 3 --w-rm 1.0 --lr 2.5e-6 --search-lr 2.5e-6
+QQ
+  setsid nohup bash -c 'bash /root/rmroundskeep.sh 2>&1 | tee -a /root/rm_rounds.log' > /dev/null 2>&1 < /dev/null &
+  echo "RMQ2 $(date -u)"
 fi
 echo "BOXRW2_OK serial $BOXRW2_SERIAL $(date -u)"
 # CTL-END
