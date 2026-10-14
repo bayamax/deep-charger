@@ -2,7 +2,7 @@
 # box RW2 (2026-10-14, the 3090 that replaces box RW's 3060 for the GRPO round: ~2.6x the speed for 1.5x the price) - box RW, the user: rent a second box, as cheap as possible, and try GRPO with a reward model's 0-1 score as
 # the reward). First step: can a dedicated reward model tell Deep Charger's better replies from its worse ones? The
 # Skywork-Reward-V2 (Qwen3) family scores the archived GRPO rollouts of mtg7-mtg10 (rm_scan.py). Pull-based as the others.
-BOXRW2_SERIAL=13
+BOXRW2_SERIAL=14
 if [ -f /root/.boxrw2_serial ] && [ "$(cat /root/.boxrw2_serial)" -gt "$BOXRW2_SERIAL" ] 2>/dev/null; then echo "BOXRW2_STALE $BOXRW2_SERIAL"; exit 0; fi
 echo $BOXRW2_SERIAL > /root/.boxrw2_serial
 mkdir -p /root/work /root/hfdl; cd /root/work
@@ -333,7 +333,7 @@ echo "BART7_JOB_DONE $(date -u)"
 B7
   setsid nohup bash -c 'bash /root/bart7keep.sh 2>&1 | tee -a /root/bart7.log' > /dev/null 2>&1 < /dev/null &
 fi
-for k in earlyscreen parscreen bartprep bart7; do
+for k in earlyscreen parscreen bartprep; do
   if [ -s /root/${k}keep.sh ] && ! pgrep -f "${k}kee[p].sh" >/dev/null && ! grep -qE "EARLYSCREEN_DONE|PARSCREEN_SKIPPED|RMROUND_JOB_DONE|BARTPREP_DONE|BARTPREP_FAILED|BART7_JOB_DONE" /root/$k.log 2>/dev/null; then
     [ "$k" = parscreen ] && grep -q "RMROUND_JOB_DONE" /root/rmround.log 2>/dev/null && continue
     setsid nohup bash -c "bash /root/${k}keep.sh 2>&1 | tee -a /root/$k.log" > /dev/null 2>&1 < /dev/null &
@@ -425,5 +425,53 @@ PM
 fi
 # rm7 stays at 60 steps (the runner screens the copies at 20/40/60): 60 of the 90 mixed items
 [ -e /root/.rm7b ] || { touch /root/.rm7b; sed -i "s#^rm7 /root/work/mix10_items.jsonl --qbatch 3 --steps 90#rm7 /root/work/mix10_items.jsonl --qbatch 3#" /root/rm_queue.txt; grep "^rm7" /root/rm_queue.txt; }
+# ---- the seventh run on this box fell over at its start beside the round (no room) and its keeper then put the partial
+# state up as the end. It goes again: wait for 10 GB free, resume from the saved state after a crash, and only a run that
+# reached TRAIN_DONE is uploaded as the end. ----
+if [ ! -e /root/.bart7b ]; then touch /root/.bart7b
+  pkill -f "bart7kee[p].sh"; sleep 1
+  cat > /root/bart7bkeep.sh <<'B7'
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); R=baya1116/hypernet-sp-distill; cd /root/sb
+DB=/root/sb/data/r1b_768; AH=/root/sb/data/am_held; DF7=/root/sb/data/dolphin768full; O=/root/sb/dolphin_once7
+freemb() { nvidia-smi --query-gpu=memory.free --format=csv,noheader,nounits | head -1 | tr -dc 0-9; }
+mkdir -p /root/sb/dolphin_once6 $O
+[ -s /root/sb/dolphin_once6/state_e2e.pt ] || { hf download $R sentbart/dolphin/once6/state_end.pt --local-dir /root/hfdl >/dev/null 2>&1; mv /root/hfdl/sentbart/dolphin/once6/state_end.pt /root/sb/dolphin_once6/state_e2e.pt; }
+if [ ! -s $O/state_e2e.pt ] || [ ! -e /root/.bart7b_seeded ]; then
+  hf download $R sentbart/dolphin/once7/state_latest.pt sentbart/dolphin/once7/model_best_partial.pt sentbart/dolphin/once7/train_partial.log --local-dir /root/hfdl >/dev/null 2>&1
+  cp /root/hfdl/sentbart/dolphin/once7/state_latest.pt $O/state_e2e.pt; cp /root/hfdl/sentbart/dolphin/once7/model_best_partial.pt $O/model_best.pt; cp /root/hfdl/sentbart/dolphin/once7/train_partial.log $O/train.log; touch /root/.bart7b_seeded
+fi
+( while sleep 7200; do f=$O/state_e2e.pt; [ -s $f ] && cp $f /root/once7_up.pt && hf upload $R /root/once7_up.pt sentbart/dolphin/once7/state_latest.pt >/dev/null 2>&1 && echo "[bart7] state on the hub $(date -u +%H:%M)"; rm -f /root/once7_up.pt; done ) &
+for try in $(seq 1 40); do
+  until [ "$(freemb)" -ge 10000 ]; do sleep 120; done
+  echo "[bart7] the seventh run resumes from step $(python3 -c "import torch; print(torch.load('$O/state_e2e.pt', map_location='cpu', weights_only=False).get('step'))") (try $try) $(date -u +%H:%M)"
+  PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python3 -u /root/sb/train_e2e.py --vec $DB --text $DB --eval-text $DB/docs_001.jsonl --out $O --init /root/sb/dolphin_once6/state_e2e.pt --layers 16 --enc-layers 0 \
+    --buckets 64,128,192,256,384,512,768 --bucket-order random --sent-budget 1900 --plan-accum 2 --max-bs 64 --eval-seq 128 --page-queue 16 --pool 0 --anchor-q 0 --select dec_top1 --patience 0 \
+    --eval-every 1000 --save-every 1000 > /root/bart7_try.log 2>&1
+  grep -E "^\[e2e\] --buckets|^\[eval|^\[best|^\[val\]|TRAIN_DONE|Error|Traceback|out of memory" /root/bart7_try.log | tail -n 6 | cut -c1-300
+  grep -q "TRAIN_DONE" /root/bart7_try.log && break
+  echo "[bart7] stopped without finishing - again in 10 min $(date -u +%H:%M)"; sleep 600
+done
+grep -q "TRAIN_DONE" /root/bart7_try.log || { echo "BART7_JOB_DONE gave up $(date -u)"; exit 1; }
+hf upload $R $O/model_best.pt sentbart/dolphin/once7/model_best.pt >/dev/null 2>&1; hf upload $R $O/train.log sentbart/dolphin/once7/train.log >/dev/null 2>&1; hf upload $R $O/state_e2e.pt sentbart/dolphin/once7/state_end.pt >/dev/null 2>&1; echo "[bart7] the end on the hub"
+hf download $R sentbart/dolphin/once4/model_best.pt --local-dir /root/hfdl >/dev/null 2>&1
+CK=""; for spec in run4_best=/root/hfdl/sentbart/dolphin/once4/model_best.pt run6_end=/root/sb/dolphin_once6/state_e2e.pt run7_best=$O/model_best.pt run7_end=$O/state_e2e.pt; do [ -s "${spec#*=}" ] && CK="$CK $spec"; done
+python3 -u /root/sb/sb_eval.py --docs $DF7/docs_001.jsonl --ckpt $CK --bands 128,256,512,768 --out /root/sb_eval768b.json 2>&1 | grep --line-buffered -vE "Warning|warn|documents \(" | sed 's/^/[bart7 dolphin] /' | cut -c1-300
+python3 -u /root/sb/sb_eval.py --docs $AH/docs_005.jsonl --ckpt $CK --bands 128,256,512,768 --out /root/sb_eval_amb.json 2>&1 | grep --line-buffered -vE "Warning|warn|documents \(" | sed 's/^/[bart7 am] /' | cut -c1-300
+python3 - <<'PC'
+import json
+a = json.load(open("/root/sb_eval768b.json"))["runs"]; b = json.load(open("/root/sb_eval_amb.json"))["runs"]
+print("[bart7 composite] top-1 at 3223+1 candidates, all hidden positions: dolphin | AM | mean")
+for k in a:
+    if k in b: print(f"  {k:10s} {a[k]['all']['top1']:.3f} | {b[k]['all']['top1']:.3f} | {(a[k]['all']['top1'] + b[k]['all']['top1']) / 2:.3f}")
+PC
+hf upload $R /root/sb_eval768b.json sentbart/dolphin/sb_eval/sb_eval768b.json >/dev/null 2>&1; hf upload $R /root/sb_eval_amb.json sentbart/dolphin/sb_eval/sb_eval_amb.json >/dev/null 2>&1
+echo "BART7_JOB_DONE $(date -u)"
+B7
+  setsid nohup bash -c 'bash /root/bart7bkeep.sh 2>&1 | tee -a /root/bart7.log' > /dev/null 2>&1 < /dev/null &
+  echo "BART7B_LAUNCHED $(date -u)"
+fi
+if [ -e /root/.bart7b ] && [ -s /root/bart7bkeep.sh ] && ! pgrep -f "bart7bkee[p].sh" >/dev/null && ! grep -q "BART7_JOB_DONE" /root/bart7.log 2>/dev/null; then
+  setsid nohup bash -c 'bash /root/bart7bkeep.sh 2>&1 | tee -a /root/bart7.log' > /dev/null 2>&1 < /dev/null &
+fi
 echo "BOXRW2_OK serial $BOXRW2_SERIAL $(date -u)"
 # CTL-END
