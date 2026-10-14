@@ -2,7 +2,7 @@
 # box RW2 (2026-10-14, the 3090 that replaces box RW's 3060 for the GRPO round: ~2.6x the speed for 1.5x the price) - box RW, the user: rent a second box, as cheap as possible, and try GRPO with a reward model's 0-1 score as
 # the reward). First step: can a dedicated reward model tell Deep Charger's better replies from its worse ones? The
 # Skywork-Reward-V2 (Qwen3) family scores the archived GRPO rollouts of mtg7-mtg10 (rm_scan.py). Pull-based as the others.
-BOXRW2_SERIAL=8
+BOXRW2_SERIAL=9
 if [ -f /root/.boxrw2_serial ] && [ "$(cat /root/.boxrw2_serial)" -gt "$BOXRW2_SERIAL" ] 2>/dev/null; then echo "BOXRW2_STALE $BOXRW2_SERIAL"; exit 0; fi
 echo $BOXRW2_SERIAL > /root/.boxrw2_serial
 mkdir -p /root/work /root/hfdl; cd /root/work
@@ -365,6 +365,16 @@ RK
 fi
 if [ -e /root/.rmrounds ] && ! pgrep -f "rmroundskee[p].sh|rm_rounds.sh" >/dev/null; then
   setsid nohup bash -c 'bash /root/rmroundskeep.sh 2>&1 | tee -a /root/rm_rounds.log' > /dev/null 2>&1 < /dev/null &
+fi
+# the next round starts once round 1's shard-0 screens are done (its last full screens run alone on a quarter of the card)
+if [ ! -e /root/.rmrounds_early ] && [ -e /root/.rmrounds ] && [ ! -e /root/rmr/rm2.trained ] && ! pgrep -f "rm_rounds.sh" >/dev/null; then touch /root/.rmrounds_early
+  cat > /root/rmroundskeep.sh <<'RK'
+until grep -qE "best copy by shard 0|RMROUND_JOB_DONE" /root/rmround.log 2>/dev/null; do sleep 60; done
+exec bash /root/work/rm_rounds.sh
+RK
+  pkill -f "rmroundskee[p].sh"; sleep 1
+  setsid nohup bash -c 'bash /root/rmroundskeep.sh 2>&1 | tee -a /root/rm_rounds.log' > /dev/null 2>&1 < /dev/null &
+  echo "RMROUNDS_EARLY $(date -u)"
 fi
 echo "BOXRW2_OK serial $BOXRW2_SERIAL $(date -u)"
 # CTL-END

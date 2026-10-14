@@ -3,7 +3,7 @@
 # is new, so try things; and use the whole card). Each line of /root/rm_queue.txt:
 #   <tag> <items.jsonl> [extra online_loop flags, which override the defaults below]
 # Every round starts from 2.1.0 (mtg7_s40), trains 60 steps, copies at 20/40/60; the screens run whenever the card has room
-# (a lane needs ~7.5 GB free): single-turn shard 0 for each copy, then for the best copy shards 1-2, br3 and chain3, and the
+# (a lane needs ~7.5 GB free); a round's screens run in the background while the next round trains: single-turn shard 0 for each copy, then for the best copy shards 1-2, br3 and chain3, and the
 # reward model's reading of the replies. One summary line per round goes to /root/rm_rounds.txt (and the hub).
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); R=baya1116/hypernet-sp-distill; cd /root/work
 EVARGS="--rw 768 --maxd 384 --samepage 1 --decode plain --temp 0.6 --gen 4000 --stop eos --replycap 600"
@@ -23,7 +23,7 @@ lane() {   # wait for room, then start one screen in the background: lane <out> 
   sleep 90   # its memory to show before the next lane looks
 }
 while :; do
-  line=$(while read -r t rest; do [ -n "$t" ] && [ "${t:0:1}" != "#" ] && [ ! -e /root/rmr/$t.done ] && { echo "$t $rest"; break; }; done < /root/rm_queue.txt)
+  line=$(while read -r t rest; do [ -n "$t" ] && [ "${t:0:1}" != "#" ] && [ ! -e /root/rmr/$t.trained ] && { echo "$t $rest"; break; }; done < /root/rm_queue.txt)
   [ -z "$line" ] && { sleep 300; continue; }
   set -- $line; T=$1; IT=$2; shift 2; EXTRA="$*"; mkdir -p /root/rmr; OUT=/root/online_$T; RUN=/root/${T}_run.log
   echo "[$T] start 2.1.0, items $IT, extra: ${EXTRA:-none} $(date -u +%H:%M)"
@@ -44,7 +44,9 @@ while :; do
   echo "[$T] stopped at step ${ST:-0} after $tmin min $(date -u +%H:%M)"; grep -E "Error|Traceback" $RUN | tail -2 | cut -c1-250
   [ "${ST:-0}" -gt 0 ] && [ ! -s /root/${T}_s$ST.safetensors ] && cp $OUT/latest.safetensors /root/${T}_s$ST.safetensors
   [ -s $OUT/rollouts.jsonl ] && hf upload $R $OUT/rollouts.jsonl pooler_distill/chatsft/rmgrpo/${T}_rollouts.jsonl >/dev/null 2>&1; hf upload $R $RUN pooler_distill/chatsft/rmgrpo/${T}_run.log >/dev/null 2>&1
+  touch /root/rmr/$T.trained
   if [ "${ST:-0}" -lt 20 ]; then echo "$T FAILED at step ${ST:-0} ($EXTRA)" | tee -a /root/rm_rounds.txt; touch /root/rmr/$T.done; continue; fi
+  (   # the screens, in the background: the next round trains meanwhile
   blocks=$(python3 - $OUT/rollouts.jsonl <<'PB' 2>/dev/null
 import json, sys, collections
 b = collections.defaultdict(lambda: [0, 0, 0])
@@ -74,4 +76,5 @@ PB
   for f in /root/work/${T}_s*st_*.jsonl /root/work/br3_${T}_*.jsonl /root/work/ch3_${T}_*.jsonl; do [ -s $f ] && hf upload $R $f pooler_distill/chatsft/rmgrpo/screens/$(basename $f) >/dev/null 2>&1; done
   hf upload $R /root/rm_rounds.txt pooler_distill/chatsft/rmgrpo/rm_rounds.txt >/dev/null 2>&1
   touch /root/rmr/$T.done
+  ) &
 done
