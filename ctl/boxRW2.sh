@@ -2,7 +2,7 @@
 # box RW2 (2026-10-14, the 3090 that replaces box RW's 3060 for the GRPO round: ~2.6x the speed for 1.5x the price) - box RW, the user: rent a second box, as cheap as possible, and try GRPO with a reward model's 0-1 score as
 # the reward). First step: can a dedicated reward model tell Deep Charger's better replies from its worse ones? The
 # Skywork-Reward-V2 (Qwen3) family scores the archived GRPO rollouts of mtg7-mtg10 (rm_scan.py). Pull-based as the others.
-BOXRW2_SERIAL=19
+BOXRW2_SERIAL=20
 if [ -f /root/.boxrw2_serial ] && [ "$(cat /root/.boxrw2_serial)" -gt "$BOXRW2_SERIAL" ] 2>/dev/null; then echo "BOXRW2_STALE $BOXRW2_SERIAL"; exit 0; fi
 echo $BOXRW2_SERIAL > /root/.boxrw2_serial
 mkdir -p /root/work /root/hfdl; cd /root/work
@@ -472,7 +472,7 @@ B7
   setsid nohup bash -c 'bash /root/bart7bkeep.sh 2>&1 | tee -a /root/bart7.log' > /dev/null 2>&1 < /dev/null &
   echo "BART7B_LAUNCHED $(date -u)"
 fi
-if [ -e /root/.bart7b ] && [ -s /root/bart7bkeep.sh ] && ! pgrep -f "bart7bkee[p].sh" >/dev/null && ! grep -q "BART7_JOB_DONE" /root/bart7.log 2>/dev/null; then
+if [ -e /root/.bart7b ] && [ ! -e /root/.bart_paused ] && [ -s /root/bart7bkeep.sh ] && ! pgrep -f "bart7bkee[p].sh" >/dev/null && ! grep -q "BART7_JOB_DONE" /root/bart7.log 2>/dev/null; then
   setsid nohup bash -c 'bash /root/bart7bkeep.sh 2>&1 | tee -a /root/bart7.log' > /dev/null 2>&1 < /dev/null &
 fi
 # 2026-10-15, the user: is the concept itself in - the judgment model's output as the reward, its continuous value making the
@@ -610,6 +610,15 @@ setsid nohup bash -c 'bash /root/rmroundskeep.sh 2>&1 | tee -a /root/rm_rounds.l
 echo "RUNNER2 $(date -u)"
 SW
   setsid nohup bash -c 'bash /root/swapkeep.sh 2>&1 | tee -a /root/swap.log' > /dev/null 2>&1 < /dev/null &
+fi
+# ---- 2026-10-15, the user: the context BART is on hold for now. Its run stops here, its latest state and log go to the hub
+# (state_latest.pt / train_partial.log, from which it resumes), and the card goes to the GRPO rounds and their screens. ----
+if [ ! -e /root/.bart_paused ]; then touch /root/.bart_paused
+  pkill -f "bart7bkee[p].sh"; pkill -f "train_e2e.py.*dolphin_once7"; sleep 15
+  export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); R=baya1116/hypernet-sp-distill; O=/root/sb/dolphin_once7
+  st=$(python3 -c "import torch; print(torch.load('$O/state_e2e.pt', map_location='cpu', weights_only=False).get('step'))" 2>/dev/null)
+  hf upload $R $O/state_e2e.pt sentbart/dolphin/once7/state_latest.pt >/dev/null 2>&1 && hf upload $R $O/model_best.pt sentbart/dolphin/once7/model_best_partial.pt >/dev/null 2>&1 && hf upload $R $O/train.log sentbart/dolphin/once7/train_partial.log >/dev/null 2>&1 \
+    && echo "BART_PAUSED at step $st, state on the hub $(date -u)" | tee -a /root/bart7.log || echo "BART_PAUSED at step $st - UPLOAD FAILED $(date -u)" | tee -a /root/bart7.log
 fi
 echo "BOXRW2_OK serial $BOXRW2_SERIAL $(date -u)"
 # CTL-END

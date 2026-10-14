@@ -69,7 +69,7 @@ while :; do
   set -- $line; T=$1; IT=$2; shift 2; EXTRA="$*"; mkdir -p /root/rmr; OUT=/root/online_$T; RUN=/root/${T}_run.log
   read M C S D < /root/rm_choice.txt; JMB=$(cat /root/rm_choice_mb.txt 2>/dev/null || echo 5500); need=$((8500 + JMB))
   while pgrep -f "pool_eval.py" >/dev/null && [ "$(freemb)" -lt $need ]; do sleep 60; done   # the last round's screens first
-  if [ "$(freemb)" -lt $need ] && pgrep -f "train_e2e.py.*dolphin_once7" >/dev/null; then
+  if [ "$(freemb)" -lt $need ] && [ ! -e /root/.bart_paused ] && pgrep -f "train_e2e.py.*dolphin_once7" >/dev/null; then
     pkill -f "bart7bkee[p].sh"; pkill -f "train_e2e.py.*dolphin_once7"; sleep 10
     sed -i 's/--save-every 1000/--save-every 250/' /root/bart7bkeep.sh
     setsid nohup bash -c 'bash /root/bart7bkeep.sh 2>&1 | tee -a /root/bart7.log' > /dev/null 2>&1 < /dev/null &
