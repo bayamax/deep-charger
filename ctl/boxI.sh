@@ -8,7 +8,7 @@ cd /root
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null)
 R=baya1116/hypernet-sp-distill
 RAW="https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl"
-BOXI_SERIAL=106
+BOXI_SERIAL=107
 if [ -f /root/.boxi_serial ] && [ "$(cat /root/.boxi_serial)" -gt "$BOXI_SERIAL" ] 2>/dev/null; then echo "BOXI_STALE $BOXI_SERIAL"; exit 0; fi
 echo $BOXI_SERIAL > /root/.boxi_serial
 mkdir -p /root/sb /root/work
@@ -50,6 +50,7 @@ if [ ! -e /root/.mirror_r17 ]; then touch /root/.mirror_r17; pkill -f "mirrorkee
 if [ ! -e /root/.mirror_r18 ]; then touch /root/.mirror_r18; pkill -f "mirrorkee[p].sh"; sleep 1; fi   # the AM held-out
 if [ ! -e /root/.mirror_r19 ]; then touch /root/.mirror_r19; pkill -f "mirrorkee[p].sh"; sleep 1; fi   # the seventh run
 if [ ! -e /root/.mirror_r20 ]; then touch /root/.mirror_r20; pkill -f "mirrorkee[p].sh"; sleep 1; fi   # the seventh run mixed
+if [ ! -e /root/.mirror_r21 ]; then touch /root/.mirror_r21; pkill -f "mirrorkee[p].sh"; sleep 1; fi   # the state backups
 if ! pgrep -f "mirrorkee[p].sh" >/dev/null; then
   cat > /root/mirrorkeep.sh <<'MK'
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); R=baya1116/hypernet-sp-distill
@@ -60,6 +61,7 @@ while :; do
     echo "--- disk ---"; df -h /root | tail -1; du -sh /root/sb/data 2>/dev/null; tail -n 3 /root/disk.log 2>/dev/null
     echo "--- ladder2 / dolphin ladder ---"; ls -t /root/sb/ladder2 /root/sb/dolphin_ladder 2>/dev/null | head -12 | tr '\n' ' '; echo
     f=$(ls -t /root/sb/ladder2/*.out /root/sb/dolphin_ladder/*.out 2>/dev/null | head -1); [ -n "$f" ] && { echo "== $f"; grep -E "^\[eval|^\[best|^\[plateau|^\[init\]|Error|Traceback" $f | tail -8 | cut -c1-300; echo "pool fields:"; grep -E "^\[eval" $f | tail -6 | sed -E 's/^(\[eval [0-9]+\]).*page_top1 ([0-9.]+).*(pool_top1.*)$/\1 2000: \2 | \3/' | cut -c1-200; grep "^\[step" $f | tail -1 | cut -c1-200; }
+    [ -s /root/stateback.log ] && { echo "--- state backups ---"; tail -n 4 /root/stateback.log; }
     [ -s /root/sb_dolphinonce7.log ] && { echo "--- dolphin once7 (mixed: the rest of AM's R1 set + dolphin's deepseek conversations, one pass; the doubled BART from the sixth run's end) ---"; grep -E "buckets|training from|training set|PREP_DOLPHIN|credit" /root/sb_dolphinonce7.log | tail -n 4 | cut -c1-400; grep -E "^\[eval|^\[best|^\[val\]|Error|Traceback|memory|sb_eval|ONCE7|composite|^  " /root/sb/dolphin_once7/train.log /root/sb_dolphinonce7.log 2>/dev/null | sed 's#^/root/[^:]*:##' | tail -n 30 | cut -c1-400; grep "^\[step" /root/sb/dolphin_once7/train.log 2>/dev/null | tail -1 | cut -c1-200; }
     [ -s /root/sb_amheld.log ] && { echo "--- the AM held-out (2000 R1 conversations the sixth run never saw): the fourth run's end and the sixth run on the fixed yardstick, both held-outs ---"; grep -vE "Warning|warn" /root/sb_amheld.log | tail -n 22 | cut -c1-300; }
     [ -s /root/sb_dolphinonce6.log ] && { echo "--- dolphin once6 (R1 only: AM's R1-671B set + the unused deepseek conversations; the doubled BART from the fourth run's end, window 768) ---"; grep -E "buckets|training from|training set|PREP_DOLPHIN|unusable" /root/sb_dolphinonce6.log | tail -n 4 | cut -c1-400; grep -E "^\[eval|^\[best|^\[val\]|^\[window|^\[grow|Error|Traceback|memory|sb_eval|ONCE6|^  " /root/sb/dolphin_once6/train.log /root/sb_dolphinonce6.log 2>/dev/null | sed 's#^/root/[^:]*:##' | tail -n 24 | cut -c1-400; grep "^\[step" /root/sb/dolphin_once6/train.log 2>/dev/null | tail -1 | cut -c1-200; }
@@ -2025,6 +2027,24 @@ if [ ! -e /root/.once7_mixed ] && [ -e /root/.dolphin_once7 ]; then
   else
     echo "ONCE7_MIXED_MISSING $S7 $(ls -la /root/sb/data/dolphin768 2>&1 | tr '\n' ' ' | cut -c1-300)"
   fi
+fi
+
+# ---- 2026-10-14: the credit ran out and the box stopped; its GPU went to another renter while it waited. The sixth run's
+# end and the seventh run's state lived on this disk only. Both go to the hub now, and the seventh run's state every two
+# hours after (a 1.4 GB upload costs ~1 cent here). ----
+if ! pgrep -f "statebackkee[p].sh" >/dev/null; then
+  cat > /root/statebackkeep.sh <<'SB'
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); R=baya1116/hypernet-sp-distill
+[ -s /root/sb/dolphin_once6/state_e2e.pt ] && [ ! -e /root/.once6_backed ] && hf upload $R /root/sb/dolphin_once6/state_e2e.pt sentbart/dolphin/once6/state_end.pt >/dev/null 2>&1 && touch /root/.once6_backed && echo "[stateback] the sixth run's end on the hub: sentbart/dolphin/once6/state_end.pt $(date -u +%H:%M)"
+while :; do
+  f=/root/sb/dolphin_once7/state_e2e.pt
+  if [ -s $f ]; then st=$(python3 -c "import torch; print(torch.load('$f', map_location='cpu', weights_only=False).get('step'))" 2>/dev/null)
+    [ -n "$st" ] && [ "$st" != "$(cat /root/.once7_backed 2>/dev/null)" ] && cp $f /root/once7_state_up.pt && hf upload $R /root/once7_state_up.pt sentbart/dolphin/once7/state_latest.pt >/dev/null 2>&1 && echo "$st" > /root/.once7_backed && echo "[stateback] the seventh run's state at step $st on the hub $(date -u +%H:%M)"; rm -f /root/once7_state_up.pt; fi
+  sleep 7200
+done
+SB
+  setsid nohup bash -c 'bash /root/statebackkeep.sh 2>&1 | tee -a /root/stateback.log' > /dev/null 2>&1 < /dev/null &
+  echo "STATEBACK_LAUNCHED $(date -u)"
 fi
 echo "BOXI_OK serial $BOXI_SERIAL $(date -u)"
 # CTL-END
