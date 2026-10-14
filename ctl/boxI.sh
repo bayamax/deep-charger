@@ -8,7 +8,7 @@ cd /root
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null)
 R=baya1116/hypernet-sp-distill
 RAW="https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl"
-BOXI_SERIAL=101
+BOXI_SERIAL=102
 if [ -f /root/.boxi_serial ] && [ "$(cat /root/.boxi_serial)" -gt "$BOXI_SERIAL" ] 2>/dev/null; then echo "BOXI_STALE $BOXI_SERIAL"; exit 0; fi
 echo $BOXI_SERIAL > /root/.boxi_serial
 mkdir -p /root/sb /root/work
@@ -1870,7 +1870,7 @@ pip install -q zstandard 2>&1 | tail -1
 Z=/root/sb/data/am_0.9M.jsonl.zst
 dl() { for try in 1 2 3 4; do [ -s $1 ] && [ "$(stat -c %s $1)" -ge $3 ] && return 0; curl -sSfL -C - -o $1 $2 || sleep 60; done; [ "$(stat -c %s $1 2>/dev/null || echo 0)" -ge $3 ]; }
 mkdir -p $DR; cp $D/docs_001.jsonl $DR/; cp $D/off_001.npy $DR/; cp $DN/docs_003.jsonl $DR/; cp $DN/off_003.npy $DR/
-if [ ! -s $DR/ready.ok ]; then
+if [ ! -e $DR/ready.ok ]; then
   dl $Z https://huggingface.co/datasets/a-m-team/AM-DeepSeek-R1-Distilled-1.4M/resolve/main/am_0.9M.jsonl.zst 3200000000 || { echo "ONCE6_JOB_DONE download failed"; exit 1; }
   echo "[once6] am_0.9M.jsonl.zst $(stat -c %s $Z) bytes; $(df -h /root | tail -1 | awk '{print $4}') free"
   python3 /root/sb/prep_dolphin.py --out $DR --schema am --all 1 --shard 004 --id-prefix am1 --max-sents 768 --max-q 24 --max-docs 280000 --keep-eval $D/docs_001.jsonl --exclude-questions $D/docs_001.jsonl --exclude /root/sb/dl/dolphin_v1.jsonl --jsonl $Z 2>&1 | grep -E "PREP_DOLPHIN|Error|Traceback" | sed 's/^/[once6 am] /' | cut -c1-300
@@ -1937,6 +1937,13 @@ fi
 if [ -e /root/.once6_nopool ] && grep -q -- "--pool 0" /root/dolphinonce6keep.sh && ! pgrep -f "dolphinonce6kee[p].sh" >/dev/null && ! grep -q "ONCE6_JOB_DONE" /root/sb_dolphinonce6.log 2>/dev/null; then
   setsid nohup bash -c 'bash /root/dolphinonce6keep.sh 2>&1 | tee -a /root/sb_dolphinonce6.log' > /dev/null 2>&1 < /dev/null &
   echo "ONCE6_NOPOOL_RELAUNCHED $(date -u)"
+fi
+
+# the relaunched keeper ran the preparation again: ready.ok was an empty file and the guard tested -s (non-empty).
+# The marker gets content; the keeper's test becomes -e (the file replaced by sed: the running bash keeps its old inode).
+if [ ! -e /root/.once6_readyfix ] && [ -e /root/.once6_nopool ]; then touch /root/.once6_readyfix
+  [ -e /root/sb/data/r1_768/ready.ok ] && echo ok > /root/sb/data/r1_768/ready.ok
+  sed -i 's/\[ ! -s \$DR\/ready.ok \]/[ ! -e $DR\/ready.ok ]/' /root/dolphinonce6keep.sh; grep -c -- "-e \$DR/ready.ok" /root/dolphinonce6keep.sh
 fi
 echo "BOXI_OK serial $BOXI_SERIAL $(date -u)"
 # CTL-END
