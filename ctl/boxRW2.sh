@@ -2,7 +2,7 @@
 # box RW2 (2026-10-14, the 3090 that replaces box RW's 3060 for the GRPO round: ~2.6x the speed for 1.5x the price) - box RW, the user: rent a second box, as cheap as possible, and try GRPO with a reward model's 0-1 score as
 # the reward). First step: can a dedicated reward model tell Deep Charger's better replies from its worse ones? The
 # Skywork-Reward-V2 (Qwen3) family scores the archived GRPO rollouts of mtg7-mtg10 (rm_scan.py). Pull-based as the others.
-BOXRW2_SERIAL=23
+BOXRW2_SERIAL=24
 if [ -f /root/.boxrw2_serial ] && [ "$(cat /root/.boxrw2_serial)" -gt "$BOXRW2_SERIAL" ] 2>/dev/null; then echo "BOXRW2_STALE $BOXRW2_SERIAL"; exit 0; fi
 echo $BOXRW2_SERIAL > /root/.boxrw2_serial
 mkdir -p /root/work /root/hfdl; cd /root/work
@@ -35,6 +35,7 @@ if [ ! -e /root/.rwmirror_r6 ]; then touch /root/.rwmirror_r6; pkill -f "rwmirro
 if [ ! -e /root/.rwmirror_r7 ]; then touch /root/.rwmirror_r7; pkill -f "rwmirro[r].sh"; sleep 1; fi
 if [ ! -e /root/.rwmirror_r8 ]; then touch /root/.rwmirror_r8; pkill -f "rwmirro[r].sh"; sleep 1; fi
 if [ ! -e /root/.rwmirror_r9 ]; then touch /root/.rwmirror_r9; pkill -f "rwmirro[r].sh"; sleep 1; fi
+if [ ! -e /root/.rwmirror_r10 ]; then touch /root/.rwmirror_r10; pkill -f "rwmirro[r].sh"; sleep 1; fi
 if ! pgrep -f "rwmirro[r].sh" >/dev/null; then
   cat > /root/rwmirror.sh <<'MR'
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); R=baya1116/hypernet-sp-distill
@@ -55,6 +56,18 @@ for k in sorted(b):
 PB
     }
     f=$(ls -t /root/rm[2-9]*_run.log /root/rm[1-9][0-9]*_run.log 2>/dev/null | head -1); [ -n "$f" ] && { echo "--- $(basename $f) steps ---"; grep -E "^\[step|^\[qbatch|^\[rm\]|rollback|Traceback|out of memory|Error" $f | sed -E "s/\| ce=.*cumulative/| cum/" | tail -n 8 | cut -c1-230; }
+    f=$(ls -td /root/online_rm* 2>/dev/null | head -1); [ -s "$f/rollouts.jsonl" ] && { echo "--- $(basename $f) by 20-step block: right% / unfinished% / judge score of right replies / mean reward ---"; python3 - $f/rollouts.jsonl <<'PB' 2>/dev/null
+import json, sys, collections
+b = collections.defaultdict(lambda: [0, 0, 0, 0.0, 0, 0.0])
+for l in open(sys.argv[1]):
+    if not l.strip(): continue
+    x = json.loads(l); w = x.get("why", {}); v = b[(x["step"] - 1) // 20]
+    v[0] += 1; v[1] += bool(w.get("correct")); v[2] += bool(w.get("unfinished")); v[5] += x.get("reward", 0)
+    if "rm_p" in w: v[3] += w["rm_p"]; v[4] += 1
+for k in sorted(b):
+    n, p, u, s_, m, r = b[k]; print(f"  steps {20*k+1:3d}-{20*k+20:3d}: {n:3d} rollouts, right {100*p/n:3.0f}%, unfinished {100*u/n:3.0f}%, judge {s_/max(m,1):.3f} ({m}), reward {r/n:+.3f}")
+PB
+    }
     [ -s /root/sb/dolphin_once7/train.log ] && { echo "--- once7 on this box (train.log) ---"; grep -E "^\[eval|^\[best|^\[val\]|Error|Traceback|memory" /root/sb/dolphin_once7/train.log | tail -n 8 | cut -c1-260; grep "^\[step" /root/sb/dolphin_once7/train.log | tail -1 | cut -c1-200; }
     echo "--- gpu ---"; nvidia-smi --query-gpu=memory.used,memory.total,utilization.gpu --format=csv,noheader
     echo "--- disk ---"; df -h /root | tail -1
