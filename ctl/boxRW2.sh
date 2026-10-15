@@ -2,7 +2,7 @@
 # box RW2 (2026-10-14, the 3090 that replaces box RW's 3060 for the GRPO round: ~2.6x the speed for 1.5x the price) - box RW, the user: rent a second box, as cheap as possible, and try GRPO with a reward model's 0-1 score as
 # the reward). First step: can a dedicated reward model tell Deep Charger's better replies from its worse ones? The
 # Skywork-Reward-V2 (Qwen3) family scores the archived GRPO rollouts of mtg7-mtg10 (rm_scan.py). Pull-based as the others.
-BOXRW2_SERIAL=24
+BOXRW2_SERIAL=25
 if [ -f /root/.boxrw2_serial ] && [ "$(cat /root/.boxrw2_serial)" -gt "$BOXRW2_SERIAL" ] 2>/dev/null; then echo "BOXRW2_STALE $BOXRW2_SERIAL"; exit 0; fi
 echo $BOXRW2_SERIAL > /root/.boxrw2_serial
 mkdir -p /root/work /root/hfdl; cd /root/work
@@ -710,6 +710,29 @@ done
 EG
   setsid nohup bash -c 'bash /root/evalguard.sh 2>&1 | tee -a /root/evalguard.log' > /dev/null 2>&1 < /dev/null &
   echo "EVALGUARD_LAUNCHED $(date -u)"
+fi
+# ---- the old runner started rm10 the minute rm9 stopped, so the guard stopped rm9's screens (shard 0 "0/100") and rm2c's.
+# The queue holds after rm10; once rm10 has trained the sequential runner takes over and screens rm9 and rm10 again, one
+# thing at a time; rm2c's are completed by fixkeep. The verdict on the reward-model GRPO waits for those. ----
+if [ ! -e /root/.hold2 ]; then touch /root/.hold2
+  cat > /root/rm_queue.txt <<'QQ'
+# held after rm10 (the verdict first): rm7m, rm5m and rm8 come back only if rm9/rm10 read better than 2.1.0
+rm2c /root/work/mtg10_items.jsonl --qbatch 3
+rm9 /root/work/mtg10_items.jsonl --qbatch 3 --rm-mult 1 --w-rm 1.0
+rm10 /root/work/mtg10_items.jsonl --qbatch 3 --rm-mult 1 --w-rm 1.0
+QQ
+  rm -f /root/rmr/rm9.done /root/work/rm9_s60st_0.jsonl
+  echo "rm9 (the line above is void: its screens were stopped by the guard; screened again)" >> /root/rm_rounds.txt
+  cat > /root/swap2keep.sh <<'SW'
+until [ -e /root/rmr/rm10.trained ] && ! pgrep -f "online_loop.py" >/dev/null; do sleep 60; done
+pkill -f "rmroundskee[p].sh"; pkill -f "rm_rounds.sh"; sleep 2; pkill -f "pool_eval.py.*\[rm(9|10)_s"; sleep 5
+rm -f /root/rmr/rm10.done /root/work/rm10_s*st_*.jsonl /root/work/br3_rm10_*.jsonl /root/work/ch3_rm10_*.jsonl
+printf 'exec bash /root/work/rm_rounds.sh\n' > /root/rmroundskeep.sh
+setsid nohup bash -c 'bash /root/rmroundskeep.sh 2>&1 | tee -a /root/rm_rounds.log' > /dev/null 2>&1 < /dev/null &
+echo "RUNNER3 (sequential) $(date -u)"
+SW
+  setsid nohup bash -c 'bash /root/swap2keep.sh 2>&1 | tee -a /root/swap.log' > /dev/null 2>&1 < /dev/null &
+  echo "HOLD2 $(date -u)"
 fi
 echo "BOXRW2_OK serial $BOXRW2_SERIAL $(date -u)"
 # CTL-END
