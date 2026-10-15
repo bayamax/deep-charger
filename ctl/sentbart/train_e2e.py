@@ -51,6 +51,7 @@ ap.add_argument("--queries", default="", help="qgen.py's queries.jsonl ({id: '<s
 ap.add_argument("--w-q", type=float, default=1.0); ap.add_argument("--tau-q", type=float, default=0.05)
 ap.add_argument("--q-frac", type=float, default=0.5, help="share of each batch drawn from the documents that have queries")
 ap.add_argument("--prefetch", type=int, default=3, help="--buckets: planned steps read and tokenized ahead on a worker thread while the card trains (0: inline)")
+ap.add_argument("--freeze-enc", type=int, default=0, help="1: bge as it stands, no gradient (forward only, no frozen reference, no anchor) - the step is mostly bge's backward and the reference")
 ap.add_argument("--embed-chunk", type=int, default=256, help="sentences per bge forward")
 ap.add_argument("--maxlen", type=int, default=128, help="tokens per sentence into bge (embed.py's 128, so step 0 reads the stored vectors' equal)")
 ap.add_argument("--eval-every", type=int, default=2000); ap.add_argument("--save-every", type=int, default=2000)
@@ -137,9 +138,13 @@ grow_bge(enc, n0)
 if "enc" in CK0: enc.load_state_dict(CK0["enc"]); print(f"[e2e] encoder from {E.grow or E.init} ({n0} layers)", flush=True)
 if E.enc_layers > n0: grow_bge(enc, E.enc_layers); print(f"[e2e] encoder grown {n0} -> {E.enc_layers} layers (middle layers duplicated)", flush=True)
 del CK0
-enc = enc.to(DEV); enc.gradient_checkpointing_enable(); enc.train()
-ref = AutoModel.from_pretrained(E.bge).to(DEV).eval()
-for p in ref.parameters(): p.requires_grad_(False)
+enc = enc.to(DEV); enc.gradient_checkpointing_enable(); enc.train(not E.freeze_enc)
+if E.freeze_enc:
+    for p in enc.parameters(): p.requires_grad_(False)
+    ref = None; print("[e2e] bge frozen as loaded: forward only, no anchor", flush=True)
+else:
+    ref = AutoModel.from_pretrained(E.bge).to(DEV).eval()
+    for p in ref.parameters(): p.requires_grad_(False)
 
 
 QPFX = "Represent this sentence for searching relevant passages: "
@@ -223,7 +228,7 @@ def eval_now():
     for d in ev_text: off.append(off[-1] + len(d))
     V = np.concatenate(vs).astype(np.float32)
     ns["eval_sh"] = ("001", V, np.array(off)); ns["edocs"] = [(off[k], off[k + 1]) for k in range(len(ev_text))]
-    r = ns["evaluate"](); enc.train()
+    r = ns["evaluate"](); enc.train(not E.freeze_enc)
     if POOL: r.update(eval_pool())
     A.seq = seq0
     # the reconstruction of the sentence-vector sequence: masked sentences named by the encoder (infilling) and hidden
@@ -273,7 +278,7 @@ def eval_pool():
             rk = (S_ > S_.gather(1, gold[:, None])).sum(1) + 1
             r[f"pool_{nm}_top1"] = float((rk <= 1).float().mean()); r[f"pool_{nm}_top10"] = float((rk <= 10).float().mean())
         r["pool_qh_top1"] = (r["pool_q_top1"] + r["pool_h_top1"]) / 2; r["pool_nq"] = len(EQ)
-    enc.train(); model.train()
+    enc.train(not E.freeze_enc); model.train()
     return r
 
 
@@ -359,14 +364,18 @@ for step in range(step0 + 1, E.steps + 1) if E.steps > 0 else []:
                     qrows.append((b, qr, pos if 0 <= pos < len(s_) else -1))
         _, valid, masked, _ = ns["make_batch"](items, "mix", nqs if any(nqs) else None)   # train.py's corruption (spans or a hidden tail); a conversation's question is never hidden
         flat = [s for d in sents for s in d]
-        v = embed(enc, flat, pre=pre)                             # gradient into bge
-        with torch.no_grad(): v0 = embed(ref, flat, pre=pre)
+        if E.freeze_enc:
+            with torch.no_grad(): v = embed(enc, flat, pre=pre)
+            v0 = v
+        else:
+            v = embed(enc, flat, pre=pre)                         # gradient into bge
+            with torch.no_grad(): v0 = embed(ref, flat, pre=pre)
         x = torch.zeros(valid.shape + (DIM,), device=DEV, dtype=v.dtype); x[valid] = v   # row-major order = the documents' order
         lq = torch.zeros((), device=DEV)
         with torch.autocast("cuda", dtype=torch.bfloat16):
             le, ld, _, _, _ = ns["losses"](x, valid, masked)
-            la = F.cross_entropy(v @ v0.T / E.tau_anchor, torch.arange(len(v), device=DEV))
-            if E.anchor_q > 0:
+            la = F.cross_entropy(v @ v0.T / E.tau_anchor, torch.arange(len(v), device=DEV)) if not E.freeze_enc else torch.zeros((), device=DEV)
+            if E.anchor_q > 0 and not E.freeze_enc:
                 qs_ = [QPFX + t for t in random.sample(flat, min(E.anchor_q, len(flat)))]
                 vq = embed(enc, qs_)
                 with torch.no_grad(): vq0 = embed(ref, qs_)

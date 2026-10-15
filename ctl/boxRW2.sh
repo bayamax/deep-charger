@@ -2,7 +2,7 @@
 # box RW2 (2026-10-14, the 3090 that replaces box RW's 3060 for the GRPO round: ~2.6x the speed for 1.5x the price) - box RW, the user: rent a second box, as cheap as possible, and try GRPO with a reward model's 0-1 score as
 # the reward). First step: can a dedicated reward model tell Deep Charger's better replies from its worse ones? The
 # Skywork-Reward-V2 (Qwen3) family scores the archived GRPO rollouts of mtg7-mtg10 (rm_scan.py). Pull-based as the others.
-BOXRW2_SERIAL=28
+BOXRW2_SERIAL=29
 if [ -f /root/.boxrw2_serial ] && [ "$(cat /root/.boxrw2_serial)" -gt "$BOXRW2_SERIAL" ] 2>/dev/null; then echo "BOXRW2_STALE $BOXRW2_SERIAL"; exit 0; fi
 echo $BOXRW2_SERIAL > /root/.boxrw2_serial
 mkdir -p /root/work /root/hfdl; cd /root/work
@@ -767,6 +767,29 @@ if [ ! -e /root/.bart_pf ] && [ -e /root/.go_bart ]; then touch /root/.bart_pf
     echo "[bart7] restarted with the prefetch after the save at $(date -u -d @$(stat -c %Y $O/state_e2e.pt) +%H:%M) $(date -u +%H:%M)"
     sleep 900; nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv,noheader | sed 's/^/[bart7] GPU 15 min after the prefetch: /'
     sleep 600; nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv,noheader | sed 's/^/[bart7] GPU 25 min after the prefetch: /' ) >> /root/bart7.log 2>&1 &
+fi
+# ---- 2026-10-15, the user: does bge need its gradient every step, or is speed worth more? An A/B from one saved state:
+# B = the same run with bge frozen as it stands (forward only, no reference, no anchor) for 2000 steps in its own folder;
+# then the seventh run itself (A) carries on from that same state, so the two meet at the same steps on the same batches. ----
+if [ ! -e /root/.frz_ab ] && [ -e /root/.bart_pf ]; then touch /root/.frz_ab
+  ( O=/root/sb/dolphin_once7; F=/root/sb/frz7; DB=/root/sb/data/r1b_768; m0=$(stat -c %Y $O/state_e2e.pt); n=0
+    until [ "$(stat -c %Y $O/state_e2e.pt)" != "$m0" ] || [ $n -ge 60 ]; do sleep 60; n=$((n+1)); done; sleep 90
+    pkill -f "bart7bkee[p].sh"; pkill -f "train_e2e.py.*dolphin_once7"; sleep 20
+    mkdir -p $F; cp $O/state_e2e.pt $F/state_e2e.pt; cp $O/train.log $F/train.log
+    S=$(python3 -c "import torch; print(torch.load('$F/state_e2e.pt', map_location='cpu', weights_only=False)['step'])")
+    echo "[frz] B (bge frozen) from step $S $(date -u +%H:%M)"
+    PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python3 -u /root/sb/train_e2e.py --vec $DB --text $DB --eval-text $DB/docs_001.jsonl --out $F --init /root/sb/dolphin_once6/state_e2e.pt --layers 16 --enc-layers 0 \
+      --buckets 64,128,192,256,384,512,768 --bucket-order random --sent-budget 3800 --plan-accum 1 --prefetch 3 --embed-chunk 512 --freeze-enc 1 --max-bs 64 --eval-seq 128 --page-queue 16 --pool 0 --anchor-q 0 --select dec_top1 --patience 0 \
+      --eval-every 1000 --save-every 100000 > /root/frz_try.log 2>&1 &
+    P=$!; n=0
+    until grep -q "^\[eval $((S+2000))\]" /root/frz_try.log || ! kill -0 $P 2>/dev/null || [ $n -ge 240 ]; do sleep 30; n=$((n+1)); done
+    kill $P 2>/dev/null; sleep 10
+    grep -E "^\[e2e\] bge frozen|^\[step|^\[eval|Traceback|Error|out of memory" /root/frz_try.log | grep -E "frozen|00\] |eval|Trace|Error|memory" | sed 's/^/[frz] /' | cut -c1-260 | tail -n 14
+    nvidia-smi --query-gpu=memory.used --format=csv,noheader | sed 's/^/[frz] card after: /'
+    echo "[frz] B done; A (the seventh run) resumes from step $S $(date -u +%H:%M)"
+    rm -f $F/state_e2e.pt $F/model_best.pt
+    setsid nohup bash -c 'bash /root/bart7bkeep.sh 2>&1 | tee -a /root/bart7.log' > /dev/null 2>&1 < /dev/null &
+  ) >> /root/bart7.log 2>&1 &
 fi
 echo "BOXRW2_OK serial $BOXRW2_SERIAL $(date -u)"
 # CTL-END
