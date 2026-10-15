@@ -3,7 +3,7 @@
 # grown 4 -> 8 -> 12 -> 16 layers at d 512 (charlm/charlm2.py), then tested against GPT-2 small on the same documents and
 # quantized to 4 bits by GPTQ. Pull-based as the others; the log goes to the hub every 10 minutes (boxlog_CH.txt), the
 # checkpoints to charlm/run2/ as they are made.
-BOXCH_SERIAL=1
+BOXCH_SERIAL=2
 if [ -f /root/.boxch_serial ] && [ "$(cat /root/.boxch_serial)" -gt "$BOXCH_SERIAL" ] 2>/dev/null; then echo "BOXCH_STALE $BOXCH_SERIAL"; exit 0; fi
 echo $BOXCH_SERIAL > /root/.boxch_serial
 [ -s /root/.hf_token ] || { [ -n "$HF_TOKEN" ] && printf '%s' "$HF_TOKEN" > /root/.hf_token && chmod 600 /root/.hf_token; }
@@ -21,7 +21,8 @@ if [ ! -f /root/.bootstrapped ]; then
   touch /root/.bootstrapped; echo "BOOTSTRAP_DONE $(date -u)"
 fi
 
-# ---- the mirror ----
+# ---- the mirror (serial 2: it reads run2/train.log, which the job's grep pipe only flushes in 4 kB blocks) ----
+if [ ! -e /root/.chmirror_r2 ]; then touch /root/.chmirror_r2; pkill -f "chmirro[r].sh"; sleep 1; fi
 if ! pgrep -f "chmirro[r].sh" >/dev/null; then
   cat > /root/chmirror.sh <<'MR'
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null)
@@ -29,7 +30,9 @@ while true; do
   { echo "=== boxCH $(date -u) ==="; nvidia-smi --query-gpu=utilization.gpu,memory.used,memory.total --format=csv,noheader; df -h /root | tail -1
     echo "--- ctl.log ---"; tail -n 15 /root/ctl.log 2>/dev/null | cut -c1-300
     echo "--- prep.log ---"; tail -n 20 /root/charlm/prep.log 2>/dev/null | cut -c1-300
-    echo "--- job.log ---"; grep -vE "Warning|warn" /root/charlm/job.log 2>/dev/null | tail -n 60 | cut -c1-600; } > /root/boxlog_CH.txt
+    echo "--- job.log ---"; grep -vE "Warning|warn" /root/charlm/job.log 2>/dev/null | tail -n 20 | cut -c1-600
+    echo "--- run2/train.log ---"; grep -E "^\[val\]|^\[grow\]|^\[oom\]|^\[charlm2\]|^\[test\]|^\[gptq\]|^\[sample\]|^\[hub\]|CHARLM2_DONE" /root/charlm/run2/train.log 2>/dev/null | tail -n 40 | cut -c1-600
+    grep -E "^\[step" /root/charlm/run2/train.log 2>/dev/null | tail -n 3 | cut -c1-300; } > /root/boxlog_CH.txt
   python3 -c "from huggingface_hub import HfApi; HfApi().upload_file(path_or_fileobj='/root/boxlog_CH.txt', path_in_repo='pooler_distill/chatsft/audit/boxlog_CH.txt', repo_id='baya1116/hypernet-sp-distill')" >/dev/null 2>&1
   sleep 600
 done
