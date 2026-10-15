@@ -2,7 +2,7 @@
 # box RW2 (2026-10-14, the 3090 that replaces box RW's 3060 for the GRPO round: ~2.6x the speed for 1.5x the price) - box RW, the user: rent a second box, as cheap as possible, and try GRPO with a reward model's 0-1 score as
 # the reward). First step: can a dedicated reward model tell Deep Charger's better replies from its worse ones? The
 # Skywork-Reward-V2 (Qwen3) family scores the archived GRPO rollouts of mtg7-mtg10 (rm_scan.py). Pull-based as the others.
-BOXRW2_SERIAL=25
+BOXRW2_SERIAL=26
 if [ -f /root/.boxrw2_serial ] && [ "$(cat /root/.boxrw2_serial)" -gt "$BOXRW2_SERIAL" ] 2>/dev/null; then echo "BOXRW2_STALE $BOXRW2_SERIAL"; exit 0; fi
 echo $BOXRW2_SERIAL > /root/.boxrw2_serial
 mkdir -p /root/work /root/hfdl; cd /root/work
@@ -733,6 +733,18 @@ echo "RUNNER3 (sequential) $(date -u)"
 SW
   setsid nohup bash -c 'bash /root/swap2keep.sh 2>&1 | tee -a /root/swap.log' > /dev/null 2>&1 < /dev/null &
   echo "HOLD2 $(date -u)"
+fi
+# ---- 2026-10-15, the user: if the screens read poorly, switch to the context BART and run it as fast as the card allows.
+# GO_BART=1 stops the GRPO side (runner, screens, judges, keepers) and resumes the seventh run here alone, with each update
+# computed in one pass (3800 sentences, the same per update as 2 x 1900) now that the 24 GB are its own. ----
+GO_BART=0
+if [ "$GO_BART" = 1 ] && [ ! -e /root/.go_bart ]; then touch /root/.go_bart
+  for k in rmroundskee rm_rounds.sh pairkee fixkee evalguar swap2kee tulukee judgeprepkee; do pkill -f "${k}[p]*" 2>/dev/null; done
+  pkill -f "rm_rounds.sh"; pkill -f "online_loop.py"; pkill -f "pool_eval.py"; pkill -f "rm_server.py"; pkill -f "rm_pair.py"; pkill -f "rm_quality.py"; sleep 10
+  rm -f /root/.bart_paused
+  sed -i 's/--sent-budget 1900 --plan-accum 2/--sent-budget 3800 --plan-accum 1/; s/--save-every 250/--save-every 1000/' /root/bart7bkeep.sh
+  setsid nohup bash -c 'bash /root/bart7bkeep.sh 2>&1 | tee -a /root/bart7.log' > /dev/null 2>&1 < /dev/null &
+  echo "GO_BART: the GRPO side stopped; the seventh run resumes alone, 3800 sentences per pass $(date -u)" | tee -a /root/bart7.log
 fi
 echo "BOXRW2_OK serial $BOXRW2_SERIAL $(date -u)"
 # CTL-END
