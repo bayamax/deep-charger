@@ -2,7 +2,7 @@
 # box RW2 (2026-10-14, the 3090 that replaces box RW's 3060 for the GRPO round: ~2.6x the speed for 1.5x the price) - box RW, the user: rent a second box, as cheap as possible, and try GRPO with a reward model's 0-1 score as
 # the reward). First step: can a dedicated reward model tell Deep Charger's better replies from its worse ones? The
 # Skywork-Reward-V2 (Qwen3) family scores the archived GRPO rollouts of mtg7-mtg10 (rm_scan.py). Pull-based as the others.
-BOXRW2_SERIAL=29
+BOXRW2_SERIAL=30
 if [ -f /root/.boxrw2_serial ] && [ "$(cat /root/.boxrw2_serial)" -gt "$BOXRW2_SERIAL" ] 2>/dev/null; then echo "BOXRW2_STALE $BOXRW2_SERIAL"; exit 0; fi
 echo $BOXRW2_SERIAL > /root/.boxrw2_serial
 mkdir -p /root/work /root/hfdl; cd /root/work
@@ -771,7 +771,7 @@ fi
 # ---- 2026-10-15, the user: does bge need its gradient every step, or is speed worth more? An A/B from one saved state:
 # B = the same run with bge frozen as it stands (forward only, no reference, no anchor) for 2000 steps in its own folder;
 # then the seventh run itself (A) carries on from that same state, so the two meet at the same steps on the same batches. ----
-if [ ! -e /root/.frz_ab ] && [ -e /root/.bart_pf ]; then touch /root/.frz_ab
+if [ ! -e /root/.frz_ab ] && [ -e /root/.bart_pf ] && false; then touch /root/.frz_ab
   ( O=/root/sb/dolphin_once7; F=/root/sb/frz7; DB=/root/sb/data/r1b_768; m0=$(stat -c %Y $O/state_e2e.pt); n=0
     until [ "$(stat -c %Y $O/state_e2e.pt)" != "$m0" ] || [ $n -ge 60 ]; do sleep 60; n=$((n+1)); done; sleep 90
     pkill -f "bart7bkee[p].sh"; pkill -f "train_e2e.py.*dolphin_once7"; sleep 20
@@ -790,6 +790,18 @@ if [ ! -e /root/.frz_ab ] && [ -e /root/.bart_pf ]; then touch /root/.frz_ab
     rm -f $F/state_e2e.pt $F/model_best.pt
     setsid nohup bash -c 'bash /root/bart7bkeep.sh 2>&1 | tee -a /root/bart7.log' > /dev/null 2>&1 < /dev/null &
   ) >> /root/bart7.log 2>&1 &
+fi
+# ---- 2026-10-15, the user: bge stays trained - the frozen-bge A/B is called off. The previous serial's waiting subshell
+# (a ctl run's child with a sleep-60 loop) goes; for two hours a guard kills any frozen-bge training and, should the
+# seventh run be found down, brings its keeper back. ----
+if [ ! -e /root/.frz_cancel ]; then touch /root/.frz_cancel; touch /root/.frz_ab
+  for sp in $(pgrep -x sleep); do pp=$(ps -o ppid= -p $sp | tr -d ' '); [ -n "$pp" ] && [ "$pp" != "$$" ] && grep -q "ctl_cmd.sh" /proc/$pp/cmdline 2>/dev/null && [ "$(cat /proc/$sp/cmdline | tr '\0' ' ')" = "sleep 60 " ] && { kill $pp $sp; echo "[frz] the A/B's waiting subshell $pp stopped"; }; done
+  ( n=0; down=0; while [ $n -lt 240 ]; do
+      pkill -f "train_e2e.py.*--freeze-enc 1" && echo "[frz] a frozen-bge training killed $(date -u +%H:%M)"
+      if pgrep -f "bart7bkee[p].sh" >/dev/null || pgrep -f "train_e2e.py.*dolphin_once7" >/dev/null || grep -q "BART7_JOB_DONE" /root/bart7.log; then down=0; else down=$((down+1)); fi
+      [ $down -ge 6 ] && { setsid nohup bash -c 'bash /root/bart7bkeep.sh 2>&1 | tee -a /root/bart7.log' > /dev/null 2>&1 < /dev/null & echo "[frz] the seventh run was down: its keeper relaunched $(date -u +%H:%M)"; down=0; sleep 120; }
+      sleep 30; n=$((n+1)); done; rm -rf /root/sb/frz7 ) >> /root/bart7.log 2>&1 &
+  echo "[frz] the frozen-bge A/B called off (bge stays trained) $(date -u +%H:%M)" | tee -a /root/bart7.log
 fi
 echo "BOXRW2_OK serial $BOXRW2_SERIAL $(date -u)"
 # CTL-END
