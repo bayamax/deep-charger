@@ -2,7 +2,7 @@
 # box RW2 (2026-10-14, the 3090 that replaces box RW's 3060 for the GRPO round: ~2.6x the speed for 1.5x the price) - box RW, the user: rent a second box, as cheap as possible, and try GRPO with a reward model's 0-1 score as
 # the reward). First step: can a dedicated reward model tell Deep Charger's better replies from its worse ones? The
 # Skywork-Reward-V2 (Qwen3) family scores the archived GRPO rollouts of mtg7-mtg10 (rm_scan.py). Pull-based as the others.
-BOXRW2_SERIAL=26
+BOXRW2_SERIAL=27
 if [ -f /root/.boxrw2_serial ] && [ "$(cat /root/.boxrw2_serial)" -gt "$BOXRW2_SERIAL" ] 2>/dev/null; then echo "BOXRW2_STALE $BOXRW2_SERIAL"; exit 0; fi
 echo $BOXRW2_SERIAL > /root/.boxrw2_serial
 mkdir -p /root/work /root/hfdl; cd /root/work
@@ -195,7 +195,7 @@ fi
 [ -s /root/rm_choice.txt ] || { echo "Skywork/Skywork-Reward-V2-Qwen3-8B@4bit 0.13 3.2 cuda" > /root/rm_choice.txt; echo "RM_CHOICE $(cat /root/rm_choice.txt)"; }
 # ---- 2026-10-14: box I (the context BART) stopped for the credit and its GPU went to another renter. Its sixth run's end
 # and seventh run's state were on its disk only; Vast copies them here (/root/fromI), and this box puts them on the hub. ----
-if ! pgrep -f "fromikee[p].sh" >/dev/null && [ ! -e /root/.fromi_done ]; then
+if [ ! -e /root/.go_bart ] && ! pgrep -f "fromikee[p].sh" >/dev/null && [ ! -e /root/.fromi_done ]; then
   cat > /root/fromikeep.sh <<'FI'
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); R=baya1116/hypernet-sp-distill
 up() { [ -s "$1" ] || return 1; a=$(stat -c %s "$1"); sleep 90; [ "$(stat -c %s "$1")" = "$a" ] || return 1; hf upload $R "$1" "$2" >/dev/null 2>&1 && echo "[fromI] $1 -> $2 ($(du -h "$1" | cut -f1)) $(date -u +%H:%M)"; }
@@ -349,7 +349,7 @@ B7
   setsid nohup bash -c 'bash /root/bart7keep.sh 2>&1 | tee -a /root/bart7.log' > /dev/null 2>&1 < /dev/null &
 fi
 for k in earlyscreen parscreen bartprep; do
-  if [ -s /root/${k}keep.sh ] && ! pgrep -f "${k}kee[p].sh" >/dev/null && ! grep -qE "EARLYSCREEN_DONE|PARSCREEN_SKIPPED|RMROUND_JOB_DONE|BARTPREP_DONE|BARTPREP_FAILED|BART7_JOB_DONE" /root/$k.log 2>/dev/null; then
+  if [ ! -e /root/.go_bart ] && [ -s /root/${k}keep.sh ] && ! pgrep -f "${k}kee[p].sh" >/dev/null && ! grep -qE "EARLYSCREEN_DONE|PARSCREEN_SKIPPED|RMROUND_JOB_DONE|BARTPREP_DONE|BARTPREP_FAILED|BART7_JOB_DONE" /root/$k.log 2>/dev/null; then
     [ "$k" = parscreen ] && grep -q "RMROUND_JOB_DONE" /root/rmround.log 2>/dev/null && continue
     setsid nohup bash -c "bash /root/${k}keep.sh 2>&1 | tee -a /root/$k.log" > /dev/null 2>&1 < /dev/null &
   fi
@@ -374,11 +374,11 @@ RK
   setsid nohup bash -c 'bash /root/rmroundskeep.sh 2>&1 | tee -a /root/rm_rounds.log' > /dev/null 2>&1 < /dev/null &
   echo "RMROUNDS_LAUNCHED $(date -u)"
 fi
-if [ -e /root/.rmrounds ] && ! pgrep -f "rmroundskee[p].sh|rm_rounds.sh" >/dev/null; then
+if [ ! -e /root/.go_bart ] && [ -e /root/.rmrounds ] && ! pgrep -f "rmroundskee[p].sh|rm_rounds.sh" >/dev/null; then
   setsid nohup bash -c 'bash /root/rmroundskeep.sh 2>&1 | tee -a /root/rm_rounds.log' > /dev/null 2>&1 < /dev/null &
 fi
 # the next round starts once round 1's shard-0 screens are done (its last full screens run alone on a quarter of the card)
-if [ ! -e /root/.rmrounds_early ] && [ -e /root/.rmrounds ] && [ ! -e /root/rmr/rm2.trained ] && ! pgrep -f "rm_rounds.sh" >/dev/null; then touch /root/.rmrounds_early
+if [ ! -e /root/.go_bart ] && [ ! -e /root/.rmrounds_early ] && [ -e /root/.rmrounds ] && [ ! -e /root/rmr/rm2.trained ] && ! pgrep -f "rm_rounds.sh" >/dev/null; then touch /root/.rmrounds_early
   cat > /root/rmroundskeep.sh <<'RK'
 until grep -qE "best copy by shard 0|RMROUND_JOB_DONE" /root/rmround.log 2>/dev/null; do sleep 60; done
 exec bash /root/work/rm_rounds.sh
@@ -523,7 +523,7 @@ fi
 # not used in training (Skywork-Reward-V2 on Llama-3.1-8B, 4 bits): win rate where both are right, lengths; the pairs go
 # to the hub for a reader. ----
 [ -e /root/.pairkeep2 ] || { touch /root/.pairkeep2; pkill -f "pairkee[p].sh"; sleep 1; }   # the judge from a file, chosen first
-if ! pgrep -f "pairkee[p].sh" >/dev/null; then
+if [ ! -e /root/.go_bart ] && ! pgrep -f "pairkee[p].sh" >/dev/null; then
   cat > /root/pairkeep.sh <<'PK'
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); R=baya1116/hypernet-sp-distill; cd /root/work
 J=$(cat /root/rm_eval_judge.txt 2>/dev/null || echo Skywork/Skywork-Reward-V2-Llama-3.1-8B@4bit)
@@ -603,7 +603,7 @@ fi
 if [ ! -e /root/.holdq ] && [ ! -e /root/.runner2 ]; then touch /root/.holdq
   printf '# held for the judge preparation; the full queue comes with the new runner\nrm2c /root/work/mtg10_items.jsonl --qbatch 3\nrm9 /root/work/mtg10_items.jsonl --qbatch 3 --rm-mult 1 --w-rm 1.0\n' > /root/rm_queue.txt
 fi
-if [ ! -e /root/.runner2 ] && ! pgrep -f "swapkee[p].sh" >/dev/null; then
+if [ ! -e /root/.go_bart ] && [ ! -e /root/.runner2 ] && ! pgrep -f "swapkee[p].sh" >/dev/null; then
   cat > /root/swapkeep.sh <<'SW'
 until [ -e /root/.judge_chosen ] && grep -q "^screens()" /root/work/rm_rounds.sh && ! pgrep -f "online_loop.py" >/dev/null; do sleep 60; done
 touch /root/.runner2
@@ -626,7 +626,7 @@ SW
 fi
 # ---- 2026-10-15, the user: the context BART is on hold for now. Its run stops here, its latest state and log go to the hub
 # (state_latest.pt / train_partial.log, from which it resumes), and the card goes to the GRPO rounds and their screens. ----
-if [ ! -e /root/.bart_paused ]; then touch /root/.bart_paused
+if [ ! -e /root/.bart_paused ] && [ ! -e /root/.go_bart ]; then touch /root/.bart_paused
   pkill -f "bart7bkee[p].sh"; pkill -f "train_e2e.py.*dolphin_once7"; sleep 15
   export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); R=baya1116/hypernet-sp-distill; O=/root/sb/dolphin_once7
   st=$(python3 -c "import torch; print(torch.load('$O/state_e2e.pt', map_location='cpu', weights_only=False).get('step'))" 2>/dev/null)
@@ -699,7 +699,7 @@ fi
 # ---- 2026-10-15, the user: training and evaluation at once is no good (rm2c's screens ran out of memory beside rm9's
 # training). Until the runner restarts with its screens in the foreground, a guard stops any screen while a training runs;
 # what it stops is screened again afterwards (rm2c's by fixkeep; a round's own by its runner's retry). ----
-if ! pgrep -f "evalguar[d].sh" >/dev/null; then
+if [ ! -e /root/.go_bart ] && ! pgrep -f "evalguar[d].sh" >/dev/null; then
   cat > /root/evalguard.sh <<'EG'
 while :; do
   if pgrep -f "online_loop.py" >/dev/null && pgrep -f "pool_eval.py" >/dev/null; then
@@ -737,14 +737,21 @@ fi
 # ---- 2026-10-15, the user: if the screens read poorly, switch to the context BART and run it as fast as the card allows.
 # GO_BART=1 stops the GRPO side (runner, screens, judges, keepers) and resumes the seventh run here alone, with each update
 # computed in one pass (3800 sentences, the same per update as 2 x 1900) now that the 24 GB are its own. ----
-GO_BART=0
+GO_BART=1
 if [ "$GO_BART" = 1 ] && [ ! -e /root/.go_bart ]; then touch /root/.go_bart
-  for k in rmroundskee rm_rounds.sh pairkee fixkee evalguar swap2kee tulukee judgeprepkee; do pkill -f "${k}[p]*" 2>/dev/null; done
-  pkill -f "rm_rounds.sh"; pkill -f "online_loop.py"; pkill -f "pool_eval.py"; pkill -f "rm_server.py"; pkill -f "rm_pair.py"; pkill -f "rm_quality.py"; sleep 10
+  : > /root/rm_queue.txt
+  for k in rmroundskeep rmroundkeep grpobootkeep earlyscreenkeep parscreenkeep pairkeep fixkeep evalguard swap2keep swapkeep tulukeep judgeprepkeep fromikeep; do pkill -f "/root/$k\.sh"; done
+  pkill -f "rm_round[s].sh"; pkill -f "online_loo[p].py"; pkill -f "pool_eva[l].py"; pkill -f "rm_serve[r].py"; pkill -f "rm_pai[r].py"; pkill -f "rm_qualit[y].py"; pkill -f "rm_sca[n].py"; sleep 15
   rm -f /root/.bart_paused
-  sed -i 's/--sent-budget 1900 --plan-accum 2/--sent-budget 3800 --plan-accum 1/; s/--save-every 250/--save-every 1000/' /root/bart7bkeep.sh
+  # one pass of 3800 sentences per update; if that runs out of memory, back to 1900 x 2 for the next try
+  sed -i 's/--sent-budget 1900 --plan-accum 2/--sent-budget $SB --plan-accum $PA/' /root/bart7bkeep.sh
+  sed -i 's/^for try in \$(seq 1 40); do$/SB=3800; PA=1\nfor try in $(seq 1 40); do/' /root/bart7bkeep.sh
+  sed -i 's/^  grep -q "TRAIN_DONE" \/root\/bart7_try.log \&\& break$/  grep -q "TRAIN_DONE" \/root\/bart7_try.log \&\& break\n  grep -q "out of memory" \/root\/bart7_try.log \&\& [ "$SB" = 3800 ] \&\& { SB=1900; PA=2; echo "[bart7] 3800 at once ran out of memory: 1900 x 2 from here"; }/' /root/bart7bkeep.sh
+  grep -c 'SB=3800; PA=1\|--sent-budget \$SB\|SB=1900; PA=2' /root/bart7bkeep.sh | sed 's/^/GO_BART edits in place (want 3): /'
   setsid nohup bash -c 'bash /root/bart7bkeep.sh 2>&1 | tee -a /root/bart7.log' > /dev/null 2>&1 < /dev/null &
   echo "GO_BART: the GRPO side stopped; the seventh run resumes alone, 3800 sentences per pass $(date -u)" | tee -a /root/bart7.log
 fi
+( sleep 900; nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv,noheader | sed 's/^/[bart7] GPU 15 min after the switch: /' >> /root/bart7.log
+  sleep 600; nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv,noheader | sed 's/^/[bart7] GPU 25 min after the switch: /' >> /root/bart7.log ) > /dev/null 2>&1 &
 echo "BOXRW2_OK serial $BOXRW2_SERIAL $(date -u)"
 # CTL-END
