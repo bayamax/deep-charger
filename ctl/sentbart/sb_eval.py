@@ -82,9 +82,9 @@ for spec in X.ckpt:
     model = build(CK["layers"], seq); model.load_state_dict(CK["model"]); model.to(DEV).eval()
     enc = AutoModel.from_pretrained(X.bge); grow_bge(enc, CK.get("enc_layers", 12)); enc.load_state_dict(CK["enc"]); enc.to(DEV).eval()
     C = embed(enc, cand_text)                                              # [N, 384], this checkpoint's own bge
-    stat = {}   # band -> [n, cos_sum, top1, top10]
-    def add(key, cos, r):
-        s = stat.setdefault(key, [0, 0.0, 0, 0]); s[0] += 1; s[1] += cos; s[2] += int(r == 0); s[3] += int(r < 10)
+    stat = {}   # band -> [n, cos_sum, top1, top10, z_sum, cand_cos_sum]
+    def add(key, cos, r, z=0.0, cm=0.0):
+        s = stat.setdefault(key, [0, 0.0, 0, 0, 0.0, 0.0]); s[0] += 1; s[1] += cos; s[2] += int(r == 0); s[3] += int(r < 10); s[4] += z; s[5] += cm
     for i in range(0, len(ev), X.batch):
         part = [docs[k] for k in ev[i:i + X.batch]]
         part = [{"sents": d["sents"][:seq], "nq": int(d.get("nq", 0) or 0)} for d in part]   # whole, up to the checkpoint's table
@@ -103,18 +103,20 @@ for spec in X.ckpt:
             cos = (P * T).sum(-1)                                                       # [n-k]
             s_true = cos; s_c = P @ C.T                                                 # scores: the truth and the fixed candidates
             rank = (s_c > s_true[:, None]).sum(-1)                                      # how many candidates beat the truth (0 = top-1)
+            cm_ = s_c.mean(-1); zz = (s_true - cm_) / s_c.std(-1).clamp_min(1e-6)       # the truth's cosine in standard deviations above the candidates' (comparable with a token LM's)
             for t in range(k, n):
                 band = next(bn for bn in bands if t + 1 <= bn) if t + 1 <= bands[-1] else bands[-1]
-                add(f"pos<={band}", float(cos[t - k]), int(rank[t - k])); add("all", float(cos[t - k]), int(rank[t - k]))
-                if t == k: add("next", float(cos[0]), int(rank[0]))
+                a_ = (float(cos[t - k]), int(rank[t - k]), float(zz[t - k]), float(cm_[t - k]))
+                add(f"pos<={band}", *a_); add("all", *a_)
+                if t == k: add("next", float(cos[0]), int(rank[0]), float(zz[0]), float(cm_[0]))
         if (i // X.batch) % 25 == 0: print(f"[sb_eval] {name}: {min(i + X.batch, len(ev))}/{len(ev)} documents ({(time.time() - t0) / 60:.1f} min)", flush=True)
-    run = {k: {"n": v[0], "cos": round(v[1] / v[0], 4), "top1": round(v[2] / v[0], 4), "top10": round(v[3] / v[0], 4)} for k, v in stat.items()}
+    run = {k: {"n": v[0], "cos": round(v[1] / v[0], 4), "top1": round(v[2] / v[0], 4), "top10": round(v[3] / v[0], 4), "z": round(v[4] / v[0], 3), "cand_cos": round(v[5] / v[0], 4)} for k, v in stat.items()}
     run["layers"] = CK["layers"]; run["enc_layers"] = CK.get("enc_layers", 12); run["pos_rows"] = rows; run["step"] = CK.get("step")
     res["runs"][name] = run; json.dump(res, open(X.out, "w"), indent=1)
     keys = ["next", "all"] + [f"pos<={b}" for b in bands]
     print(f"[sb_eval] {name} (BART {CK['layers']}+{CK['layers']}, bge {run['enc_layers']}, table {rows}, step {run['step']}) at {len(cand_text)}+1 candidates [{(time.time() - t0) / 60:.1f} min]", flush=True)
     for k in keys:
-        if k in run: print(f"  {k:10s} n {run[k]['n']:6d}  cos {run[k]['cos']:.3f}  top1 {run[k]['top1']:.3f}  top10 {run[k]['top10']:.3f}", flush=True)
+        if k in run: print(f"  {k:10s} n {run[k]['n']:6d}  cos {run[k]['cos']:.3f}  top1 {run[k]['top1']:.3f}  top10 {run[k]['top10']:.3f}  z {run[k]['z']:.2f}  cand_cos {run[k]['cand_cos']:.3f}", flush=True)
     del model, enc, C, CK
     if DEV == "cuda": torch.cuda.empty_cache()
 print("SB_EVAL_DONE", flush=True)
