@@ -2,7 +2,7 @@
 # box RW2 (2026-10-14, the 3090 that replaces box RW's 3060 for the GRPO round: ~2.6x the speed for 1.5x the price) - box RW, the user: rent a second box, as cheap as possible, and try GRPO with a reward model's 0-1 score as
 # the reward). First step: can a dedicated reward model tell Deep Charger's better replies from its worse ones? The
 # Skywork-Reward-V2 (Qwen3) family scores the archived GRPO rollouts of mtg7-mtg10 (rm_scan.py). Pull-based as the others.
-BOXRW2_SERIAL=31
+BOXRW2_SERIAL=32
 if [ -f /root/.boxrw2_serial ] && [ "$(cat /root/.boxrw2_serial)" -gt "$BOXRW2_SERIAL" ] 2>/dev/null; then echo "BOXRW2_STALE $BOXRW2_SERIAL"; exit 0; fi
 echo $BOXRW2_SERIAL > /root/.boxrw2_serial
 mkdir -p /root/work /root/hfdl; cd /root/work
@@ -802,6 +802,19 @@ if [ ! -e /root/.frz_cancel ]; then touch /root/.frz_cancel; touch /root/.frz_ab
       [ $down -ge 6 ] && { setsid nohup bash -c 'bash /root/bart7bkeep.sh 2>&1 | tee -a /root/bart7.log' > /dev/null 2>&1 < /dev/null & echo "[frz] the seventh run was down: its keeper relaunched $(date -u +%H:%M)"; down=0; sleep 120; }
       sleep 30; n=$((n+1)); done; rm -rf /root/sb/frz7 ) >> /root/bart7.log 2>&1 &
   echo "[frz] the frozen-bge A/B called off (bge stays trained) $(date -u +%H:%M)" | tee -a /root/bart7.log
+fi
+# ---- 2026-10-16, the user: the box goes once the seventh run's evaluation is over. Before that, the two fixed yardsticks
+# (the dolphin 768-whole held-out and the AM held-out, prepared on this box) go to the hub so the next box measures on
+# the same documents, and the run's final files are checked there. BART7_HELDOUTS_UP marks it done. ----
+if [ ! -e /root/.heldouts_up ]; then touch /root/.heldouts_up
+  ( export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); R=baya1116/hypernet-sp-distill
+    until grep -q "BART7_JOB_DONE" /root/bart7.log 2>/dev/null; do sleep 120; done
+    hf upload $R /root/sb/data/dolphin768full/docs_001.jsonl sentbart/dolphin/heldout/dolphin768full_docs_001.jsonl >/dev/null 2>&1 && \
+    hf upload $R /root/sb/data/am_held/docs_005.jsonl sentbart/dolphin/heldout/am_held_docs_005.jsonl >/dev/null 2>&1 && \
+    hf upload $R /root/sb/dolphin_once7/train.log sentbart/dolphin/once7/train.log >/dev/null 2>&1 && \
+    echo "BART7_HELDOUTS_UP $(date -u)" || echo "BART7_HELDOUTS_UP FAILED $(date -u)"
+    for f in sentbart/dolphin/once7/model_best.pt sentbart/dolphin/once7/state_end.pt sentbart/dolphin/sb_eval/sb_eval768b.json sentbart/dolphin/sb_eval/sb_eval_amb.json; do
+      n=$(curl -sI "https://huggingface.co/$R/resolve/main/$f" | grep -i "x-linked-size\|content-length" | tail -1 | tr -dc 0-9); echo "[hub] $f: ${n:-missing} bytes"; done ) >> /root/bart7.log 2>&1 &
 fi
 echo "BOXRW2_OK serial $BOXRW2_SERIAL $(date -u)"
 # CTL-END
