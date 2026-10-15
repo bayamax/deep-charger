@@ -2,7 +2,7 @@
 # box RW2 (2026-10-14, the 3090 that replaces box RW's 3060 for the GRPO round: ~2.6x the speed for 1.5x the price) - box RW, the user: rent a second box, as cheap as possible, and try GRPO with a reward model's 0-1 score as
 # the reward). First step: can a dedicated reward model tell Deep Charger's better replies from its worse ones? The
 # Skywork-Reward-V2 (Qwen3) family scores the archived GRPO rollouts of mtg7-mtg10 (rm_scan.py). Pull-based as the others.
-BOXRW2_SERIAL=20
+BOXRW2_SERIAL=21
 if [ -f /root/.boxrw2_serial ] && [ "$(cat /root/.boxrw2_serial)" -gt "$BOXRW2_SERIAL" ] 2>/dev/null; then echo "BOXRW2_STALE $BOXRW2_SERIAL"; exit 0; fi
 echo $BOXRW2_SERIAL > /root/.boxrw2_serial
 mkdir -p /root/work /root/hfdl; cd /root/work
@@ -619,6 +619,38 @@ if [ ! -e /root/.bart_paused ]; then touch /root/.bart_paused
   st=$(python3 -c "import torch; print(torch.load('$O/state_e2e.pt', map_location='cpu', weights_only=False).get('step'))" 2>/dev/null)
   hf upload $R $O/state_e2e.pt sentbart/dolphin/once7/state_latest.pt >/dev/null 2>&1 && hf upload $R $O/model_best.pt sentbart/dolphin/once7/model_best_partial.pt >/dev/null 2>&1 && hf upload $R $O/train.log sentbart/dolphin/once7/train_partial.log >/dev/null 2>&1 \
     && echo "BART_PAUSED at step $st, state on the hub $(date -u)" | tee -a /root/bart7.log || echo "BART_PAUSED at step $st - UPLOAD FAILED $(date -u)" | tee -a /root/bart7.log
+fi
+# ---- the judge scan: Llama-8B 0.822/0.778/0.816, both 8B together 0.838/0.826/0.807 (Qwen3-8B alone 0.829/0.799/0.767) -
+# the pair is the judge from rm9 on (rm10, its duplicate, leaves the queue). Tulu-3 failed for want of a pad token
+# (fixed in rm_load); it is scanned alone, and becomes the quality judge if it reads right-over-wrong at 0.7 or better. ----
+if [ ! -e /root/.judge2 ] && grep -q "def fix_pad" /root/work/rm_load.py; then touch /root/.judge2
+  python3 - <<'PD'
+import json
+r = json.load(open("/root/judgescan.json"))["models"]
+Q, L = "Skywork/Skywork-Reward-V2-Qwen3-8B@4bit", "Skywork/Skywork-Reward-V2-Llama-3.1-8B@4bit"
+mem = r[f"{Q}+{L}"]["members"]
+open("/root/rm_choice.txt", "w").write(f"{Q}+{L} {mem[Q]['mean']},{mem[L]['mean']} {mem[Q]['sd']},{mem[L]['sd']} cuda\n"); open("/root/rm_choice_mb.txt", "w").write("11500\n")
+print("JUDGE2", open("/root/rm_choice.txt").read().strip(), flush=True)
+PD
+  sed -i '/^rm10 /d' /root/rm_queue.txt
+  cat > /root/tulukeep.sh <<'TK'
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); R=baya1116/hypernet-sp-distill; cd /root/work
+freemb() { nvidia-smi --query-gpu=memory.free --format=csv,noheader,nounits | head -1 | tr -dc 0-9; }
+until [ "$(freemb)" -ge 7000 ]; do sleep 120; done
+FS=$(ls /root/hfdl/pooler_distill/chatsft/archive_G2/online/online_*/rollouts.jsonl)
+PYTHONPATH=/root/rmenv python3 -u /root/work/rm_scan.py --rollouts $FS --models allenai/Llama-3.1-Tulu-3-8B-RM@4bit --out /root/tuluscan.json --batch 4 2>&1 | grep -E "search_correct|Error|Traceback" | cut -c1-500
+python3 - <<'PT'
+import json
+m = json.load(open("/root/tuluscan.json"))["models"]["allenai/Llama-3.1-Tulu-3-8B-RM@4bit"]
+ok = m["search_correct_pairwise"] >= 0.7
+open("/root/rm_eval_judge.txt", "w").write("allenai/Llama-3.1-Tulu-3-8B-RM@4bit\n" if ok else "Skywork/Skywork-Reward-V2-Llama-3.2-3B\n")
+print("[tulu] quality judge:", open("/root/rm_eval_judge.txt").read().strip(), "(Tulu right-over-wrong", m["search_correct_pairwise"], ", nano-good", m["judge_good_pairwise_among_correct"], ")", flush=True)
+PT
+hf upload $R /root/tuluscan.json pooler_distill/chatsft/rm_scan/tuluscan.json >/dev/null 2>&1
+echo "TULU_DONE $(date -u)"
+TK
+  setsid nohup bash -c 'bash /root/tulukeep.sh 2>&1 | tee -a /root/judgeprep.log' > /dev/null 2>&1 < /dev/null &
+  echo "JUDGE2_SET $(date -u)"
 fi
 echo "BOXRW2_OK serial $BOXRW2_SERIAL $(date -u)"
 # CTL-END

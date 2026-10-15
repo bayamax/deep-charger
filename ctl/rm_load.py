@@ -10,7 +10,18 @@ QDIR = "/root/rm_q"
 def local_dir(name): return os.path.join(QDIR, name.replace("/", "__"))
 
 
+def fix_pad(tok, m):
+    """a batch needs a pad token in the tokenizer and the model's config (the Tulu-3 reward model has none)"""
+    if tok.pad_token is None: tok.pad_token = tok.eos_token
+    if m.config.pad_token_id is None: m.config.pad_token_id = tok.pad_token_id
+    return tok, m
+
+
 def load_rm(spec, dev="cuda"):
+    return fix_pad(*_load(spec, dev))
+
+
+def _load(spec, dev="cuda"):
     name, _, q = spec.partition("@")
     kw = {"num_labels": 1}
     if q == "4bit" and os.path.exists(os.path.join(local_dir(name), "config.json")):
