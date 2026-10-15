@@ -1,5 +1,5 @@
 #!/bin/bash
-# box CH (2026-10-16): the character-level LM made in earnest - 4096-character context, WikiText-103 + FineWeb-Edu,
+# box CH (2026-10-16, a 3060 - the user: the cheap one): the character-level LM made in earnest - 4096-character context, WikiText-103 + FineWeb-Edu,
 # grown 4 -> 8 -> 12 -> 16 layers at d 512 (charlm/charlm2.py), then tested against GPT-2 small on the same documents and
 # quantized to 4 bits by GPTQ. Pull-based as the others; the log goes to the hub every 10 minutes (boxlog_CH.txt), the
 # checkpoints to charlm/run2/ as they are made.
@@ -47,7 +47,7 @@ export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); cd /root/cha
 for try in 1 2 3 4 5; do
   RES=""; [ -s run2/model_latest.pt ] && RES="--resume run2/model_latest.pt"
   python3 -u charlm2.py --data data --out run2 --d 512 --heads 8 --layers 4,8,12,16 --seq 4096 --chars-per-step 131072 --micro 16 \
-    --hours 13 --eval-every 20 --hub baya1116/hypernet-sp-distill:charlm/run2 $RES 2>&1 | grep -vE "Warning|warn"
+    --hours 30 --eval-every 30 --hub baya1116/hypernet-sp-distill:charlm/run2 $RES 2>&1 | grep -vE "Warning|warn"
   grep -q CHARLM2_DONE run2/train.log && break
   echo "CHJOB training stopped without finishing (try $try) - again in 2 min $(date -u)"; sleep 120
 done
