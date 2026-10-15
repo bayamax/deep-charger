@@ -2,7 +2,7 @@
 # box RW2 (2026-10-14, the 3090 that replaces box RW's 3060 for the GRPO round: ~2.6x the speed for 1.5x the price) - box RW, the user: rent a second box, as cheap as possible, and try GRPO with a reward model's 0-1 score as
 # the reward). First step: can a dedicated reward model tell Deep Charger's better replies from its worse ones? The
 # Skywork-Reward-V2 (Qwen3) family scores the archived GRPO rollouts of mtg7-mtg10 (rm_scan.py). Pull-based as the others.
-BOXRW2_SERIAL=27
+BOXRW2_SERIAL=28
 if [ -f /root/.boxrw2_serial ] && [ "$(cat /root/.boxrw2_serial)" -gt "$BOXRW2_SERIAL" ] 2>/dev/null; then echo "BOXRW2_STALE $BOXRW2_SERIAL"; exit 0; fi
 echo $BOXRW2_SERIAL > /root/.boxrw2_serial
 mkdir -p /root/work /root/hfdl; cd /root/work
@@ -753,5 +753,20 @@ if [ "$GO_BART" = 1 ] && [ ! -e /root/.go_bart ]; then touch /root/.go_bart
 fi
 ( sleep 900; nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv,noheader | sed 's/^/[bart7] GPU 15 min after the switch: /' >> /root/bart7.log
   sleep 600; nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv,noheader | sed 's/^/[bart7] GPU 25 min after the switch: /' >> /root/bart7.log ) > /dev/null 2>&1 &
+# ---- the card sat at 40-48% with BART alone: each step read and tokenized its 3800 sentences inline (twice: bge and its
+# frozen reference). train_e2e.py now does that a few steps ahead on a worker thread, once. The run restarts on it right
+# after its next save (nothing lost); a crash that is not out of memory turns the prefetch off for the next try. ----
+if [ ! -e /root/.bart_pf ] && [ -e /root/.go_bart ]; then touch /root/.bart_pf
+  ( O=/root/sb/dolphin_once7; m0=$(stat -c %Y $O/state_e2e.pt); n=0
+    until [ "$(stat -c %Y $O/state_e2e.pt)" != "$m0" ] || [ $n -ge 60 ]; do sleep 60; n=$((n+1)); done; sleep 90
+    pkill -f "bart7bkee[p].sh"; pkill -f "train_e2e.py.*dolphin_once7"; sleep 20
+    sed -i 's/--plan-accum \$PA --max-bs 64/--plan-accum $PA --prefetch $PF0 --embed-chunk 512 --max-bs 64/; s/^SB=3800; PA=1$/SB=3800; PA=1; PF0=3/' /root/bart7bkeep.sh
+    sed -i 's/^  grep -q "TRAIN_DONE" \/root\/bart7_try.log \&\& break$/  grep -q "TRAIN_DONE" \/root\/bart7_try.log \&\& break\n  grep -q "Traceback" \/root\/bart7_try.log \&\& ! grep -q "out of memory" \/root\/bart7_try.log \&\& [ "$PF0" != 0 ] \&\& { PF0=0; echo "[bart7] crashed with the prefetch on: off for the next try"; }/' /root/bart7bkeep.sh
+    grep -c 'PF0=3\|--prefetch \$PF0\|PF0=0;' /root/bart7bkeep.sh | sed 's/^/[bart7] prefetch edits in place (want 3): /'
+    setsid nohup bash -c 'bash /root/bart7bkeep.sh 2>&1 | tee -a /root/bart7.log' > /dev/null 2>&1 < /dev/null &
+    echo "[bart7] restarted with the prefetch after the save at $(date -u -d @$(stat -c %Y $O/state_e2e.pt) +%H:%M) $(date -u +%H:%M)"
+    sleep 900; nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv,noheader | sed 's/^/[bart7] GPU 15 min after the prefetch: /'
+    sleep 600; nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv,noheader | sed 's/^/[bart7] GPU 25 min after the prefetch: /' ) >> /root/bart7.log 2>&1 &
+fi
 echo "BOXRW2_OK serial $BOXRW2_SERIAL $(date -u)"
 # CTL-END

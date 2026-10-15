@@ -50,6 +50,8 @@ ap.add_argument("--anchor-q", type=int, default=0, help=">0: the anchor also on 
 ap.add_argument("--queries", default="", help="qgen.py's queries.jsonl ({id: '<shard>:<line>', s0, s1, query, hyde}): the query -> article losses. For a batch document with queries, its search query (bge's query instruction in front) and its HyDE sentence (plain) must each find (a) the document's page vector among the batch's pages (+ the page queue) and (b) the passage's first sentence among every sentence of the batch (the bge side) - the forms real searches take, which the sentence losses never show")
 ap.add_argument("--w-q", type=float, default=1.0); ap.add_argument("--tau-q", type=float, default=0.05)
 ap.add_argument("--q-frac", type=float, default=0.5, help="share of each batch drawn from the documents that have queries")
+ap.add_argument("--prefetch", type=int, default=3, help="--buckets: planned steps read and tokenized ahead on a worker thread while the card trains (0: inline)")
+ap.add_argument("--embed-chunk", type=int, default=256, help="sentences per bge forward")
 ap.add_argument("--maxlen", type=int, default=128, help="tokens per sentence into bge (embed.py's 128, so step 0 reads the stored vectors' equal)")
 ap.add_argument("--eval-every", type=int, default=2000); ap.add_argument("--save-every", type=int, default=2000)
 ap.add_argument("--bge", default="BAAI/bge-small-en-v1.5")
@@ -143,11 +145,18 @@ for p in ref.parameters(): p.requires_grad_(False)
 QPFX = "Represent this sentence for searching relevant passages: "
 
 
-def embed(m, sents, chunk=256):
-    """CLS, L2-normalised (as embed.py made the stored vectors); length-sorted chunks keep the padding small"""
-    order = sorted(range(len(sents)), key=lambda i: len(sents[i])); parts = []
-    for i in range(0, len(order), chunk):
-        b = btok([sents[j] for j in order[i:i + chunk]], padding=True, truncation=True, max_length=E.maxlen, return_tensors="pt").to(DEV)
+def tok_chunks(tk, sents, chunk=None):
+    """length-sorted chunks, tokenized on the CPU (a worker thread can do this ahead of the card)"""
+    chunk = chunk or E.embed_chunk; order = sorted(range(len(sents)), key=lambda i: len(sents[i]))
+    return order, [tk([sents[j] for j in order[i:i + chunk]], padding=True, truncation=True, max_length=E.maxlen, return_tensors="pt") for i in range(0, len(order), chunk)]
+
+
+def embed(m, sents, chunk=None, pre=None):
+    """CLS, L2-normalised (as embed.py made the stored vectors); length-sorted chunks keep the padding small. pre: tok_chunks'
+    output for these sentences, so bge and its frozen reference share one tokenization"""
+    order, bs = pre if pre is not None else tok_chunks(btok, sents, chunk); parts = []
+    for b in bs:
+        b = {k_: t_.to(DEV, non_blocking=True) for k_, t_ in b.items()}
         with torch.autocast("cuda", dtype=torch.bfloat16):
             parts.append(F.normalize(m(**b).last_hidden_state[:, 0].float(), dim=-1))
     inv = torch.empty(len(order), dtype=torch.long, device=DEV); inv[torch.tensor(order, device=DEV)] = torch.arange(len(order), device=DEV)
@@ -299,31 +308,59 @@ if step0 == 0:
     save("best", 0); out(f"[best] step 0 {E.select} {BEST:.3f}")
 model.train(); t0 = time.time(); acc = []; SEEN_W = set(); TRD = []   # TRD: the training decoder loss since the last evaluation (the validation gap)
 if E.once and step0: PTR[0] = step0 * E.batch * E.accum
+PF = {}   # --prefetch: step -> future of its planned batches, read from disk and tokenized on a worker thread (its own file handles and tokenizer)
+if PLAN and not qdocs and E.prefetch > 0:
+    import concurrent.futures as _cf
+    _ptok = AutoTokenizer.from_pretrained(E.bge); _prng = random.Random(1000003 + step0); _ptr = []
+    for L_ in TR: c_ = Lines.__new__(Lines); c_.path, c_.off, c_.fh = L_.path, L_.off, open(L_.path, "rb"); _ptr.append(c_)   # the offsets shared, a file handle of its own
+    _pool = _cf.ThreadPoolExecutor(max_workers=1)
+    def _prep(st):
+        res = []
+        for _mb in range(E.accum):
+            U, rows = PLAN[(st - 1) * E.accum + _mb]; sents, nqs = [], []
+            for r_ in rows:
+                i, j = tdocs[r_]; d_ = _ptr[i][j]; s_ = d_["sents"]; nq_ = int(d_.get("nq", 0) or 0)
+                k = _prng.randint(0, len(s_) - U) if len(s_) > U and not nq_ else 0; sents.append(s_[k:k + U]); nqs.append(nq_)
+            res.append((U, sents, nqs, tok_chunks(_ptok, [x_ for d in sents for x_ in d])))
+        return res
+    def _ahead(st):
+        for t_ in range(st, min(st + E.prefetch, E.steps) + 1):
+            if t_ not in PF: PF[t_] = _pool.submit(_prep, t_)
+    _ahead(step0 + 1); print(f"[e2e] prefetch: {E.prefetch} planned steps read and tokenized ahead", flush=True)
 for step in range(step0 + 1, E.steps + 1) if E.steps > 0 else []:
     ns["STEP"][0] = step
     opt.zero_grad(set_to_none=True); parts = []
     rows = None
+    PFD = None
+    if PF: PFD = PF.pop(step).result(); _ahead(step + 1)
     for _mb in range(E.accum):   # --accum: micro-batches of --batch, one update (the ladder's OOM halving keeps the batch per update); under a plan each micro-batch is its own planned batch
-        if PLAN:
-            U, rows = PLAN[(step - 1) * E.accum + _mb]
+        pre = None
+        if PFD is not None:
+            U, sents, nqs, pre = PFD[_mb]; qrows = []; items = [np.zeros((len(s_), DIM), np.float32) for s_ in sents]
             if A.seq != U:
                 A.seq = U
                 if E.bucket_order != "random" or U not in SEEN_W: out(f"[window] {U} sentences from step {step}"); SEEN_W.add(U)
-        sents, items, qrows, nqs = [], [], [], []                 # qrows: (batch row, query row, the passage's first sentence's position in the crop or -1)
-        for b in range(len(rows) if rows else E.batch):
-            from_q = bool(qdocs) and not rows and random.random() < E.q_frac
-            i, j = tdocs[rows[b]] if rows else (random.choice(qdocs) if from_q else draw_doc()); d_ = TR[i][j]; s_ = d_["sents"]
-            while len(s_) < A.min_sents and not rows: i, j = draw_doc(); d_ = TR[i][j]; s_ = d_["sents"]; from_q = (i, j) in QT
-            nq_ = int(d_.get("nq", 0) or 0)
-            k = random.randint(0, len(s_) - A.seq) if len(s_) > A.seq and not nq_ else 0; s_ = s_[k:k + A.seq]
-            items.append(np.zeros((len(s_), DIM), np.float32)); sents.append(s_); nqs.append(nq_)
-            if from_q:
-                qr = random.choice(QT[(i, j)]); pos = qr["s0"] - k
-                qrows.append((b, qr, pos if 0 <= pos < len(s_) else -1))
+        else:
+            if PLAN:
+                U, rows = PLAN[(step - 1) * E.accum + _mb]
+                if A.seq != U:
+                    A.seq = U
+                    if E.bucket_order != "random" or U not in SEEN_W: out(f"[window] {U} sentences from step {step}"); SEEN_W.add(U)
+            sents, items, qrows, nqs = [], [], [], []                 # qrows: (batch row, query row, the passage's first sentence's position in the crop or -1)
+            for b in range(len(rows) if rows else E.batch):
+                from_q = bool(qdocs) and not rows and random.random() < E.q_frac
+                i, j = tdocs[rows[b]] if rows else (random.choice(qdocs) if from_q else draw_doc()); d_ = TR[i][j]; s_ = d_["sents"]
+                while len(s_) < A.min_sents and not rows: i, j = draw_doc(); d_ = TR[i][j]; s_ = d_["sents"]; from_q = (i, j) in QT
+                nq_ = int(d_.get("nq", 0) or 0)
+                k = random.randint(0, len(s_) - A.seq) if len(s_) > A.seq and not nq_ else 0; s_ = s_[k:k + A.seq]
+                items.append(np.zeros((len(s_), DIM), np.float32)); sents.append(s_); nqs.append(nq_)
+                if from_q:
+                    qr = random.choice(QT[(i, j)]); pos = qr["s0"] - k
+                    qrows.append((b, qr, pos if 0 <= pos < len(s_) else -1))
         _, valid, masked, _ = ns["make_batch"](items, "mix", nqs if any(nqs) else None)   # train.py's corruption (spans or a hidden tail); a conversation's question is never hidden
         flat = [s for d in sents for s in d]
-        v = embed(enc, flat)                                      # gradient into bge
-        with torch.no_grad(): v0 = embed(ref, flat)
+        v = embed(enc, flat, pre=pre)                             # gradient into bge
+        with torch.no_grad(): v0 = embed(ref, flat, pre=pre)
         x = torch.zeros(valid.shape + (DIM,), device=DEV, dtype=v.dtype); x[valid] = v   # row-major order = the documents' order
         lq = torch.zeros((), device=DEV)
         with torch.autocast("cuda", dtype=torch.bfloat16):
