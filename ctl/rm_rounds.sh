@@ -4,7 +4,8 @@
 # Each line of /root/rm_queue.txt:  <tag> <items.jsonl> [extra online_loop flags, which override the defaults below]
 # Every round starts from 2.1.0 (mtg7_s40) and trains 60 steps (copies at 20/40/60 go to the hub). The judge is read from
 # /root/rm_choice.txt at each round ("<spec> <centres> <scales> <device>", an ensemble as A+B with comma lists) and its
-# memory from /root/rm_choice_mb.txt; when the card has not room for the policy and the judge, the context BART yields
+# memory from /root/rm_choice_mb.txt; training and screens never share the card (2026-10-15, the user): a round's screens
+# finish before the next round trains; when the card has not room for the policy and the judge, the context BART yields
 # (it resumes from its last save once the round is over). Screens at the end only: single-turn shard 0 of the last copy,
 # and only when it reaches 50 the shards 1-2, br3 and chain3; reply quality is judged apart (pairkeep, a judge not used
 # in training). One summary line per round goes to /root/rm_rounds.txt (and the hub).
@@ -61,14 +62,14 @@ until [ -e /root/.judge_chosen ]; do sleep 60; done
 # rounds trained under an earlier runner whose screens never finished
 while read -r t rest; do
   [ -n "$t" ] && [ "${t:0:1}" != "#" ] && [ -e /root/rmr/$t.trained ] && [ ! -e /root/rmr/$t.done ] && [ -s /root/${t}_s60.safetensors ] || continue
-  echo "[$t] trained before this runner: its screens now"; screens $t 60 "?" "$(grep -o "judge [^ ]*" /root/rm_rounds.log | tail -1 | cut -d' ' -f2)" "$rest" &
+  echo "[$t] trained before this runner: its screens now"; screens $t 60 "?" "$(grep -o "judge [^ ]*" /root/rm_rounds.log | tail -1 | cut -d' ' -f2)" "$rest"
 done < /root/rm_queue.txt
 while :; do
   line=$(while read -r t rest; do [ -n "$t" ] && [ "${t:0:1}" != "#" ] && [ ! -e /root/rmr/$t.trained ] && { echo "$t $rest"; break; }; done < /root/rm_queue.txt)
   [ -z "$line" ] && { sleep 300; continue; }
   set -- $line; T=$1; IT=$2; shift 2; EXTRA="$*"; mkdir -p /root/rmr; OUT=/root/online_$T; RUN=/root/${T}_run.log
   read M C S D < /root/rm_choice.txt; JMB=$(cat /root/rm_choice_mb.txt 2>/dev/null || echo 5500); need=$((8500 + JMB))
-  while pgrep -f "pool_eval.py" >/dev/null && [ "$(freemb)" -lt $need ]; do sleep 60; done   # the last round's screens first
+  while pgrep -f "pool_eval.py" >/dev/null; do sleep 60; done   # no screen beside a training
   if [ "$(freemb)" -lt $need ] && [ ! -e /root/.bart_paused ] && pgrep -f "train_e2e.py.*dolphin_once7" >/dev/null; then
     pkill -f "bart7bkee[p].sh"; pkill -f "train_e2e.py.*dolphin_once7"; sleep 10
     sed -i 's/--save-every 1000/--save-every 250/' /root/bart7bkeep.sh
@@ -93,5 +94,5 @@ while :; do
   [ -s $OUT/rollouts.jsonl ] && hf upload $R $OUT/rollouts.jsonl pooler_distill/chatsft/rmgrpo/${T}_rollouts.jsonl >/dev/null 2>&1; hf upload $R $RUN pooler_distill/chatsft/rmgrpo/${T}_run.log >/dev/null 2>&1
   touch /root/rmr/$T.trained
   if [ "${ST:-0}" -lt 20 ]; then echo "$T FAILED at step ${ST:-0} ($EXTRA)" | tee -a /root/rm_rounds.txt; touch /root/rmr/$T.done; continue; fi
-  screens $T $ST $tmin "$M" "$EXTRA" &
+  screens $T $ST $tmin "$M" "$EXTRA"
 done

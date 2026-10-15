@@ -2,7 +2,7 @@
 # box RW2 (2026-10-14, the 3090 that replaces box RW's 3060 for the GRPO round: ~2.6x the speed for 1.5x the price) - box RW, the user: rent a second box, as cheap as possible, and try GRPO with a reward model's 0-1 score as
 # the reward). First step: can a dedicated reward model tell Deep Charger's better replies from its worse ones? The
 # Skywork-Reward-V2 (Qwen3) family scores the archived GRPO rollouts of mtg7-mtg10 (rm_scan.py). Pull-based as the others.
-BOXRW2_SERIAL=22
+BOXRW2_SERIAL=23
 if [ -f /root/.boxrw2_serial ] && [ "$(cat /root/.boxrw2_serial)" -gt "$BOXRW2_SERIAL" ] 2>/dev/null; then echo "BOXRW2_STALE $BOXRW2_SERIAL"; exit 0; fi
 echo $BOXRW2_SERIAL > /root/.boxrw2_serial
 mkdir -p /root/work /root/hfdl; cd /root/work
@@ -40,7 +40,7 @@ if ! pgrep -f "rwmirro[r].sh" >/dev/null; then
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); R=baya1116/hypernet-sp-distill
 while :; do
   { echo "=== boxRW2 $(date -u) ==="; echo "--- ctl.log ---"; tail -n 30 /root/ctl.log 2>/dev/null
-    for f in /root/fromi.log /root/rm_scan.log /root/grpoboot.log /root/rmround.log /root/earlyscreen.log /root/parscreen.log /root/bartprep.log /root/bart7.log /root/rm_rounds.log /root/rm_rounds.txt /root/rm_pairs.txt /root/judgeprep.log /root/du.txt /root/swap.log /root/fixkeep.log; do [ -s $f ] && { echo "--- $f ---"; grep -vE "Warning|warn|Loading weights" $f | tail -n 30 | cut -c1-600; }; done
+    for f in /root/fromi.log /root/rm_scan.log /root/grpoboot.log /root/rmround.log /root/earlyscreen.log /root/parscreen.log /root/bartprep.log /root/bart7.log /root/rm_rounds.log /root/rm_rounds.txt /root/rm_pairs.txt /root/judgeprep.log /root/du.txt /root/swap.log /root/fixkeep.log /root/evalguard.log; do [ -s $f ] && { echo "--- $f ---"; grep -vE "Warning|warn|Loading weights" $f | tail -n 30 | cut -c1-600; }; done
     [ -s /root/rm1_run.log ] && { echo "--- rm1 steps ---"; grep -E "^\[step|^\[rm\]|rollback|Traceback|out of memory|Error" /root/rm1_run.log | sed -E 's/\| ce=.*cumulative/| cum/' | tail -n 10 | cut -c1-240; }
     [ -s /root/online_rm1/rollouts.jsonl ] && { echo "--- rm1 by 20-step block ---"; python3 - /root/online_rm1/rollouts.jsonl <<'PB' 2>/dev/null
 import json, sys, collections
@@ -682,6 +682,21 @@ echo "FIX_DONE $(date -u)"
 FX
   setsid nohup bash -c 'bash /root/fixkeep.sh 2>&1 | tee -a /root/fixkeep.log' > /dev/null 2>&1 < /dev/null &
   echo "RM10BACK $(date -u)"
+fi
+# ---- 2026-10-15, the user: training and evaluation at once is no good (rm2c's screens ran out of memory beside rm9's
+# training). Until the runner restarts with its screens in the foreground, a guard stops any screen while a training runs;
+# what it stops is screened again afterwards (rm2c's by fixkeep; a round's own by its runner's retry). ----
+if ! pgrep -f "evalguar[d].sh" >/dev/null; then
+  cat > /root/evalguard.sh <<'EG'
+while :; do
+  if pgrep -f "online_loop.py" >/dev/null && pgrep -f "pool_eval.py" >/dev/null; then
+    pkill -f "pool_eval.py"; echo "[guard] screens stopped: a training is running $(date -u +%H:%M)"
+  fi
+  sleep 30
+done
+EG
+  setsid nohup bash -c 'bash /root/evalguard.sh 2>&1 | tee -a /root/evalguard.log' > /dev/null 2>&1 < /dev/null &
+  echo "EVALGUARD_LAUNCHED $(date -u)"
 fi
 echo "BOXRW2_OK serial $BOXRW2_SERIAL $(date -u)"
 # CTL-END
