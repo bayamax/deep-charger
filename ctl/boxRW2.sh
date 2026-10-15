@@ -2,7 +2,7 @@
 # box RW2 (2026-10-14, the 3090 that replaces box RW's 3060 for the GRPO round: ~2.6x the speed for 1.5x the price) - box RW, the user: rent a second box, as cheap as possible, and try GRPO with a reward model's 0-1 score as
 # the reward). First step: can a dedicated reward model tell Deep Charger's better replies from its worse ones? The
 # Skywork-Reward-V2 (Qwen3) family scores the archived GRPO rollouts of mtg7-mtg10 (rm_scan.py). Pull-based as the others.
-BOXRW2_SERIAL=21
+BOXRW2_SERIAL=22
 if [ -f /root/.boxrw2_serial ] && [ "$(cat /root/.boxrw2_serial)" -gt "$BOXRW2_SERIAL" ] 2>/dev/null; then echo "BOXRW2_STALE $BOXRW2_SERIAL"; exit 0; fi
 echo $BOXRW2_SERIAL > /root/.boxrw2_serial
 mkdir -p /root/work /root/hfdl; cd /root/work
@@ -40,7 +40,7 @@ if ! pgrep -f "rwmirro[r].sh" >/dev/null; then
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); R=baya1116/hypernet-sp-distill
 while :; do
   { echo "=== boxRW2 $(date -u) ==="; echo "--- ctl.log ---"; tail -n 30 /root/ctl.log 2>/dev/null
-    for f in /root/fromi.log /root/rm_scan.log /root/grpoboot.log /root/rmround.log /root/earlyscreen.log /root/parscreen.log /root/bartprep.log /root/bart7.log /root/rm_rounds.log /root/rm_rounds.txt /root/rm_pairs.txt /root/judgeprep.log /root/du.txt /root/swap.log; do [ -s $f ] && { echo "--- $f ---"; grep -vE "Warning|warn|Loading weights" $f | tail -n 30 | cut -c1-600; }; done
+    for f in /root/fromi.log /root/rm_scan.log /root/grpoboot.log /root/rmround.log /root/earlyscreen.log /root/parscreen.log /root/bartprep.log /root/bart7.log /root/rm_rounds.log /root/rm_rounds.txt /root/rm_pairs.txt /root/judgeprep.log /root/du.txt /root/swap.log /root/fixkeep.log; do [ -s $f ] && { echo "--- $f ---"; grep -vE "Warning|warn|Loading weights" $f | tail -n 30 | cut -c1-600; }; done
     [ -s /root/rm1_run.log ] && { echo "--- rm1 steps ---"; grep -E "^\[step|^\[rm\]|rollback|Traceback|out of memory|Error" /root/rm1_run.log | sed -E 's/\| ce=.*cumulative/| cum/' | tail -n 10 | cut -c1-240; }
     [ -s /root/online_rm1/rollouts.jsonl ] && { echo "--- rm1 by 20-step block ---"; python3 - /root/online_rm1/rollouts.jsonl <<'PB' 2>/dev/null
 import json, sys, collections
@@ -651,6 +651,37 @@ echo "TULU_DONE $(date -u)"
 TK
   setsid nohup bash -c 'bash /root/tulukeep.sh 2>&1 | tee -a /root/judgeprep.log' > /dev/null 2>&1 < /dev/null &
   echo "JUDGE2_SET $(date -u)"
+fi
+# rm9 picked its judge before the switch (Qwen3-8B alone): it runs on as the user's form with one judge, and rm10 - the same
+# with the two judges - comes back right after it. rm2c's full screens lost shard 1 to memory (rm9's training beside it):
+# what is missing is screened again once rm9 has trained, and rm2c gets a corrected line.
+if [ ! -e /root/.rm10back ]; then touch /root/.rm10back
+  grep -q "^rm10 " /root/rm_queue.txt || sed -i '/^rm9 /a rm10 /root/work/mtg10_items.jsonl --qbatch 3 --rm-mult 1 --w-rm 1.0' /root/rm_queue.txt
+  cat > /root/fixkeep.sh <<'FX'
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); R=baya1116/hypernet-sp-distill; cd /root/work
+EVARGS="--rw 768 --maxd 384 --samepage 1 --decode plain --temp 0.6 --gen 4000 --stop eos --replycap 600"
+ENV="SP_BASE=/root/gptq_hf_gq14 SP_RANK=16 SP_NOSYS=1 SP_EPISODIC=1 OMP_NUM_THREADS=1 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True"
+cnt() { python3 -c "import json,sys;print(sum(bool(json.loads(l).get('correct')) for l in open(sys.argv[1]) if l.strip()))" "$1" 2>/dev/null || echo 0; }
+turns() { python3 -c "
+import json,sys; r=[json.loads(l) for l in open(sys.argv[1]) if l.strip()]
+print(' '.join(str(sum(bool(x['correct']) for x in r if x['turn']==t)) for t in range(int(sys.argv[2]))))" "$1" "$2" 2>/dev/null; }
+lines() { wc -l < "$1" 2>/dev/null || echo 0; }
+until [ -e /root/rmr/rm9.trained ] && [ -e /root/rmr/rm2c.done ]; do sleep 120; done
+B=rm2c_s60; CK=/root/$B.safetensors
+while pgrep -f "online_loop.py" >/dev/null; do sleep 120; done
+for x in "st_1 ev_1.jsonl 100" "st_2 ev_2.jsonl 100"; do set -- $x; f=/root/work/${B}$1.jsonl
+  [ "$(lines $f)" -ge $3 ] || { rm -f $f; env $ENV python3 /root/work/pool_eval.py $CK /root/work/$2 $f --n 100 $EVARGS --tag "[${B}fix$1]" > /root/${B}fix$1.log 2>&1 & sleep 60; }; done
+[ "$(lines /root/work/br3_$B.jsonl)" -ge 150 ] || { rm -f /root/work/br3_$B.jsonl; env $ENV python3 /root/work/pool_eval.py $CK /root/work/eval300.jsonl /root/work/br3_$B.jsonl --multiturn /root/work/mt_eval_bridge3.jsonl --mt-mode win --n 1000 $EVARGS --tag "[br3fix-$B]" > /root/br3fix_$B.log 2>&1 & sleep 60; }
+wait
+[ "$(lines /root/work/ch3_$B.jsonl)" -ge 170 ] || { rm -f /root/work/ch3_$B.jsonl; env $ENV python3 /root/work/pool_eval.py $CK /root/work/eval300.jsonl /root/work/ch3_$B.jsonl --multiturn /root/work/mt_eval_chain3.jsonl --mt-mode win --n 1000 $EVARGS --tag "[ch3fix-$B]" > /root/ch3fix_$B.log 2>&1; }
+s300=$(( $(cnt /root/work/${B}st_0.jsonl) + $(cnt /root/work/${B}st_1.jsonl) + $(cnt /root/work/${B}st_2.jsonl) ))
+echo "rm2c (screens completed again) $B: single $s300/300 (2.1.0 162), br3 $(turns /root/work/br3_$B.jsonl 2) (35 31), ch3 $(turns /root/work/ch3_$B.jsonl 3) (28 17 4); shard 0 measured twice: 57 and $(cnt /root/work/${B}st_0.jsonl)" | tee -a /root/rm_rounds.txt
+for f in /root/work/${B}st_*.jsonl /root/work/br3_$B.jsonl /root/work/ch3_$B.jsonl; do [ -s $f ] && hf upload $R $f pooler_distill/chatsft/rmgrpo/screens/$(basename $f) >/dev/null 2>&1; done
+hf upload $R /root/rm_rounds.txt pooler_distill/chatsft/rmgrpo/rm_rounds.txt >/dev/null 2>&1
+echo "FIX_DONE $(date -u)"
+FX
+  setsid nohup bash -c 'bash /root/fixkeep.sh 2>&1 | tee -a /root/fixkeep.log' > /dev/null 2>&1 < /dev/null &
+  echo "RM10BACK $(date -u)"
 fi
 echo "BOXRW2_OK serial $BOXRW2_SERIAL $(date -u)"
 # CTL-END
