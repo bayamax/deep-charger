@@ -5,7 +5,7 @@
 # (16, 32, 64, 128, 256 tokens) each time the predicted-vector nll levels off: how wide a window the decoder needs.
 # Each evaluation also scores another sentence's vector, so what the vector still adds next to the window shows.
 # Pull-based as the others; the log goes to the hub every 10 minutes (boxlog_DW.txt), the decoders to sentbart/dec/win1.
-BOXDW_SERIAL=2
+BOXDW_SERIAL=3
 if [ -f /root/.boxdw_serial ] && [ "$(cat /root/.boxdw_serial)" -gt "$BOXDW_SERIAL" ] 2>/dev/null; then echo "BOXDW_STALE $BOXDW_SERIAL"; exit 0; fi
 echo $BOXDW_SERIAL > /root/.boxdw_serial
 [ -s /root/.hf_token ] || { [ -n "$HF_TOKEN" ] && printf '%s' "$HF_TOKEN" > /root/.hf_token && chmod 600 /root/.hf_token; }
@@ -101,6 +101,23 @@ echo "DWJOB_DONE $(date -u)"
 JOB
   setsid nohup bash -c 'bash /root/dwjob2.sh >> /root/dw/job.log 2>&1' > /dev/null 2>&1 < /dev/null &
   echo "[dwjob2] launched: fresh conversations from row 90000 $(date -u)" | tee -a /root/dw/job.log
+fi
+# ---- serial 3: fresh data did not stop the held-out nll rising at window 0 (AM 3.257 -> 3.358, Dolphin 2.859 -> 3.016):
+# the end-to-end run had finished at a tenth of its learning rate (cosine), and this run warmed straight back up to the
+# full 5e-5 / 5e-4 - the usual bump. The run again from e2e_best at the rate e2e3 ended on (GPT-2 1e-5, MLP 1e-4). ----
+if [ ! -e /root/.dw_lr3 ] && [ -s /root/dw/pairs/pairs_fresh.npz ]; then touch /root/.dw_lr3
+  pkill -f "dwjob[2].sh"; pkill -f "dec_train.py --pairs pairs"; sleep 15
+  cd /root/dw && mv win1 seen_data/win1_lr5e-5 2>/dev/null; mv win1.out seen_data/win1_lr5e-5.out 2>/dev/null
+  cat > /root/dwjob3.sh <<'JOB'
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); R=baya1116/hypernet-sp-distill; cd /root/dw
+PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python3 -u dec_train.py --pairs pairs --train fresh --eval am_held,dolphin_held --ckpt e2e_best/bart.pt --init e2e_best \
+  --out win1 --vec pred --win 0,16,32,64,128,256 --win-plateau 0.01 --win-min-evals 2 --win-max-min 90 --eval-every 20 --hours 10 --epochs 3 \
+  --lr 1e-5 --lr-mlp 1e-4 --warmup 100 --ckpt-lm 1 --hub $R:sentbart/dec/win1 > win1.out 2>&1
+grep -h "Error\|Traceback" win1.out | tail -3
+echo "DWJOB_DONE $(date -u)"
+JOB
+  setsid nohup bash -c 'bash /root/dwjob3.sh >> /root/dw/job.log 2>&1' > /dev/null 2>&1 < /dev/null &
+  echo "[dwjob3] relaunched at GPT-2 1e-5 / MLP 1e-4 $(date -u)" | tee -a /root/dw/job.log
 fi
 echo "BOXDW_OK serial $BOXDW_SERIAL $(date -u)"
 # CTL-END
