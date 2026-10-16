@@ -34,6 +34,7 @@ ap.add_argument("--stage-min", type=float, default=0.10, help="share of the budg
 ap.add_argument("--hub", default="", help="repo/prefix on the hub for checkpoints and the log")
 ap.add_argument("--resume", default=""); ap.add_argument("--seed", type=int, default=0); ap.add_argument("--bench", type=int, default=0)
 ap.add_argument("--compile", type=int, default=0)
+ap.add_argument("--diverge", type=float, default=0.10, help="a validation this much worse than the best: back to the best weights, the learning rate halved")
 A = ap.parse_args()
 torch.manual_seed(A.seed); np.random.seed(A.seed); random.seed(A.seed)
 DEV = "cuda" if torch.cuda.is_available() else "cpu"; FF = A.ff or 4 * A.d
@@ -169,6 +170,7 @@ model = CharLM(DEPTHS[0]).to(DEV); stage = 0; step = 0; hist = []; best = {"bpc"
 if A.resume and os.path.exists(A.resume):
     st = torch.load(A.resume, map_location=DEV, weights_only=False); model = CharLM(st["layers"]).to(DEV); model.load_state_dict(st["model"])
     stage = DEPTHS.index(st["layers"]); step = st["step"]; hist = st.get("hist", []); best = st.get("best", best); T0 = time.time() - st.get("elapsed", 0)
+    best.setdefault("layers", st["layers"])
     out(f"[charlm2] resumed at step {step}, {st['layers']} layers, {st.get('elapsed', 0) / 3600:.1f} h in")
 make_opt = lambda: torch.optim.AdamW(model.parameters(), lr=A.lr, betas=(0.9, 0.95), weight_decay=A.wd, fused=DEV == "cuda")
 opt = make_opt(); MICRO = A.micro
@@ -186,14 +188,14 @@ def save(tag):
     return p
 
 
-stage_t0 = time.time(); stage_step0 = step; last_eval = time.time()
+stage_t0 = time.time(); stage_step0 = step; last_eval = time.time(); LR_SCALE = 1.0
 vw, vf, v = validate(); hist.append((step, (time.time() - T0) / 60, len(model.blocks), vw, vf)); out(f"[val] step {step} {len(model.blocks)} layers: wiki {vw:.3f} fineweb {vf:.3f} mean {v:.3f} bpc")
 acc = []; t_log = time.time(); seen = step * A.chars_per_step
 while True:
     el = time.time() - T0
     if el > budget: break
     w = min(1.0, (step - stage_step0 + 1) / A.warmup); dec = 1.0 if el < 0.8 * budget else max(0.1, 1.0 - 0.9 * (el - 0.8 * budget) / (0.2 * budget))
-    for g in opt.param_groups: g["lr"] = A.lr * w * dec
+    for g in opt.param_groups: g["lr"] = A.lr * LR_SCALE * w * dec
     n_win = A.chars_per_step // A.seq
     try:
         opt.zero_grad(set_to_none=True); tot = 0.0
@@ -213,6 +215,12 @@ while True:
         vw, vf, v = validate(); el = time.time() - T0; hist.append((step, el / 60, len(model.blocks), vw, vf)); last_eval = time.time()
         out(f"[val] step {step} {len(model.blocks)} layers: wiki {vw:.3f} fineweb {vf:.3f} mean {v:.3f} bpc ({el / 60:.0f} min)")
         if v < best["bpc"]: best = {"bpc": v, "step": step, "layers": len(model.blocks)}; hub_put(save("best"), "model_best.pt")
+        if v > best["bpc"] + A.diverge and best.get("layers") == len(model.blocks) and os.path.exists(os.path.join(A.out, "model_best.pt")):
+            # diverging: the best weights back (same depth), a fresh optimizer, half the learning rate from here on
+            bst = torch.load(os.path.join(A.out, "model_best.pt"), map_location=DEV, weights_only=False); model.load_state_dict(bst["model"])
+            LR_SCALE *= 0.5; opt = make_opt(); stage_step0 = step
+            out(f"[diverge] validation {v:.3f} against the best {best['bpc']:.3f} (step {best['step']}): back to those weights, learning rate x{LR_SCALE:g} ({A.lr * LR_SCALE:.1e})")
+            hist.append((step, (time.time() - T0) / 60, len(model.blocks), bst["hist"][-1][3] if bst.get("hist") else v, bst["hist"][-1][4] if bst.get("hist") else v))
         hub_put(save("latest"), "model_latest.pt"); hub_put(LOGF, "train.log")
         same = [h for h in hist if h[2] == len(model.blocks)]
         m_ = lambda h: (h[3] + h[4]) / 2

@@ -3,7 +3,7 @@
 # grown 4 -> 8 -> 12 -> 16 layers at d 512 (charlm/charlm2.py), then tested against GPT-2 small on the same documents and
 # quantized to 4 bits by GPTQ. Pull-based as the others; the log goes to the hub every 10 minutes (boxlog_CH.txt), the
 # checkpoints to charlm/run2/ as they are made.
-BOXCH_SERIAL=3
+BOXCH_SERIAL=4
 if [ -f /root/.boxch_serial ] && [ "$(cat /root/.boxch_serial)" -gt "$BOXCH_SERIAL" ] 2>/dev/null; then echo "BOXCH_STALE $BOXCH_SERIAL"; exit 0; fi
 echo $BOXCH_SERIAL > /root/.boxch_serial
 [ -s /root/.hf_token ] || { [ -n "$HF_TOKEN" ] && printf '%s' "$HF_TOKEN" > /root/.hf_token && chmod 600 /root/.hf_token; }
@@ -53,7 +53,7 @@ export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); cd /root/cha
 for try in 1 2 3 4 5; do
   RES=""; [ -s run2/model_latest.pt ] && RES="--resume run2/model_latest.pt"
   python3 -u charlm2.py --data data --out run2 --d 512 --heads 8 --layers 4,8,12,16 --seq 4096 --chars-per-step 131072 --micro 16 \
-    --hours 30 --eval-every 30 --hub baya1116/hypernet-sp-distill:charlm/run2 $RES 2>&1 | grep -vE "Warning|warn"
+    --hours 30 --eval-every 30 --lr 6e-4 --hub baya1116/hypernet-sp-distill:charlm/run2 $RES 2>&1 | grep -vE "Warning|warn"
   grep -q CHARLM2_DONE run2/train.log && break
   echo "CHJOB training stopped without finishing (try $try) - again in 2 min $(date -u)"; sleep 120
 done
@@ -77,6 +77,17 @@ echo "CHSFT_DONE $(date -u)"
 SFT
   setsid nohup bash -c 'bash /root/chsft.sh >> /root/charlm/sft.log 2>&1' > /dev/null 2>&1 < /dev/null &
   echo "CHSFT_LAUNCHED (waits for the pre-training) $(date -u)"
+fi
+# ---- 2026-10-16 (serial 4): at lr 1.5e-3 the run diverged after its 30-minute validation (1.716 -> 3.127 -> 3.206 bpc).
+# The job stops; the diverged weights are set aside; it resumes from the best ones (step 1845) at lr 6e-4, and
+# charlm2.py now goes back to its best weights at half the learning rate by itself if a validation is 0.1 worse. ----
+if [ ! -e /root/.ch_restart4 ]; then touch /root/.ch_restart4
+  pkill -f "chjo[b].sh"; pkill -f "charlm2.py --data data --out run2"; sleep 15
+  cd /root/charlm && mv run2/model_latest.pt run2/model_diverged.pt && cp run2/model_best.pt run2/model_latest.pt
+  sed -i 's/--hours 30 --eval-every 30 --hub/--hours 30 --eval-every 30 --lr 6e-4 --hub/' /root/chjob.sh
+  grep -c "lr 6e-4" /root/chjob.sh | sed 's/^/[restart4] lr lines: /'
+  setsid nohup bash -c 'bash /root/chjob.sh >> /root/charlm/job.log 2>&1' > /dev/null 2>&1 < /dev/null &
+  echo "[restart4] resumed from the best weights (step 1845, 1.716 bpc) at lr 6e-4 $(date -u)" | tee -a /root/charlm/run2/train.log
 fi
 echo "BOXCH_OK serial $BOXCH_SERIAL $(date -u)"
 # CTL-END
