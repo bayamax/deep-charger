@@ -7,6 +7,8 @@ Each answer sentence t gives one pair:
     pred  - the BART's vector for sentence t (what the next sentence should be, from the question and sentences < t)
     true  - sentence t's own vector, from the BART checkpoint's own (trained) bge
     text  - sentence t;  prev - sentence t-1 (the raw text a decoder may also be shown)
+    ctx   - with --ctx-chars N: the last N characters of everything before sentence t (question included), the raw
+            window a decoder may be shown
 Written as <out>/pairs_<name>.npz (pred, true: float16 [N, 384]) and pairs_<name>.jsonl (doc, t, nq, text, prev).
 
   python3 dec_pairs.py --ckpt once7/model_best.pt --docs data/am_dec/docs_007.jsonl --name train --out dec --max-docs 30000
@@ -22,7 +24,7 @@ from transformers import AutoModel, AutoTokenizer
 ap = argparse.ArgumentParser()
 ap.add_argument("--ckpt", required=True); ap.add_argument("--docs", required=True); ap.add_argument("--out", required=True); ap.add_argument("--name", required=True)
 ap.add_argument("--max-docs", type=int, default=0); ap.add_argument("--skip-docs", type=int, default=0); ap.add_argument("--max-t", type=int, default=256, help="answer sentences per conversation at most")
-ap.add_argument("--min-sents", type=int, default=4); ap.add_argument("--batch", type=int, default=8); ap.add_argument("--bge", default="BAAI/bge-small-en-v1.5")
+ap.add_argument("--ctx-chars", type=int, default=0); ap.add_argument("--min-sents", type=int, default=4); ap.add_argument("--batch", type=int, default=8); ap.add_argument("--bge", default="BAAI/bge-small-en-v1.5")
 X = ap.parse_args()
 DEV = os.environ.get("SB_DEV", "cuda" if torch.cuda.is_available() else "cpu")
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -92,7 +94,9 @@ for i in range(0, len(docs), X.batch):
         P = pd[b, k:e]; T = V[off[b] + k:off[b] + e]; cs.append(float((P * T).sum(-1).mean()))
         PRED.append(P.half().cpu().numpy()); TRUE.append(T.half().cpu().numpy())
         for t in range(k, e):
-            meta.write(json.dumps({"doc": d.get("id", i + b), "t": t, "nq": k, "text": d["sents"][t], "prev": d["sents"][t - 1]}) + "\n")
+            m_ = {"doc": d.get("id", i + b), "t": t, "nq": k, "text": d["sents"][t], "prev": d["sents"][t - 1]}
+            if X.ctx_chars: m_["ctx"] = " ".join(d["sents"][max(0, t - 64):t])[-X.ctx_chars:]
+            meta.write(json.dumps(m_) + "\n")
     if (i // X.batch) % 100 == 0: print(f"[pairs] {X.name}: {min(i + X.batch, len(docs))}/{len(docs)} conversations, cos(pred, true) so far {np.mean(cs):.3f} ({(time.time() - t0) / 60:.1f} min)", flush=True)
 meta.close()
 PRED, TRUE = np.concatenate(PRED), np.concatenate(TRUE)
