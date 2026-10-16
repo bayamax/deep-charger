@@ -34,6 +34,7 @@ ap.add_argument("--stage-min", type=float, default=0.10, help="share of the budg
 ap.add_argument("--hub", default="", help="repo/prefix on the hub for checkpoints and the log")
 ap.add_argument("--resume", default=""); ap.add_argument("--seed", type=int, default=0); ap.add_argument("--bench", type=int, default=0)
 ap.add_argument("--compile", type=int, default=0)
+ap.add_argument("--qknorm", type=int, default=1, help="1: LayerNorm on each head's queries and keys (keeps attention logits bounded over the 4096-character context)")
 ap.add_argument("--diverge", type=float, default=0.10, help="a validation this much worse than the best: back to the best weights, the learning rate halved")
 A = ap.parse_args()
 torch.manual_seed(A.seed); np.random.seed(A.seed); random.seed(A.seed)
@@ -59,11 +60,15 @@ class Block(nn.Module):
         super().__init__()
         s.ln1 = nn.LayerNorm(A.d); s.qkv = nn.Linear(A.d, 3 * A.d); s.proj = nn.Linear(A.d, A.d)
         s.ln2 = nn.LayerNorm(A.d); s.fc = nn.Linear(A.d, FF); s.fc2 = nn.Linear(FF, A.d)
+        s.qk = bool(A.qknorm)
+        if s.qk: s.qn = nn.LayerNorm(A.d // A.heads); s.kn = nn.LayerNorm(A.d // A.heads)
 
     def forward(s, x):
         B, T, D = x.shape; q, k, v = s.qkv(s.ln1(x)).split(D, -1)
-        sh = lambda z: z.view(B, T, A.heads, D // A.heads).transpose(1, 2)
-        a = F.scaled_dot_product_attention(sh(q), sh(k), sh(v), is_causal=True).transpose(1, 2).reshape(B, T, D)
+        sh = lambda z: z.view(B, T, A.heads, D // A.heads)
+        q, k, v = sh(q), sh(k), sh(v)
+        if s.qk: q, k = s.qn(q), s.kn(k)
+        a = F.scaled_dot_product_attention(q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2), is_causal=True).transpose(1, 2).reshape(B, T, D)
         x = x + s.proj(a)
         return x + s.fc2(F.gelu(s.fc(s.ln2(x)), approximate="tanh"))
 
@@ -209,7 +214,7 @@ while True:
         opt.zero_grad(set_to_none=True); torch.cuda.empty_cache(); MICRO = max(1, MICRO // 2); out(f"[oom] micro-batch -> {MICRO}"); continue
     step += 1; seen += A.chars_per_step; acc.append(tot)
     if time.time() - t_log > 300:
-        out(f"[step {step}] {len(model.blocks)} layers: train {np.mean(acc) / math.log(2):.3f} bpc, lr {A.lr * w * dec:.2e}, micro {MICRO}, "
+        out(f"[step {step}] {len(model.blocks)} layers: train {np.mean(acc) / math.log(2):.3f} bpc, lr {A.lr * LR_SCALE * w * dec:.2e}, micro {MICRO}, "
             f"{seen / 1e9:.2f}B chars, {seen / (time.time() - T0) / 1e3:.0f}k chars/s overall, {el / 60:.0f} min"); acc = []; t_log = time.time()
     if time.time() - last_eval > A.eval_every * 60:
         vw, vf, v = validate(); el = time.time() - T0; hist.append((step, el / 60, len(model.blocks), vw, vf)); last_eval = time.time()

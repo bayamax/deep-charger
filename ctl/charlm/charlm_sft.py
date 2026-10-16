@@ -49,11 +49,15 @@ class Block(nn.Module):
         super().__init__()
         s.ln1 = nn.LayerNorm(D); s.qkv = nn.Linear(D, 3 * D); s.proj = nn.Linear(D, D)
         s.ln2 = nn.LayerNorm(D); s.fc = nn.Linear(D, FF); s.fc2 = nn.Linear(FF, D)
+        s.qk = bool(BA.get("qknorm", 0))
+        if s.qk: s.qn = nn.LayerNorm(D // HEADS); s.kn = nn.LayerNorm(D // HEADS)
 
     def forward(s, x):
         B, T, _ = x.shape; q, k, v = s.qkv(s.ln1(x)).split(D, -1)
-        sh = lambda z: z.view(B, T, HEADS, D // HEADS).transpose(1, 2)
-        a = F.scaled_dot_product_attention(sh(q), sh(k), sh(v), is_causal=True).transpose(1, 2).reshape(B, T, D)
+        sh = lambda z: z.view(B, T, HEADS, D // HEADS)
+        q, k, v = sh(q), sh(k), sh(v)
+        if s.qk: q, k = s.qn(q), s.kn(k)
+        a = F.scaled_dot_product_attention(q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2), is_causal=True).transpose(1, 2).reshape(B, T, D)
         x = x + s.proj(a)
         return x + s.fc2(F.gelu(s.fc(s.ln2(x)), approximate="tanh"))
 
