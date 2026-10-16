@@ -4,7 +4,7 @@
 # writes the sentence (sentbart/dec_pairs.py, dec_train.py). Two decoders side by side on the one card: A the vector alone,
 # B the vector plus the previous sentence's raw text (in case names do not survive the vector). Pull-based as the others;
 # the log goes to the hub every 10 minutes (boxlog_DC.txt), the decoders to sentbart/dec/.
-BOXDC_SERIAL=2
+BOXDC_SERIAL=3
 if [ -f /root/.boxdc_serial ] && [ "$(cat /root/.boxdc_serial)" -gt "$BOXDC_SERIAL" ] 2>/dev/null; then echo "BOXDC_STALE $BOXDC_SERIAL"; exit 0; fi
 echo $BOXDC_SERIAL > /root/.boxdc_serial
 [ -s /root/.hf_token ] || { [ -n "$HF_TOKEN" ] && printf '%s' "$HF_TOKEN" > /root/.hf_token && chmod 600 /root/.hf_token; }
@@ -22,6 +22,7 @@ if [ ! -f /root/.bootstrapped ]; then
   touch /root/.bootstrapped; echo "BOOTSTRAP_DONE $(date -u)"
 fi
 
+if [ ! -e /root/.dcmirror_r3 ]; then touch /root/.dcmirror_r3; pkill -f "dcmirro[r].sh"; sleep 1; fi
 if ! pgrep -f "dcmirro[r].sh" >/dev/null; then
   cat > /root/dcmirror.sh <<'MR'
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null)
@@ -29,6 +30,8 @@ while true; do
   { echo "=== boxDC $(date -u) ==="; nvidia-smi --query-gpu=utilization.gpu,memory.used,memory.total --format=csv,noheader; df -h /root | tail -1; free -g | sed -n 2p
     echo "--- ctl.log ---"; tail -n 12 /root/ctl.log 2>/dev/null | cut -c1-300
     echo "--- job.log ---"; grep -vE "Warning|warn|it/s\]" /root/dec/job.log 2>/dev/null | tail -n 25 | cut -c1-400
+    echo "--- processes ---"; ps -eo pid,etimes,pcpu,rss,args | grep "[d]ec_train.py" | cut -c1-160; nvidia-smi --query-compute-apps=pid,used_memory --format=csv,noheader
+    for r in A B; do echo "--- run$r.out (tail) ---"; grep -vE "Warning|warn|it/s\]" /root/dec/run$r.out 2>/dev/null | tail -n 6 | cut -c1-300; done
     for r in A B; do echo "--- run$r/train.log ---"; grep -vE "^\[step" /root/dec/run$r/train.log 2>/dev/null | tail -n 40 | cut -c1-500; grep -E "^\[step" /root/dec/run$r/train.log 2>/dev/null | tail -n 2; done; } > /root/boxlog_DC.txt
   python3 -c "from huggingface_hub import HfApi; HfApi().upload_file(path_or_fileobj='/root/boxlog_DC.txt', path_in_repo='pooler_distill/chatsft/audit/boxlog_DC.txt', repo_id='baya1116/hypernet-sp-distill')" >/dev/null 2>&1
   sleep 600
