@@ -30,6 +30,8 @@ ap.add_argument("--w-cos", type=float, default=0.1); ap.add_argument("--warmup",
 ap.add_argument("--k", type=int, default=8); ap.add_argument("--max-tok", type=int, default=96)
 ap.add_argument("--eval-every", type=float, default=30.0); ap.add_argument("--eval-docs", type=int, default=150); ap.add_argument("--eval-n", type=int, default=1000); ap.add_argument("--gen-n", type=int, default=300)
 ap.add_argument("--ckpt-lm", type=int, default=1, help="gradient checkpointing in GPT-2");
+ap.add_argument("--resume", default="", help="an e2e_* dir of this script (bart.pt + GPT-2 + prefix_mlp.pt): everything from there");
+ap.add_argument("--grow-to", type=int, default=0, help="BART layers per stack after loading (a multiple of what it has): new layers start as the identity");
 ap.add_argument("--hub", default=""); ap.add_argument("--seed", type=int, default=0); ap.add_argument("--max-docs", type=int, default=0)
 A = ap.parse_args()
 torch.manual_seed(A.seed); random.seed(A.seed); np.random.seed(A.seed)
@@ -52,8 +54,28 @@ def build(layers, seq):
     return ns["SentBART"]()
 
 
-CK = torch.load(A.ckpt, map_location="cpu", weights_only=False)
-bart = build(CK["layers"], CK["model"]["pos.weight"].shape[0] - 1); bart.load_state_dict(CK["model"]); bart.to(DEV).train()
+CK = torch.load(os.path.join(A.resume, "bart.pt") if A.resume else A.ckpt, map_location="cpu", weights_only=False)
+SEQ_ = CK["model"]["pos.weight"].shape[0] - 1; L0 = CK["layers"]
+if A.grow_to and A.grow_to > L0:
+    # train.py's --grow: layer i of the smaller BART becomes layer i*k, the layers between start as the identity (their
+    # attention and feed-forward output projections zero), so the function is unchanged at the moment of growth
+    assert A.grow_to % L0 == 0, (A.grow_to, L0); kk = A.grow_to // L0
+    bart = build(A.grow_to, SEQ_); new_sd = {}
+    for k_, v_ in CK["model"].items():
+        parts = k_.split(".")
+        if parts[0] in ("enc", "dec") and parts[1] == "layers": parts[2] = str(int(parts[2]) * kk)
+        new_sd[".".join(parts)] = v_
+    miss = bart.load_state_dict(new_sd, strict=False)
+    with torch.no_grad():
+        for stack in (bart.enc.layers, bart.dec.layers):
+            for i, layer in enumerate(stack):
+                if i % kk == 0: continue
+                for n_, p_ in layer.named_parameters():
+                    if n_.startswith(("self_attn.out_proj", "multihead_attn.out_proj", "linear2")): p_.zero_()
+    CK["layers"] = A.grow_to; print(f"[grow] BART {L0} -> {A.grow_to} layers per stack; {len(miss.missing_keys)} new tensors, the new layers start as the identity", flush=True)
+else:
+    bart = build(L0, SEQ_); bart.load_state_dict(CK["model"])
+bart.to(DEV).train()
 btok = AutoTokenizer.from_pretrained("BAAI/bge-small-en-v1.5"); enc = AutoModel.from_pretrained("BAAI/bge-small-en-v1.5")
 while len(enc.encoder.layer) < CK.get("enc_layers", 12): j = len(enc.encoder.layer) // 2; enc.encoder.layer.insert(j + 1, copy.deepcopy(enc.encoder.layer[j]))
 enc.load_state_dict(CK["enc"]); enc.to(DEV).eval()
@@ -73,6 +95,7 @@ def embed(sents, chunk=256):
 
 
 # ---- the decoder ---------------------------------------------------------------------------------------------------------
+A.dec = A.resume or A.dec
 tok = GPT2TokenizerFast.from_pretrained(A.dec or "gpt2"); EOS = tok.eos_token_id
 lm = GPT2LMHeadModel.from_pretrained(A.dec or "gpt2").to(DEV).train(); H = lm.config.n_embd
 lm.config.use_cache = False
@@ -94,7 +117,7 @@ def docs_of(path, limit=0, skip=0):
     return ds
 
 
-TRAIN = docs_of(A.docs, A.max_docs)
+TRAIN = [d for p_ in A.docs.split(",") for d in docs_of(p_, A.max_docs)]
 HELD = {n: docs_of(p, A.eval_docs) for n, p in (x.split("=", 1) for x in A.held.split(","))}
 out(f"[e2e-dec] {len(TRAIN)} training conversations, window {A.window}; held-out {', '.join(f'{n} {len(v)}' for n, v in HELD.items())}; BART step {BART_STEP}; decoder {A.dec or 'fresh GPT-2'} (k {A.k})")
 
@@ -208,12 +231,16 @@ while time.time() - T0 < A.hours * 3600:
     for g_, b_ in zip(opt.param_groups, base_lr): g_["lr"] = b_ * sc
     if ptr + A.docs_per_step > len(order): random.shuffle(order); ptr = 0
     part = [TRAIN[i] for i in order[ptr:ptr + A.docs_per_step]]; ptr += A.docs_per_step
-    pd, V, off = bart_predict(part)
-    sel = [(b, t) for b, d in enumerate(part) for t in random.sample(range(d["nq"], len(d["sents"])), min(A.per_doc, len(d["sents"]) - d["nq"]))]
-    P = F.normalize(torch.stack([pd[b, t] for b, t in sel]), dim=-1); Tv = torch.stack([V[off[b] + t] for b, t in sel])
-    s_, c_ = dec_loss(P, [part[b]["sents"][t] for b, t in sel]); lcos = (1 - (P * Tv).sum(-1)).mean()
-    loss = s_ / max(c_, 1) + A.w_cos * lcos
-    opt.zero_grad(set_to_none=True); loss.backward()
+    try:
+        pd, V, off = bart_predict(part)
+        sel = [(b, t) for b, d in enumerate(part) for t in random.sample(range(d["nq"], len(d["sents"])), min(A.per_doc, len(d["sents"]) - d["nq"]))]
+        P = F.normalize(torch.stack([pd[b, t] for b, t in sel]), dim=-1); Tv = torch.stack([V[off[b] + t] for b, t in sel])
+        s_, c_ = dec_loss(P, [part[b]["sents"][t] for b, t in sel]); lcos = (1 - (P * Tv).sum(-1)).mean()
+        loss = s_ / max(c_, 1) + A.w_cos * lcos
+        opt.zero_grad(set_to_none=True); loss.backward()
+    except torch.cuda.OutOfMemoryError:
+        opt.zero_grad(set_to_none=True); pd = V = P = Tv = loss = None; torch.cuda.empty_cache()
+        A.per_doc = max(2, A.per_doc // 2); out(f"[oom] sentences per conversation -> {A.per_doc}"); continue
     torch.nn.utils.clip_grad_norm_(list(bart.parameters()) + list(lm.parameters()) + list(mlp.parameters()), 1.0); opt.step()
     step += 1; acc.append(float(s_) / max(c_, 1)); accc.append(1 - float(lcos))
     if step % 100 == 0: out(f"[step {step}] sentence nll {np.mean(acc):.3f}, cos(pred, true) {np.mean(accc):.3f}, {(time.time() - T0) / 60:.0f} min"); acc = []; accc = []

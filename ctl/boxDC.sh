@@ -4,7 +4,7 @@
 # writes the sentence (sentbart/dec_pairs.py, dec_train.py). Two decoders side by side on the one card: A the vector alone,
 # B the vector plus the previous sentence's raw text (in case names do not survive the vector). Pull-based as the others;
 # the log goes to the hub every 10 minutes (boxlog_DC.txt), the decoders to sentbart/dec/.
-BOXDC_SERIAL=6
+BOXDC_SERIAL=7
 if [ -f /root/.boxdc_serial ] && [ "$(cat /root/.boxdc_serial)" -gt "$BOXDC_SERIAL" ] 2>/dev/null; then echo "BOXDC_STALE $BOXDC_SERIAL"; exit 0; fi
 echo $BOXDC_SERIAL > /root/.boxdc_serial
 [ -s /root/.hf_token ] || { [ -n "$HF_TOKEN" ] && printf '%s' "$HF_TOKEN" > /root/.hf_token && chmod 600 /root/.hf_token; }
@@ -24,6 +24,7 @@ fi
 
 if [ ! -e /root/.dcmirror_r3 ]; then touch /root/.dcmirror_r3; pkill -f "dcmirro[r].sh"; sleep 1; fi
 if [ ! -e /root/.dcmirror_r5 ]; then touch /root/.dcmirror_r5; pkill -f "dcmirro[r].sh"; sleep 1; fi
+if [ ! -e /root/.dcmirror_r7 ]; then touch /root/.dcmirror_r7; pkill -f "dcmirro[r].sh"; sleep 1; fi
 if ! pgrep -f "dcmirro[r].sh" >/dev/null; then
   cat > /root/dcmirror.sh <<'MR'
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null)
@@ -33,6 +34,8 @@ while true; do
     echo "--- job.log ---"; grep -vE "Warning|warn|it/s\]" /root/dec/job.log 2>/dev/null | tail -n 25 | cut -c1-400
     echo "--- processes ---"; ps -eo pid,etimes,pcpu,rss,args | grep "[d]ec_train.py" | cut -c1-160; nvidia-smi --query-compute-apps=pid,used_memory --format=csv,noheader
     for r in A B; do echo "--- run$r.out (tail) ---"; grep -vE "Warning|warn|it/s\]" /root/dec/run$r.out 2>/dev/null | tail -n 6 | cut -c1-300; done
+    echo "--- e2e2/train.log ---"; grep -vE "^\[step" /root/dec/e2e2/train.log 2>/dev/null | tail -n 40 | cut -c1-500; grep -E "^\[step" /root/dec/e2e2/train.log 2>/dev/null | tail -n 2
+    echo "--- e2e2.out (tail) ---"; grep -vE "Warning|warn|it/s\]" /root/dec/e2e2.out 2>/dev/null | tail -n 5 | cut -c1-300
     echo "--- e2e1/train.log ---"; grep -vE "^\[step" /root/dec/e2e1/train.log 2>/dev/null | tail -n 40 | cut -c1-500; grep -E "^\[step" /root/dec/e2e1/train.log 2>/dev/null | tail -n 2
     echo "--- e2e1.out (tail) ---"; grep -vE "Warning|warn|it/s\]" /root/dec/e2e1.out 2>/dev/null | tail -n 5 | cut -c1-300
     for r in A B; do echo "--- run$r/train.log ---"; grep -vE "^\[step" /root/dec/run$r/train.log 2>/dev/null | tail -n 40 | cut -c1-500; grep -E "^\[step" /root/dec/run$r/train.log 2>/dev/null | tail -n 2; done; } > /root/boxlog_DC.txt
@@ -137,6 +140,34 @@ echo "DCE2E6_DONE $(date -u)"
 JOB
   setsid nohup bash -c 'bash /root/dce2e6.sh >> /root/dec/job.log 2>&1' > /dev/null 2>&1 < /dev/null &
   echo "[dce2e6] end-to-end relaunched with GPT-2 checkpointing, 48 sentences per update $(date -u)" | tee -a /root/dec/job.log
+fi
+# ---- serial 7, the user: grow the BART inside the end-to-end run (1.2e8 parameters against the 1.5e9 of the model it is
+# meant to serve). 60k more AM conversations are prepared while e2e1 goes on (CPU), then e2e1 stops and e2e2 resumes from
+# its best state with the BART grown 16+16 -> 32+32 (identity-initialised: the function unchanged at the growth), on all
+# 80k conversations, for 5 h. ----
+if [ ! -e /root/.dce2e7 ]; then touch /root/.dce2e7
+  cat > /root/dce2e7.sh <<'JOB'
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); R=baya1116/hypernet-sp-distill; cd /root/dec
+dl() { for try in 1 2 3 4; do [ -s $1 ] && [ "$(stat -c %s $1)" -ge $3 ] && return 0; curl -sSfL -C - -o $1 $2 || sleep 60; done; [ "$(stat -c %s $1 2>/dev/null || echo 0)" -ge $3 ]; }
+if [ ! -s data/docs_008.jsonl ]; then
+  Z=data/am_0.9M.jsonl.zst
+  dl $Z https://huggingface.co/datasets/a-m-team/AM-DeepSeek-R1-Distilled-1.4M/resolve/main/am_0.9M.jsonl.zst 3200000000 || { echo "DCE2E7 am download failed"; exit 1; }
+  python3 -u prep_dolphin.py --out data --schema am --all 1 --shard 008 --id-prefix am1 --max-sents 768 --max-q 24 --skip-rows 20172 --max-docs 60000 \
+    --keep-eval data/dolphin_docs_001.jsonl --exclude-questions data/dolphin_docs_001.jsonl data/am_held.jsonl --jsonl $Z 2>&1 | grep -E "PREP_DOLPHIN_DONE|Error|Traceback" | cut -c1-300
+  rm -f $Z
+fi
+echo "[dce2e7] 60k more conversations: $(wc -l < data/docs_008.jsonl) $(date -u)"
+pkill -f "dce2e[6].sh"; pkill -f "dec_e2e.py.*--out e2e1"; sleep 20
+RES=e2e1/e2e_best; [ -s $RES/bart.pt ] || RES=""
+echo "[dce2e7] e2e1 stopped: $(grep -E '^\[eval step' e2e1/train.log | tail -4 | cut -c1-120 | tr '\n' ' '); resuming from ${RES:-the BART checkpoint and runA/dec_best} $(date -u)"
+if [ -n "$RES" ]; then SRC="--resume $RES"; else SRC="--dec runA/dec_best"; fi
+PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python3 -u dec_e2e.py --ckpt data/model_best.pt $SRC --grow-to 32 --docs data/docs_007.jsonl,data/docs_008.jsonl \
+  --held am_held=data/am_held.jsonl,dolphin_held=data/dolphin_held.jsonl --out e2e2 --hours 5 --per-doc 12 --hub $R:sentbart/dec/e2e2 > e2e2.out 2>&1
+grep -h "Error\|Traceback" e2e2.out | tail -3
+echo "DCE2E7_DONE $(date -u)"
+JOB
+  setsid nohup bash -c 'bash /root/dce2e7.sh >> /root/dec/job.log 2>&1' > /dev/null 2>&1 < /dev/null &
+  echo "[dce2e7] launched: prep, then e2e2 with the BART at 32+32 $(date -u)" | tee -a /root/dec/job.log
 fi
 echo "BOXDC_OK serial $BOXDC_SERIAL $(date -u)"
 # CTL-END
