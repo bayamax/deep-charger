@@ -3,7 +3,7 @@
 # grown 4 -> 8 -> 12 -> 16 layers at d 512 (charlm/charlm2.py), then tested against GPT-2 small on the same documents and
 # quantized to 4 bits by GPTQ. Pull-based as the others; the log goes to the hub every 10 minutes (boxlog_CH.txt), the
 # checkpoints to charlm/run2/ as they are made.
-BOXCH_SERIAL=5
+BOXCH_SERIAL=6
 if [ -f /root/.boxch_serial ] && [ "$(cat /root/.boxch_serial)" -gt "$BOXCH_SERIAL" ] 2>/dev/null; then echo "BOXCH_STALE $BOXCH_SERIAL"; exit 0; fi
 echo $BOXCH_SERIAL > /root/.boxch_serial
 [ -s /root/.hf_token ] || { [ -n "$HF_TOKEN" ] && printf '%s' "$HF_TOKEN" > /root/.hf_token && chmod 600 /root/.hf_token; }
@@ -100,6 +100,19 @@ if [ ! -e /root/.ch_restart5 ]; then touch /root/.ch_restart5
   grep -c "qknorm 1" /root/chjob.sh | sed 's/^/[restart5] qknorm lines: /'
   setsid nohup bash -c 'bash /root/chjob.sh >> /root/charlm/job.log 2>&1' > /dev/null 2>&1 < /dev/null &
   echo "[restart5] a fresh run with query/key LayerNorm at lr 8e-4, 26 h $(date -u)" | tee -a /root/charlm/run2/train.log
+fi
+# ---- serial 6: the growth 8 -> 12 dropped the last two blocks (an identity after each block until the count was reached,
+# the rest cut off; 4 -> 8 was exact, so it had not shown): validation 1.208 -> 2.242 at growth. charlm2.py now spreads
+# the identity blocks evenly and keeps every block (8 -> 12 -> 16 checked equal to the output). The job stops; the run
+# resumes from the best weights (8 layers, 1.208, saved just before the growth) and grows to 12 at once (--grow-now). ----
+if [ ! -e /root/.ch_restart6 ]; then touch /root/.ch_restart6
+  pkill -f "chjo[b].sh"; pkill -f "charlm2.py --data data --out run2"; sleep 15
+  cd /root/charlm && mv run2/model_latest.pt run2_failed/model_grow12_broken.pt 2>/dev/null; cp run2/model_best.pt run2/model_latest.pt
+  python3 -c "import torch; c=torch.load('run2/model_latest.pt', map_location='cpu', weights_only=False); print('[restart6] resuming from', c['layers'], 'layers, step', c['step'], 'best', round(c['best']['bpc'], 3))" | tee -a run2/train.log
+  sed -i 's/^for try in 1 2 3 4 5; do$/GN="--grow-now 1"\nfor try in 1 2 3 4 5; do/; s/ \$RES 2>&1 | grep -vE "Warning|warn"$/ $RES $GN 2>\&1 | grep -vE "Warning|warn"; GN=""/' /root/chjob.sh
+  grep -c 'GN=' /root/chjob.sh | sed 's/^/[restart6] grow-now lines: /'
+  setsid nohup bash -c 'bash /root/chjob.sh >> /root/charlm/job.log 2>&1' > /dev/null 2>&1 < /dev/null &
+  echo "[restart6] relaunched: 8 layers from the best weights, grown to 12 at once with every block kept $(date -u)" | tee -a /root/charlm/run2/train.log
 fi
 echo "BOXCH_OK serial $BOXCH_SERIAL $(date -u)"
 # CTL-END

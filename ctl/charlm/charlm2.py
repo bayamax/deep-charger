@@ -34,6 +34,7 @@ ap.add_argument("--stage-min", type=float, default=0.10, help="share of the budg
 ap.add_argument("--hub", default="", help="repo/prefix on the hub for checkpoints and the log")
 ap.add_argument("--resume", default=""); ap.add_argument("--seed", type=int, default=0); ap.add_argument("--bench", type=int, default=0)
 ap.add_argument("--compile", type=int, default=0)
+ap.add_argument("--grow-now", type=int, default=0, help="1: after --resume, grow to the next depth at once")
 ap.add_argument("--qknorm", type=int, default=1, help="1: LayerNorm on each head's queries and keys (keeps attention logits bounded over the 4096-character context)")
 ap.add_argument("--diverge", type=float, default=0.10, help="a validation this much worse than the best: back to the best weights, the learning rate halved")
 A = ap.parse_args()
@@ -97,12 +98,14 @@ class CharLM(nn.Module):
         return s.head(s.ln_f(x))
 
     def grow(s, to):
-        new = []
-        for b in s.blocks:
+        """identity blocks spread evenly between the existing ones - every existing block kept (8 -> 12 used to drop the
+        last two: an identity after each block until the count was reached, the rest cut off)"""
+        old = list(s.blocks); n_add = to - len(old); new = []
+        for i, b in enumerate(old):
             new.append(b)
-            if len(new) < to: new.append(Block().as_identity().to(s.head.weight.device))
-        while len(new) < to: new.append(Block().as_identity().to(s.head.weight.device))
-        s.blocks = nn.ModuleList(new[:to])
+            for _ in range((i + 1) * n_add // len(old) - i * n_add // len(old)): new.append(Block().as_identity().to(s.head.weight.device))
+        assert len(new) == to and all(any(b is o for b in new) for o in old)
+        s.blocks = nn.ModuleList(new)
 
     def n_params(s): return sum(p.numel() for p in s.parameters())
 
@@ -177,6 +180,8 @@ if A.resume and os.path.exists(A.resume):
     stage = DEPTHS.index(st["layers"]); step = st["step"]; hist = st.get("hist", []); best = st.get("best", best); T0 = time.time() - st.get("elapsed", 0)
     best.setdefault("layers", st["layers"])
     out(f"[charlm2] resumed at step {step}, {st['layers']} layers, {st.get('elapsed', 0) / 3600:.1f} h in")
+if A.grow_now and A.resume and stage + 1 < len(DEPTHS):
+    stage += 1; model.grow(DEPTHS[stage]); out(f"[grow] -> {len(model.blocks)} layers ({model.n_params() / 1e6:.1f}M params) at resume, step {step} (--grow-now)")
 make_opt = lambda: torch.optim.AdamW(model.parameters(), lr=A.lr, betas=(0.9, 0.95), weight_decay=A.wd, fused=DEV == "cuda")
 opt = make_opt(); MICRO = A.micro
 out(f"[charlm2] {len(model.blocks)} layers, d {A.d}, ff {FF}, heads {A.heads}, context {A.seq}: {model.n_params() / 1e6:.2f}M params; "
