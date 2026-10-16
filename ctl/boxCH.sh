@@ -3,7 +3,7 @@
 # grown 4 -> 8 -> 12 -> 16 layers at d 512 (charlm/charlm2.py), then tested against GPT-2 small on the same documents and
 # quantized to 4 bits by GPTQ. Pull-based as the others; the log goes to the hub every 10 minutes (boxlog_CH.txt), the
 # checkpoints to charlm/run2/ as they are made.
-BOXCH_SERIAL=4
+BOXCH_SERIAL=5
 if [ -f /root/.boxch_serial ] && [ "$(cat /root/.boxch_serial)" -gt "$BOXCH_SERIAL" ] 2>/dev/null; then echo "BOXCH_STALE $BOXCH_SERIAL"; exit 0; fi
 echo $BOXCH_SERIAL > /root/.boxch_serial
 [ -s /root/.hf_token ] || { [ -n "$HF_TOKEN" ] && printf '%s' "$HF_TOKEN" > /root/.hf_token && chmod 600 /root/.hf_token; }
@@ -24,6 +24,7 @@ fi
 # ---- the mirror (serial 2: it reads run2/train.log, which the job's grep pipe only flushes in 4 kB blocks) ----
 if [ ! -e /root/.chmirror_r2 ]; then touch /root/.chmirror_r2; pkill -f "chmirro[r].sh"; sleep 1; fi
 if [ ! -e /root/.chmirror_r3 ]; then touch /root/.chmirror_r3; pkill -f "chmirro[r].sh"; sleep 1; fi
+if [ ! -e /root/.chmirror_r5 ]; then touch /root/.chmirror_r5; pkill -f "chmirro[r].sh"; sleep 1; fi
 if ! pgrep -f "chmirro[r].sh" >/dev/null; then
   cat > /root/chmirror.sh <<'MR'
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null)
@@ -32,7 +33,7 @@ while true; do
     echo "--- ctl.log ---"; tail -n 15 /root/ctl.log 2>/dev/null | cut -c1-300
     echo "--- prep.log ---"; tail -n 20 /root/charlm/prep.log 2>/dev/null | cut -c1-300
     echo "--- job.log ---"; grep -vE "Warning|warn" /root/charlm/job.log 2>/dev/null | tail -n 20 | cut -c1-600
-    echo "--- run2/train.log ---"; grep -E "^\[val\]|^\[grow\]|^\[oom\]|^\[charlm2\]|^\[test\]|^\[gptq\]|^\[sample\]|^\[hub\]|CHARLM2_DONE" /root/charlm/run2/train.log 2>/dev/null | tail -n 40 | cut -c1-600
+    echo "--- run2/train.log ---"; grep -E "^\[val\]|^\[grow\]|^\[oom\]|^\[diverge\]|^\[restart|^\[charlm2\]|^\[test\]|^\[gptq\]|^\[sample\]|^\[hub\]|CHARLM2_DONE" /root/charlm/run2/train.log 2>/dev/null | tail -n 40 | cut -c1-600
     grep -E "^\[step" /root/charlm/run2/train.log 2>/dev/null | tail -n 3 | cut -c1-300
     echo "--- sft1/train.log ---"; grep -vE "Warning|warn|^\[step" /root/charlm/sft1/train.log 2>/dev/null | tail -n 30 | cut -c1-900
     grep -E "^\[step" /root/charlm/sft1/train.log 2>/dev/null | tail -n 2 | cut -c1-300; } > /root/boxlog_CH.txt
@@ -53,7 +54,7 @@ export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); cd /root/cha
 for try in 1 2 3 4 5; do
   RES=""; [ -s run2/model_latest.pt ] && RES="--resume run2/model_latest.pt"
   python3 -u charlm2.py --data data --out run2 --d 512 --heads 8 --layers 4,8,12,16 --seq 4096 --chars-per-step 131072 --micro 16 \
-    --hours 30 --eval-every 30 --lr 6e-4 --hub baya1116/hypernet-sp-distill:charlm/run2 $RES 2>&1 | grep -vE "Warning|warn"
+    --hours 26 --eval-every 30 --lr 8e-4 --qknorm 1 --hub baya1116/hypernet-sp-distill:charlm/run2 $RES 2>&1 | grep -vE "Warning|warn"
   grep -q CHARLM2_DONE run2/train.log && break
   echo "CHJOB training stopped without finishing (try $try) - again in 2 min $(date -u)"; sleep 120
 done
@@ -84,10 +85,21 @@ fi
 if [ ! -e /root/.ch_restart4 ]; then touch /root/.ch_restart4
   pkill -f "chjo[b].sh"; pkill -f "charlm2.py --data data --out run2"; sleep 15
   cd /root/charlm && mv run2/model_latest.pt run2/model_diverged.pt && cp run2/model_best.pt run2/model_latest.pt
-  sed -i 's/--hours 30 --eval-every 30 --hub/--hours 30 --eval-every 30 --lr 6e-4 --hub/' /root/chjob.sh
+  sed -i 's/--hours 30 --eval-every 30 --hub/--hours 26 --eval-every 30 --lr 8e-4 --qknorm 1 --hub/' /root/chjob.sh
   grep -c "lr 6e-4" /root/chjob.sh | sed 's/^/[restart4] lr lines: /'
   setsid nohup bash -c 'bash /root/chjob.sh >> /root/charlm/job.log 2>&1' > /dev/null 2>&1 < /dev/null &
   echo "[restart4] resumed from the best weights (step 1845, 1.716 bpc) at lr 6e-4 $(date -u)" | tee -a /root/charlm/run2/train.log
+fi
+# ---- 2026-10-16 (serial 5): lr 6e-4 diverged too (1.716 -> 3.416 by the next validation): the attention logits over
+# 4096 characters, not the step size alone. A fresh run with LayerNorm on each head's queries and keys (--qknorm 1) at
+# lr 8e-4; the failed runs kept in run2_failed/. 26 h, so pre-training, chat tuning and the 4-bit steps fit the credit. ----
+if [ ! -e /root/.ch_restart5 ]; then touch /root/.ch_restart5
+  pkill -f "chjo[b].sh"; pkill -f "charlm2.py --data data --out run2"; sleep 15
+  cd /root/charlm && mkdir -p run2_failed && mv run2/model_diverged.pt run2_failed/model_lr15e-4_diverged.pt 2>/dev/null; mv run2/train.log run2_failed/train_lr15e-4_and_6e-4.log; mv run2/model_best.pt run2_failed/model_best_step1845.pt; rm -f run2/model_latest.pt
+  sed -i 's/--hours 26 --eval-every 30 --lr 8e-4 --qknorm 1 --hub/--hours 26 --eval-every 30 --lr 8e-4 --qknorm 1 --hub/' /root/chjob.sh
+  grep -c "qknorm 1" /root/chjob.sh | sed 's/^/[restart5] qknorm lines: /'
+  setsid nohup bash -c 'bash /root/chjob.sh >> /root/charlm/job.log 2>&1' > /dev/null 2>&1 < /dev/null &
+  echo "[restart5] a fresh run with query/key LayerNorm at lr 8e-4, 26 h $(date -u)" | tee -a /root/charlm/run2/train.log
 fi
 echo "BOXCH_OK serial $BOXCH_SERIAL $(date -u)"
 # CTL-END
