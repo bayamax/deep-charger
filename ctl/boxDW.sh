@@ -5,7 +5,7 @@
 # (16, 32, 64, 128, 256 tokens) each time the predicted-vector nll levels off: how wide a window the decoder needs.
 # Each evaluation also scores another sentence's vector, so what the vector still adds next to the window shows.
 # Pull-based as the others; the log goes to the hub every 10 minutes (boxlog_DW.txt), the decoders to sentbart/dec/win1.
-BOXDW_SERIAL=1
+BOXDW_SERIAL=2
 if [ -f /root/.boxdw_serial ] && [ "$(cat /root/.boxdw_serial)" -gt "$BOXDW_SERIAL" ] 2>/dev/null; then echo "BOXDW_STALE $BOXDW_SERIAL"; exit 0; fi
 echo $BOXDW_SERIAL > /root/.boxdw_serial
 [ -s /root/.hf_token ] || { [ -n "$HF_TOKEN" ] && printf '%s' "$HF_TOKEN" > /root/.hf_token && chmod 600 /root/.hf_token; }
@@ -72,6 +72,35 @@ echo "DWJOB_DONE $(date -u)"
 JOB
   setsid nohup bash -c 'bash /root/dwjob.sh >> /root/dw/job.log 2>&1' > /dev/null 2>&1 < /dev/null &
   echo "DWJOB_LAUNCHED $(date -u)"
+fi
+# ---- serial 2: the 20k conversations of shard 007 are ones the decoder had already trained on (box DC's e2e runs saw
+# 007 and 008, ~80k rows of the AM file): at window 0 the training nll sat at 2.24 while the held-out one rose (AM 3.257 ->
+# 3.332). Fresh conversations instead - 30k from row 90000 on, past everything the e2e runs read - and the run again. ----
+if [ ! -e /root/.dw_fresh2 ]; then touch /root/.dw_fresh2
+  pkill -f "dwjo[b].sh"; pkill -f "dec_train.py --pairs pairs"; sleep 15
+  cd /root/dw && mkdir -p seen_data && mv win1 seen_data/win1_on_007 2>/dev/null; mv win1.out seen_data/ 2>/dev/null
+  cat > /root/dwjob2.sh <<'JOB'
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); R=baya1116/hypernet-sp-distill; cd /root/dw
+dl() { for try in 1 2 3 4; do [ -s $1 ] && [ "$(stat -c %s $1)" -ge $3 ] && return 0; curl -sSfL -C - -o $1 $2 || sleep 60; done; [ "$(stat -c %s $1 2>/dev/null || echo 0)" -ge $3 ]; }
+if [ ! -s data/docs_009.jsonl ]; then
+  Z=data/am_0.9M.jsonl.zst
+  dl $Z https://huggingface.co/datasets/a-m-team/AM-DeepSeek-R1-Distilled-1.4M/resolve/main/am_0.9M.jsonl.zst 3200000000 || { echo "DWJOB2 am download failed"; exit 1; }
+  python3 -u prep_dolphin.py --out data --schema am --all 1 --shard 009 --id-prefix am1 --max-sents 768 --max-q 24 --skip-rows 90000 --max-docs 30000 \
+    --keep-eval data/dolphin_docs_001.jsonl --exclude-questions data/dolphin_docs_001.jsonl data/am_held.jsonl --jsonl $Z 2>&1 | grep -E "PREP_DOLPHIN_DONE|Error|Traceback" | cut -c1-300
+  rm -f $Z
+fi
+echo "[dwjob2] fresh conversations: $(wc -l < data/docs_009.jsonl) $(date -u)"
+[ -s pairs/pairs_fresh.npz ] || python3 -u dec_pairs.py --ckpt e2e_best/bart.pt --docs data/docs_009.jsonl --name fresh --out pairs --max-t 96 --batch 8 --ctx-chars 1600 2>&1 | grep -E "^\[pairs\]|DONE|Error|Traceback" | grep -vE "/[0-9]+ conversations" | cut -c1-300
+[ -s pairs/pairs_fresh.npz ] && rm -f pairs/pairs_train.npz pairs/pairs_train.jsonl
+echo "[dwjob2] pairs ready $(date -u)"
+PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python3 -u dec_train.py --pairs pairs --train fresh --eval am_held,dolphin_held --ckpt e2e_best/bart.pt --init e2e_best \
+  --out win1 --vec pred --win 0,16,32,64,128,256 --win-plateau 0.01 --win-min-evals 2 --win-max-min 90 --eval-every 20 --hours 10 --epochs 3 \
+  --lr 5e-5 --lr-mlp 5e-4 --warmup 100 --ckpt-lm 1 --hub $R:sentbart/dec/win1 > win1.out 2>&1
+grep -h "Error\|Traceback" win1.out | tail -3
+echo "DWJOB_DONE $(date -u)"
+JOB
+  setsid nohup bash -c 'bash /root/dwjob2.sh >> /root/dw/job.log 2>&1' > /dev/null 2>&1 < /dev/null &
+  echo "[dwjob2] launched: fresh conversations from row 90000 $(date -u)" | tee -a /root/dw/job.log
 fi
 echo "BOXDW_OK serial $BOXDW_SERIAL $(date -u)"
 # CTL-END
