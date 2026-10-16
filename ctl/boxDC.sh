@@ -4,7 +4,7 @@
 # writes the sentence (sentbart/dec_pairs.py, dec_train.py). Two decoders side by side on the one card: A the vector alone,
 # B the vector plus the previous sentence's raw text (in case names do not survive the vector). Pull-based as the others;
 # the log goes to the hub every 10 minutes (boxlog_DC.txt), the decoders to sentbart/dec/.
-BOXDC_SERIAL=1
+BOXDC_SERIAL=2
 if [ -f /root/.boxdc_serial ] && [ "$(cat /root/.boxdc_serial)" -gt "$BOXDC_SERIAL" ] 2>/dev/null; then echo "BOXDC_STALE $BOXDC_SERIAL"; exit 0; fi
 echo $BOXDC_SERIAL > /root/.boxdc_serial
 [ -s /root/.hf_token ] || { [ -n "$HF_TOKEN" ] && printf '%s' "$HF_TOKEN" > /root/.hf_token && chmod 600 /root/.hf_token; }
@@ -65,6 +65,23 @@ echo "DCJOB_DONE $(date -u)"
 JOB
   setsid nohup bash -c 'bash /root/dcjob.sh >> /root/dec/job.log 2>&1' > /dev/null 2>&1 < /dev/null &
   echo "DCJOB_LAUNCHED $(date -u)"
+fi
+# ---- serial 2: both decoders ran out of the 12 GB card side by side (the vocabulary logits of every position, prefix and
+# previous sentence included). dec_train.py now projects only the target positions; the pairs stay; the two runs again. ----
+if [ ! -e /root/.dctrain2 ] && grep -q "pairs ready" /root/dec/job.log 2>/dev/null; then touch /root/.dctrain2
+  cat > /root/dctrain2.sh <<'JOB'
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); R=baya1116/hypernet-sp-distill; cd /root/dec
+mkdir -p failed_oom; mv runA failed_oom/runA 2>/dev/null; mv runB failed_oom/runB 2>/dev/null
+python3 -u dec_train.py --pairs pairs --train train --eval am_held,dolphin_held --ckpt data/model_best.pt --out runA --vec mix --raw-prev 0 --epochs 2 --hours 6 --hub $R:sentbart/dec/runA > runA.out 2>&1 &
+sleep 240
+python3 -u dec_train.py --pairs pairs --train train --eval am_held,dolphin_held --ckpt data/model_best.pt --out runB --vec mix --raw-prev 1 --epochs 2 --hours 6 --hub $R:sentbart/dec/runB > runB.out 2>&1 &
+sleep 600; nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv,noheader | sed 's/^/[dctrain2] both running: GPU /'
+wait
+grep -h "Error\|Traceback" runA.out runB.out | tail -5
+echo "DCTRAIN2_DONE $(date -u)"
+JOB
+  setsid nohup bash -c 'bash /root/dctrain2.sh >> /root/dec/job.log 2>&1' > /dev/null 2>&1 < /dev/null &
+  echo "[dctrain2] launched $(date -u)" | tee -a /root/dec/job.log
 fi
 echo "BOXDC_OK serial $BOXDC_SERIAL $(date -u)"
 # CTL-END

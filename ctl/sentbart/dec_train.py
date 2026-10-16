@@ -82,9 +82,13 @@ def make_batch(vecs, tgt_ids, prev_ids=None):
 
 
 def loss_of(emb, att, lab):
+    """the vocabulary projection only where a target is (the prefix and the previous sentence carry no loss): the
+    [B, L, 50257] logits of every position were what ran two runs out of a 12 GB card"""
     with torch.autocast("cuda", dtype=torch.bfloat16, enabled=AMP):
-        lg = lm(inputs_embeds=emb, attention_mask=att).logits
-    return F.cross_entropy(lg[:, :-1].float().reshape(-1, lg.shape[-1]), lab[:, 1:].reshape(-1), ignore_index=-100, reduction="sum"), int((lab[:, 1:] != -100).sum())
+        h = lm.transformer(inputs_embeds=emb, attention_mask=att).last_hidden_state[:, :-1]
+        sel = lab[:, 1:] != -100
+        lg = lm.lm_head(h[sel])
+    return F.cross_entropy(lg.float(), lab[:, 1:][sel], reduction="sum"), int(sel.sum())
 
 
 @torch.no_grad()
