@@ -29,6 +29,7 @@ ap.add_argument("--lr-bart", type=float, default=1e-5); ap.add_argument("--lr", 
 ap.add_argument("--w-cos", type=float, default=0.1); ap.add_argument("--warmup", type=int, default=200); ap.add_argument("--hours", type=float, default=5.0)
 ap.add_argument("--k", type=int, default=8); ap.add_argument("--max-tok", type=int, default=96)
 ap.add_argument("--eval-every", type=float, default=30.0); ap.add_argument("--eval-docs", type=int, default=150); ap.add_argument("--eval-n", type=int, default=1000); ap.add_argument("--gen-n", type=int, default=300)
+ap.add_argument("--ckpt-lm", type=int, default=1, help="gradient checkpointing in GPT-2");
 ap.add_argument("--hub", default=""); ap.add_argument("--seed", type=int, default=0); ap.add_argument("--max-docs", type=int, default=0)
 A = ap.parse_args()
 torch.manual_seed(A.seed); random.seed(A.seed); np.random.seed(A.seed)
@@ -74,6 +75,8 @@ def embed(sents, chunk=256):
 # ---- the decoder ---------------------------------------------------------------------------------------------------------
 tok = GPT2TokenizerFast.from_pretrained(A.dec or "gpt2"); EOS = tok.eos_token_id
 lm = GPT2LMHeadModel.from_pretrained(A.dec or "gpt2").to(DEV).train(); H = lm.config.n_embd
+lm.config.use_cache = False
+if A.ckpt_lm: lm.gradient_checkpointing_enable()   # the BART, GPT-2 and their optimiser states share a 12 GB card
 mlp = nn.Sequential(nn.Linear(384, 4 * H), nn.GELU(), nn.Linear(4 * H, A.k * H)).to(DEV)
 if A.dec and os.path.exists(os.path.join(A.dec, "prefix_mlp.pt")):
     pm = torch.load(os.path.join(A.dec, "prefix_mlp.pt"), map_location="cpu", weights_only=False); mlp.load_state_dict(pm["mlp"]); A.k = pm["k"]
@@ -173,7 +176,9 @@ def evaluate(tag):
             out(f"[eval {tag}] {n:13s} {which}: nll {r['nll']:.3f}  word-F1 {r['word_f1']:.3f}  names {r['names']:.3f} (of {r['names_n']})  round-trip cos {r['cos']:.3f}  exact {r['exact']:.3f}" + (f"  | cos(pred, true) {r['vec_cos']:.3f}" if which == "pred" else ""))
             if which == "pred":
                 for j in range(3): out(f"[sample {tag}] {n} | prev: {json.dumps(prevs[j][:150])}\n    true: {json.dumps(refs[j][:200])}\n    gen : {json.dumps(g[j][:200])}")
-    bart.train(); lm.train(); mlp.train(); return res
+    bart.train(); lm.train(); mlp.train()
+    if DEV == "cuda": torch.cuda.empty_cache()
+    return res
 
 
 def hub_put(local, remote):

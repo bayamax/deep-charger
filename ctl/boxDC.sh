@@ -4,7 +4,7 @@
 # writes the sentence (sentbart/dec_pairs.py, dec_train.py). Two decoders side by side on the one card: A the vector alone,
 # B the vector plus the previous sentence's raw text (in case names do not survive the vector). Pull-based as the others;
 # the log goes to the hub every 10 minutes (boxlog_DC.txt), the decoders to sentbart/dec/.
-BOXDC_SERIAL=5
+BOXDC_SERIAL=6
 if [ -f /root/.boxdc_serial ] && [ "$(cat /root/.boxdc_serial)" -gt "$BOXDC_SERIAL" ] 2>/dev/null; then echo "BOXDC_STALE $BOXDC_SERIAL"; exit 0; fi
 echo $BOXDC_SERIAL > /root/.boxdc_serial
 [ -s /root/.hf_token ] || { [ -n "$HF_TOKEN" ] && printf '%s' "$HF_TOKEN" > /root/.hf_token && chmod 600 /root/.hf_token; }
@@ -122,6 +122,21 @@ echo "DCE2E5_DONE $(date -u)"
 JOB
   setsid nohup bash -c 'bash /root/dce2e5.sh >> /root/dec/job.log 2>&1' > /dev/null 2>&1 < /dev/null &
   echo "[dce2e5] end-to-end launched $(date -u)" | tee -a /root/dec/job.log
+fi
+# ---- serial 6: the first end-to-end update ran out of memory (BART + GPT-2 + MLP weights, grads and AdamW ~4 GB, then
+# GPT-2's activations for 64 sentences). GPT-2 with gradient checkpointing, 12 sentences per conversation (48 per update),
+# expandable allocator segments. ----
+if [ ! -e /root/.dce2e6 ]; then touch /root/.dce2e6
+  pkill -f "dce2e[5].sh"; pkill -f "dec_e2e.py"; sleep 10; cd /root/dec; mkdir -p failed_oom; mv e2e1 failed_oom/e2e1_oom 2>/dev/null; mv e2e1.out failed_oom/e2e1_oom.out 2>/dev/null
+  cat > /root/dce2e6.sh <<'JOB'
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); R=baya1116/hypernet-sp-distill; cd /root/dec
+PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python3 -u dec_e2e.py --ckpt data/model_best.pt --dec runA/dec_best --docs data/docs_007.jsonl --held am_held=data/am_held.jsonl,dolphin_held=data/dolphin_held.jsonl \
+  --out e2e1 --hours 5 --per-doc 12 --hub $R:sentbart/dec/e2e1 > e2e1.out 2>&1
+grep -h "Error\|Traceback" e2e1.out | tail -3
+echo "DCE2E6_DONE $(date -u)"
+JOB
+  setsid nohup bash -c 'bash /root/dce2e6.sh >> /root/dec/job.log 2>&1' > /dev/null 2>&1 < /dev/null &
+  echo "[dce2e6] end-to-end relaunched with GPT-2 checkpointing, 48 sentences per update $(date -u)" | tee -a /root/dec/job.log
 fi
 echo "BOXDC_OK serial $BOXDC_SERIAL $(date -u)"
 # CTL-END
