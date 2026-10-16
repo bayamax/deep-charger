@@ -32,6 +32,8 @@ ap.add_argument("--eval-every", type=float, default=30.0); ap.add_argument("--ev
 ap.add_argument("--ckpt-lm", type=int, default=1, help="gradient checkpointing in GPT-2");
 ap.add_argument("--resume", default="", help="an e2e_* dir of this script (bart.pt + GPT-2 + prefix_mlp.pt): everything from there");
 ap.add_argument("--grow-to", type=int, default=0, help="BART layers per stack after loading (a multiple of what it has): new layers start as the identity");
+ap.add_argument("--grow-plateau", type=float, default=0.0, help=">0: when two evaluations in a row gain less than this (mean predicted-vector nll), the BART doubles its layers (identity-initialised)");
+ap.add_argument("--grow-max", type=int, default=32); ap.add_argument("--grow-min-evals", type=int, default=3);
 ap.add_argument("--hub", default=""); ap.add_argument("--seed", type=int, default=0); ap.add_argument("--max-docs", type=int, default=0)
 A = ap.parse_args()
 torch.manual_seed(A.seed); random.seed(A.seed); np.random.seed(A.seed)
@@ -56,23 +58,28 @@ def build(layers, seq):
 
 CK = torch.load(os.path.join(A.resume, "bart.pt") if A.resume else A.ckpt, map_location="cpu", weights_only=False)
 SEQ_ = CK["model"]["pos.weight"].shape[0] - 1; L0 = CK["layers"]
-if A.grow_to and A.grow_to > L0:
-    # train.py's --grow: layer i of the smaller BART becomes layer i*k, the layers between start as the identity (their
-    # attention and feed-forward output projections zero), so the function is unchanged at the moment of growth
-    assert A.grow_to % L0 == 0, (A.grow_to, L0); kk = A.grow_to // L0
-    bart = build(A.grow_to, SEQ_); new_sd = {}
-    for k_, v_ in CK["model"].items():
+def grown(sd, L_old, L_new):
+    """train.py's --grow: layer i of the smaller BART becomes layer i*k, the layers between start as the identity (their
+    attention and feed-forward output projections zero), so the function is unchanged at the moment of growth"""
+    assert L_new % L_old == 0, (L_new, L_old); kk = L_new // L_old
+    m = build(L_new, SEQ_); new_sd = {}
+    for k_, v_ in sd.items():
         parts = k_.split(".")
         if parts[0] in ("enc", "dec") and parts[1] == "layers": parts[2] = str(int(parts[2]) * kk)
         new_sd[".".join(parts)] = v_
-    miss = bart.load_state_dict(new_sd, strict=False)
+    miss = m.load_state_dict(new_sd, strict=False)
     with torch.no_grad():
-        for stack in (bart.enc.layers, bart.dec.layers):
+        for stack in (m.enc.layers, m.dec.layers):
             for i, layer in enumerate(stack):
                 if i % kk == 0: continue
                 for n_, p_ in layer.named_parameters():
                     if n_.startswith(("self_attn.out_proj", "multihead_attn.out_proj", "linear2")): p_.zero_()
-    CK["layers"] = A.grow_to; print(f"[grow] BART {L0} -> {A.grow_to} layers per stack; {len(miss.missing_keys)} new tensors, the new layers start as the identity", flush=True)
+    print(f"[grow] BART {L_old} -> {L_new} layers per stack; {len(miss.missing_keys)} new tensors, the new layers start as the identity", flush=True)
+    return m
+
+
+if A.grow_to and A.grow_to > L0:
+    bart = grown(CK["model"], L0, A.grow_to); CK["layers"] = A.grow_to
 else:
     bart = build(L0, SEQ_); bart.load_state_dict(CK["model"])
 bart.to(DEV).train()
@@ -198,7 +205,7 @@ def evaluate(tag):
             res[f"{n}/{which}"] = r
             out(f"[eval {tag}] {n:13s} {which}: nll {r['nll']:.3f}  word-F1 {r['word_f1']:.3f}  names {r['names']:.3f} (of {r['names_n']})  round-trip cos {r['cos']:.3f}  exact {r['exact']:.3f}" + (f"  | cos(pred, true) {r['vec_cos']:.3f}" if which == "pred" else ""))
             if which == "pred":
-                for j in range(3): out(f"[sample {tag}] {n} | prev: {json.dumps(prevs[j][:150])}\n    true: {json.dumps(refs[j][:200])}\n    gen : {json.dumps(g[j][:200])}")
+                for j in range(min(3, len(g))): out(f"[sample {tag}] {n} | prev: {json.dumps(prevs[j][:150])}\n    true: {json.dumps(refs[j][:200])}\n    gen : {json.dumps(g[j][:200])}")
     bart.train(); lm.train(); mlp.train()
     if DEV == "cuda": torch.cuda.empty_cache()
     return res
@@ -223,11 +230,13 @@ def save(tag):
 
 
 res0 = evaluate("start")
-opt = torch.optim.AdamW([{"params": bart.parameters(), "lr": A.lr_bart}, {"params": lm.parameters(), "lr": A.lr}, {"params": mlp.parameters(), "lr": A.lr_mlp}], weight_decay=0.0, betas=(0.9, 0.98))
 base_lr = [A.lr_bart, A.lr, A.lr_mlp]; T0 = time.time(); last = time.time(); step = 0; acc = []; accc = []; best = 1e9
+make_opt = lambda: torch.optim.AdamW([{"params": bart.parameters(), "lr": A.lr_bart}, {"params": lm.parameters(), "lr": A.lr}, {"params": mlp.parameters(), "lr": A.lr_mlp}], weight_decay=0.0, betas=(0.9, 0.98))
+opt = make_opt()
+HIST = [(0, BART_LAYERS, np.mean([v["nll"] for k, v in res0.items() if k.endswith("/pred")]))]; warm0 = 0
 order = list(range(len(TRAIN))); random.shuffle(order); ptr = 0
 while time.time() - T0 < A.hours * 3600:
-    el = time.time() - T0; sc = min(1.0, (step + 1) / A.warmup) * (0.1 + 0.9 * 0.5 * (1 + math.cos(math.pi * min(1.0, el / (A.hours * 3600)))))
+    el = time.time() - T0; sc = min(1.0, (step - warm0 + 1) / A.warmup) * (0.1 + 0.9 * 0.5 * (1 + math.cos(math.pi * min(1.0, el / (A.hours * 3600)))))
     for g_, b_ in zip(opt.param_groups, base_lr): g_["lr"] = b_ * sc
     if ptr + A.docs_per_step > len(order): random.shuffle(order); ptr = 0
     part = [TRAIN[i] for i in order[ptr:ptr + A.docs_per_step]]; ptr += A.docs_per_step
@@ -247,6 +256,14 @@ while time.time() - T0 < A.hours * 3600:
     if time.time() - last > A.eval_every * 60:
         r = evaluate(f"step {step}"); last = time.time(); key = np.mean([v["nll"] for k, v in r.items() if k.endswith("/pred")])
         if key < best: best = key; hub_put(save("best"), "e2e_best")
+        HIST.append((step, BART_LAYERS, key)); same = [h for h in HIST if h[1] == BART_LAYERS]
+        if A.grow_plateau > 0 and BART_LAYERS * 2 <= A.grow_max and len(same) >= A.grow_min_evals and \
+                same[-3][2] - same[-2][2] < A.grow_plateau and same[-2][2] - same[-1][2] < A.grow_plateau and time.time() - T0 < 0.8 * A.hours * 3600:
+            # the plateau: the BART doubles its depth (identity layers), a fresh optimiser, the learning rate warmed up again
+            bart = grown({k_: v_.detach().cpu() for k_, v_ in bart.state_dict().items()}, BART_LAYERS, BART_LAYERS * 2).to(DEV).train()
+            BART_LAYERS *= 2; opt = make_opt(); warm0 = step; torch.cuda.empty_cache() if DEV == "cuda" else None
+            out(f"[grow] at step {step}: two evaluations gained under {A.grow_plateau} (mean predicted nll {same[-3][2]:.3f} -> {same[-2][2]:.3f} -> {same[-1][2]:.3f}); BART now {BART_LAYERS}+{BART_LAYERS}")
+            evaluate(f"after growth {step}")
         hub_put(LOGF, "train.log")
 r = evaluate("end"); json.dump({"start": res0, "end": r}, open(os.path.join(A.out, "result.json"), "w"), indent=1)
 hub_put(save("final"), "e2e_final"); hub_put(os.path.join(A.out, "result.json"), "result.json"); hub_put(LOGF, "train.log")
