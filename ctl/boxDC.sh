@@ -4,7 +4,7 @@
 # writes the sentence (sentbart/dec_pairs.py, dec_train.py). Two decoders side by side on the one card: A the vector alone,
 # B the vector plus the previous sentence's raw text (in case names do not survive the vector). Pull-based as the others;
 # the log goes to the hub every 10 minutes (boxlog_DC.txt), the decoders to sentbart/dec/.
-BOXDC_SERIAL=3
+BOXDC_SERIAL=4
 if [ -f /root/.boxdc_serial ] && [ "$(cat /root/.boxdc_serial)" -gt "$BOXDC_SERIAL" ] 2>/dev/null; then echo "BOXDC_STALE $BOXDC_SERIAL"; exit 0; fi
 echo $BOXDC_SERIAL > /root/.boxdc_serial
 [ -s /root/.hf_token ] || { [ -n "$HF_TOKEN" ] && printf '%s' "$HF_TOKEN" > /root/.hf_token && chmod 600 /root/.hf_token; }
@@ -85,6 +85,24 @@ echo "DCTRAIN2_DONE $(date -u)"
 JOB
   setsid nohup bash -c 'bash /root/dctrain2.sh >> /root/dec/job.log 2>&1' > /dev/null 2>&1 < /dev/null &
   echo "[dctrain2] launched $(date -u)" | tee -a /root/dec/job.log
+fi
+# ---- serial 4: decoder B ran out of memory beside A (A alone holds ~10 GB and keeps the card at 100%, so two at once
+# would not be faster anyway). One at a time: A stops 3.5 h after its start (its best weights are on the hub at every
+# evaluation), then B (the previous sentence's raw text as well) for 3.5 h, so the two meet at the same number of steps. ----
+if [ ! -e /root/.dcseq4 ]; then touch /root/.dcseq4
+  cat > /root/dcseq4.sh <<'JOB'
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); R=baya1116/hypernet-sp-distill; cd /root/dec
+p=$(pgrep -f "dec_train.py.*--out runA" | head -1)
+if [ -n "$p" ]; then
+  while [ "$(ps -o etimes= -p $p 2>/dev/null | tr -d ' ')" -lt 12600 ] 2>/dev/null && kill -0 $p 2>/dev/null; do sleep 60; done
+  kill $p 2>/dev/null; sleep 20; echo "[dcseq4] A stopped at 3.5 h: $(grep -E '^\[eval step' runA/train.log | tail -4 | cut -c1-120 | tr '\n' ' ') $(date -u)"
+fi
+mkdir -p failed_oom; mv runB failed_oom/runB_oom 2>/dev/null; mv runB.out failed_oom/runB_oom.out 2>/dev/null
+python3 -u dec_train.py --pairs pairs --train train --eval am_held,dolphin_held --ckpt data/model_best.pt --out runB --vec mix --raw-prev 1 --epochs 2 --hours 3.5 --hub $R:sentbart/dec/runB > runB.out 2>&1
+echo "DCSEQ4_DONE $(date -u)"
+JOB
+  setsid nohup bash -c 'bash /root/dcseq4.sh >> /root/dec/job.log 2>&1' > /dev/null 2>&1 < /dev/null &
+  echo "[dcseq4] A runs to 3.5 h, then B alone $(date -u)" | tee -a /root/dec/job.log
 fi
 echo "BOXDC_OK serial $BOXDC_SERIAL $(date -u)"
 # CTL-END
