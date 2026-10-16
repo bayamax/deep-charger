@@ -4,14 +4,14 @@
 # writes the sentence (sentbart/dec_pairs.py, dec_train.py). Two decoders side by side on the one card: A the vector alone,
 # B the vector plus the previous sentence's raw text (in case names do not survive the vector). Pull-based as the others;
 # the log goes to the hub every 10 minutes (boxlog_DC.txt), the decoders to sentbart/dec/.
-BOXDC_SERIAL=4
+BOXDC_SERIAL=5
 if [ -f /root/.boxdc_serial ] && [ "$(cat /root/.boxdc_serial)" -gt "$BOXDC_SERIAL" ] 2>/dev/null; then echo "BOXDC_STALE $BOXDC_SERIAL"; exit 0; fi
 echo $BOXDC_SERIAL > /root/.boxdc_serial
 [ -s /root/.hf_token ] || { [ -n "$HF_TOKEN" ] && printf '%s' "$HF_TOKEN" > /root/.hf_token && chmod 600 /root/.hf_token; }
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); R=baya1116/hypernet-sp-distill
 RAW="https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl"
 mkdir -p /root/dec /root/hfdl
-for f in sentbart/train.py sentbart/prep_dolphin.py sentbart/dec_pairs.py sentbart/dec_train.py; do
+for f in sentbart/train.py sentbart/prep_dolphin.py sentbart/dec_pairs.py sentbart/dec_train.py sentbart/dec_e2e.py; do
   for try in 1 2 3; do curl -sS -o /root/dec/$(basename $f) "$RAW/$f?nocache=$(date +%s)" && python3 -m py_compile /root/dec/$(basename $f) && break; sleep 5; done
 done
 
@@ -23,6 +23,7 @@ if [ ! -f /root/.bootstrapped ]; then
 fi
 
 if [ ! -e /root/.dcmirror_r3 ]; then touch /root/.dcmirror_r3; pkill -f "dcmirro[r].sh"; sleep 1; fi
+if [ ! -e /root/.dcmirror_r5 ]; then touch /root/.dcmirror_r5; pkill -f "dcmirro[r].sh"; sleep 1; fi
 if ! pgrep -f "dcmirro[r].sh" >/dev/null; then
   cat > /root/dcmirror.sh <<'MR'
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null)
@@ -32,6 +33,8 @@ while true; do
     echo "--- job.log ---"; grep -vE "Warning|warn|it/s\]" /root/dec/job.log 2>/dev/null | tail -n 25 | cut -c1-400
     echo "--- processes ---"; ps -eo pid,etimes,pcpu,rss,args | grep "[d]ec_train.py" | cut -c1-160; nvidia-smi --query-compute-apps=pid,used_memory --format=csv,noheader
     for r in A B; do echo "--- run$r.out (tail) ---"; grep -vE "Warning|warn|it/s\]" /root/dec/run$r.out 2>/dev/null | tail -n 6 | cut -c1-300; done
+    echo "--- e2e1/train.log ---"; grep -vE "^\[step" /root/dec/e2e1/train.log 2>/dev/null | tail -n 40 | cut -c1-500; grep -E "^\[step" /root/dec/e2e1/train.log 2>/dev/null | tail -n 2
+    echo "--- e2e1.out (tail) ---"; grep -vE "Warning|warn|it/s\]" /root/dec/e2e1.out 2>/dev/null | tail -n 5 | cut -c1-300
     for r in A B; do echo "--- run$r/train.log ---"; grep -vE "^\[step" /root/dec/run$r/train.log 2>/dev/null | tail -n 40 | cut -c1-500; grep -E "^\[step" /root/dec/run$r/train.log 2>/dev/null | tail -n 2; done; } > /root/boxlog_DC.txt
   python3 -c "from huggingface_hub import HfApi; HfApi().upload_file(path_or_fileobj='/root/boxlog_DC.txt', path_in_repo='pooler_distill/chatsft/audit/boxlog_DC.txt', repo_id='baya1116/hypernet-sp-distill')" >/dev/null 2>&1
   sleep 600
@@ -103,6 +106,22 @@ echo "DCSEQ4_DONE $(date -u)"
 JOB
   setsid nohup bash -c 'bash /root/dcseq4.sh >> /root/dec/job.log 2>&1' > /dev/null 2>&1 < /dev/null &
   echo "[dcseq4] A runs to 3.5 h, then B alone $(date -u)" | tee -a /root/dec/job.log
+fi
+# ---- serial 5, the user: with the BART frozen the decoder is capped by its vector (predicted-vector word F1 flat at
+# 0.11-0.16 while the true vector's climbs to 0.33-0.49) - train them end to end. A stops now (its best decoder is in
+# runA/dec_best), B is called off, and dec_e2e.py trains the BART, the MLP and GPT-2 together from those. ----
+if [ ! -e /root/.dce2e5 ]; then touch /root/.dce2e5
+  pkill -f "dcseq[4].sh"; pkill -f "dec_train.py.*--out run"; sleep 20
+  echo "[dce2e5] A stopped, B called off; A's last evaluations: $(grep -E '^\[eval step' /root/dec/runA/train.log | tail -4 | cut -c1-110 | tr '\n' ' ')" | tee -a /root/dec/job.log
+  cat > /root/dce2e5.sh <<'JOB'
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); R=baya1116/hypernet-sp-distill; cd /root/dec
+python3 -u dec_e2e.py --ckpt data/model_best.pt --dec runA/dec_best --docs data/docs_007.jsonl --held am_held=data/am_held.jsonl,dolphin_held=data/dolphin_held.jsonl \
+  --out e2e1 --hours 5 --hub $R:sentbart/dec/e2e1 > e2e1.out 2>&1
+grep -h "Error\|Traceback" e2e1.out | tail -3
+echo "DCE2E5_DONE $(date -u)"
+JOB
+  setsid nohup bash -c 'bash /root/dce2e5.sh >> /root/dec/job.log 2>&1' > /dev/null 2>&1 < /dev/null &
+  echo "[dce2e5] end-to-end launched $(date -u)" | tee -a /root/dec/job.log
 fi
 echo "BOXDC_OK serial $BOXDC_SERIAL $(date -u)"
 # CTL-END
