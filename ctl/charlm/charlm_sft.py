@@ -143,7 +143,7 @@ def load(paths, limit=0):
             if np.mean(np.array(ids) == UNK) > 0.005: skipped["non-ascii"] += 1; continue
             r = cut(ids, mask, SEQ)
             if r is None or sum(r[1]) < 20: skipped["too long"] += 1; continue
-            convs.append(r)
+            convs.append((np.asarray(r[0], np.uint8), np.asarray(r[1], np.uint8)))   # one byte a symbol: as int lists 695M characters took tens of GB
             if limit and len(convs) >= limit: return convs, skipped
     return convs, skipped
 
@@ -155,26 +155,28 @@ def collections_counter():
 t0 = time.time()
 train_paths = [fetch(f"data/all/train-{i:05d}-of-00009.parquet") for i in range(A.shards)]
 TRAIN, sk = load(train_paths, A.max_convs); VAL, _ = load([fetch("data/all/test-00000-of-00001.parquet")], A.val_convs)
-ntr = sum(len(c[0]) for c in TRAIN); nas = sum(sum(c[1]) for c in TRAIN)
+ntr = sum(len(c[0]) for c in TRAIN); nas = sum(int(c[1].sum()) for c in TRAIN)
 out(f"[sft] {len(TRAIN)} training conversations ({ntr / 1e6:.0f}M chars, {nas / 1e6:.0f}M assistant chars learned); skipped {dict(sk)}; validation {len(VAL)} [{time.time() - t0:.0f}s]")
 
 
 def pack(convs, shuffle=True):
-    """conversations whole into windows of SEQ+1 tokens; the rest of a window is EOD with no loss"""
-    order = list(range(len(convs)))
-    if shuffle: random.shuffle(order)
-    rows, cur_i, cur_m = [], [], []
+    """conversations whole into windows of SEQ+1 symbols; the rest of a window is EOD with no loss (uint8 arrays)"""
+    order = np.random.permutation(len(convs)) if shuffle else np.arange(len(convs))
+    rows, cur = [], []; n = 0
+    def flush():
+        ids = np.full(SEQ + 1, EOD, np.uint8); msk = np.zeros(SEQ + 1, np.uint8); o = 0
+        for a, m in cur: ids[o:o + len(a)] = a; msk[o:o + len(m)] = m; o += len(a)
+        rows.append((ids, msk))
     for k in order:
-        ids, mask = convs[k]
-        if len(cur_i) + len(ids) > SEQ + 1:
-            rows.append((cur_i + [EOD] * (SEQ + 1 - len(cur_i)), cur_m + [0] * (SEQ + 1 - len(cur_m)))); cur_i, cur_m = [], []
-        cur_i += ids; cur_m += mask
-    if cur_i: rows.append((cur_i + [EOD] * (SEQ + 1 - len(cur_i)), cur_m + [0] * (SEQ + 1 - len(cur_m))))
+        a, m = convs[k]
+        if n + len(a) > SEQ + 1: flush(); cur, n = [], 0
+        cur.append((a, m)); n += len(a)
+    if cur: flush()
     return rows
 
 
 def run_rows(rows):
-    a = torch.tensor([r[0] for r in rows], device=DEV); m = torch.tensor([r[1] for r in rows], device=DEV, dtype=torch.float32)
+    a = torch.from_numpy(np.stack([r[0] for r in rows]).astype(np.int64)).to(DEV); m = torch.from_numpy(np.stack([r[1] for r in rows]).astype(np.float32)).to(DEV)
     with torch.autocast("cuda", dtype=torch.bfloat16, enabled=DEV == "cuda"):
         lg = model(a[:, :-1])
     nll = F.cross_entropy(lg.flatten(0, 1).float(), a[:, 1:].flatten(), reduction="none") * m[:, 1:].flatten()
@@ -226,7 +228,7 @@ while step < total_steps and time.time() - T0 < A.hours * 3600:
     batch = epoch_rows[ptr:ptr + rows_per_step]; ptr += rows_per_step
     try:
         opt.zero_grad(set_to_none=True); tot = cnt = 0.0
-        n_all = sum(sum(r[1][1:]) for r in batch)
+        n_all = sum(int(r[1][1:].sum()) for r in batch)
         for i in range(0, len(batch), MICRO):
             s_, c_ = run_rows(batch[i:i + MICRO])
             (s_ / max(n_all, 1)).backward(); tot += float(s_); cnt += float(c_)
@@ -275,7 +277,7 @@ try:
                 err = (W1[:, i] - q) / Hi[i, i]; W1[:, i:] -= err[:, None] * Hi[i, i:][None]; E1[:, i] = err
             Q[:, i1:i2] = Q1; W[:, i2:] -= E1 @ Hinv[i1:i2, i2:]
         return Q, codes, sc, bi
-    model.eval(); calib = torch.tensor([r[0][:-1] for r in pack(TRAIN)[:24]], device=DEV); PACK = {}
+    model.eval(); calib = torch.from_numpy(np.stack([r[0][:-1] for r in pack(TRAIN)[:24]]).astype(np.int64)).to(DEV); PACK = {}
     with torch.no_grad():
         x = model.emb(calib) + model.pos(torch.arange(SEQ, device=DEV))
         for li, blk in enumerate(model.blocks):
