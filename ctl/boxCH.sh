@@ -3,7 +3,7 @@
 # grown 4 -> 8 -> 12 -> 16 layers at d 512 (charlm/charlm2.py), then tested against GPT-2 small on the same documents and
 # quantized to 4 bits by GPTQ. Pull-based as the others; the log goes to the hub every 10 minutes (boxlog_CH.txt), the
 # checkpoints to charlm/run2/ as they are made.
-BOXCH_SERIAL=19
+BOXCH_SERIAL=20
 if [ -f /root/.boxch_serial ] && [ "$(cat /root/.boxch_serial)" -gt "$BOXCH_SERIAL" ] 2>/dev/null; then echo "BOXCH_STALE $BOXCH_SERIAL"; exit 0; fi
 echo $BOXCH_SERIAL > /root/.boxch_serial
 [ -s /root/.hf_token ] || { [ -n "$HF_TOKEN" ] && printf '%s' "$HF_TOKEN" > /root/.hf_token && chmod 600 /root/.hf_token; }
@@ -31,6 +31,7 @@ if [ ! -e /root/.chmirror_r14 ]; then touch /root/.chmirror_r14; pkill -f "chmir
 if [ ! -e /root/.chmirror_r15 ]; then touch /root/.chmirror_r15; pkill -f "chmirro[r].sh"; sleep 1; fi   # serial 15: the push15 lines
 if [ ! -e /root/.chmirror_r17 ]; then touch /root/.chmirror_r17; pkill -f "chmirro[r].sh"; sleep 1; fi   # serial 17: the sft17 lines
 if [ ! -e /root/.chmirror_r19 ]; then touch /root/.chmirror_r19; pkill -f "chmirro[r].sh"; sleep 1; fi   # serial 19: the sft19 lines
+if [ ! -e /root/.chmirror_r20 ]; then touch /root/.chmirror_r20; pkill -f "chmirro[r].sh"; sleep 1; fi   # serial 20: the npc20 lines and npc1
 if ! pgrep -f "chmirro[r].sh" >/dev/null; then
   cat > /root/chmirror.sh <<'MR'
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null)
@@ -39,9 +40,10 @@ while true; do
     echo "--- ctl.log ---"; tail -n 15 /root/ctl.log 2>/dev/null | cut -c1-300
     echo "--- prep.log ---"; tail -n 20 /root/charlm/prep.log 2>/dev/null | cut -c1-300
     echo "--- job.log ---"; grep -vE "Warning|warn" /root/charlm/job.log 2>/dev/null | tail -n 20 | cut -c1-600
-    echo "--- run2/train.log ---"; grep -E "^\[val\]|^\[chat|^\[cool\]|^\[ctl\]|^\[plateau\]|^\[more7\]|^\[target9\]|^\[mix14\]|^\[push15\]|^\[sft17\]|^\[sft19\]|^\[ctl11\]|^\[grow\]|^\[oom\]|^\[diverge\]|^\[restart|^\[charlm2\]|^\[test\]|^\[gptq\]|^\[sample\]|^\[hub\]|CHARLM2_DONE" /root/charlm/run2/train.log 2>/dev/null | tail -n 50 | cut -c1-600
+    echo "--- run2/train.log ---"; grep -E "^\[val\]|^\[chat|^\[cool\]|^\[ctl\]|^\[plateau\]|^\[more7\]|^\[target9\]|^\[mix14\]|^\[push15\]|^\[sft17\]|^\[sft19\]|^\[npc20\]|^\[ctl11\]|^\[grow\]|^\[oom\]|^\[diverge\]|^\[restart|^\[charlm2\]|^\[test\]|^\[gptq\]|^\[sample\]|^\[hub\]|CHARLM2_DONE" /root/charlm/run2/train.log 2>/dev/null | tail -n 50 | cut -c1-600
     grep -E "^\[step" /root/charlm/run2/train.log 2>/dev/null | tail -n 48 | cut -c1-300
     echo "--- sft1/train.log ---"; grep -vE "Warning|warn|^\[step" /root/charlm/sft1/train.log 2>/dev/null | tail -n 30 | cut -c1-900
+    echo "--- npc1/train.log ---"; grep -vE "Warning|warn|^\[step" /root/charlm/npc1/train.log 2>/dev/null | tail -n 30 | cut -c1-900; grep -E "^\[step" /root/charlm/npc1/train.log 2>/dev/null | tail -n 2
     grep -E "^\[step" /root/charlm/sft1/train.log 2>/dev/null | tail -n 2 | cut -c1-300; } > /root/boxlog_CH.txt
   python3 -c "from huggingface_hub import HfApi; HfApi().upload_file(path_or_fileobj='/root/boxlog_CH.txt', path_in_repo='pooler_distill/chatsft/audit/boxlog_CH.txt', repo_id='baya1116/hypernet-sp-distill')" >/dev/null 2>&1
   sleep 600
@@ -271,6 +273,27 @@ if [ ! -e /root/.ch_sft19 ]; then touch /root/.ch_sft19
   cd /root/charlm && mkdir -p sft_old && mv sft1 sft_old/sft1_oom 2>/dev/null
   setsid nohup bash -c 'bash /root/chsft.sh >> /root/charlm/sft.log 2>&1' > /dev/null 2>&1 < /dev/null &
   echo "[sft19] the chat fine-tuning relaunched with uint8 conversations $(date -u)" | tee -a run2/train.log
+fi
+# ---- serial 20, the user: the model is for indie-game NPCs (distributed, commercial): it need not say hard things, but must
+# answer what it is asked. A second fine-tuning, on commercially usable conversations only (17,763: SmolTalk everyday and
+# systemchats with short replies and no AI talk - Apache-2.0; Synthetic-Persona-Chat with its persona as a character card -
+# CC BY 4.0), from the first fine-tuning's final weights, one pass; held out: their test splits (299); sample replies to NPC
+# cards. Waits for the first fine-tuning to finish. ----
+if [ ! -e /root/.ch_npc20 ]; then touch /root/.ch_npc20
+  cat > /root/chnpc20.sh <<'JOB'
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); cd /root/charlm; mkdir -p npcdata
+until grep -q CHSFT_DONE sft.log 2>/dev/null; do sleep 300; done
+for f in stage2_public.jsonl stage2_val.jsonl stage2_prompts.json; do
+  [ -s npcdata/$f ] || curl -sSfL -o npcdata/$f "https://huggingface.co/baya1116/hypernet-sp-distill/resolve/main/charlm/npc_data/$f"; done
+B=sft1/model_final.pt; [ -s $B ] || B=sft1/model_best.pt
+echo "[npc20] the NPC fine-tuning from $B: $(wc -l < npcdata/stage2_public.jsonl) conversations $(date -u)" | tee -a run2/train.log
+python3 -u charlm_sft.py --base $B --data sftdata --out npc1 --shards 0 --jsonl npcdata/stage2_public.jsonl --val-jsonl npcdata/stage2_val.jsonl \
+  --prompts-json npcdata/stage2_prompts.json --epochs 1 --lr 1e-4 --warmup 50 --eval-every 5 --hours 3 --hub baya1116/hypernet-sp-distill:charlm/npc1 2>&1 | grep -vE "Warning|warn" > npc1.out
+grep -h "Error\|Traceback" npc1.out | tail -3 | sed 's/^/[npc20] /' | tee -a run2/train.log
+echo "[npc20] NPC_DONE $(date -u)" | tee -a run2/train.log
+JOB
+  setsid nohup bash -c 'bash /root/chnpc20.sh >> /root/charlm/job.log 2>&1' > /dev/null 2>&1 < /dev/null &
+  echo "[npc20] queued after the first fine-tuning $(date -u)" | tee -a /root/charlm/run2/train.log
 fi
 echo "BOXCH_OK serial $BOXCH_SERIAL $(date -u)"
 # CTL-END
