@@ -3,7 +3,7 @@
 # grown 4 -> 8 -> 12 -> 16 layers at d 512 (charlm/charlm2.py), then tested against GPT-2 small on the same documents and
 # quantized to 4 bits by GPTQ. Pull-based as the others; the log goes to the hub every 10 minutes (boxlog_CH.txt), the
 # checkpoints to charlm/run2/ as they are made.
-BOXCH_SERIAL=11
+BOXCH_SERIAL=12
 if [ -f /root/.boxch_serial ] && [ "$(cat /root/.boxch_serial)" -gt "$BOXCH_SERIAL" ] 2>/dev/null; then echo "BOXCH_STALE $BOXCH_SERIAL"; exit 0; fi
 echo $BOXCH_SERIAL > /root/.boxch_serial
 [ -s /root/.hf_token ] || { [ -n "$HF_TOKEN" ] && printf '%s' "$HF_TOKEN" > /root/.hf_token && chmod 600 /root/.hf_token; }
@@ -26,6 +26,7 @@ if [ ! -e /root/.chmirror_r2 ]; then touch /root/.chmirror_r2; pkill -f "chmirro
 if [ ! -e /root/.chmirror_r3 ]; then touch /root/.chmirror_r3; pkill -f "chmirro[r].sh"; sleep 1; fi
 if [ ! -e /root/.chmirror_r5 ]; then touch /root/.chmirror_r5; pkill -f "chmirro[r].sh"; sleep 1; fi
 if [ ! -e /root/.chmirror_r10 ]; then touch /root/.chmirror_r10; pkill -f "chmirro[r].sh"; sleep 1; fi   # serial 10: the chat lines too
+if [ ! -e /root/.chmirror_r12 ]; then touch /root/.chmirror_r12; pkill -f "chmirro[r].sh"; sleep 1; fi   # serial 12: 4 h of training-loss lines
 if ! pgrep -f "chmirro[r].sh" >/dev/null; then
   cat > /root/chmirror.sh <<'MR'
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null)
@@ -35,7 +36,7 @@ while true; do
     echo "--- prep.log ---"; tail -n 20 /root/charlm/prep.log 2>/dev/null | cut -c1-300
     echo "--- job.log ---"; grep -vE "Warning|warn" /root/charlm/job.log 2>/dev/null | tail -n 20 | cut -c1-600
     echo "--- run2/train.log ---"; grep -E "^\[val\]|^\[chat|^\[cool\]|^\[ctl\]|^\[plateau\]|^\[more7\]|^\[target9\]|^\[ctl11\]|^\[grow\]|^\[oom\]|^\[diverge\]|^\[restart|^\[charlm2\]|^\[test\]|^\[gptq\]|^\[sample\]|^\[hub\]|CHARLM2_DONE" /root/charlm/run2/train.log 2>/dev/null | tail -n 50 | cut -c1-600
-    grep -E "^\[step" /root/charlm/run2/train.log 2>/dev/null | tail -n 3 | cut -c1-300
+    grep -E "^\[step" /root/charlm/run2/train.log 2>/dev/null | tail -n 48 | cut -c1-300
     echo "--- sft1/train.log ---"; grep -vE "Warning|warn|^\[step" /root/charlm/sft1/train.log 2>/dev/null | tail -n 30 | cut -c1-900
     grep -E "^\[step" /root/charlm/sft1/train.log 2>/dev/null | tail -n 2 | cut -c1-300; } > /root/boxlog_CH.txt
   python3 -c "from huggingface_hub import HfApi; HfApi().upload_file(path_or_fileobj='/root/boxlog_CH.txt', path_in_repo='pooler_distill/chatsft/audit/boxlog_CH.txt', repo_id='baya1116/hypernet-sp-distill')" >/dev/null 2>&1
