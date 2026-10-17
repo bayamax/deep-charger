@@ -3,7 +3,7 @@
 # grown 4 -> 8 -> 12 -> 16 layers at d 512 (charlm/charlm2.py), then tested against GPT-2 small on the same documents and
 # quantized to 4 bits by GPTQ. Pull-based as the others; the log goes to the hub every 10 minutes (boxlog_CH.txt), the
 # checkpoints to charlm/run2/ as they are made.
-BOXCH_SERIAL=17
+BOXCH_SERIAL=18
 if [ -f /root/.boxch_serial ] && [ "$(cat /root/.boxch_serial)" -gt "$BOXCH_SERIAL" ] 2>/dev/null; then echo "BOXCH_STALE $BOXCH_SERIAL"; exit 0; fi
 echo $BOXCH_SERIAL > /root/.boxch_serial
 [ -s /root/.hf_token ] || { [ -n "$HF_TOKEN" ] && printf '%s' "$HF_TOKEN" > /root/.hf_token && chmod 600 /root/.hf_token; }
@@ -253,6 +253,15 @@ if [ ! -e /root/.ch_sft17 ]; then touch /root/.ch_sft17
   grep -o -- "--hours [0-9]* --epochs [0-9]* --stop-plateau [0-9.]* --stop-evals [0-9]*" /root/chsft.sh | sed 's/^/[sft17] fine-tuning now: /' | tee -a run2/train.log
   setsid nohup bash -c 'bash /root/chsft.sh >> /root/charlm/sft.log 2>&1' > /dev/null 2>&1 < /dev/null &
   echo "[sft17] the chat fine-tuning relaunched (one pass, robust GPTQ) $(date -u)" | tee -a run2/train.log
+fi
+# ---- serial 18: the chat fine-tuning stops right after its replies before training, three tries running, the GPU idle; its
+# error goes to sft.log, which the mirror does not carry. Into sft1/train.log (which it does): sft.log's tail, memory, the
+# kernel's OOM lines. ----
+if [ ! -e /root/.ch_diag18 ]; then touch /root/.ch_diag18
+  cd /root/charlm; mkdir -p sft1
+  { echo "[diag18] $(date -u) - sft.log tail:"; grep -vE "Warning|warn" sft.log | tail -n 30 | cut -c1-300 | sed 's/^/[diag18] /'
+    echo "[diag18] memory: $(free -g | sed -n 2p)"; dmesg 2>/dev/null | grep -iE "killed process|out of memory" | tail -n 3 | sed 's/^/[diag18] /'
+    ps -eo pid,etimes,args | grep -E "[c]harlm_sft|[c]hsft" | cut -c1-150 | sed 's/^/[diag18] /'; } >> sft1/train.log
 fi
 echo "BOXCH_OK serial $BOXCH_SERIAL $(date -u)"
 # CTL-END
