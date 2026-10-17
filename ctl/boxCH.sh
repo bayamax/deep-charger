@@ -3,7 +3,7 @@
 # grown 4 -> 8 -> 12 -> 16 layers at d 512 (charlm/charlm2.py), then tested against GPT-2 small on the same documents and
 # quantized to 4 bits by GPTQ. Pull-based as the others; the log goes to the hub every 10 minutes (boxlog_CH.txt), the
 # checkpoints to charlm/run2/ as they are made.
-BOXCH_SERIAL=21
+BOXCH_SERIAL=22
 if [ -f /root/.boxch_serial ] && [ "$(cat /root/.boxch_serial)" -gt "$BOXCH_SERIAL" ] 2>/dev/null; then echo "BOXCH_STALE $BOXCH_SERIAL"; exit 0; fi
 echo $BOXCH_SERIAL > /root/.boxch_serial
 [ -s /root/.hf_token ] || { [ -n "$HF_TOKEN" ] && printf '%s' "$HF_TOKEN" > /root/.hf_token && chmod 600 /root/.hf_token; }
@@ -305,6 +305,12 @@ if [ ! -e /root/.ch_npc21 ]; then touch /root/.ch_npc21
   grep -n "^until" /root/chnpc20.sh | sed 's/^/[npc21] wait: /' | tee -a run2/train.log
   setsid nohup bash -c 'bash /root/chnpc20.sh >> /root/charlm/job.log 2>&1' > /dev/null 2>&1 < /dev/null &
   echo "[npc21] the NPC fine-tuning re-queued after the running one $(date -u)" | tee -a run2/train.log
+fi
+# ---- serial 22: the early start may have fetched the NPC data before the 1,894 NPC dialogues were added to it: the copies
+# go, so the queued run fetches the current files. ----
+if [ ! -e /root/.ch_npcdata22 ]; then touch /root/.ch_npcdata22
+  rm -f /root/charlm/npcdata/stage2_public.jsonl /root/charlm/npcdata/stage2_val.jsonl
+  echo "[npc21] stale NPC data removed; fetched afresh when the run starts $(date -u)" | tee -a /root/charlm/run2/train.log
 fi
 echo "BOXCH_OK serial $BOXCH_SERIAL $(date -u)"
 # CTL-END
