@@ -3,7 +3,7 @@
 # grown 4 -> 8 -> 12 -> 16 layers at d 512 (charlm/charlm2.py), then tested against GPT-2 small on the same documents and
 # quantized to 4 bits by GPTQ. Pull-based as the others; the log goes to the hub every 10 minutes (boxlog_CH.txt), the
 # checkpoints to charlm/run2/ as they are made.
-BOXCH_SERIAL=8
+BOXCH_SERIAL=9
 if [ -f /root/.boxch_serial ] && [ "$(cat /root/.boxch_serial)" -gt "$BOXCH_SERIAL" ] 2>/dev/null; then echo "BOXCH_STALE $BOXCH_SERIAL"; exit 0; fi
 echo $BOXCH_SERIAL > /root/.boxch_serial
 [ -s /root/.hf_token ] || { [ -n "$HF_TOKEN" ] && printf '%s' "$HF_TOKEN" > /root/.hf_token && chmod 600 /root/.hf_token; }
@@ -156,6 +156,25 @@ if [ ! -e /root/.ch_chat8 ]; then touch /root/.ch_chat8
   grep -o -- "--hours [0-9]* --stop-plateau [0-9.]* --stop-evals [0-9]*" /root/chsft.sh | sed 's/^/[chat8] fine-tuning now: /' | tee -a run2/train.log
   setsid nohup bash -c 'bash /root/chsft.sh >> /root/charlm/sft.log 2>&1' > /dev/null 2>&1 < /dev/null &
   echo "[chat8] chat yardstick ready; the fine-tuning waits for pre-training again $(date -u)" | tee -a run2/train.log
+fi
+# ---- serial 9, the user: on to the chat fine-tuning once the chat perplexity is on a par with GPT-2's. GPT-2 small on the
+# same 600 SmolTalk test conversations: token perplexity 11.38 = 0.845 bits per character. The target is within 5% of
+# that (0.887 bpc), read from data/ctl.json at every validation (changeable without a restart); a plateau before it is
+# only reported. The whole 2.3M-character yardstick is scored (as GPT-2's was). The run restarts once, just after a
+# validation, for the new code. ----
+if [ ! -e /root/.ch_target9 ]; then touch /root/.ch_target9
+  echo '{"cool_target": 0.887, "plateau_cools": 0}' > /root/charlm/data/ctl.json
+  cat > /root/chtarget9.sh <<'JOB'
+cd /root/charlm; L=run2/train.log
+grep -q -- "--ctl " /root/chjob.sh || sed -i 's/ --chat-val data\/val_chat.bin / --chat-val data\/val_chat.bin --chat-val-chars 2400000 --ctl data\/ctl.json /' /root/chjob.sh
+grep -o -- "--chat-val [^ ]* --chat-val-chars [0-9]* --ctl [^ ]*" /root/chjob.sh | sed 's/^/[target9] job now: /' | tee -a $L
+n0=$(grep -c "^\[val\]" $L); while [ "$(grep -c '^\[val\]' $L)" -le "$n0" ]; do grep -q CHARLM2_DONE $L && exit 0; sleep 30; done; sleep 150   # after the validation and its chat score
+pkill -f "chjo[b].sh"; pkill -f "charlm2.py --data data --out run2"; sleep 20
+setsid nohup bash -c 'bash /root/chjob.sh >> /root/charlm/job.log 2>&1' > /dev/null 2>&1 < /dev/null &
+echo "[target9] resumed: the chat target 0.887 bpc (GPT-2 small 0.845 + 5%) decides the cool-down $(date -u)" | tee -a $L
+JOB
+  setsid nohup bash -c 'bash /root/chtarget9.sh >> /root/charlm/job.log 2>&1' > /dev/null 2>&1 < /dev/null &
+  echo "[target9] launched $(date -u)"
 fi
 echo "BOXCH_OK serial $BOXCH_SERIAL $(date -u)"
 # CTL-END

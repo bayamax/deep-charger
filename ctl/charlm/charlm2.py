@@ -40,6 +40,10 @@ ap.add_argument("--chat-val-chars", type=int, default=1500000); ap.add_argument(
 ap.add_argument("--cool-plateau", type=float, default=0.0, help="at the last depth, when the chat score has gained less than this over --cool-evals "
                 "validations, the learning rate falls to a tenth over --cool-hours and the run ends there (0: off; --hours stays the cap)")
 ap.add_argument("--cool-evals", type=int, default=4); ap.add_argument("--cool-hours", type=float, default=3.0)
+ap.add_argument("--cool-target", type=float, default=0.0, help="the cool-down starts once the chat score reaches this (bpc; 0: no target)")
+ap.add_argument("--plateau-cools", type=int, default=1, help="0: a chat plateau before the target is only reported, the run goes on")
+ap.add_argument("--ctl", default="", help="a JSON file read at every validation; its keys (cool_target, cool_plateau, plateau_cools, "
+                "cool_evals, cool_hours) replace those settings without a restart")
 ap.add_argument("--qknorm", type=int, default=1, help="1: LayerNorm on each head's queries and keys (keeps attention logits bounded over the 4096-character context)")
 ap.add_argument("--diverge", type=float, default=0.10, help="a validation this much worse than the best: back to the best weights, the learning rate halved")
 A = ap.parse_args()
@@ -244,10 +248,21 @@ while True:
     if time.time() - last_eval > A.eval_every * 60:
         vw, vf, v = validate(); el = time.time() - T0; hist.append((step, el / 60, len(model.blocks), vw, vf)); last_eval = time.time()
         out(f"[val] step {step} {len(model.blocks)} layers: wiki {vw:.3f} fineweb {vf:.3f} mean {v:.3f} bpc ({el / 60:.0f} min)")
-        if chat_eval() is not None and A.cool_plateau > 0 and COOL_T0 is None and stage + 1 >= len(DEPTHS) and len(CHATH) > A.cool_evals \
-                and CHATH[-1 - A.cool_evals][2] - CHATH[-1][2] < A.cool_plateau:
-            COOL_T0 = el; out(f"[cool] the chat score gained {CHATH[-1 - A.cool_evals][2] - CHATH[-1][2]:.4f} over the last {A.cool_evals} validations "
-                              f"(< {A.cool_plateau}): the learning rate falls to a tenth over {A.cool_hours:g} h, then the run ends")
+        if A.ctl and os.path.exists(A.ctl):
+            try:
+                for k_, v_ in json.load(open(A.ctl)).items():
+                    if hasattr(A, k_) and getattr(A, k_) != v_: out(f"[ctl] {k_}: {getattr(A, k_)} -> {v_}"); setattr(A, k_, type(getattr(A, k_))(v_))
+            except Exception as e: out(f"[ctl] unreadable: {str(e)[:100]}")
+        vc = chat_eval()
+        if vc is not None and COOL_T0 is None and stage + 1 >= len(DEPTHS):
+            gain = CHATH[-1 - A.cool_evals][2] - CHATH[-1][2] if len(CHATH) > A.cool_evals else None
+            if A.cool_target > 0 and vc <= A.cool_target:
+                COOL_T0 = el; out(f"[cool] the chat score {vc:.3f} reached the target {A.cool_target:.3f}: the learning rate falls to a tenth over {A.cool_hours:g} h, then the run ends")
+            elif A.cool_plateau > 0 and gain is not None and gain < A.cool_plateau:
+                if A.plateau_cools:
+                    COOL_T0 = el; out(f"[cool] the chat score gained {gain:.4f} over the last {A.cool_evals} validations (< {A.cool_plateau}): "
+                                      f"the learning rate falls to a tenth over {A.cool_hours:g} h, then the run ends")
+                else: out(f"[plateau] the chat score gained only {gain:.4f} over the last {A.cool_evals} validations, still {vc:.3f} against the target {A.cool_target:.3f} - going on")
         if v < best["bpc"]: best = {"bpc": v, "step": step, "layers": len(model.blocks)}; hub_put(save("best"), "model_best.pt")
         if v > best["bpc"] + A.diverge and best.get("layers") == len(model.blocks) and os.path.exists(os.path.join(A.out, "model_best.pt")):
             # diverging: the best weights back (same depth), a fresh optimizer, half the learning rate from here on
