@@ -12,6 +12,7 @@ growth), WikiText-2 test and the next 3000 FineWeb documents (test, decides noth
 for GPT-2 on the very same documents.
 
   python3 charlm_prep.py --out /root/charlm/data --fineweb 1
+  python3 charlm_prep.py --out /root/charlm/data --more 2,3      (more training text later, appended by the caller)
 """
 import argparse, codecs, os, sys, time, unicodedata
 
@@ -20,6 +21,8 @@ import numpy as np
 ap = argparse.ArgumentParser()
 ap.add_argument("--out", required=True); ap.add_argument("--fineweb", type=int, default=1, help="FineWeb-Edu sample-10BT shards")
 ap.add_argument("--src", default="", help="a folder that already holds the parquet files (else they are downloaded there)")
+ap.add_argument("--more", default="", help="only this: more FineWeb-Edu training text from these sample-10BT shards (e.g. 2,3) into train_fw_more.bin, "
+                "nothing held out (the held-out documents stay those of the original run's last shard)")
 A = ap.parse_args()
 os.makedirs(A.out, exist_ok=True); SRC = A.src or os.path.join(A.out, "src"); os.makedirs(SRC, exist_ok=True)
 
@@ -81,6 +84,12 @@ def wikitext_articles(path):
         cur.append(line)
     if cur: yield "".join(cur)
 
+
+if A.more:
+    more = [fetch("HuggingFaceFW/fineweb-edu", f"sample/10BT/{int(i):03d}_00000.parquet") for i in A.more.split(",")]
+    write("train_fw_more.bin", (d for p_ in more for d in docs_of(p_)))
+    for p_ in more: os.remove(p_)
+    print("CHARLM_MORE_DONE", flush=True); sys.exit(0)
 
 W = "Salesforce/wikitext"
 wtr = [fetch(W, f"wikitext-103-raw-v1/train-0000{i}-of-00002.parquet") for i in range(2)]

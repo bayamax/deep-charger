@@ -3,7 +3,7 @@
 # grown 4 -> 8 -> 12 -> 16 layers at d 512 (charlm/charlm2.py), then tested against GPT-2 small on the same documents and
 # quantized to 4 bits by GPTQ. Pull-based as the others; the log goes to the hub every 10 minutes (boxlog_CH.txt), the
 # checkpoints to charlm/run2/ as they are made.
-BOXCH_SERIAL=6
+BOXCH_SERIAL=7
 if [ -f /root/.boxch_serial ] && [ "$(cat /root/.boxch_serial)" -gt "$BOXCH_SERIAL" ] 2>/dev/null; then echo "BOXCH_STALE $BOXCH_SERIAL"; exit 0; fi
 echo $BOXCH_SERIAL > /root/.boxch_serial
 [ -s /root/.hf_token ] || { [ -n "$HF_TOKEN" ] && printf '%s' "$HF_TOKEN" > /root/.hf_token && chmod 600 /root/.hf_token; }
@@ -113,6 +113,30 @@ if [ ! -e /root/.ch_restart6 ]; then touch /root/.ch_restart6
   grep -c 'GN=' /root/chjob.sh | sed 's/^/[restart6] grow-now lines: /'
   setsid nohup bash -c 'bash /root/chjob.sh >> /root/charlm/job.log 2>&1' > /dev/null 2>&1 < /dev/null &
   echo "[restart6] relaunched: 8 layers from the best weights, grown to 12 at once with every block kept $(date -u)" | tee -a /root/charlm/run2/train.log
+fi
+# ---- serial 7, the user: more data rather than more passes - Wikipedia had been read ~2.5 times at p_wiki 0.3. Two more
+# FineWeb-Edu sample-10BT shards (002, 003; ~6.8B characters, none of the held-out documents, which stay shard 001's) are
+# prepared beside the run; at the next validation after that the run stops, the new text is appended to train_fw.bin, and
+# it resumes with 53 h in all (23 more) at p_wiki 0.05 - Wikipedia ends near 3 passes, FineWeb near 0.7. ----
+if [ ! -e /root/.ch_more7 ]; then touch /root/.ch_more7
+  cat > /root/chmore7.sh <<'JOB'
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); cd /root/charlm
+L=run2/train.log
+echo "[more7] preparing FineWeb shards 002, 003 beside the run $(date -u)" | tee -a $L
+python3 -u charlm_prep.py --out data --more 2,3 > more7.log 2>&1
+grep -E "^\[prep\]|Error|Traceback|CHARLM_MORE_DONE" more7.log | tail -3 | sed 's/^/[more7] /' | tee -a $L
+grep -q CHARLM_MORE_DONE more7.log && [ -s data/train_fw_more.bin ] || { echo "[more7] prep failed - the run goes on unchanged $(date -u)" | tee -a $L; exit 1; }
+n0=$(grep -c "^\[val\]" $L); while [ "$(grep -c '^\[val\]' $L)" -le "$n0" ]; do grep -q CHARLM2_DONE $L && break; sleep 30; done; sleep 60   # just after a validation (model_latest saved)
+pkill -f "chjo[b].sh"; pkill -f "charlm2.py --data data --out run2"; sleep 20
+b0=$(stat -c %s data/train_fw.bin); cat data/train_fw_more.bin >> data/train_fw.bin && rm -f data/train_fw_more.bin
+echo "[more7] train_fw.bin $((b0 / 1000000))M -> $(( $(stat -c %s data/train_fw.bin) / 1000000 ))M chars $(date -u)" | tee -a $L
+sed -i 's/^GN="--grow-now 1"$/GN=""/; s/--hours [0-9][0-9]* /--hours 53 --p-wiki 0.05 /' /root/chjob.sh
+grep -o -- "--hours [0-9]* --p-wiki [0-9.]*" /root/chjob.sh | sed 's/^/[more7] job now: /' | tee -a $L; grep -c '^GN="--grow' /root/chjob.sh | sed 's/^/[more7] grow-now lines left: /' | tee -a $L
+setsid nohup bash -c 'bash /root/chjob.sh >> /root/charlm/job.log 2>&1' > /dev/null 2>&1 < /dev/null &
+echo "[more7] resumed from model_latest with the larger FineWeb, 53 h in all, p_wiki 0.05 $(date -u)" | tee -a $L
+JOB
+  setsid nohup bash -c 'bash /root/chmore7.sh >> /root/charlm/job.log 2>&1' > /dev/null 2>&1 < /dev/null &
+  echo "[more7] launched $(date -u)"
 fi
 echo "BOXCH_OK serial $BOXCH_SERIAL $(date -u)"
 # CTL-END
