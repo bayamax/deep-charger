@@ -27,6 +27,7 @@ ap.add_argument("--layers", default="4,8,12,16"); ap.add_argument("--seq", type=
 ap.add_argument("--chars-per-step", type=int, default=131072, help="characters per update (micro-batches accumulate to it)")
 ap.add_argument("--micro", type=int, default=16, help="windows per micro-batch to start with; halves on out-of-memory")
 ap.add_argument("--lr", type=float, default=1.5e-3); ap.add_argument("--warmup", type=int, default=300); ap.add_argument("--wd", type=float, default=0.1)
+ap.add_argument("--p-chat", type=float, default=0.0, help="a window from train_chat.bin (chat as plain text) with this probability, when the file is there")
 ap.add_argument("--p-wiki", type=float, default=0.3); ap.add_argument("--hours", type=float, default=14.0)
 ap.add_argument("--eval-every", type=float, default=20.0, help="minutes"); ap.add_argument("--val-chars", type=int, default=2_000_000)
 ap.add_argument("--plateau", type=float, default=0.006, help="grow when two validations in a row gain less than this (bpc)")
@@ -61,6 +62,7 @@ def encode_ascii(s): return LUT[np.frombuffer(s.encode("ascii", "replace"), dtyp
 
 mm = lambda n: np.memmap(os.path.join(A.data, n), dtype=np.uint8, mode="r")
 VAC = np.memmap(A.chat_val, dtype=np.uint8, mode="r") if A.chat_val and os.path.exists(A.chat_val) else None
+TRC = mm("train_chat.bin") if os.path.exists(os.path.join(A.data, "train_chat.bin")) else None
 TRW, TRF = mm("train_wiki.bin"), mm("train_fw.bin"); VAW, VAF = mm("val_wiki.bin"), mm("val_fw.bin"); TEW, TEF = mm("test_wiki.bin"), mm("test_fw.bin")
 out(f"[charlm2] train: wiki {len(TRW) / 1e6:.0f}M + fineweb {len(TRF) / 1e6:.0f}M chars; validation {len(VAW) / 1e6:.2f}M + {len(VAF) / 1e6:.1f}M; "
     f"test {len(TEW) / 1e6:.2f}M + {len(TEF) / 1e6:.1f}M; {DEV} {torch.cuda.get_device_name(0) if DEV == 'cuda' else ''}")
@@ -123,7 +125,7 @@ class CharLM(nn.Module):
 def windows(n):
     rows = []
     for _ in range(n):
-        src = TRW if random.random() < A.p_wiki else TRF; j = random.randrange(0, len(src) - A.seq - 1); rows.append(src[j:j + A.seq + 1])
+        src = TRC if TRC is not None and random.random() < A.p_chat else (TRW if random.random() < A.p_wiki else TRF); j = random.randrange(0, len(src) - A.seq - 1); rows.append(src[j:j + A.seq + 1])
     a = torch.from_numpy(np.stack(rows).astype(np.int64)).pin_memory() if DEV == "cuda" else torch.from_numpy(np.stack(rows).astype(np.int64))
     a = a.to(DEV, non_blocking=True); return a[:, :-1], a[:, 1:]
 

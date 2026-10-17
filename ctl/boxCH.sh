@@ -3,7 +3,7 @@
 # grown 4 -> 8 -> 12 -> 16 layers at d 512 (charlm/charlm2.py), then tested against GPT-2 small on the same documents and
 # quantized to 4 bits by GPTQ. Pull-based as the others; the log goes to the hub every 10 minutes (boxlog_CH.txt), the
 # checkpoints to charlm/run2/ as they are made.
-BOXCH_SERIAL=13
+BOXCH_SERIAL=14
 if [ -f /root/.boxch_serial ] && [ "$(cat /root/.boxch_serial)" -gt "$BOXCH_SERIAL" ] 2>/dev/null; then echo "BOXCH_STALE $BOXCH_SERIAL"; exit 0; fi
 echo $BOXCH_SERIAL > /root/.boxch_serial
 [ -s /root/.hf_token ] || { [ -n "$HF_TOKEN" ] && printf '%s' "$HF_TOKEN" > /root/.hf_token && chmod 600 /root/.hf_token; }
@@ -27,6 +27,7 @@ if [ ! -e /root/.chmirror_r3 ]; then touch /root/.chmirror_r3; pkill -f "chmirro
 if [ ! -e /root/.chmirror_r5 ]; then touch /root/.chmirror_r5; pkill -f "chmirro[r].sh"; sleep 1; fi
 if [ ! -e /root/.chmirror_r10 ]; then touch /root/.chmirror_r10; pkill -f "chmirro[r].sh"; sleep 1; fi   # serial 10: the chat lines too
 if [ ! -e /root/.chmirror_r12 ]; then touch /root/.chmirror_r12; pkill -f "chmirro[r].sh"; sleep 1; fi   # serial 12: 4 h of training-loss lines
+if [ ! -e /root/.chmirror_r14 ]; then touch /root/.chmirror_r14; pkill -f "chmirro[r].sh"; sleep 1; fi   # serial 14: the mix14 lines
 if ! pgrep -f "chmirro[r].sh" >/dev/null; then
   cat > /root/chmirror.sh <<'MR'
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null)
@@ -35,7 +36,7 @@ while true; do
     echo "--- ctl.log ---"; tail -n 15 /root/ctl.log 2>/dev/null | cut -c1-300
     echo "--- prep.log ---"; tail -n 20 /root/charlm/prep.log 2>/dev/null | cut -c1-300
     echo "--- job.log ---"; grep -vE "Warning|warn" /root/charlm/job.log 2>/dev/null | tail -n 20 | cut -c1-600
-    echo "--- run2/train.log ---"; grep -E "^\[val\]|^\[chat|^\[cool\]|^\[ctl\]|^\[plateau\]|^\[more7\]|^\[target9\]|^\[ctl11\]|^\[grow\]|^\[oom\]|^\[diverge\]|^\[restart|^\[charlm2\]|^\[test\]|^\[gptq\]|^\[sample\]|^\[hub\]|CHARLM2_DONE" /root/charlm/run2/train.log 2>/dev/null | tail -n 50 | cut -c1-600
+    echo "--- run2/train.log ---"; grep -E "^\[val\]|^\[chat|^\[cool\]|^\[ctl\]|^\[plateau\]|^\[more7\]|^\[target9\]|^\[mix14\]|^\[ctl11\]|^\[grow\]|^\[oom\]|^\[diverge\]|^\[restart|^\[charlm2\]|^\[test\]|^\[gptq\]|^\[sample\]|^\[hub\]|CHARLM2_DONE" /root/charlm/run2/train.log 2>/dev/null | tail -n 50 | cut -c1-600
     grep -E "^\[step" /root/charlm/run2/train.log 2>/dev/null | tail -n 48 | cut -c1-300
     echo "--- sft1/train.log ---"; grep -vE "Warning|warn|^\[step" /root/charlm/sft1/train.log 2>/dev/null | tail -n 30 | cut -c1-900
     grep -E "^\[step" /root/charlm/sft1/train.log 2>/dev/null | tail -n 2 | cut -c1-300; } > /root/boxlog_CH.txt
@@ -191,6 +192,28 @@ fi
 if [ ! -e /root/.ch_nodiv13 ]; then touch /root/.ch_nodiv13
   echo '{"cool_target": 0.887, "plateau_cools": 0, "p_wiki": 0.0, "diverge": 9.0}' > /root/charlm/data/ctl.json
   echo "[ctl13] data/ctl.json: $(cat /root/charlm/data/ctl.json) $(date -u)" | tee -a /root/charlm/run2/train.log
+fi
+# ---- serial 14, the user: chat in the pre-training mix too - GPT-2 read conversation-like web text, and chat is where this
+# model is headed. SmolTalk train shards 4-8 (of 9) as the same plain 'User:'/'Assistant:' text (0-3 stay for the chat
+# fine-tuning; the test split stays the unseen yardstick), a quarter of the windows from it. One restart for the new code
+# (the last without the optimizer state: the running code predates it). ----
+if [ ! -e /root/.ch_chatmix14 ]; then touch /root/.ch_chatmix14
+  cat > /root/chmix14.sh <<'JOB'
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); cd /root/charlm; L=run2/train.log
+echo "[mix14] preparing SmolTalk train shards 4-8 as plain chat text beside the run $(date -u)" | tee -a $L
+python3 -u charlm_prep.py --out data --chat-train 4,5,6,7,8 > mix14.log 2>&1
+grep -E "^\[prep\]|Error|Traceback|CHARLM_CHATTRAIN_DONE" mix14.log | tail -3 | sed 's/^/[mix14] /' | tee -a $L
+grep -q CHARLM_CHATTRAIN_DONE mix14.log && [ -s data/train_chat.bin ] || { echo "[mix14] prep failed - the run goes on unchanged $(date -u)" | tee -a $L; exit 1; }
+sed -i 's/ --p-wiki [0-9.]* / --p-wiki 0.0 --p-chat 0.25 /' /root/chjob.sh
+grep -o -- "--p-wiki [0-9.]* --p-chat [0-9.]*" /root/chjob.sh | sed 's/^/[mix14] job now: /' | tee -a $L
+echo '{"cool_target": 0.887, "plateau_cools": 0, "p_wiki": 0.0, "diverge": 9.0, "p_chat": 0.25}' > data/ctl.json
+n0=$(grep -c "^\[val\]" $L); while [ "$(grep -c '^\[val\]' $L)" -le "$n0" ]; do grep -q CHARLM2_DONE $L && exit 0; sleep 30; done; sleep 150
+pkill -f "chjo[b].sh"; pkill -f "charlm2.py --data data --out run2"; sleep 20
+setsid nohup bash -c 'bash /root/chjob.sh >> /root/charlm/job.log 2>&1' > /dev/null 2>&1 < /dev/null &
+echo "[mix14] resumed with a quarter of the windows from chat text $(date -u)" | tee -a $L
+JOB
+  setsid nohup bash -c 'bash /root/chmix14.sh >> /root/charlm/job.log 2>&1' > /dev/null 2>&1 < /dev/null &
+  echo "[mix14] launched $(date -u)"
 fi
 echo "BOXCH_OK serial $BOXCH_SERIAL $(date -u)"
 # CTL-END

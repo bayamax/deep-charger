@@ -23,6 +23,8 @@ ap.add_argument("--out", required=True); ap.add_argument("--fineweb", type=int, 
 ap.add_argument("--src", default="", help="a folder that already holds the parquet files (else they are downloaded there)")
 ap.add_argument("--chat-val", type=int, default=0, help="only this: the first N conversations of SmolTalk's test split (used by no training) as "
                 "plain text - 'User: ...' / 'Assistant: ...' lines - into val_chat.bin (+ val_chat.txt), the chat yardstick")
+ap.add_argument("--chat-train", default="", help="only this: SmolTalk train shards (e.g. 4,5,6,7,8 of 9) as the same plain 'User:'/'Assistant:' "
+                "text into train_chat.bin, for pre-training (the other shards stay for the chat fine-tuning; the test split stays unseen)")
 ap.add_argument("--more", default="", help="only this: more FineWeb-Edu training text from these sample-10BT shards (e.g. 2,3) into train_fw_more.bin, "
                 "nothing held out (the held-out documents stay those of the original run's last shard)")
 A = ap.parse_args()
@@ -87,21 +89,34 @@ def wikitext_articles(path):
     if cur: yield "".join(cur)
 
 
-if A.chat_val:
+def chat_text(msgs):
+    """a conversation as plain text: 'User: ...' / 'Assistant: ...' lines, a system prompt folded into the first user turn"""
+    lines = []; sys_ = ""
+    for m in msgs:
+        if m["role"] == "system": sys_ += m["content"].strip() + "\n\n"; continue
+        c = m["content"].strip()
+        if m["role"] == "user" and sys_: c = sys_ + c; sys_ = ""
+        lines.append(("User: " if m["role"] == "user" else "Assistant: ") + c)
+    return "\n".join(lines) + "\n" if lines else ""
+
+
+if A.chat_val or A.chat_train:
     from huggingface_hub import hf_hub_download
-    t = pq.read_table(hf_hub_download("HuggingFaceTB/smoltalk", "data/all/test-00000-of-00001.parquet", repo_type="dataset", local_dir=os.path.join(SRC, "dl")), columns=["messages"])
+    st_ = lambda path: hf_hub_download("HuggingFaceTB/smoltalk", path, repo_type="dataset", local_dir=os.path.join(SRC, "dl"))
+if A.chat_val:
+    t = pq.read_table(st_("data/all/test-00000-of-00001.parquet"), columns=["messages"])
     convs = []
     for msgs in t.column("messages").to_pylist():
-        lines = []; sys_ = ""
-        for m in msgs:
-            if m["role"] == "system": sys_ += m["content"].strip() + "\n\n"; continue
-            c = m["content"].strip()
-            if m["role"] == "user" and sys_: c = sys_ + c; sys_ = ""
-            lines.append(("User: " if m["role"] == "user" else "Assistant: ") + c)
-        if lines: convs.append("\n".join(lines) + "\n")
+        c = chat_text(msgs)
+        if c: convs.append(c)
         if len(convs) >= A.chat_val: break
     raw = []; write("val_chat.bin", convs, raw); open(os.path.join(A.out, "val_chat.txt"), "w").write("\x00".join(raw))
     print("CHARLM_CHATVAL_DONE", flush=True); sys.exit(0)
+if A.chat_train:
+    paths = [st_(f"data/all/train-{int(i):05d}-of-00009.parquet") for i in A.chat_train.split(",")]
+    write("train_chat.bin", (chat_text(m) for p_ in paths for m in pq.read_table(p_, columns=["messages"]).column("messages").to_pylist()))
+    for p_ in paths: os.remove(p_)
+    print("CHARLM_CHATTRAIN_DONE", flush=True); sys.exit(0)
 
 if A.more:
     more = [fetch("HuggingFaceFW/fineweb-edu", f"sample/10BT/{int(i):03d}_00000.parquet") for i in A.more.split(",")]
