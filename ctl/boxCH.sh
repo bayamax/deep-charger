@@ -3,7 +3,7 @@
 # grown 4 -> 8 -> 12 -> 16 layers at d 512 (charlm/charlm2.py), then tested against GPT-2 small on the same documents and
 # quantized to 4 bits by GPTQ. Pull-based as the others; the log goes to the hub every 10 minutes (boxlog_CH.txt), the
 # checkpoints to charlm/run2/ as they are made.
-BOXCH_SERIAL=12
+BOXCH_SERIAL=13
 if [ -f /root/.boxch_serial ] && [ "$(cat /root/.boxch_serial)" -gt "$BOXCH_SERIAL" ] 2>/dev/null; then echo "BOXCH_STALE $BOXCH_SERIAL"; exit 0; fi
 echo $BOXCH_SERIAL > /root/.boxch_serial
 [ -s /root/.hf_token ] || { [ -n "$HF_TOKEN" ] && printf '%s' "$HF_TOKEN" > /root/.hf_token && chmod 600 /root/.hf_token; }
@@ -184,6 +184,13 @@ fi
 if [ ! -e /root/.ch_nowiki11 ]; then touch /root/.ch_nowiki11
   echo '{"cool_target": 0.887, "plateau_cools": 0, "p_wiki": 0.0}' > /root/charlm/data/ctl.json
   echo "[ctl11] data/ctl.json: $(cat /root/charlm/data/ctl.json) $(date -u)" | tee -a /root/charlm/run2/train.log
+fi
+# ---- serial 13: with Wikipedia no longer read, WikiText's validation climbs (1.123 -> 1.197) and drags the wiki+FineWeb
+# mean up; the divergence guard (mean 0.1 above its best -> back to old weights at half the rate) would fire on that alone
+# within hours. Off (diverge 9) through the control file; FineWeb and the chat score are what is watched now. ----
+if [ ! -e /root/.ch_nodiv13 ]; then touch /root/.ch_nodiv13
+  echo '{"cool_target": 0.887, "plateau_cools": 0, "p_wiki": 0.0, "diverge": 9.0}' > /root/charlm/data/ctl.json
+  echo "[ctl13] data/ctl.json: $(cat /root/charlm/data/ctl.json) $(date -u)" | tee -a /root/charlm/run2/train.log
 fi
 echo "BOXCH_OK serial $BOXCH_SERIAL $(date -u)"
 # CTL-END
