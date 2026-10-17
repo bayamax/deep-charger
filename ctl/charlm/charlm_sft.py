@@ -30,6 +30,9 @@ ap.add_argument("--stop-plateau", type=float, default=0.0, help="stop when the h
 ap.add_argument("--stop-evals", type=int, default=3)
 ap.add_argument("--chars-per-step", type=int, default=65536); ap.add_argument("--micro", type=int, default=8); ap.add_argument("--epochs", type=float, default=2.0)
 ap.add_argument("--eval-every", type=float, default=20.0); ap.add_argument("--val-convs", type=int, default=600)
+ap.add_argument("--jsonl", default="", help="conversations of one's own, comma-separated .jsonl files of {\"messages\": [...]} (with --shards 0: only these)")
+ap.add_argument("--val-jsonl", default="", help="held-out conversations as .jsonl (in place of SmolTalk's test split)")
+ap.add_argument("--prompts-json", default="", help="a JSON list of user turns for the sample replies")
 ap.add_argument("--hub", default=""); ap.add_argument("--seed", type=int, default=0); ap.add_argument("--max-convs", type=int, default=0)
 A = ap.parse_args()
 torch.manual_seed(A.seed); random.seed(A.seed); np.random.seed(A.seed)
@@ -133,12 +136,17 @@ def cut(ids, mask, T):
     return ids, mask
 
 
+def jsonl_table(p):
+    return [(json.loads(l)["messages"], "jsonl") for l in open(p) if l.strip()]
+
+
 def load(paths, limit=0):
     convs = []; skipped = collections_counter()
     for p in paths:
-        t = pq.read_table(p, columns=["messages", "source"])
-        for msgs, src in zip(t.column("messages").to_pylist(), t.column("source").to_pylist()):
-            if src not in SRC: skipped["source"] += 1; continue
+        if p.endswith(".jsonl"): rows = jsonl_table(p)
+        else: t = pq.read_table(p, columns=["messages", "source"]); rows = zip(t.column("messages").to_pylist(), t.column("source").to_pylist())
+        for msgs, src in rows:
+            if src != "jsonl" and src not in SRC: skipped["source"] += 1; continue
             ids, mask = conv_ids(msgs)
             if np.mean(np.array(ids) == UNK) > 0.005: skipped["non-ascii"] += 1; continue
             r = cut(ids, mask, SEQ)
@@ -153,8 +161,8 @@ def collections_counter():
 
 
 t0 = time.time()
-train_paths = [fetch(f"data/all/train-{i:05d}-of-00009.parquet") for i in range(A.shards)]
-TRAIN, sk = load(train_paths, A.max_convs); VAL, _ = load([fetch("data/all/test-00000-of-00001.parquet")], A.val_convs)
+train_paths = [fetch(f"data/all/train-{i:05d}-of-00009.parquet") for i in range(A.shards)] + [x for x in A.jsonl.split(",") if x]
+TRAIN, sk = load(train_paths, A.max_convs); VAL, _ = load([A.val_jsonl] if A.val_jsonl else [fetch("data/all/test-00000-of-00001.parquet")], A.val_convs)
 ntr = sum(len(c[0]) for c in TRAIN); nas = sum(int(c[1].sum()) for c in TRAIN)
 out(f"[sft] {len(TRAIN)} training conversations ({ntr / 1e6:.0f}M chars, {nas / 1e6:.0f}M assistant chars learned); skipped {dict(sk)}; validation {len(VAL)} [{time.time() - t0:.0f}s]")
 
@@ -214,6 +222,7 @@ def hub_put(local, remote):
 
 PROMPTS = ["Hi! How are you today?", "What is photosynthesis? Explain it simply.", "Write a short poem about the sea.",
            "Can you give me three tips for staying focused while studying?", "Rewrite this sentence to sound more polite: Give me the report now."]
+if A.prompts_json: PROMPTS = json.load(open(A.prompts_json))
 v0 = val_bpc(); out(f"[val] before fine-tuning: {v0:.3f} bits per assistant character")
 for p in PROMPTS[:2]: out(f"[reply before] {json.dumps(p)} -> {json.dumps(reply(p, 300))}")
 
