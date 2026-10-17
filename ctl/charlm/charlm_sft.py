@@ -26,6 +26,8 @@ ap.add_argument("--base", required=True); ap.add_argument("--data", required=Tru
 ap.add_argument("--shards", type=int, default=4, help="SmolTalk train shards (of 9)")
 ap.add_argument("--sources", default="smol-magpie-ultra,everyday-conversations,systemchats-30k,openhermes-100k,smol-rewrite,smol-summarize,smol-constraints,explore-instruct-rewriting,longalign")
 ap.add_argument("--lr", type=float, default=3e-4); ap.add_argument("--warmup", type=int, default=100); ap.add_argument("--hours", type=float, default=3.0)
+ap.add_argument("--stop-plateau", type=float, default=0.0, help="stop when the held-out score has not improved by this over --stop-evals evaluations (0: off; --hours stays the cap)")
+ap.add_argument("--stop-evals", type=int, default=3)
 ap.add_argument("--chars-per-step", type=int, default=65536); ap.add_argument("--micro", type=int, default=8); ap.add_argument("--epochs", type=float, default=2.0)
 ap.add_argument("--eval-every", type=float, default=20.0); ap.add_argument("--val-convs", type=int, default=600)
 ap.add_argument("--hub", default=""); ap.add_argument("--seed", type=int, default=0); ap.add_argument("--max-convs", type=int, default=0)
@@ -216,7 +218,7 @@ for p in PROMPTS[:2]: out(f"[reply before] {json.dumps(p)} -> {json.dumps(reply(
 opt = torch.optim.AdamW(model.parameters(), lr=A.lr, betas=(0.9, 0.95), weight_decay=0.0, fused=DEV == "cuda")
 rows_per_step = max(1, A.chars_per_step // SEQ); epoch_rows = pack(TRAIN); total_steps = int(A.epochs * len(epoch_rows) / rows_per_step)
 out(f"[sft] {len(epoch_rows)} windows per epoch, {rows_per_step} per update -> {total_steps} updates for {A.epochs} epochs (or {A.hours} h)")
-T0 = time.time(); step = 0; ptr = 0; last_eval = time.time(); best = v0; acc = []; MICRO = A.micro
+T0 = time.time(); step = 0; ptr = 0; last_eval = time.time(); best = v0; acc = []; MICRO = A.micro; VH = [v0]
 while step < total_steps and time.time() - T0 < A.hours * 3600:
     frac = step / max(1, total_steps); lr = A.lr * min(1.0, (step + 1) / A.warmup) * (0.1 + 0.9 * 0.5 * (1 + math.cos(math.pi * frac)))
     for g in opt.param_groups: g["lr"] = lr
@@ -234,11 +236,14 @@ while step < total_steps and time.time() - T0 < A.hours * 3600:
     step += 1; acc.append(tot / max(cnt, 1))
     if step % 100 == 0: out(f"[step {step}/{total_steps}] train {np.mean(acc) / math.log(2):.3f} bits/assistant char, lr {lr:.2e}, {(time.time() - T0) / 60:.0f} min"); acc = []
     if time.time() - last_eval > A.eval_every * 60:
-        v = val_bpc(); last_eval = time.time(); out(f"[val] step {step}: {v:.3f} bits per assistant character")
+        v = val_bpc(); last_eval = time.time(); out(f"[val] step {step}: {v:.3f} bits per assistant character"); VH.append(v)
+        for p in PROMPTS[step // 100 % len(PROMPTS):][:2]: out(f"[reply step {step}] {json.dumps(p)} -> {json.dumps(reply(p, 300))}")
         if v < best:
             best = v; p_ = os.path.join(A.out, "model_best.pt")
             torch.save({"model": model.state_dict(), "layers": CK["layers"], "args": BA, "vocab": V, "chars": CHARS, "special": {"UNK": UNK, "EOD": EOD, "USER": USR, "ASSISTANT": AST}}, p_); hub_put(p_, "model_best.pt")
         hub_put(LOGF, "train.log")
+        if A.stop_plateau > 0 and len(VH) > A.stop_evals and min(VH[:-A.stop_evals]) - min(VH[-A.stop_evals:]) < A.stop_plateau:
+            out(f"[stop] the held-out score gained {min(VH[:-A.stop_evals]) - min(VH[-A.stop_evals:]):.4f} over the last {A.stop_evals} evaluations (< {A.stop_plateau}) - done"); break
 
 v1 = val_bpc(); out(f"[val] after: {v1:.3f} bits per assistant character (before {v0:.3f}); {step} updates, {(time.time() - T0) / 60:.0f} min")
 p_ = os.path.join(A.out, "model_final.pt")

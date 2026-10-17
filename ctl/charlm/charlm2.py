@@ -35,6 +35,11 @@ ap.add_argument("--hub", default="", help="repo/prefix on the hub for checkpoint
 ap.add_argument("--resume", default=""); ap.add_argument("--seed", type=int, default=0); ap.add_argument("--bench", type=int, default=0)
 ap.add_argument("--compile", type=int, default=0)
 ap.add_argument("--grow-now", type=int, default=0, help="1: after --resume, grow to the next depth at once")
+ap.add_argument("--chat-val", default="", help="a held-out chat text (charlm_prep.py --chat-val: SmolTalk's test split, used by no training), scored at every validation")
+ap.add_argument("--chat-val-chars", type=int, default=1500000); ap.add_argument("--chat-prompt", default="User: What is photosynthesis? Explain it simply.\nAssistant:")
+ap.add_argument("--cool-plateau", type=float, default=0.0, help="at the last depth, when the chat score has gained less than this over --cool-evals "
+                "validations, the learning rate falls to a tenth over --cool-hours and the run ends there (0: off; --hours stays the cap)")
+ap.add_argument("--cool-evals", type=int, default=4); ap.add_argument("--cool-hours", type=float, default=3.0)
 ap.add_argument("--qknorm", type=int, default=1, help="1: LayerNorm on each head's queries and keys (keeps attention logits bounded over the 4096-character context)")
 ap.add_argument("--diverge", type=float, default=0.10, help="a validation this much worse than the best: back to the best weights, the learning rate halved")
 A = ap.parse_args()
@@ -51,6 +56,7 @@ for i, c in enumerate(CHARS): LUT[ord(c)] = i
 def encode_ascii(s): return LUT[np.frombuffer(s.encode("ascii", "replace"), dtype=np.uint8)]
 
 mm = lambda n: np.memmap(os.path.join(A.data, n), dtype=np.uint8, mode="r")
+VAC = np.memmap(A.chat_val, dtype=np.uint8, mode="r") if A.chat_val and os.path.exists(A.chat_val) else None
 TRW, TRF = mm("train_wiki.bin"), mm("train_fw.bin"); VAW, VAF = mm("val_wiki.bin"), mm("val_fw.bin"); TEW, TEF = mm("test_wiki.bin"), mm("test_fw.bin")
 out(f"[charlm2] train: wiki {len(TRW) / 1e6:.0f}M + fineweb {len(TRF) / 1e6:.0f}M chars; validation {len(VAW) / 1e6:.2f}M + {len(VAF) / 1e6:.1f}M; "
     f"test {len(TEW) / 1e6:.2f}M + {len(TEF) / 1e6:.1f}M; {DEV} {torch.cuda.get_device_name(0) if DEV == 'cuda' else ''}")
@@ -175,10 +181,11 @@ if A.bench:
     sys.exit(0)
 
 model = CharLM(DEPTHS[0]).to(DEV); stage = 0; step = 0; hist = []; best = {"bpc": 9.0, "step": 0}; T0 = time.time(); budget = A.hours * 3600
+CHATH = []; COOL_T0 = None   # chat-score history (step, minutes, bpc); when the cool-down started (seconds of the run)
 if A.resume and os.path.exists(A.resume):
     st = torch.load(A.resume, map_location=DEV, weights_only=False); model = CharLM(st["layers"]).to(DEV); model.load_state_dict(st["model"])
     stage = DEPTHS.index(st["layers"]); step = st["step"]; hist = st.get("hist", []); best = st.get("best", best); T0 = time.time() - st.get("elapsed", 0)
-    best.setdefault("layers", st["layers"])
+    best.setdefault("layers", st["layers"]); CHATH = st.get("chat_hist", []); COOL_T0 = st.get("cool_t0")
     out(f"[charlm2] resumed at step {step}, {st['layers']} layers, {st.get('elapsed', 0) / 3600:.1f} h in")
 if A.grow_now and A.resume and stage + 1 < len(DEPTHS):
     stage += 1; model.grow(DEPTHS[stage]); out(f"[grow] -> {len(model.blocks)} layers ({model.n_params() / 1e6:.1f}M params) at resume, step {step} (--grow-now)")
@@ -192,19 +199,32 @@ def validate():
     vw, vf = bpc(model, VAW, A.val_chars), bpc(model, VAF, A.val_chars); return vw, vf, (vw + vf) / 2
 
 
+def chat_eval():
+    """the unseen chat text's bpc, and a reply to --chat-prompt (the base model, no fine-tuning yet)"""
+    if VAC is None: return None
+    vc = bpc(model, VAC, A.chat_val_chars); CHATH.append((step, (time.time() - T0) / 60, vc))
+    out(f"[chat] step {step} {len(model.blocks)} layers: SmolTalk test (unseen) {vc:.3f} bpc")
+    out(f"[chat-sample] {json.dumps(sample(model, A.chat_prompt, n=300)[len(A.chat_prompt):])}")
+    return vc
+
+
 def save(tag):
     p = os.path.join(A.out, f"model_{tag}.pt")
-    torch.save({"model": model.state_dict(), "layers": len(model.blocks), "step": step, "hist": hist, "best": best, "elapsed": time.time() - T0, "args": vars(A), "chars": CHARS}, p)
+    torch.save({"model": model.state_dict(), "layers": len(model.blocks), "step": step, "hist": hist, "best": best, "elapsed": time.time() - T0, "args": vars(A), "chars": CHARS,
+                "chat_hist": CHATH, "cool_t0": COOL_T0}, p)
     return p
 
 
 stage_t0 = time.time(); stage_step0 = step; last_eval = time.time(); LR_SCALE = 1.0
 vw, vf, v = validate(); hist.append((step, (time.time() - T0) / 60, len(model.blocks), vw, vf)); out(f"[val] step {step} {len(model.blocks)} layers: wiki {vw:.3f} fineweb {vf:.3f} mean {v:.3f} bpc")
+chat_eval()
 acc = []; t_log = time.time(); seen = step * A.chars_per_step
 while True:
     el = time.time() - T0
     if el > budget: break
+    if COOL_T0 is not None and el > COOL_T0 + A.cool_hours * 3600: out(f"[cool] cool-down over at {el / 60:.0f} min"); break
     w = min(1.0, (step - stage_step0 + 1) / A.warmup); dec = 1.0 if el < 0.8 * budget else max(0.1, 1.0 - 0.9 * (el - 0.8 * budget) / (0.2 * budget))
+    if COOL_T0 is not None: dec = min(dec, max(0.1, 1.0 - 0.9 * (el - COOL_T0) / (A.cool_hours * 3600)))
     for g in opt.param_groups: g["lr"] = A.lr * LR_SCALE * w * dec
     n_win = A.chars_per_step // A.seq
     try:
@@ -224,6 +244,10 @@ while True:
     if time.time() - last_eval > A.eval_every * 60:
         vw, vf, v = validate(); el = time.time() - T0; hist.append((step, el / 60, len(model.blocks), vw, vf)); last_eval = time.time()
         out(f"[val] step {step} {len(model.blocks)} layers: wiki {vw:.3f} fineweb {vf:.3f} mean {v:.3f} bpc ({el / 60:.0f} min)")
+        if chat_eval() is not None and A.cool_plateau > 0 and COOL_T0 is None and stage + 1 >= len(DEPTHS) and len(CHATH) > A.cool_evals \
+                and CHATH[-1 - A.cool_evals][2] - CHATH[-1][2] < A.cool_plateau:
+            COOL_T0 = el; out(f"[cool] the chat score gained {CHATH[-1 - A.cool_evals][2] - CHATH[-1][2]:.4f} over the last {A.cool_evals} validations "
+                              f"(< {A.cool_plateau}): the learning rate falls to a tenth over {A.cool_hours:g} h, then the run ends")
         if v < best["bpc"]: best = {"bpc": v, "step": step, "layers": len(model.blocks)}; hub_put(save("best"), "model_best.pt")
         if v > best["bpc"] + A.diverge and best.get("layers") == len(model.blocks) and os.path.exists(os.path.join(A.out, "model_best.pt")):
             # diverging: the best weights back (same depth), a fresh optimizer, half the learning rate from here on

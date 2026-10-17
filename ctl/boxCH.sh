@@ -3,7 +3,7 @@
 # grown 4 -> 8 -> 12 -> 16 layers at d 512 (charlm/charlm2.py), then tested against GPT-2 small on the same documents and
 # quantized to 4 bits by GPTQ. Pull-based as the others; the log goes to the hub every 10 minutes (boxlog_CH.txt), the
 # checkpoints to charlm/run2/ as they are made.
-BOXCH_SERIAL=7
+BOXCH_SERIAL=8
 if [ -f /root/.boxch_serial ] && [ "$(cat /root/.boxch_serial)" -gt "$BOXCH_SERIAL" ] 2>/dev/null; then echo "BOXCH_STALE $BOXCH_SERIAL"; exit 0; fi
 echo $BOXCH_SERIAL > /root/.boxch_serial
 [ -s /root/.hf_token ] || { [ -n "$HF_TOKEN" ] && printf '%s' "$HF_TOKEN" > /root/.hf_token && chmod 600 /root/.hf_token; }
@@ -137,6 +137,25 @@ echo "[more7] resumed from model_latest with the larger FineWeb, 53 h in all, p_
 JOB
   setsid nohup bash -c 'bash /root/chmore7.sh >> /root/charlm/job.log 2>&1' > /dev/null 2>&1 < /dev/null &
   echo "[more7] launched $(date -u)"
+fi
+# ---- serial 8, the user: the goal is a model that chats well enough, not the planned hours. A chat yardstick no training
+# uses (the first 600 conversations of SmolTalk's test split, as 'User:'/'Assistant:' text) is scored at every validation
+# with a reply to a chat prompt; once that score gains < 0.004 bpc over 4 validations (2 h) the learning rate falls to a
+# tenth over 3 h and pre-training ends (53 h stays only the cap). The chat fine-tuning then runs until its own held-out
+# score (the same test conversations) stops improving (< 0.005 over 3 evaluations, 1 h), with replies at every evaluation,
+# 10 h the cap. The flags reach the run at its restart with the larger FineWeb (serial 7). ----
+if [ ! -e /root/.ch_chat8 ]; then touch /root/.ch_chat8
+  cd /root/charlm
+  [ -s data/val_chat.bin ] || python3 -u charlm_prep.py --out data --chat-val 600 2>&1 | grep -E "^\[prep\]|DONE|Error|Traceback" | sed 's/^/[chat8] /' | tee -a run2/train.log
+  if [ -s data/val_chat.bin ]; then
+    grep -q -- "--chat-val" /root/chjob.sh || sed -i 's/ --eval-every 30 / --chat-val data\/val_chat.bin --cool-plateau 0.004 --cool-evals 4 --cool-hours 3 --eval-every 30 /' /root/chjob.sh
+    grep -o -- "--chat-val [^ ]* --cool-plateau [0-9.]* --cool-evals [0-9]* --cool-hours [0-9.]*" /root/chjob.sh | sed 's/^/[chat8] job now: /' | tee -a run2/train.log
+  fi
+  pkill -f "chsf[t].sh"; sleep 2
+  sed -i 's/ --hours 3 --hub / --hours 10 --stop-plateau 0.005 --stop-evals 3 --hub /' /root/chsft.sh
+  grep -o -- "--hours [0-9]* --stop-plateau [0-9.]* --stop-evals [0-9]*" /root/chsft.sh | sed 's/^/[chat8] fine-tuning now: /' | tee -a run2/train.log
+  setsid nohup bash -c 'bash /root/chsft.sh >> /root/charlm/sft.log 2>&1' > /dev/null 2>&1 < /dev/null &
+  echo "[chat8] chat yardstick ready; the fine-tuning waits for pre-training again $(date -u)" | tee -a run2/train.log
 fi
 echo "BOXCH_OK serial $BOXCH_SERIAL $(date -u)"
 # CTL-END

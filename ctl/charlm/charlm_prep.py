@@ -21,6 +21,8 @@ import numpy as np
 ap = argparse.ArgumentParser()
 ap.add_argument("--out", required=True); ap.add_argument("--fineweb", type=int, default=1, help="FineWeb-Edu sample-10BT shards")
 ap.add_argument("--src", default="", help="a folder that already holds the parquet files (else they are downloaded there)")
+ap.add_argument("--chat-val", type=int, default=0, help="only this: the first N conversations of SmolTalk's test split (used by no training) as "
+                "plain text - 'User: ...' / 'Assistant: ...' lines - into val_chat.bin (+ val_chat.txt), the chat yardstick")
 ap.add_argument("--more", default="", help="only this: more FineWeb-Edu training text from these sample-10BT shards (e.g. 2,3) into train_fw_more.bin, "
                 "nothing held out (the held-out documents stay those of the original run's last shard)")
 A = ap.parse_args()
@@ -84,6 +86,22 @@ def wikitext_articles(path):
         cur.append(line)
     if cur: yield "".join(cur)
 
+
+if A.chat_val:
+    from huggingface_hub import hf_hub_download
+    t = pq.read_table(hf_hub_download("HuggingFaceTB/smoltalk", "data/all/test-00000-of-00001.parquet", repo_type="dataset", local_dir=os.path.join(SRC, "dl")), columns=["messages"])
+    convs = []
+    for msgs in t.column("messages").to_pylist():
+        lines = []; sys_ = ""
+        for m in msgs:
+            if m["role"] == "system": sys_ += m["content"].strip() + "\n\n"; continue
+            c = m["content"].strip()
+            if m["role"] == "user" and sys_: c = sys_ + c; sys_ = ""
+            lines.append(("User: " if m["role"] == "user" else "Assistant: ") + c)
+        if lines: convs.append("\n".join(lines) + "\n")
+        if len(convs) >= A.chat_val: break
+    raw = []; write("val_chat.bin", convs, raw); open(os.path.join(A.out, "val_chat.txt"), "w").write("\x00".join(raw))
+    print("CHARLM_CHATVAL_DONE", flush=True); sys.exit(0)
 
 if A.more:
     more = [fetch("HuggingFaceFW/fineweb-edu", f"sample/10BT/{int(i):03d}_00000.parquet") for i in A.more.split(",")]
