@@ -331,8 +331,13 @@ try:
     import q4
     def gptq_linear(W, H, group=64, bits=4, block=128, damp=0.01):
         W = W.clone().float(); rows, cols = W.shape; nb = float((1 << bits) - 1)
-        dead = torch.diag(H) == 0; H[dead, dead] = 1; W[:, dead] = 0; H += torch.eye(cols, device=W.device) * damp * torch.mean(torch.diag(H))
-        Hinv = torch.linalg.cholesky(torch.cholesky_inverse(torch.linalg.cholesky(H)), upper=True)
+        H = H.double(); dead = torch.diag(H) == 0; H[dead, dead] = 1; W[:, dead] = 0; Hinv = None
+        for d_ in (damp, 0.1, 1.0, 10.0):   # in float64, the damping raised until the factorisation goes through (it once failed at 0.01)
+            try:
+                Hd = H + torch.eye(cols, device=W.device, dtype=H.dtype) * d_ * torch.mean(torch.diag(H))
+                Hinv = torch.linalg.cholesky(torch.cholesky_inverse(torch.linalg.cholesky(Hd)), upper=True).float(); break
+            except Exception: continue
+        if Hinv is None: raise RuntimeError("GPTQ: the Hessian would not factorise even at damping 10")
         Q = torch.zeros_like(W); codes = torch.zeros(rows, cols, dtype=torch.uint8, device=W.device); sc = torch.zeros(rows, cols // group, device=W.device); bi = torch.zeros_like(sc)
         for i1 in range(0, cols, block):
             i2 = min(i1 + block, cols); W1 = W[:, i1:i2].clone(); Q1 = torch.zeros_like(W1); E1 = torch.zeros_like(W1); Hi = Hinv[i1:i2, i1:i2]
