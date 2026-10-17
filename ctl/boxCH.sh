@@ -3,7 +3,7 @@
 # grown 4 -> 8 -> 12 -> 16 layers at d 512 (charlm/charlm2.py), then tested against GPT-2 small on the same documents and
 # quantized to 4 bits by GPTQ. Pull-based as the others; the log goes to the hub every 10 minutes (boxlog_CH.txt), the
 # checkpoints to charlm/run2/ as they are made.
-BOXCH_SERIAL=14
+BOXCH_SERIAL=15
 if [ -f /root/.boxch_serial ] && [ "$(cat /root/.boxch_serial)" -gt "$BOXCH_SERIAL" ] 2>/dev/null; then echo "BOXCH_STALE $BOXCH_SERIAL"; exit 0; fi
 echo $BOXCH_SERIAL > /root/.boxch_serial
 [ -s /root/.hf_token ] || { [ -n "$HF_TOKEN" ] && printf '%s' "$HF_TOKEN" > /root/.hf_token && chmod 600 /root/.hf_token; }
@@ -28,6 +28,7 @@ if [ ! -e /root/.chmirror_r5 ]; then touch /root/.chmirror_r5; pkill -f "chmirro
 if [ ! -e /root/.chmirror_r10 ]; then touch /root/.chmirror_r10; pkill -f "chmirro[r].sh"; sleep 1; fi   # serial 10: the chat lines too
 if [ ! -e /root/.chmirror_r12 ]; then touch /root/.chmirror_r12; pkill -f "chmirro[r].sh"; sleep 1; fi   # serial 12: 4 h of training-loss lines
 if [ ! -e /root/.chmirror_r14 ]; then touch /root/.chmirror_r14; pkill -f "chmirro[r].sh"; sleep 1; fi   # serial 14: the mix14 lines
+if [ ! -e /root/.chmirror_r15 ]; then touch /root/.chmirror_r15; pkill -f "chmirro[r].sh"; sleep 1; fi   # serial 15: the push15 lines
 if ! pgrep -f "chmirro[r].sh" >/dev/null; then
   cat > /root/chmirror.sh <<'MR'
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null)
@@ -36,7 +37,7 @@ while true; do
     echo "--- ctl.log ---"; tail -n 15 /root/ctl.log 2>/dev/null | cut -c1-300
     echo "--- prep.log ---"; tail -n 20 /root/charlm/prep.log 2>/dev/null | cut -c1-300
     echo "--- job.log ---"; grep -vE "Warning|warn" /root/charlm/job.log 2>/dev/null | tail -n 20 | cut -c1-600
-    echo "--- run2/train.log ---"; grep -E "^\[val\]|^\[chat|^\[cool\]|^\[ctl\]|^\[plateau\]|^\[more7\]|^\[target9\]|^\[mix14\]|^\[ctl11\]|^\[grow\]|^\[oom\]|^\[diverge\]|^\[restart|^\[charlm2\]|^\[test\]|^\[gptq\]|^\[sample\]|^\[hub\]|CHARLM2_DONE" /root/charlm/run2/train.log 2>/dev/null | tail -n 50 | cut -c1-600
+    echo "--- run2/train.log ---"; grep -E "^\[val\]|^\[chat|^\[cool\]|^\[ctl\]|^\[plateau\]|^\[more7\]|^\[target9\]|^\[mix14\]|^\[push15\]|^\[ctl11\]|^\[grow\]|^\[oom\]|^\[diverge\]|^\[restart|^\[charlm2\]|^\[test\]|^\[gptq\]|^\[sample\]|^\[hub\]|CHARLM2_DONE" /root/charlm/run2/train.log 2>/dev/null | tail -n 50 | cut -c1-600
     grep -E "^\[step" /root/charlm/run2/train.log 2>/dev/null | tail -n 48 | cut -c1-300
     echo "--- sft1/train.log ---"; grep -vE "Warning|warn|^\[step" /root/charlm/sft1/train.log 2>/dev/null | tail -n 30 | cut -c1-900
     grep -E "^\[step" /root/charlm/sft1/train.log 2>/dev/null | tail -n 2 | cut -c1-300; } > /root/boxlog_CH.txt
@@ -214,6 +215,24 @@ echo "[mix14] resumed with a quarter of the windows from chat text $(date -u)" |
 JOB
   setsid nohup bash -c 'bash /root/chmix14.sh >> /root/charlm/job.log 2>&1' > /dev/null 2>&1 < /dev/null &
   echo "[mix14] launched $(date -u)"
+fi
+# ---- serial 15, the user: push on while the chat score falls this fast (1.146 -> 0.901 -> 0.864 within an hour of the chat
+# mix). The cool-down the 0.887 target started (minute 1861) is called off; no fixed target - the cool-down now starts when
+# the chat score gains < 0.01 over 4 validations (2 h); 40% of the windows from chat text (2.2B characters: still under one
+# pass by the cap). One restart for the new code (the optimizer state now comes back with it). ----
+if [ ! -e /root/.ch_push15 ]; then touch /root/.ch_push15
+  echo '{"cool_target": 0.0, "plateau_cools": 1, "cool_plateau": 0.01, "cool_evals": 4, "p_wiki": 0.0, "diverge": 9.0, "p_chat": 0.4, "cool_cancel_before_min": 1900}' > /root/charlm/data/ctl.json
+  cat > /root/chpush15.sh <<'JOB'
+cd /root/charlm; L=run2/train.log
+sed -i 's/ --p-chat [0-9.]* / --p-chat 0.4 /' /root/chjob.sh
+echo "[push15] control file: $(cat data/ctl.json); job: $(grep -o -- '--p-chat [0-9.]*' /root/chjob.sh) $(date -u)" | tee -a $L
+n0=$(grep -c "^\[val\]" $L); while [ "$(grep -c '^\[val\]' $L)" -le "$n0" ]; do grep -q CHARLM2_DONE $L && exit 0; sleep 30; done; sleep 150
+pkill -f "chjo[b].sh"; pkill -f "charlm2.py --data data --out run2"; sleep 20
+setsid nohup bash -c 'bash /root/chjob.sh >> /root/charlm/job.log 2>&1' > /dev/null 2>&1 < /dev/null &
+echo "[push15] resumed: the cool-down called off, the chat plateau decides, 40% chat $(date -u)" | tee -a $L
+JOB
+  setsid nohup bash -c 'bash /root/chpush15.sh >> /root/charlm/job.log 2>&1' > /dev/null 2>&1 < /dev/null &
+  echo "[push15] launched $(date -u)"
 fi
 echo "BOXCH_OK serial $BOXCH_SERIAL $(date -u)"
 # CTL-END

@@ -208,6 +208,18 @@ def validate():
     vw, vf = bpc(model, VAW, A.val_chars), bpc(model, VAF, A.val_chars); return vw, vf, (vw + vf) / 2
 
 
+def apply_ctl():
+    """the control file's settings; "cool_cancel_before_min": N calls off a cool-down that started before minute N"""
+    global COOL_T0
+    if not (A.ctl and os.path.exists(A.ctl)): return
+    try:
+        for k_, v_ in json.load(open(A.ctl)).items():
+            if k_ == "cool_cancel_before_min":
+                if COOL_T0 is not None and COOL_T0 / 60 < v_: out(f"[ctl] the cool-down started at {COOL_T0 / 60:.0f} min is called off"); COOL_T0 = None
+            elif hasattr(A, k_) and getattr(A, k_) != v_: out(f"[ctl] {k_}: {getattr(A, k_)} -> {v_}"); setattr(A, k_, type(getattr(A, k_))(v_))
+    except Exception as e: out(f"[ctl] unreadable: {str(e)[:100]}")
+
+
 def chat_eval():
     """the unseen chat text's bpc, and a reply to --chat-prompt (the base model, no fine-tuning yet)"""
     if VAC is None: return None
@@ -225,6 +237,7 @@ def save(tag):
 
 
 stage_t0 = time.time(); stage_step0 = step - (A.warmup if OPT_BACK else 0); last_eval = time.time(); LR_SCALE = 1.0
+apply_ctl()
 vw, vf, v = validate(); hist.append((step, (time.time() - T0) / 60, len(model.blocks), vw, vf)); out(f"[val] step {step} {len(model.blocks)} layers: wiki {vw:.3f} fineweb {vf:.3f} mean {v:.3f} bpc")
 chat_eval()
 acc = []; t_log = time.time(); seen = step * A.chars_per_step
@@ -253,11 +266,7 @@ while True:
     if time.time() - last_eval > A.eval_every * 60:
         vw, vf, v = validate(); el = time.time() - T0; hist.append((step, el / 60, len(model.blocks), vw, vf)); last_eval = time.time()
         out(f"[val] step {step} {len(model.blocks)} layers: wiki {vw:.3f} fineweb {vf:.3f} mean {v:.3f} bpc ({el / 60:.0f} min)")
-        if A.ctl and os.path.exists(A.ctl):
-            try:
-                for k_, v_ in json.load(open(A.ctl)).items():
-                    if hasattr(A, k_) and getattr(A, k_) != v_: out(f"[ctl] {k_}: {getattr(A, k_)} -> {v_}"); setattr(A, k_, type(getattr(A, k_))(v_))
-            except Exception as e: out(f"[ctl] unreadable: {str(e)[:100]}")
+        apply_ctl()
         vc = chat_eval()
         if vc is not None and COOL_T0 is None and stage + 1 >= len(DEPTHS):
             gain = CHATH[-1 - A.cool_evals][2] - CHATH[-1][2] if len(CHATH) > A.cool_evals else None
