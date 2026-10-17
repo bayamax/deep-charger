@@ -194,7 +194,10 @@ if A.resume and os.path.exists(A.resume):
 if A.grow_now and A.resume and stage + 1 < len(DEPTHS):
     stage += 1; model.grow(DEPTHS[stage]); out(f"[grow] -> {len(model.blocks)} layers ({model.n_params() / 1e6:.1f}M params) at resume, step {step} (--grow-now)")
 make_opt = lambda: torch.optim.AdamW(model.parameters(), lr=A.lr, betas=(0.9, 0.95), weight_decay=A.wd, fused=DEV == "cuda")
-opt = make_opt(); MICRO = A.micro
+opt = make_opt(); MICRO = A.micro; OPT_BACK = False
+if A.resume and os.path.exists(A.resume) and "opt" in st and not A.grow_now:   # the AdamW moments back too: a fresh optimizer cost every restart a bump
+    try: opt.load_state_dict(st["opt"]); OPT_BACK = True; out("[charlm2] optimizer state restored (no warm-up)")
+    except Exception as e: out(f"[charlm2] optimizer state not restored: {str(e)[:100]}")
 out(f"[charlm2] {len(model.blocks)} layers, d {A.d}, ff {FF}, heads {A.heads}, context {A.seq}: {model.n_params() / 1e6:.2f}M params; "
     f"{A.chars_per_step} chars per update; budget {A.hours} h; depths {DEPTHS}")
 
@@ -215,11 +218,11 @@ def chat_eval():
 def save(tag):
     p = os.path.join(A.out, f"model_{tag}.pt")
     torch.save({"model": model.state_dict(), "layers": len(model.blocks), "step": step, "hist": hist, "best": best, "elapsed": time.time() - T0, "args": vars(A), "chars": CHARS,
-                "chat_hist": CHATH, "cool_t0": COOL_T0}, p)
+                "chat_hist": CHATH, "cool_t0": COOL_T0, **({"opt": opt.state_dict()} if tag == "latest" else {})}, p)
     return p
 
 
-stage_t0 = time.time(); stage_step0 = step; last_eval = time.time(); LR_SCALE = 1.0
+stage_t0 = time.time(); stage_step0 = step - (A.warmup if OPT_BACK else 0); last_eval = time.time(); LR_SCALE = 1.0
 vw, vf, v = validate(); hist.append((step, (time.time() - T0) / 60, len(model.blocks), vw, vf)); out(f"[val] step {step} {len(model.blocks)} layers: wiki {vw:.3f} fineweb {vf:.3f} mean {v:.3f} bpc")
 chat_eval()
 acc = []; t_log = time.time(); seen = step * A.chars_per_step
