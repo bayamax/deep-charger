@@ -3,7 +3,7 @@
 # grown 4 -> 8 -> 12 -> 16 layers at d 512 (charlm/charlm2.py), then tested against GPT-2 small on the same documents and
 # quantized to 4 bits by GPTQ. Pull-based as the others; the log goes to the hub every 10 minutes (boxlog_CH.txt), the
 # checkpoints to charlm/run2/ as they are made.
-BOXCH_SERIAL=15
+BOXCH_SERIAL=16
 if [ -f /root/.boxch_serial ] && [ "$(cat /root/.boxch_serial)" -gt "$BOXCH_SERIAL" ] 2>/dev/null; then echo "BOXCH_STALE $BOXCH_SERIAL"; exit 0; fi
 echo $BOXCH_SERIAL > /root/.boxch_serial
 [ -s /root/.hf_token ] || { [ -n "$HF_TOKEN" ] && printf '%s' "$HF_TOKEN" > /root/.hf_token && chmod 600 /root/.hf_token; }
@@ -233,6 +233,14 @@ echo "[push15] resumed: the cool-down called off, the chat plateau decides, 40% 
 JOB
   setsid nohup bash -c 'bash /root/chpush15.sh >> /root/charlm/job.log 2>&1' > /dev/null 2>&1 < /dev/null &
   echo "[push15] launched $(date -u)"
+fi
+# ---- serial 16, the user: the sample's question needed knowledge (photosynthesis), the thing a 50M-parameter model has least
+# of; an everyday one shows whether it can hold a conversation. The prompt changes through the control file. ----
+if [ ! -e /root/.ch_prompt16 ]; then touch /root/.ch_prompt16
+  cat > /root/charlm/data/ctl.json <<'CTLJ'
+{"cool_target": 0.0, "plateau_cools": 1, "cool_plateau": 0.01, "cool_evals": 4, "p_wiki": 0.0, "diverge": 9.0, "p_chat": 0.4, "cool_cancel_before_min": 1900, "chat_prompt": "User: Hi! I'm going to the beach this weekend. Any tips?\nAssistant:"}
+CTLJ
+  echo "[ctl16] data/ctl.json: $(cat /root/charlm/data/ctl.json) $(date -u)" | tee -a /root/charlm/run2/train.log
 fi
 echo "BOXCH_OK serial $BOXCH_SERIAL $(date -u)"
 # CTL-END
