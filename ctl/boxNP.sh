@@ -5,7 +5,7 @@
 # probes; the character model (npc1) is fine-tuned on them with the earlier public NPC data (npc2), and both models' replies
 # to the probes are graded by the same open model (charlm/npc_bench.py). Pull-based as the others; the log goes to the hub
 # every 10 minutes (charlm/npc2/boxlog_NP.txt) and to the container log every 5 (status.sh).
-BOXNP_SERIAL=11
+BOXNP_SERIAL=12
 if [ -f /root/.boxnp_serial ] && [ "$(cat /root/.boxnp_serial)" -gt "$BOXNP_SERIAL" ] 2>/dev/null; then echo "BOXNP_STALE $BOXNP_SERIAL"; exit 0; fi
 echo $BOXNP_SERIAL > /root/.boxnp_serial
 # serial 10: the host checked first (three hosts had a broken Docker, a slow network, or a GPU already half used by
@@ -66,6 +66,12 @@ if [ ! -e /root/.np_s11 ]; then touch /root/.np_s11
   pkill -f "npjo[b].sh"; pkill -f "npc_ge[n].py"; pkill -f "npc_benc[h].py"; pkill -f "charlm_sf[t].py"; sleep 8
   rm -f /root/.npjob /root/np/*.tmp; echo "[np] s11: job stopped, restarting with the raw outputs kept $(date -u)"
 fi
+# serial 12: serial 11's stop left vLLM's engine process (its own process, not npc_gen.py) holding 37 GB, so every load
+# after it failed: whatever holds the GPU ended, the job started again; the job itself now clears the GPU before each load
+if [ ! -e /root/.np_s12 ]; then touch /root/.np_s12
+  pkill -f "npjo[b].sh"; pkill -f "npc_ge[n].py"; pkill -f "npc_benc[h].py"; sleep 3; fuser -k -9 /dev/nvidia* > /dev/null 2>&1; sleep 5
+  rm -f /root/.npjob /root/np/*.tmp; echo "[np] s12: GPU $(nvidia-smi --query-gpu=memory.used --format=csv,noheader) used after clearing $(date -u)"
+fi
 [ -s /root/.hf_token ] || { [ -n "$HF_TOKEN" ] && printf '%s' "$HF_TOKEN" > /root/.hf_token && chmod 600 /root/.hf_token; }
 echo "[np] HF token: $([ -s /root/.hf_token ] && echo present || echo MISSING)"
 RAW="https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl"
@@ -122,16 +128,17 @@ if [ ! -e /root/.npjob ]; then touch /root/.npjob
   cat > /root/npjob.sh <<'JOB'
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); cd /root/np
 HUB="https://huggingface.co/baya1116/hypernet-sp-distill/resolve/main/charlm"
+gpu_clear() { fuser -k -9 /dev/nvidia* > /dev/null 2>&1; sleep 3; }   # an engine process left by a failed load would hold the GPU
 put() { python3 -c "import sys; from huggingface_hub import HfApi; HfApi().upload_file(path_or_fileobj=sys.argv[1], path_in_repo='charlm/'+sys.argv[2], repo_id='baya1116/hypernet-sp-distill')" "$1" "$2" > /dev/null 2>&1 && echo "[hub] $2" || echo "[hub] $2 FAILED"; }
 for f in npc1/model_final.pt npc_data/stage2_public.jsonl npc_data/stage2_val.jsonl; do
   [ -s $(basename $f) ] || curl -sSfL -o $(basename $f) "$HUB/$f"; done
 mv -n model_final.pt npc1.pt 2>/dev/null; ls -la *.pt *.jsonl | sed 's/^/[np] /'
 echo "[np] probes $(date -u)"
-[ -s npc_bench.jsonl ] || { python3 -u npc_gen.py bench --n 150 --out npc_bench.tmp && mv npc_bench.tmp npc_bench.jsonl && put npc_bench.jsonl npc_data2/npc_bench.jsonl; }
+[ -s npc_bench.jsonl ] || { gpu_clear; python3 -u npc_gen.py bench --n 150 --out npc_bench.tmp && mv npc_bench.tmp npc_bench.jsonl && put npc_bench.jsonl npc_data2/npc_bench.jsonl; }
 for c in 0 1 2 3; do
   echo "[np] dialogues part $c $(date -u)"
   for try in 1 2; do
-    [ -s train_$c.jsonl ] && break
+    [ -s train_$c.jsonl ] && break; gpu_clear
     if [ -s train_$c.tmp.raw ]; then python3 -u npc_gen.py train --from-raw train_$c.tmp.raw --seed $((c + 1)) --out train_$c.tmp
     else python3 -u npc_gen.py train --n 2500 --seed $((c + 1)) --out train_$c.tmp; fi
     [ -s train_$c.tmp ] && mv train_$c.tmp train_$c.jsonl && put train_$c.jsonl npc_data2/train_$c.jsonl && cp train_$c.tmp.raw train_$c.raw.jsonl && put train_$c.raw.jsonl npc_data2/train_$c.raw.jsonl
@@ -153,7 +160,7 @@ for m in best final 4bit; do
   [ -s npc2/model_$m.pt ] && [ ! -s replies_npc2_$m.jsonl ] && python3 -u npc_bench.py reply --model npc2/model_$m.pt --tag npc2-$m --bench npc_bench.jsonl --out replies_npc2_$m.jsonl
 done
 cat replies_*.jsonl > replies_all.jsonl
-[ -s judged_all.jsonl ] || python3 -u npc_gen.py judge --inp replies_all.jsonl --out judged_all.jsonl
+[ -s judged_all.jsonl ] || { gpu_clear; python3 -u npc_gen.py judge --inp replies_all.jsonl --out judged_all.jsonl; }
 python3 npc_bench.py report --inp judged_all.jsonl > report.txt; sed 's/^/[report] /' report.txt
 put judged_all.jsonl npc2/judged_all.jsonl; put report.txt npc2/report.txt
 echo "[np] NPJOB_DONE $(date -u)"
