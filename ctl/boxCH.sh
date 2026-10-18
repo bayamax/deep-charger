@@ -3,7 +3,7 @@
 # grown 4 -> 8 -> 12 -> 16 layers at d 512 (charlm/charlm2.py), then tested against GPT-2 small on the same documents and
 # quantized to 4 bits by GPTQ. Pull-based as the others; the log goes to the hub every 10 minutes (boxlog_CH.txt), the
 # checkpoints to charlm/run2/ as they are made.
-BOXCH_SERIAL=25
+BOXCH_SERIAL=26
 if [ -f /root/.boxch_serial ] && [ "$(cat /root/.boxch_serial)" -gt "$BOXCH_SERIAL" ] 2>/dev/null; then echo "BOXCH_STALE $BOXCH_SERIAL"; exit 0; fi
 echo $BOXCH_SERIAL > /root/.boxch_serial
 [ -s /root/.hf_token ] || { [ -n "$HF_TOKEN" ] && printf '%s' "$HF_TOKEN" > /root/.hf_token && chmod 600 /root/.hf_token; }
@@ -352,6 +352,15 @@ JOB
   setsid nohup bash -c 'bash /root/chsft2.sh >> /root/charlm/job.log 2>&1' > /dev/null 2>&1 < /dev/null &
   setsid nohup bash -c 'bash /root/chnpc20.sh >> /root/charlm/job.log 2>&1' > /dev/null 2>&1 < /dev/null &
   echo "[sft2_25] queued: sft1 -> sft2 (shards 4-8) -> NPC $(date -u)" | tee -a /root/charlm/run2/train.log
+fi
+# ---- serial 26: the second chat fine-tuning got worse at once (held-out 0.588 -> 0.604 by step 513): the first had ended at
+# a tenth of 3e-4 and this one warmed straight up to 1.5e-4 - the bump seen before. Again from sft1's final weights at 5e-5. ----
+if [ ! -e /root/.ch_sft2lr26 ]; then touch /root/.ch_sft2lr26
+  pkill -f "chsft[2].sh"; pkill -f "charlm_sft.py.*--out sft2"; sleep 10
+  cd /root/charlm && mkdir -p sft_old && mv sft2 sft_old/sft2_lr1.5e-4 2>/dev/null; mv sft2.out sft_old/sft2_lr1.5e-4.out 2>/dev/null
+  sed -i 's/ --lr 1.5e-4 / --lr 5e-5 /' /root/chsft2.sh
+  grep -o -- "--lr [0-9.e-]*" /root/chsft2.sh | sed 's/^/[sft2_25] relaunched at /' | tee -a run2/train.log
+  setsid nohup bash -c 'bash /root/chsft2.sh >> /root/charlm/job.log 2>&1' > /dev/null 2>&1 < /dev/null &
 fi
 echo "BOXCH_OK serial $BOXCH_SERIAL $(date -u)"
 # CTL-END
