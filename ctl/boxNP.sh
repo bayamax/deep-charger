@@ -5,7 +5,7 @@
 # probes; the character model (npc1) is fine-tuned on them with the earlier public NPC data (npc2), and both models' replies
 # to the probes are graded by the same open model (charlm/npc_bench.py). Pull-based as the others; the log goes to the hub
 # every 10 minutes (charlm/npc2/boxlog_NP.txt) and to the container log every 5 (status.sh).
-BOXNP_SERIAL=5
+BOXNP_SERIAL=6
 if [ -f /root/.boxnp_serial ] && [ "$(cat /root/.boxnp_serial)" -gt "$BOXNP_SERIAL" ] 2>/dev/null; then echo "BOXNP_STALE $BOXNP_SERIAL"; exit 0; fi
 echo $BOXNP_SERIAL > /root/.boxnp_serial
 # serial 2: Vast's own vLLM image (theirs builds; the vllm-openai one did not): its Python is /venv/main, and its own server
@@ -27,6 +27,14 @@ if [ ! -e /root/.np_s5 ]; then touch /root/.np_s5
     echo "[np] s5 speed: $(curl -sSL -o /dev/null -m 60 -w '%{size_download} bytes in %{time_total}s' $u) $(basename $u)"; done
 fi
 export UV_HTTP_TIMEOUT=300 UV_CONCURRENT_DOWNLOADS=4
+# serial 6: serial 4 took the failed install for a finished bootstrap and started the job without vLLM: the job stopped,
+# vLLM installed whenever it does not import (bootstrap or not), the job started only once it does
+if [ ! -e /root/.np_s6 ]; then touch /root/.np_s6
+  for p in $(pgrep -f "bash /root/ctl_cmd.sh"); do [ "$p" != "$$" ] && kill $p 2>/dev/null; done
+  pkill -f "npjo[b].sh"; pkill -f "npc_ge[n].py"; pkill -f "npc_benc[h].py"; pkill -f "charlm_sf[t].py"; pkill -f "uv pip install"; sleep 3
+  rm -f /root/.npjob /root/np/*.tmp; rmdir /root/.bootstrap_lock /root/.vllm_lock 2>/dev/null
+  echo "[np] s6: job stopped and reset $(date -u)"
+fi
 [ -s /root/.hf_token ] || { [ -n "$HF_TOKEN" ] && printf '%s' "$HF_TOKEN" > /root/.hf_token && chmod 600 /root/.hf_token; }
 echo "[np] HF token: $([ -s /root/.hf_token ] && echo present || echo MISSING)"
 RAW="https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl"
@@ -37,17 +45,22 @@ done
 
 if [ ! -f /root/.bootstrapped ]; then
   mkdir /root/.bootstrap_lock 2>/dev/null || { echo "bootstrap already running"; exit 0; }
-  if ! python3 -c "import vllm" 2>/dev/null; then   # serial 3: Vast's PyTorch image has none
-    echo "[np] installing vLLM 0.31.0 $(date -u)"
-    if which uv > /dev/null; then timeout 1800 uv pip install --python $(which python3) "vllm==0.31.0" 2>&1 | tail -4
-    else timeout 1800 python3 -m pip install --progress-bar off --timeout 60 "vllm==0.31.0" 2>&1 | tail -4; fi
-    echo "[np] vLLM install ended $(date -u)"
-  fi
   python3 -m pip install -q pyarrow "huggingface_hub[hf_xet]" 2>&1 | tail -1 || uv pip install --system -q pyarrow "huggingface_hub[hf_xet]" 2>&1 | tail -1
   python3 -c "import vllm, torch; print('[np] vllm', vllm.__version__, 'torch', torch.__version__, torch.cuda.get_device_name(0))"
   nvidia-smi --query-gpu=name,memory.total,driver_version --format=csv,noheader; df -h /root | tail -1; free -g | head -2; nproc
   touch /root/.bootstrapped; echo "BOOTSTRAP_DONE $(date -u)"
 fi
+
+if ! python3 -c "import vllm" 2>/dev/null && mkdir /root/.vllm_lock 2>/dev/null; then   # serial 3: Vast's PyTorch image has none
+  echo "[np] installing vLLM 0.31.0 $(date -u)"
+  for try in 1 2 3; do
+    timeout 2400 uv pip install --python $(which python3) "vllm==0.31.0" 2>&1 | tail -3
+    python3 -c "import vllm" 2>/dev/null && break; echo "[np] vLLM install try $try failed $(date -u)"; sleep 20
+  done
+  python3 -c "import vllm, torch; print('[np] vllm', vllm.__version__, 'torch', torch.__version__, torch.cuda.get_device_name(0))" 2>&1 | tail -1
+  rmdir /root/.vllm_lock
+fi
+python3 -c "import vllm" 2>/dev/null || { echo "[np] no vLLM yet - the job waits $(date -u)"; exit 0; }
 
 cat > /root/status.sh <<'ST'
 grep -vE "Warning|warn|it/s\]|^\s*$" /root/np/np.log 2>/dev/null | tail -n 6 | cut -c1-300
