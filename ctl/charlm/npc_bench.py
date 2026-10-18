@@ -5,17 +5,22 @@
           (mean log-probability per character), with rule checks: the answer's words present, AI talk, an echo of the
           player's line, length
   report  per model and probe kind from the judged rows: usable %, the four scores, answer hit %
+  sample  for situations cut from the training dialogues (the card, the turns so far, the player's line), N replies each,
+          all kept, for the judge
+  pick    the judged samples -> the best usable reply per situation as a training dialogue (rejection sampling)
 
   python3 npc_bench.py reply --model npc1/model_final.pt --tag npc1 --bench npc_bench.jsonl --out replies.jsonl
   python3 npc_bench.py report --inp judged.jsonl
+  python3 npc_bench.py sample --model npc2/model_final.pt --tag npc2 --bench train_3.jsonl --situations 3000 --n 6 --out samples.jsonl
+  python3 npc_bench.py pick --inp samples_judged.jsonl --out rft.jsonl
 """
 import argparse, collections, json, re, sys, time
 
 ap = argparse.ArgumentParser()
-ap.add_argument("mode", choices=["reply", "report"])
+ap.add_argument("mode", choices=["reply", "report", "sample", "pick"])
 ap.add_argument("--model", default=""); ap.add_argument("--tag", default=""); ap.add_argument("--bench", default=""); ap.add_argument("--out", default="")
 ap.add_argument("--inp", default=""); ap.add_argument("--n", type=int, default=4); ap.add_argument("--max-chars", type=int, default=300)
-ap.add_argument("--temp", type=float, default=0.7); ap.add_argument("--top-p", type=float, default=0.9); ap.add_argument("--seed", type=int, default=0)
+ap.add_argument("--situations", type=int, default=3000); ap.add_argument("--temp", type=float, default=0.7); ap.add_argument("--top-p", type=float, default=0.9); ap.add_argument("--seed", type=int, default=0)
 A = ap.parse_args()
 AI_TALK = re.compile(r"\b(as an ai|language model|i'm an ai|i am an ai|virtual assistant|ai assistant|text-based|real-time)\b", re.I)
 
@@ -34,7 +39,7 @@ def echo(reply, line):
     return bool(a) and len(set(a) & set(b)) / max(1, len(set(a))) > 0.8 and len(a) <= len(b) + 2
 
 
-if A.mode == "reply":
+if A.mode in ("reply", "sample"):
     import torch, torch.nn.functional as F
     sys.path.insert(0, __import__("os").path.dirname(__import__("os").path.abspath(__file__)))
     import charlm_fold as FM
@@ -92,21 +97,50 @@ if A.mode == "reply":
         txt = ["".join(CHARS[i] if i < UNK else "" for i in o).strip() for o in outs]
         return txt, (lp / torch.tensor([len(o) + 1 for o in outs], device=DEV)).tolist()
 
-    rows = [json.loads(l) for l in open(A.bench)]; T0 = time.time(); n = 0
-    with open(A.out, "a") as f:
-        for r in rows:
-            for p in r["probes"]:
-                ids = []
-                for i, t in enumerate(p["turns"]):
-                    ids += [USR if i % 2 == 0 else AST] + FM.encode((r["card"] + "\n\n" + t) if i == 0 else t).tolist()
-                txt, lps = sample(ids + [AST], A.n); best = max(range(A.n), key=lambda j: lps[j])
-                for pick, j in (("first", 0), ("best", best)):
-                    s = txt[j]
-                    f.write(json.dumps({"model": A.tag, "pick": pick, "kind": p["kind"], "card": r["card"], "turns": p["turns"], "answer": p.get("answer", ""),
-                                        "reply": s, "hit": hit(s, p["answer"]) if p.get("answer") else None, "ai_talk": bool(AI_TALK.search(s)),
-                                        "echo": echo(s, p["turns"][-1]), "chars": len(s)}) + "\n")
+    def conv_ids(card, turns):
+        ids = []
+        for i, t in enumerate(turns): ids += [USR if i % 2 == 0 else AST] + FM.encode((card + "\n\n" + t) if i == 0 else t).tolist()
+        return ids + [AST]
+
+    T0 = time.time(); n = 0
+    if A.mode == "reply":
+        rows = [json.loads(l) for l in open(A.bench)]
+        with open(A.out, "a") as f:
+            for r in rows:
+                for p in r["probes"]:
+                    txt, lps = sample(conv_ids(r["card"], p["turns"]), A.n); best = max(range(A.n), key=lambda j: lps[j])
+                    for pick, j in (("first", 0), ("best", best)):
+                        s = txt[j]
+                        f.write(json.dumps({"model": A.tag, "pick": pick, "kind": p["kind"], "card": r["card"], "turns": p["turns"], "answer": p.get("answer", ""),
+                                            "reply": s, "hit": hit(s, p["answer"]) if p.get("answer") else None, "ai_talk": bool(AI_TALK.search(s)),
+                                            "echo": echo(s, p["turns"][-1]), "chars": len(s)}) + "\n")
+                    n += 1
+    else:   # situations: a training dialogue cut before one of its NPC turns (a random one), N replies each
+        import random; rng = random.Random(A.seed); dl = [json.loads(l) for l in open(A.bench)]; rng.shuffle(dl)
+        with open(A.out, "w") as f:
+            for k, d in enumerate(dl[:A.situations]):
+                m = d["messages"]; card = m[0]["content"]; turns = [x["content"] for x in m[1:]]
+                cut = rng.randrange(len(turns) // 2) * 2 + 1; ctx = turns[:cut]
+                if len(card) + sum(len(t) for t in ctx) > 3600: continue
+                txt, lps = sample(conv_ids(card, ctx), A.n)
+                for j in range(A.n):
+                    f.write(json.dumps({"model": A.tag, "sid": k, "j": j, "lp": lps[j], "card": card, "turns": ctx, "reference": turns[cut], "reply": txt[j],
+                                        "ai_talk": bool(AI_TALK.search(txt[j])), "echo": echo(txt[j], ctx[-1]), "chars": len(txt[j])}) + "\n")
                 n += 1
-    print(f"[bench] {A.tag}: {n} probes x {A.n} samples [{(time.time() - T0) / 60:.1f} min] -> {A.out}", flush=True)
+    print(f"[bench] {A.mode} {A.tag}: {n} {'probes' if A.mode == 'reply' else 'situations'} x {A.n} samples [{(time.time() - T0) / 60:.1f} min] -> {A.out}", flush=True)
+elif A.mode == "pick":
+    rows = [json.loads(l) for l in open(A.inp)]; S = collections.defaultdict(list)
+    for r in rows: S[r["sid"]].append(r)
+    score = lambda r: (sum((r["judge"].get(k) or 0) for k in ("answers", "consistent", "in_character", "fluent")), r["lp"])
+    n_sit = len(S); kept = 0; usable = sum(bool(r["judge"].get("usable")) for r in rows)
+    with open(A.out, "w") as f:
+        for sid, rs in S.items():
+            ok = [r for r in rs if r["judge"].get("usable") and not r["ai_talk"] and not r["echo"] and r["reply"]]
+            if not ok: continue
+            b = max(ok, key=score); msgs = [{"role": "system", "content": b["card"]}]
+            for i, t in enumerate(b["turns"] + [b["reply"]]): msgs.append({"role": "user" if i % 2 == 0 else "assistant", "content": t})
+            f.write(json.dumps({"messages": msgs}) + "\n"); kept += 1
+    print(f"[pick] {len(rows)} samples, {100 * usable / max(1, len(rows)):.0f}% usable; {kept} of {n_sit} situations have one -> {A.out}", flush=True)
 else:
     rows = [json.loads(l) for l in open(A.inp)]; G = collections.defaultdict(list)
     for r in rows:
