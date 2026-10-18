@@ -5,7 +5,7 @@
 # probes; the character model (npc1) is fine-tuned on them with the earlier public NPC data (npc2), and both models' replies
 # to the probes are graded by the same open model (charlm/npc_bench.py). Pull-based as the others; the log goes to the hub
 # every 10 minutes (charlm/npc2/boxlog_NP.txt) and to the container log every 5 (status.sh).
-BOXNP_SERIAL=2
+BOXNP_SERIAL=3
 if [ -f /root/.boxnp_serial ] && [ "$(cat /root/.boxnp_serial)" -gt "$BOXNP_SERIAL" ] 2>/dev/null; then echo "BOXNP_STALE $BOXNP_SERIAL"; exit 0; fi
 echo $BOXNP_SERIAL > /root/.boxnp_serial
 # serial 2: Vast's own vLLM image (theirs builds; the vllm-openai one did not): its Python is /venv/main, and its own server
@@ -22,6 +22,7 @@ done
 
 if [ ! -f /root/.bootstrapped ]; then
   mkdir /root/.bootstrap_lock 2>/dev/null || { echo "bootstrap already running"; exit 0; }
+  python3 -c "import vllm" 2>/dev/null || python3 -m pip install -q "vllm==0.31.0" 2>&1 | tail -2   # serial 3: Vast's PyTorch image
   python3 -m pip install -q pyarrow "huggingface_hub[hf_xet]" 2>&1 | tail -1 || uv pip install --system -q pyarrow "huggingface_hub[hf_xet]" 2>&1 | tail -1
   python3 -c "import vllm, torch; print('[np] vllm', vllm.__version__, 'torch', torch.__version__, torch.cuda.get_device_name(0))"
   nvidia-smi --query-gpu=name,memory.total,driver_version --format=csv,noheader; df -h /root | tail -1; free -g | head -2; nproc
