@@ -8,16 +8,22 @@
   sample  for situations cut from the training dialogues (the card, the turns so far, the player's line), N replies each,
           all kept, for the judge
   pick    the judged samples -> the best usable reply per situation as a training dialogue (rejection sampling)
+  rank    a reranker for the game (no judge there): logistic regression on the model's own view of a reply (its last
+          hidden state, the mean over the reply, the reply's log-probability and length), fit to the judge's 'usable' on
+          the judged samples; tested on held-out situations as "pick the top of N" against the likeliest and the first;
+          with --ranker, reply also writes the ranker's pick
 
   python3 npc_bench.py reply --model npc1/model_final.pt --tag npc1 --bench npc_bench.jsonl --out replies.jsonl
   python3 npc_bench.py report --inp judged.jsonl
   python3 npc_bench.py sample --model npc2/model_final.pt --tag npc2 --bench train_3.jsonl --situations 3000 --n 6 --out samples.jsonl
   python3 npc_bench.py pick --inp samples_judged.jsonl --out rft.jsonl
+  python3 npc_bench.py rank --model npc2/model_final.pt --inp samples_judged.jsonl --out rank.pt
 """
 import argparse, collections, json, re, sys, time
 
 ap = argparse.ArgumentParser()
-ap.add_argument("mode", choices=["reply", "report", "sample", "pick"])
+ap.add_argument("mode", choices=["reply", "report", "sample", "pick", "rank"])
+ap.add_argument("--ranker", default="", help="reply: a rank.pt; its pick of the N is written too")
 ap.add_argument("--model", default=""); ap.add_argument("--tag", default=""); ap.add_argument("--bench", default=""); ap.add_argument("--out", default="")
 ap.add_argument("--inp", default=""); ap.add_argument("--n", type=int, default=4); ap.add_argument("--max-chars", type=int, default=300)
 ap.add_argument("--situations", type=int, default=3000); ap.add_argument("--temp", type=float, default=0.7); ap.add_argument("--top-p", type=float, default=0.9); ap.add_argument("--seed", type=int, default=0)
@@ -39,7 +45,7 @@ def echo(reply, line):
     return bool(a) and len(set(a) & set(b)) / max(1, len(set(a))) > 0.8 and len(a) <= len(b) + 2
 
 
-if A.mode in ("reply", "sample"):
+if A.mode in ("reply", "sample", "rank"):
     import torch, torch.nn.functional as F
     sys.path.insert(0, __import__("os").path.dirname(__import__("os").path.abspath(__file__)))
     import charlm_fold as FM
@@ -81,6 +87,25 @@ if A.mode in ("reply", "sample"):
         return lin(ln(x[:, -1], "ln_f"), "head").float()
 
     @torch.no_grad()
+    def feats(ctx, reply_ids, lp):
+        """the model's view of a reply: its final hidden state (after the reply and the turn's end), the mean over the
+        reply, the mean log-probability per character and the length"""
+        seq = (ctx + reply_ids + [USR])[-W["pos.weight"].shape[0]:]; ids = torch.tensor([seq], device=DEV); T = ids.shape[1]; n = len(reply_ids) + 1
+        x = W["emb.weight"][ids] + W["pos.weight"][:T]
+        for i in range(L):
+            b = f"blocks.{i}"; q, k, v = lin(ln(x, b + ".ln1"), b + ".qkv").split(D, -1)
+            q, k, v = (z.view(1, T, H, HD) for z in (q, k, v))
+            if QK: q, k = ln(q, b + ".qn"), ln(k, b + ".kn")
+            o = F.scaled_dot_product_attention(q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2), is_causal=True)
+            x = x + lin(o.transpose(1, 2).reshape(1, T, D), b + ".proj")
+            x = x + lin(F.gelu(lin(ln(x, b + ".ln2"), b + ".fc"), approximate="tanh"), b + ".fc2")
+        h = ln(x[0], "ln_f").float()
+        return torch.cat([h[-1], h[-n:].mean(0), torch.tensor([lp, len(reply_ids) / 100.0], device=DEV)])
+
+    RK = torch.load(A.ranker, map_location=DEV) if A.ranker else None
+    def rank_score(f): return float(((f - RK["mu"]) / RK["sd"]) @ RK["w"] + RK["b"])
+
+    @torch.no_grad()
     def sample(ids, n):
         cache = [None] * L; lg = step(torch.tensor([ids] * n, device=DEV), cache)
         outs = [[] for _ in range(n)]; lp = torch.zeros(n, device=DEV); done = torch.zeros(n, dtype=torch.bool, device=DEV)
@@ -108,13 +133,36 @@ if A.mode in ("reply", "sample"):
         with open(A.out, "a") as f:
             for r in rows:
                 for p in r["probes"]:
-                    txt, lps = sample(conv_ids(r["card"], p["turns"]), A.n); best = max(range(A.n), key=lambda j: lps[j])
-                    for pick, j in (("first", 0), ("best", best)):
+                    ctx = conv_ids(r["card"], p["turns"]); txt, lps = sample(ctx, A.n); best = max(range(A.n), key=lambda j: lps[j])
+                    picks = [("first", 0), ("best", best)]
+                    if RK is not None: picks.append(("rank", max(range(A.n), key=lambda j: rank_score(feats(ctx, FM.encode(txt[j]).tolist(), lps[j])))))
+                    for pick, j in picks:
                         s = txt[j]
                         f.write(json.dumps({"model": A.tag, "pick": pick, "kind": p["kind"], "card": r["card"], "turns": p["turns"], "answer": p.get("answer", ""),
                                             "reply": s, "hit": hit(s, p["answer"]) if p.get("answer") else None, "ai_talk": bool(AI_TALK.search(s)),
                                             "echo": echo(s, p["turns"][-1]), "chars": len(s)}) + "\n")
                     n += 1
+    elif A.mode == "rank":
+        rows = [json.loads(l) for l in open(A.inp)]; X = []; y = []; sid = []
+        for r in rows:
+            X.append(feats(conv_ids(r["card"], r["turns"]), FM.encode(r["reply"]).tolist(), r["lp"])); y.append(float(bool(r["judge"].get("usable")))); sid.append(r["sid"])
+        X = torch.stack(X); y = torch.tensor(y, device=DEV); sid = torch.tensor(sid, device=DEV)
+        test = (sid % 5) == 0; tr = ~test; mu = X[tr].mean(0); sd = X[tr].std(0) + 1e-4; Z = (X - mu) / sd
+        w = torch.zeros(Z.shape[1], device=DEV, requires_grad=True); b0 = torch.zeros((), device=DEV, requires_grad=True)
+        opt = torch.optim.Adam([w, b0], lr=0.01)
+        for it in range(600):
+            opt.zero_grad(); z = Z[tr] @ w + b0
+            loss = F.binary_cross_entropy_with_logits(z, y[tr]) + 1e-3 * (w ** 2).sum(); loss.backward(); opt.step()
+        with torch.no_grad():
+            sc = Z @ w + b0; lpv = X[:, -2]; res = collections.Counter(); nsit = 0
+            for k in torch.unique(sid[test]).tolist():
+                m = (sid == k).nonzero().flatten()
+                if len(m) < 2: continue
+                nsit += 1; res["first"] += float(y[m[0]]); res["likeliest"] += float(y[m[lpv[m].argmax()]]); res["ranker"] += float(y[m[sc[m].argmax()]])
+                res["any"] += float(y[m].max()); res["mean"] += float(y[m].mean())
+        torch.save({"w": w.detach(), "b": b0.detach(), "mu": mu, "sd": sd, "features": "last hidden, mean over reply, lp, chars/100"}, A.out)
+        print(f"[rank] {len(rows)} judged replies ({100 * float(y.mean()):.0f}% usable); held-out {nsit} situations, usable % of the one picked: "
+              + ", ".join(f"{k} {100 * v / max(1, nsit):.1f}" for k, v in res.items()) + f" -> {A.out}", flush=True)
     else:   # situations: a training dialogue cut before one of its NPC turns (a random one), N replies each
         import random; rng = random.Random(A.seed); dl = [json.loads(l) for l in open(A.bench)]; rng.shuffle(dl)
         with open(A.out, "w") as f:
@@ -127,7 +175,7 @@ if A.mode in ("reply", "sample"):
                     f.write(json.dumps({"model": A.tag, "sid": k, "j": j, "lp": lps[j], "card": card, "turns": ctx, "reference": turns[cut], "reply": txt[j],
                                         "ai_talk": bool(AI_TALK.search(txt[j])), "echo": echo(txt[j], ctx[-1]), "chars": len(txt[j])}) + "\n")
                 n += 1
-    print(f"[bench] {A.mode} {A.tag}: {n} {'probes' if A.mode == 'reply' else 'situations'} x {A.n} samples [{(time.time() - T0) / 60:.1f} min] -> {A.out}", flush=True)
+    if A.mode != "rank": print(f"[bench] {A.mode} {A.tag}: {n} {'probes' if A.mode == 'reply' else 'situations'} x {A.n} samples [{(time.time() - T0) / 60:.1f} min] -> {A.out}", flush=True)
 elif A.mode == "pick":
     rows = [json.loads(l) for l in open(A.inp)]; S = collections.defaultdict(list)
     for r in rows: S[r["sid"]].append(r)

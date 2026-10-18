@@ -5,7 +5,7 @@
 # probes; the character model (npc1) is fine-tuned on them with the earlier public NPC data (npc2), and both models' replies
 # to the probes are graded by the same open model (charlm/npc_bench.py). Pull-based as the others; the log goes to the hub
 # every 10 minutes (charlm/npc2/boxlog_NP.txt) and to the container log every 5 (status.sh).
-BOXNP_SERIAL=15
+BOXNP_SERIAL=16
 if [ -f /root/.boxnp_serial ] && [ "$(cat /root/.boxnp_serial)" -gt "$BOXNP_SERIAL" ] 2>/dev/null; then echo "BOXNP_STALE $BOXNP_SERIAL"; exit 0; fi
 echo $BOXNP_SERIAL > /root/.boxnp_serial
 # serial 10: the host checked first (three hosts had a broken Docker, a slow network, or a GPU already half used by
@@ -248,6 +248,36 @@ echo "[np3] NPJOB3_DONE $(date -u)"
 JOB
   setsid nohup bash -c 'bash /root/npjob3.sh >> /root/np/np.log 2>&1' > /dev/null 2>&1 < /dev/null &
   echo "NPJOB3_QUEUED $(date -u)"
+fi
+# ---- serial 16, round 4 (queued behind round 3): a reranker for the game, where there is no judge. The better of npc3
+# and npc4 (first reply's usable %) answers 2,000 situations x 8; the judge grades them; a logistic regression on the
+# model's own view of each reply learns 'usable' (npc_bench.py rank); then the probes again, 8 replies each, with the
+# ranker's pick beside the first and the likeliest ----
+if [ ! -e /root/.npjob4 ]; then touch /root/.npjob4
+  cat > /root/npjob4.sh <<'JOB'
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); cd /root/np
+gpu_clear() { fuser -k -9 /dev/nvidia* > /dev/null 2>&1; sleep 3; }
+put() { python3 -c "import sys; from huggingface_hub import HfApi; HfApi().upload_file(path_or_fileobj=sys.argv[1], path_in_repo='charlm/'+sys.argv[2], repo_id='baya1116/hypernet-sp-distill')" "$1" "$2" > /dev/null 2>&1 && echo "[hub] $2" || echo "[hub] $2 FAILED"; }
+until grep -q NPJOB3_DONE np.log 2>/dev/null; do sleep 120; done
+M=$(python3 -c "
+import json, collections; u = collections.defaultdict(list)
+for f in ('judged_r3.jsonl', 'judged_r4.jsonl'):
+    for l in open(f):
+        r = json.loads(l)
+        if r['pick'] == 'first' and r['model'] in ('npc3-best', 'npc3-final', 'npc4-best', 'npc4-final'): u[r['model']].append(bool(r['judge'].get('usable')))
+print(max(u, key=lambda k: sum(u[k]) / len(u[k])) if u else 'npc4-final')")
+F=${M%-*}/model_${M#*-}.pt; echo "[np4] round 4: the ranker for $F $(date -u)"
+[ -s s4.jsonl ] || python3 -u npc_bench.py sample --model $F --tag $M --bench t3_all.jsonl --situations 2000 --n 8 --seed 4 --out s4.jsonl
+[ -s s4_judged.jsonl ] || { gpu_clear; python3 -u npc_gen.py judge --inp s4.jsonl --out s4_judged.jsonl; }
+python3 -u npc_bench.py rank --model $F --inp s4_judged.jsonl --out rank_$M.pt; put rank_$M.pt ${M%-*}/rank_$M.pt
+[ -s r5.jsonl ] || python3 -u npc_bench.py reply --model $F --tag $M-n8 --bench npc_bench.jsonl --n 8 --ranker rank_$M.pt --out r5.jsonl
+[ -s judged_r5.jsonl ] || { gpu_clear; python3 -u npc_gen.py judge --inp r5.jsonl --out judged_r5.jsonl; }
+python3 npc_bench.py report --inp judged_r5.jsonl > report4.txt; sed 's/^/[report4] /' report4.txt
+put judged_r5.jsonl ${M%-*}/judged_r5.jsonl; put report4.txt ${M%-*}/report4.txt; put s4_judged.jsonl npc_data2/s4_judged.jsonl
+echo "[np4] NPJOB4_DONE $(date -u)"
+JOB
+  setsid nohup bash -c 'bash /root/npjob4.sh >> /root/np/np.log 2>&1' > /dev/null 2>&1 < /dev/null &
+  echo "NPJOB4_QUEUED $(date -u)"
 fi
 echo "BOXNP_OK serial $BOXNP_SERIAL $(date -u)"
 # CTL-END
