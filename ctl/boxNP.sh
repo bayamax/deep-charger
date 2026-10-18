@@ -5,7 +5,7 @@
 # probes; the character model (npc1) is fine-tuned on them with the earlier public NPC data (npc2), and both models' replies
 # to the probes are graded by the same open model (charlm/npc_bench.py). Pull-based as the others; the log goes to the hub
 # every 10 minutes (charlm/npc2/boxlog_NP.txt) and to the container log every 5 (status.sh).
-BOXNP_SERIAL=10
+BOXNP_SERIAL=11
 if [ -f /root/.boxnp_serial ] && [ "$(cat /root/.boxnp_serial)" -gt "$BOXNP_SERIAL" ] 2>/dev/null; then echo "BOXNP_STALE $BOXNP_SERIAL"; exit 0; fi
 echo $BOXNP_SERIAL > /root/.boxnp_serial
 # serial 10: the host checked first (three hosts had a broken Docker, a slow network, or a GPU already half used by
@@ -58,6 +58,13 @@ if [ ! -e /root/.np_s8 ]; then touch /root/.np_s8
   nvidia-smi | sed 's/^/[np] s8 smi: /' | head -30
   ps -eo pid,stat,rss,etime,cmd --sort=-rss | head -12 | cut -c1-200 | sed 's/^/[np] s8 ps: /'
   (fuser -v /dev/nvidia* 2>&1 || ls -la /proc/*/fd 2>/dev/null | grep -c nvidia) | head -12 | sed 's/^/[np] s8 fuser: /'
+fi
+# serial 11: part 0's 2,500 outputs (12 min) were lost to a parse error (a dialogue written as a bare list): npc_gen.py
+# now keeps the raw outputs before parsing and skips a bad one; the job stopped and started again (the probes kept),
+# each part tried twice and parsed again from its raw file when that exists
+if [ ! -e /root/.np_s11 ]; then touch /root/.np_s11
+  pkill -f "npjo[b].sh"; pkill -f "npc_ge[n].py"; pkill -f "npc_benc[h].py"; pkill -f "charlm_sf[t].py"; sleep 8
+  rm -f /root/.npjob /root/np/*.tmp; echo "[np] s11: job stopped, restarting with the raw outputs kept $(date -u)"
 fi
 [ -s /root/.hf_token ] || { [ -n "$HF_TOKEN" ] && printf '%s' "$HF_TOKEN" > /root/.hf_token && chmod 600 /root/.hf_token; }
 echo "[np] HF token: $([ -s /root/.hf_token ] && echo present || echo MISSING)"
@@ -123,7 +130,12 @@ echo "[np] probes $(date -u)"
 [ -s npc_bench.jsonl ] || { python3 -u npc_gen.py bench --n 150 --out npc_bench.tmp && mv npc_bench.tmp npc_bench.jsonl && put npc_bench.jsonl npc_data2/npc_bench.jsonl; }
 for c in 0 1 2 3; do
   echo "[np] dialogues part $c $(date -u)"
-  [ -s train_$c.jsonl ] || { python3 -u npc_gen.py train --n 2500 --seed $((c + 1)) --out train_$c.tmp && mv train_$c.tmp train_$c.jsonl && put train_$c.jsonl npc_data2/train_$c.jsonl; }
+  for try in 1 2; do
+    [ -s train_$c.jsonl ] && break
+    if [ -s train_$c.tmp.raw ]; then python3 -u npc_gen.py train --from-raw train_$c.tmp.raw --seed $((c + 1)) --out train_$c.tmp
+    else python3 -u npc_gen.py train --n 2500 --seed $((c + 1)) --out train_$c.tmp; fi
+    [ -s train_$c.tmp ] && mv train_$c.tmp train_$c.jsonl && put train_$c.jsonl npc_data2/train_$c.jsonl && cp train_$c.tmp.raw train_$c.raw.jsonl && put train_$c.raw.jsonl npc_data2/train_$c.raw.jsonl
+  done
 done
 cat train_0.jsonl train_1.jsonl train_2.jsonl > train_new.jsonl; head -n -400 train_3.jsonl >> train_new.jsonl
 tail -n 400 train_3.jsonl > val_new.jsonl; cat val_new.jsonl stage2_val.jsonl > val_all.jsonl

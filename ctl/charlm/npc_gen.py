@@ -20,6 +20,7 @@ ap = argparse.ArgumentParser()
 ap.add_argument("mode", choices=["train", "bench", "judge"])
 ap.add_argument("--n", type=int, default=100, help="requests (train: one card and two dialogues each; bench: one card each)")
 ap.add_argument("--out", required=True); ap.add_argument("--inp", default="")
+ap.add_argument("--from-raw", default="", help="parse the outputs a run kept (OUT.raw) again instead of generating")
 ap.add_argument("--model", default="nvidia/Qwen3.6-35B-A3B-NVFP4"); ap.add_argument("--fallback", default="QuantTrio/Qwen3.6-35B-A3B-AWQ")
 ap.add_argument("--seed", type=int, default=0); ap.add_argument("--max-len", type=int, default=8192); ap.add_argument("--gpu-mem", type=float, default=0.90)
 A = ap.parse_args()
@@ -186,41 +187,65 @@ def ok_card(c):
 def ok_reply(s): return 2 <= len(s) <= 320 and not AI_TALK.search(s) and "*" not in s and sum(ord(ch) > 127 for ch in s) <= 2
 
 
+def turn_list(dl):
+    """a dialogue as the model wrote it: {"turns": [...]} or the list of turns itself"""
+    ts = dl.get("turns") if isinstance(dl, dict) else dl if isinstance(dl, list) else None
+    return [(clean(t.get("player", "")), clean(t.get("npc", ""))) for t in (ts or []) if isinstance(t, dict)]
+
+
+def train_rows(i, d, c, plans):
+    out = []
+    for j, dl in enumerate(d.get("dialogues") or []):
+        turns = turn_list(dl)
+        if len(turns) < 2 or not all(p and ok_reply(r) for p, r in turns): continue
+        msgs = [{"role": "system", "content": card_text(c, R.randrange(3))}]
+        for p, r in turns: msgs += [{"role": "user", "content": p}, {"role": "assistant", "content": r}]
+        out.append({"messages": msgs, "card": c, "plan": plans[i][j] if plans[i] and j < len(plans[i]) else []})
+    return out
+
+
+def bench_row(i, d, c, seen):
+    fq = [q for q in d.get("fact_questions") or [] if isinstance(q, dict) and q.get("q") and q.get("answer")]
+    fu = d.get("followup") if isinstance(d.get("followup"), dict) else {}
+    if len(fq) < 2 or c["name"].lower() in seen or not all(isinstance(d.get(k), str) and d[k].strip() for k in ("unknown", "meta", "rude")): return None
+    seen.add(c["name"].lower()); probes = []
+    for q in fq[:3]: probes.append({"kind": "fact", "turns": [clean(q["q"])], "answer": clean(q["answer"])})
+    if all(fu.get(k) for k in ("q", "reference", "q2", "answer")):
+        probes.append({"kind": "followup", "turns": [clean(fu["q"]), clean(fu["reference"]), clean(fu["q2"])], "answer": clean(fu["answer"])})
+    for k in ("unknown", "meta", "rude"): probes.append({"kind": k, "turns": [clean(d[k])]})
+    nm = NAMES_BENCH[i % len(NAMES_BENCH)]
+    probes.append({"kind": "recall", "turns": [f"Hi, I'm {nm}. Nice to meet you.", "Nice to meet you too.", "Do you remember my name?"], "answer": nm})
+    return {"card": card_text(c, i % 3), "card_fields": c, "probes": probes}
+
+
 def main():
     T0 = time.time()
     if A.mode in ("train", "bench"):
-        llm, used = engine(); print(f"[gen] {A.mode} with {used}: {A.n} requests", flush=True)
-        specs = [card_spec() for _ in range(A.n)]
-        if A.mode == "train":
-            plans = [[plan(), plan()] for _ in specs]; texts = run(llm, [train_prompt(s, p) for s, p in zip(specs, plans)], 0.9, 2600)
+        if A.from_raw:
+            raw = [json.loads(l) for l in open(A.from_raw)]; specs = [r["spec"] for r in raw]; plans = [r.get("plans") for r in raw]; texts = [r["text"] for r in raw]
+            print(f"[gen] {A.mode}: {len(raw)} outputs from {A.from_raw}", flush=True)
         else:
-            texts = run(llm, [bench_prompt(s) for s in specs], 0.8, 1600)
+            llm, used = engine(); print(f"[gen] {A.mode} with {used}: {A.n} requests", flush=True)
+            specs = [card_spec() for _ in range(A.n)]
+            if A.mode == "train":
+                plans = [[plan(), plan()] for _ in specs]; texts = run(llm, [train_prompt(s, p) for s, p in zip(specs, plans)], 0.9, 2600)
+            else:
+                plans = [None] * len(specs); texts = run(llm, [bench_prompt(s) for s in specs], 0.8, 1600)
+            with open(A.out + ".raw", "w") as f:   # what the model wrote, kept before any parsing
+                for s_, p_, t_ in zip(specs, plans, texts): f.write(json.dumps({"spec": s_, "plans": p_, "text": t_}) + "\n")
         n_ok = n_bad = 0; seen = set()
         with open(A.out, "w") as f:
-            for i, (s, t) in enumerate(zip(specs, texts)):
-                d = parse_json(t)
-                if not ok_card(d): n_bad += 1; continue
-                c = {k: clean(d[k]) for k in ("name", "role", "place", "personality")}; c["facts"] = [clean(x) for x in d["facts"]]
-                if A.mode == "train":
-                    for j, dl in enumerate(d.get("dialogues") or []):
-                        turns = [(clean(t_.get("player", "")), clean(t_.get("npc", ""))) for t_ in (dl.get("turns") or []) if isinstance(t_, dict)]
-                        if len(turns) < 2 or not all(p and ok_reply(r) for p, r in turns): n_bad += 1; continue
-                        msgs = [{"role": "system", "content": card_text(c, R.randrange(3))}]
-                        for p, r in turns: msgs += [{"role": "user", "content": p}, {"role": "assistant", "content": r}]
-                        f.write(json.dumps({"messages": msgs, "card": c, "plan": plans[i][j] if j < 2 else []}) + "\n"); n_ok += 1
-                else:
-                    fq = [q for q in d.get("fact_questions") or [] if isinstance(q, dict) and q.get("q") and q.get("answer")]
-                    fu = d.get("followup") or {}
-                    if len(fq) < 2 or c["name"].lower() in seen or not all(isinstance(d.get(k), str) and d[k].strip() for k in ("unknown", "meta", "rude")):
-                        n_bad += 1; continue
-                    seen.add(c["name"].lower()); card = card_text(c, i % 3); probes = []
-                    for q in fq[:3]: probes.append({"kind": "fact", "turns": [clean(q["q"])], "answer": clean(q["answer"])})
-                    if all(fu.get(k) for k in ("q", "reference", "q2", "answer")):
-                        probes.append({"kind": "followup", "turns": [clean(fu["q"]), clean(fu["reference"]), clean(fu["q2"])], "answer": clean(fu["answer"])})
-                    for k in ("unknown", "meta", "rude"): probes.append({"kind": k, "turns": [clean(d[k])]})
-                    nm = NAMES_BENCH[i % len(NAMES_BENCH)]
-                    probes.append({"kind": "recall", "turns": [f"Hi, I'm {nm}. Nice to meet you.", "Nice to meet you too.", "Do you remember my name?"], "answer": nm})
-                    f.write(json.dumps({"card": card, "card_fields": c, "probes": probes}) + "\n"); n_ok += 1
+            for i, t in enumerate(texts):
+                try:
+                    d = parse_json(t)
+                    if isinstance(d, dict) and not ok_card(d): d = next((v for v in d.values() if isinstance(v, dict) and ok_card(v)), d)   # wrapped once
+                    if not ok_card(d): n_bad += 1; continue
+                    c = {k: clean(d[k]) for k in ("name", "role", "place", "personality")}; c["facts"] = [clean(x) for x in d["facts"]]
+                    rows = train_rows(i, d, c, plans) if A.mode == "train" else [x for x in [bench_row(i, d, c, seen)] if x]
+                except Exception as e:
+                    print(f"[gen] output {i} skipped: {type(e).__name__}: {str(e)[:100]}", flush=True); n_bad += 1; continue
+                for x in rows: f.write(json.dumps(x) + "\n")
+                n_ok += len(rows); n_bad += (2 if A.mode == "train" else 1) - len(rows)
         print(f"[gen] {A.mode}: {n_ok} written, {n_bad} dropped [{(time.time() - T0) / 60:.1f} min] -> {A.out}", flush=True)
     else:
         rows = [json.loads(l) for l in open(A.inp)]
@@ -233,7 +258,7 @@ def main():
         with open(A.out, "w") as f:
             for r, t in zip(rows, texts):
                 g = parse_json(t) or {}
-                if "usable" not in g: n_bad += 1
+                if not isinstance(g, dict) or "usable" not in g: n_bad += 1; g = g if isinstance(g, dict) else {}
                 r["judge"] = {k: g.get(k) for k in ("answers", "consistent", "in_character", "fluent", "usable")}; f.write(json.dumps(r) + "\n")
         print(f"[judge] {len(rows)} replies graded with {used}, {n_bad} unparsed [{(time.time() - T0) / 60:.1f} min] -> {A.out}", flush=True)
 
