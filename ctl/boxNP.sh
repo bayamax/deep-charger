@@ -5,7 +5,7 @@
 # probes; the character model (npc1) is fine-tuned on them with the earlier public NPC data (npc2), and both models' replies
 # to the probes are graded by the same open model (charlm/npc_bench.py). Pull-based as the others; the log goes to the hub
 # every 10 minutes (charlm/npc2/boxlog_NP.txt) and to the container log every 5 (status.sh).
-BOXNP_SERIAL=8
+BOXNP_SERIAL=9
 if [ -f /root/.boxnp_serial ] && [ "$(cat /root/.boxnp_serial)" -gt "$BOXNP_SERIAL" ] 2>/dev/null; then echo "BOXNP_STALE $BOXNP_SERIAL"; exit 0; fi
 echo $BOXNP_SERIAL > /root/.boxnp_serial
 # serial 2: Vast's own vLLM image (theirs builds; the vllm-openai one did not): its Python is /venv/main, and its own server
@@ -100,6 +100,9 @@ done
 MR
   setsid nohup bash /root/npmirror.sh > /dev/null 2>&1 < /dev/null &
 fi
+
+chmod +x /root/status.sh   # serial 9: ctl.sh runs it only when executable
+grep -E "^\[gen\]|^\[np\]|^\[bench\]|^\[hub\]|Free memory|KV cache" /root/np/np.log 2>/dev/null | tail -n 12 | cut -c1-300 | sed 's/^/[np] s9 log: /'
 
 # ---- the job: probes, dialogues (4 parts, each kept as made), npc1's replies, fine-tuning, npc2's replies, grading ----
 if [ ! -e /root/.npjob ]; then touch /root/.npjob
