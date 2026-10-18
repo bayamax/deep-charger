@@ -103,13 +103,26 @@ def plan():
     return seq[:7]
 
 
+SYL_A = ["Al", "Bar", "Cor", "Da", "El", "Fen", "Gar", "Hal", "Is", "Jor", "Ka", "Lu", "Mar", "Ned", "Or", "Pel", "Quen", "Ros", "Sa", "Tam",
+         "Ul", "Ver", "Wil", "Yan", "Zel", "Bri", "Cal", "Dor", "Fi", "Gwen", "Hen", "Ilo", "Ma", "No", "Pip", "Ru", "Sil", "To", "Ash", "Em"]
+SYL_B = ["a", "an", "ba", "bel", "da", "den", "do", "e", "el", "en", "eth", "i", "ia", "in", "io", "is", "ka", "la", "len", "li", "lo", "ma",
+         "mi", "na", "ne", "o", "on", "ra", "ren", "ri", "ro", "sa", "ta", "th", "to", "us", "va", "vin", "wen", "y"]
+
+
+def fresh_name():
+    """a first name from two or three syllables, so the cards do not all share the model's favourite few"""
+    n = R.choice(SYL_A) + R.choice(SYL_B) + (R.choice(SYL_B) if R.random() < 0.3 else "")
+    return n[0].upper() + n[1:].lower()
+
+
 def card_spec():
     m = R.choice(MOODS)
-    return dict(role=R.choice(ROLES), place=R.choice(SETTINGS), mood=("an " if m[0] in "aeiou" else "a ") + m, style=R.choice(STYLES), nf=R.randint(4, 7))
+    return dict(role=R.choice(ROLES), place=R.choice(SETTINGS), mood=("an " if m[0] in "aeiou" else "a ") + m, style=R.choice(STYLES), nf=R.randint(4, 7),
+                name=fresh_name())
 
 
-CARD_RULES = ("Invent one non-player character (NPC) for a video game: {mood} {role}, living in {place}, who talks in {style}. Give them a fresh, uncommon "
-              "first name (not Elara, Lyra, Thorne, Kael, Mira, Finn, Bram or Greta). Write {nf} facts the NPC knows: short concrete sentences about "
+CARD_RULES = ("Invent one non-player character (NPC) for a video game: {mood} {role}, living in {place}, who talks in {style}, named {name}. Other people "
+              "in the facts get their own fresh names too (not Silas, Elara, Kael, Jarek or Vesper). Write {nf} facts the NPC knows: short concrete sentences about "
               "their work, prices (with a currency that fits the setting), places nearby, people they know by name, opening hours, rumours or a job "
               "for the player. Facts are plain statements, e.g. 'A room costs 5 silver a night.' or 'The mayor, Hilda, lives by the old well.'")
 
