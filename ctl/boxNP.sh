@@ -5,7 +5,7 @@
 # probes; the character model (npc1) is fine-tuned on them with the earlier public NPC data (npc2), and both models' replies
 # to the probes are graded by the same open model (charlm/npc_bench.py). Pull-based as the others; the log goes to the hub
 # every 10 minutes (charlm/npc2/boxlog_NP.txt) and to the container log every 5 (status.sh).
-BOXNP_SERIAL=4
+BOXNP_SERIAL=5
 if [ -f /root/.boxnp_serial ] && [ "$(cat /root/.boxnp_serial)" -gt "$BOXNP_SERIAL" ] 2>/dev/null; then echo "BOXNP_STALE $BOXNP_SERIAL"; exit 0; fi
 echo $BOXNP_SERIAL > /root/.boxnp_serial
 # serial 2: Vast's own vLLM image (theirs builds; the vllm-openai one did not): its Python is /venv/main, and its own server
@@ -19,6 +19,14 @@ if [ ! -e /root/.np_s4 ]; then touch /root/.np_s4
   pkill -f "pip install" 2>/dev/null; sleep 2; rmdir /root/.bootstrap_lock 2>/dev/null
   echo "[np] s4: $(python3 --version) at $(which python3); uv: $(which uv || echo none)"
 fi
+# serial 5: uv timed out on one wheel from files.pythonhosted.org: the download speeds (PyPI, the hub) to the log, and uv
+# with a longer timeout and fewer parallel downloads
+if [ ! -e /root/.np_s5 ]; then touch /root/.np_s5
+  for u in https://files.pythonhosted.org/packages/source/n/numpy/numpy-2.3.4.tar.gz \
+           https://huggingface.co/nvidia/Qwen3.6-35B-A3B-NVFP4/resolve/main/tokenizer.json; do
+    echo "[np] s5 speed: $(curl -sSL -o /dev/null -m 60 -w '%{size_download} bytes in %{time_total}s' $u) $(basename $u)"; done
+fi
+export UV_HTTP_TIMEOUT=300 UV_CONCURRENT_DOWNLOADS=4
 [ -s /root/.hf_token ] || { [ -n "$HF_TOKEN" ] && printf '%s' "$HF_TOKEN" > /root/.hf_token && chmod 600 /root/.hf_token; }
 echo "[np] HF token: $([ -s /root/.hf_token ] && echo present || echo MISSING)"
 RAW="https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl"
