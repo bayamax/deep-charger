@@ -5,7 +5,7 @@
 # probes; the character model (npc1) is fine-tuned on them with the earlier public NPC data (npc2), and both models' replies
 # to the probes are graded by the same open model (charlm/npc_bench.py). Pull-based as the others; the log goes to the hub
 # every 10 minutes (charlm/npc2/boxlog_NP.txt) and to the container log every 5 (status.sh).
-BOXNP_SERIAL=13
+BOXNP_SERIAL=14
 if [ -f /root/.boxnp_serial ] && [ "$(cat /root/.boxnp_serial)" -gt "$BOXNP_SERIAL" ] 2>/dev/null; then echo "BOXNP_STALE $BOXNP_SERIAL"; exit 0; fi
 echo $BOXNP_SERIAL > /root/.boxnp_serial
 # serial 10: the host checked first (three hosts had a broken Docker, a slow network, or a GPU already half used by
@@ -117,6 +117,7 @@ while true; do
     echo "--- ctl.log ---"; tail -n 15 /root/ctl.log 2>/dev/null | cut -c1-300
     echo "--- np.log ---"; grep -vE "Warning|warn|it/s\]" /root/np/np.log 2>/dev/null | tail -n 150 | cut -c1-900
     echo "--- npc2/train.log ---"; grep -vE "^\[step" /root/np/npc2/train.log 2>/dev/null | tail -n 40 | cut -c1-900
+    echo "--- npc3/train.log ---"; grep -vE "^\[step" /root/np/npc3/train.log 2>/dev/null | tail -n 30 | cut -c1-900
     grep -E "^\[step" /root/np/npc2/train.log 2>/dev/null | tail -n 30; } > /root/boxlog_NP.txt
   python3 -c "from huggingface_hub import HfApi; HfApi().upload_file(path_or_fileobj='/root/boxlog_NP.txt', path_in_repo='charlm/npc2/boxlog_NP.txt', repo_id='baya1116/hypernet-sp-distill')" >/dev/null 2>&1
   sleep 600
@@ -172,6 +173,43 @@ echo "[np] NPJOB_DONE $(date -u)"
 JOB
   setsid nohup bash -c 'bash /root/npjob.sh >> /root/np/np.log 2>&1' > /dev/null 2>&1 < /dev/null &
   echo "NPJOB_LAUNCHED $(date -u)"
+fi
+# ---- serial 14, round 2 (queued behind the first job): rejection sampling. The better npc2 file by the judge (first
+# reply's usable %) answers 4,000 situations cut from the new dialogues, 6 replies each; the judge grades them; the best
+# usable reply of each situation becomes a training dialogue; npc3 is fine-tuned on those from npc2, then graded alike ----
+if [ ! -e /root/.npjob2 ]; then touch /root/.npjob2
+  cat > /root/npjob2.sh <<'JOB'
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); cd /root/np
+gpu_clear() { fuser -k -9 /dev/nvidia* > /dev/null 2>&1; sleep 3; }
+put() { python3 -c "import sys; from huggingface_hub import HfApi; HfApi().upload_file(path_or_fileobj=sys.argv[1], path_in_repo='charlm/'+sys.argv[2], repo_id='baya1116/hypernet-sp-distill')" "$1" "$2" > /dev/null 2>&1 && echo "[hub] $2" || echo "[hub] $2 FAILED"; }
+until grep -q NPJOB_DONE np.log 2>/dev/null; do sleep 120; done
+B=$(python3 -c "
+import json, collections; u = collections.defaultdict(list)
+for l in open('judged_all.jsonl'):
+    r = json.loads(l)
+    if r['pick'] == 'first' and r['model'] in ('npc2-best', 'npc2-final'): u[r['model']].append(bool(r['judge'].get('usable')))
+print(max(u, key=lambda k: sum(u[k]) / len(u[k])).split('-')[1] if u else 'final')")
+echo "[np2] round 2 from npc2/model_$B.pt $(date -u)"
+[ -s samples.jsonl ] || python3 -u npc_bench.py sample --model npc2/model_$B.pt --tag npc2-$B --bench train_new.jsonl --situations 4000 --n 6 --out samples.jsonl
+[ -s samples_judged.jsonl ] || { gpu_clear; python3 -u npc_gen.py judge --inp samples.jsonl --out samples_judged.jsonl; }
+python3 npc_bench.py pick --inp samples_judged.jsonl --out rft.jsonl; put rft.jsonl npc_data2/rft.jsonl
+if [ ! -s npc3/model_final.pt ]; then
+  python3 -u charlm_sft.py --base npc2/model_$B.pt --data sftdata --out npc3 --shards 0 --jsonl rft.jsonl --val-jsonl val_all.jsonl \
+    --val-convs 1000 --prompts-json prompts.json --epochs 2 --lr 5e-5 --warmup 30 --eval-every 5 --hours 1.5 \
+    --hub baya1116/hypernet-sp-distill:charlm/npc3 2>&1 | grep -vE "Warning|warn|^\[step"
+fi
+for m in best final 4bit; do
+  [ -s npc3/model_$m.pt ] && [ ! -s r3_$m.jsonl ] && python3 -u npc_bench.py reply --model npc3/model_$m.pt --tag npc3-$m --bench npc_bench.jsonl --out r3_$m.jsonl
+done
+cat r3_*.jsonl > replies_r3.jsonl
+[ -s judged_r3.jsonl ] || { gpu_clear; python3 -u npc_gen.py judge --inp replies_r3.jsonl --out judged_r3.jsonl; }
+cat judged_all.jsonl judged_r3.jsonl > judged_both.jsonl
+python3 npc_bench.py report --inp judged_both.jsonl > report2.txt; sed 's/^/[report2] /' report2.txt
+put judged_r3.jsonl npc3/judged_r3.jsonl; put report2.txt npc3/report2.txt
+echo "[np2] NPJOB2_DONE $(date -u)"
+JOB
+  setsid nohup bash -c 'bash /root/npjob2.sh >> /root/np/np.log 2>&1' > /dev/null 2>&1 < /dev/null &
+  echo "NPJOB2_QUEUED $(date -u)"
 fi
 echo "BOXNP_OK serial $BOXNP_SERIAL $(date -u)"
 # CTL-END
