@@ -3,7 +3,7 @@
 # grown 4 -> 8 -> 12 -> 16 layers at d 512 (charlm/charlm2.py), then tested against GPT-2 small on the same documents and
 # quantized to 4 bits by GPTQ. Pull-based as the others; the log goes to the hub every 10 minutes (boxlog_CH.txt), the
 # checkpoints to charlm/run2/ as they are made.
-BOXCH_SERIAL=23
+BOXCH_SERIAL=24
 if [ -f /root/.boxch_serial ] && [ "$(cat /root/.boxch_serial)" -gt "$BOXCH_SERIAL" ] 2>/dev/null; then echo "BOXCH_STALE $BOXCH_SERIAL"; exit 0; fi
 echo $BOXCH_SERIAL > /root/.boxch_serial
 [ -s /root/.hf_token ] || { [ -n "$HF_TOKEN" ] && printf '%s' "$HF_TOKEN" > /root/.hf_token && chmod 600 /root/.hf_token; }
@@ -312,5 +312,22 @@ if [ ! -e /root/.ch_npcdata22 ]; then touch /root/.ch_npcdata22
   rm -f /root/charlm/npcdata/stage2_public.jsonl /root/charlm/npcdata/stage2_val.jsonl
   echo "[npc21] stale NPC data removed; fetched afresh when the run starts $(date -u)" | tee -a /root/charlm/run2/train.log
 fi
+# ---- serial 24, the user looks over ssh: /root/st.sh shows the running stage (NPC fine-tuning, else the chat one, else
+# pre-training): its evaluations, the latest replies, the training loss as an EMA; "loss" its whole EMA; "log" the raw tail. ----
+cat > /root/st.sh <<'ST'
+#!/bin/bash
+cd /root/charlm
+if [ -s npc1/train.log ]; then S="NPC 学習"; L=npc1/train.log; elif [ -s sft1/train.log ]; then S="SFT"; L=sft1/train.log; else S="事前学習"; L=run2/train.log; fi
+ema() { grep -E "^\[step" $L | awk -v mode="$1" '{for(i=1;i<=NF;i++){if($i=="train")v=$(i+1); if($i=="min"||$i=="min,")m=$(i-1)}; gsub(/[^0-9.]/,"",v); if(v=="")next; e=(n++?0.9*e+0.1*v:v); s=$2; gsub(/[^0-9\/]/,"",s); if(mode=="all"&&n%6==0)printf "%s  %s min  EMA %.3f\n",s,m,e} END{if(n)printf "最新 %s  %s min  EMA %.3f（生 %.3f）\n",s,m,e,v}'; }
+case "$1" in
+  log)  tail -n 30 $L ;;
+  loss) echo "== $S: 学習ロス EMA（α=0.1） =="; ema all ;;
+  *)    echo "== $S（$(date '+%H:%M' -d '+9 hours') JST）  GPU $(nvidia-smi --query-gpu=utilization.gpu --format=csv,noheader) =="
+        echo "-- 評価（返答部分の bits/文字、低いほど良い） --"; grep -E "^\[val\]|^\[stop\]|^\[gptq\]|SFT_DONE" $L | tail -n 6
+        echo "-- 学習ロス --"; ema
+        echo "-- 直近の返答 --"; grep -E "^\[reply" $L | tail -n 2 | cut -c1-400 ;;
+esac
+ST
+chmod +x /root/st.sh
 echo "BOXCH_OK serial $BOXCH_SERIAL $(date -u)"
 # CTL-END
