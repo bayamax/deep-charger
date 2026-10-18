@@ -5,7 +5,7 @@
 # probes; the character model (npc1) is fine-tuned on them with the earlier public NPC data (npc2), and both models' replies
 # to the probes are graded by the same open model (charlm/npc_bench.py). Pull-based as the others; the log goes to the hub
 # every 10 minutes (charlm/npc2/boxlog_NP.txt) and to the container log every 5 (status.sh).
-BOXNP_SERIAL=16
+BOXNP_SERIAL=17
 if [ -f /root/.boxnp_serial ] && [ "$(cat /root/.boxnp_serial)" -gt "$BOXNP_SERIAL" ] 2>/dev/null; then echo "BOXNP_STALE $BOXNP_SERIAL"; exit 0; fi
 echo $BOXNP_SERIAL > /root/.boxnp_serial
 # serial 10: the host checked first (three hosts had a broken Docker, a slow network, or a GPU already half used by
@@ -76,6 +76,11 @@ fi
 # (and any fine-tuning start) dropped so the job makes them whole
 if [ ! -e /root/.np_s13 ]; then touch /root/.np_s13
   echo "[np] s13: dropping $(ls /root/np/replies_*.jsonl /root/np/npc2 2>/dev/null | tr '\n' ' ')"; rm -rf /root/np/replies_*.jsonl /root/np/npc2
+fi
+# serial 17: the credit left (~$2.9) would not cover rounds 3 and 4 as queued: round 3 makes 30,000 dialogues (6 parts),
+# round 4 1,500 situations; both were only waiting and are queued again
+if [ ! -e /root/.np_s17 ]; then touch /root/.np_s17
+  pkill -f "npjob[34].sh"; rm -f /root/.npjob3 /root/.npjob4; echo "[np] s17: rounds 3 and 4 re-queued smaller $(date -u)"
 fi
 [ -s /root/.hf_token ] || { [ -n "$HF_TOKEN" ] && printf '%s' "$HF_TOKEN" > /root/.hf_token && chmod 600 /root/.hf_token; }
 echo "[np] HF token: $([ -s /root/.hf_token ] && echo present || echo MISSING)"
@@ -211,7 +216,7 @@ JOB
   setsid nohup bash -c 'bash /root/npjob2.sh >> /root/np/np.log 2>&1' > /dev/null 2>&1 < /dev/null &
   echo "NPJOB2_QUEUED $(date -u)"
 fi
-# ---- serial 15, round 3 (queued behind round 2): more data. npc2 rose from 0% to 17% usable (first reply) on the probes,
+# ---- serial 15, round 3 (queued behind round 2; serial 17: 30,000): more data. npc2 rose from 0% to 17% usable (first reply) on the probes,
 # fact questions most; rude and out-of-world lines, recall and follow-ups stayed near 10%. 40,000 more dialogues (fresh
 # syllable names, more unknown/rude/meta/self-recall lines), then npc4 from npc1 on all of it (+ round 2's picks + the
 # public set), graded alike ----
@@ -221,8 +226,8 @@ export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); cd /root/np
 gpu_clear() { fuser -k -9 /dev/nvidia* > /dev/null 2>&1; sleep 3; }
 put() { python3 -c "import sys; from huggingface_hub import HfApi; HfApi().upload_file(path_or_fileobj=sys.argv[1], path_in_repo='charlm/'+sys.argv[2], repo_id='baya1116/hypernet-sp-distill')" "$1" "$2" > /dev/null 2>&1 && echo "[hub] $2" || echo "[hub] $2 FAILED"; }
 until grep -q NPJOB2_DONE np.log 2>/dev/null; do sleep 120; done
-echo "[np3] round 3: 40,000 more dialogues $(date -u)"
-for c in 0 1 2 3 4 5 6 7; do
+echo "[np3] round 3: 30,000 more dialogues $(date -u)"
+for c in 0 1 2 3 4 5; do
   for try in 1 2; do
     [ -s t3_$c.jsonl ] && break; gpu_clear
     if [ -s t3_$c.tmp.raw ]; then python3 -u npc_gen.py train --from-raw t3_$c.tmp.raw --seed $((c + 11)) --out t3_$c.tmp
@@ -249,7 +254,7 @@ JOB
   setsid nohup bash -c 'bash /root/npjob3.sh >> /root/np/np.log 2>&1' > /dev/null 2>&1 < /dev/null &
   echo "NPJOB3_QUEUED $(date -u)"
 fi
-# ---- serial 16, round 4 (queued behind round 3): a reranker for the game, where there is no judge. The better of npc3
+# ---- serial 16, round 4 (queued behind round 3; serial 17: 1,500 situations): a reranker for the game, where there is no judge. The better of npc3
 # and npc4 (first reply's usable %) answers 2,000 situations x 8; the judge grades them; a logistic regression on the
 # model's own view of each reply learns 'usable' (npc_bench.py rank); then the probes again, 8 replies each, with the
 # ranker's pick beside the first and the likeliest ----
@@ -267,7 +272,7 @@ for f in ('judged_r3.jsonl', 'judged_r4.jsonl'):
         if r['pick'] == 'first' and r['model'] in ('npc3-best', 'npc3-final', 'npc4-best', 'npc4-final'): u[r['model']].append(bool(r['judge'].get('usable')))
 print(max(u, key=lambda k: sum(u[k]) / len(u[k])) if u else 'npc4-final')")
 F=${M%-*}/model_${M#*-}.pt; echo "[np4] round 4: the ranker for $F $(date -u)"
-[ -s s4.jsonl ] || python3 -u npc_bench.py sample --model $F --tag $M --bench t3_all.jsonl --situations 2000 --n 8 --seed 4 --out s4.jsonl
+[ -s s4.jsonl ] || python3 -u npc_bench.py sample --model $F --tag $M --bench t3_all.jsonl --situations 1500 --n 8 --seed 4 --out s4.jsonl
 [ -s s4_judged.jsonl ] || { gpu_clear; python3 -u npc_gen.py judge --inp s4.jsonl --out s4_judged.jsonl; }
 python3 -u npc_bench.py rank --model $F --inp s4_judged.jsonl --out rank_$M.pt; put rank_$M.pt ${M%-*}/rank_$M.pt
 [ -s r5.jsonl ] || python3 -u npc_bench.py reply --model $F --tag $M-n8 --bench npc_bench.jsonl --n 8 --ranker rank_$M.pt --out r5.jsonl
