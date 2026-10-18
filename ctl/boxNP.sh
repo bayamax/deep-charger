@@ -5,9 +5,15 @@
 # probes; the character model (npc1) is fine-tuned on them with the earlier public NPC data (npc2), and both models' replies
 # to the probes are graded by the same open model (charlm/npc_bench.py). Pull-based as the others; the log goes to the hub
 # every 10 minutes (charlm/npc2/boxlog_NP.txt) and to the container log every 5 (status.sh).
-BOXNP_SERIAL=9
+BOXNP_SERIAL=10
 if [ -f /root/.boxnp_serial ] && [ "$(cat /root/.boxnp_serial)" -gt "$BOXNP_SERIAL" ] 2>/dev/null; then echo "BOXNP_STALE $BOXNP_SERIAL"; exit 0; fi
 echo $BOXNP_SERIAL > /root/.boxnp_serial
+# serial 10: the host checked first (three hosts had a broken Docker, a slow network, or a GPU already half used by
+# someone else): free GPU memory and load before anything runs, and a 100 MB download from the hub
+if [ ! -e /root/.np_pre ]; then touch /root/.np_pre
+  echo "[np] preflight GPU: $(nvidia-smi --query-gpu=name,memory.used,memory.total,utilization.gpu,power.draw --format=csv,noheader)"
+  echo "[np] preflight hub: $(curl -sSL -o /dev/null -m 90 -w '%{size_download} bytes in %{time_total}s' https://huggingface.co/nvidia/Qwen3.6-35B-A3B-NVFP4/resolve/main/model-00003-of-00003.safetensors -r 0-104857599 2>&1)"
+fi
 # serial 2: Vast's own vLLM image (theirs builds; the vllm-openai one did not): its Python is /venv/main, and its own server
 # must not hold the GPU
 [ -d /venv/main/bin ] && export PATH=/venv/main/bin:$PATH
