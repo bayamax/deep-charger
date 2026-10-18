@@ -3,7 +3,7 @@
 # grown 4 -> 8 -> 12 -> 16 layers at d 512 (charlm/charlm2.py), then tested against GPT-2 small on the same documents and
 # quantized to 4 bits by GPTQ. Pull-based as the others; the log goes to the hub every 10 minutes (boxlog_CH.txt), the
 # checkpoints to charlm/run2/ as they are made.
-BOXCH_SERIAL=24
+BOXCH_SERIAL=25
 if [ -f /root/.boxch_serial ] && [ "$(cat /root/.boxch_serial)" -gt "$BOXCH_SERIAL" ] 2>/dev/null; then echo "BOXCH_STALE $BOXCH_SERIAL"; exit 0; fi
 echo $BOXCH_SERIAL > /root/.boxch_serial
 [ -s /root/.hf_token ] || { [ -n "$HF_TOKEN" ] && printf '%s' "$HF_TOKEN" > /root/.hf_token && chmod 600 /root/.hf_token; }
@@ -34,6 +34,7 @@ if [ ! -e /root/.chmirror_r19 ]; then touch /root/.chmirror_r19; pkill -f "chmir
 if [ ! -e /root/.chmirror_r20 ]; then touch /root/.chmirror_r20; pkill -f "chmirro[r].sh"; sleep 1; fi   # serial 20: the npc20 lines and npc1
 if [ ! -e /root/.chmirror_r21 ]; then touch /root/.chmirror_r21; pkill -f "chmirro[r].sh"; sleep 1; fi   # serial 21: the npc21 lines
 if [ ! -e /root/.chmirror_r23 ]; then touch /root/.chmirror_r23; pkill -f "chmirro[r].sh"; sleep 1; fi   # serial 23: 4 h of fine-tuning loss lines, one section per run
+if [ ! -e /root/.chmirror_r25 ]; then touch /root/.chmirror_r25; pkill -f "chmirro[r].sh"; sleep 1; fi   # serial 25: the sft2 run
 if ! pgrep -f "chmirro[r].sh" >/dev/null; then
   cat > /root/chmirror.sh <<'MR'
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null)
@@ -42,9 +43,9 @@ while true; do
     echo "--- ctl.log ---"; tail -n 15 /root/ctl.log 2>/dev/null | cut -c1-300
     echo "--- prep.log ---"; tail -n 20 /root/charlm/prep.log 2>/dev/null | cut -c1-300
     echo "--- job.log ---"; grep -vE "Warning|warn" /root/charlm/job.log 2>/dev/null | tail -n 20 | cut -c1-600
-    echo "--- run2/train.log ---"; grep -E "^\[val\]|^\[chat|^\[cool\]|^\[ctl\]|^\[plateau\]|^\[more7\]|^\[target9\]|^\[mix14\]|^\[push15\]|^\[sft17\]|^\[sft19\]|^\[npc20\]|^\[npc21\]|^\[ctl11\]|^\[grow\]|^\[oom\]|^\[diverge\]|^\[restart|^\[charlm2\]|^\[test\]|^\[gptq\]|^\[sample\]|^\[hub\]|CHARLM2_DONE" /root/charlm/run2/train.log 2>/dev/null | tail -n 50 | cut -c1-600
+    echo "--- run2/train.log ---"; grep -E "^\[val\]|^\[chat|^\[cool\]|^\[ctl\]|^\[plateau\]|^\[more7\]|^\[target9\]|^\[mix14\]|^\[push15\]|^\[sft17\]|^\[sft19\]|^\[npc20\]|^\[npc21\]|^\[sft2_25\]|^\[ctl11\]|^\[grow\]|^\[oom\]|^\[diverge\]|^\[restart|^\[charlm2\]|^\[test\]|^\[gptq\]|^\[sample\]|^\[hub\]|CHARLM2_DONE" /root/charlm/run2/train.log 2>/dev/null | tail -n 50 | cut -c1-600
     grep -E "^\[step" /root/charlm/run2/train.log 2>/dev/null | tail -n 48 | cut -c1-300
-    for r in sft1 npc1; do echo "--- $r/train.log ---"; grep -vE "Warning|warn|^\[step" /root/charlm/$r/train.log 2>/dev/null | tail -n 30 | cut -c1-900
+    for r in sft1 sft2 npc1; do echo "--- $r/train.log ---"; grep -vE "Warning|warn|^\[step" /root/charlm/$r/train.log 2>/dev/null | tail -n 30 | cut -c1-900
       echo "--- $r steps ---"; grep -E "^\[step" /root/charlm/$r/train.log 2>/dev/null | tail -n 48 | cut -c1-300; done; } > /root/boxlog_CH.txt
   python3 -c "from huggingface_hub import HfApi; HfApi().upload_file(path_or_fileobj='/root/boxlog_CH.txt', path_in_repo='pooler_distill/chatsft/audit/boxlog_CH.txt', repo_id='baya1116/hypernet-sp-distill')" >/dev/null 2>&1
   sleep 600
@@ -317,7 +318,7 @@ fi
 cat > /root/st.sh <<'ST'
 #!/bin/bash
 cd /root/charlm
-if [ -s npc1/train.log ]; then S="NPC 学習"; L=npc1/train.log; elif [ -s sft1/train.log ]; then S="SFT"; L=sft1/train.log; else S="事前学習"; L=run2/train.log; fi
+if [ -s npc1/train.log ]; then S="NPC 学習"; L=npc1/train.log; elif [ -s sft2/train.log ]; then S="SFT 1.5 段目"; L=sft2/train.log; elif [ -s sft1/train.log ]; then S="SFT"; L=sft1/train.log; else S="事前学習"; L=run2/train.log; fi
 ema() { grep -E "^\[step" $L | awk -v mode="$1" '{for(i=1;i<=NF;i++){if($i=="train")v=$(i+1); if($i=="min"||$i=="min,")m=$(i-1)}; gsub(/[^0-9.]/,"",v); if(v=="")next; e=(n++?0.9*e+0.1*v:v); s=$2; gsub(/[^0-9\/]/,"",s); if(mode=="all"&&n%6==0)printf "%s  %s min  EMA %.3f\n",s,m,e} END{if(n)printf "最新 %s  %s min  EMA %.3f（生 %.3f）\n",s,m,e,v}'; }
 case "$1" in
   log)  tail -n 30 $L ;;
@@ -329,5 +330,28 @@ case "$1" in
 esac
 ST
 chmod +x /root/st.sh
+# ---- serial 25, the user: more chat fine-tuning of the same kind before the NPC one - the replies are taking shape. SmolTalk
+# train shards 4-8, never yet seen as conversations (pre-training read them once as plain text), one pass from the first
+# run's final weights (sft2); the NPC fine-tuning then starts from sft2's. ----
+if [ ! -e /root/.ch_sft2_25 ]; then touch /root/.ch_sft2_25
+  pkill -f "chnpc2[0].sh"
+  cat > /root/chsft2.sh <<'JOB'
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); cd /root/charlm
+until grep -q CHARLM_SFT_DONE sft1/train.log 2>/dev/null && ! pgrep -f "charlm_sf[t].py" >/dev/null; do sleep 300; done
+B=sft1/model_final.pt; [ -s $B ] || B=sft1/model_best.pt
+echo "[sft2_25] the second chat fine-tuning (SmolTalk shards 4-8) from $B $(date -u)" | tee -a run2/train.log
+for try in 1 2 3; do
+  python3 -u charlm_sft.py --base $B --data sftdata --out sft2 --shard-list 4,5,6,7,8 --epochs 1 --lr 1.5e-4 --hours 14 --stop-plateau 0.003 --stop-evals 3 \
+    --hub baya1116/hypernet-sp-distill:charlm/sft2 2>&1 | grep -vE "Warning|warn" >> sft2.out
+  grep -q CHARLM_SFT_DONE sft2/train.log && break; echo "[sft2_25] stopped (try $try) $(date -u)" | tee -a run2/train.log; sleep 120
+done
+echo "[sft2_25] SFT2_DONE $(date -u)" | tee -a run2/train.log
+JOB
+  sed -i 's/^until grep -q CHARLM_SFT_DONE sft1\/train.log/until grep -q CHARLM_SFT_DONE sft2\/train.log/; s/^B=sft1\/model_final.pt; \[ -s \$B \] || B=sft1\/model_best.pt$/B=sft2\/model_final.pt; [ -s $B ] || B=sft2\/model_best.pt/' /root/chnpc20.sh
+  grep -nE "^until|^B=" /root/chnpc20.sh | sed 's/^/[sft2_25] NPC run now: /' | tee -a /root/charlm/run2/train.log
+  setsid nohup bash -c 'bash /root/chsft2.sh >> /root/charlm/job.log 2>&1' > /dev/null 2>&1 < /dev/null &
+  setsid nohup bash -c 'bash /root/chnpc20.sh >> /root/charlm/job.log 2>&1' > /dev/null 2>&1 < /dev/null &
+  echo "[sft2_25] queued: sft1 -> sft2 (shards 4-8) -> NPC $(date -u)" | tee -a /root/charlm/run2/train.log
+fi
 echo "BOXCH_OK serial $BOXCH_SERIAL $(date -u)"
 # CTL-END

@@ -23,7 +23,8 @@ import torch.nn.functional as F
 
 ap = argparse.ArgumentParser()
 ap.add_argument("--base", required=True); ap.add_argument("--data", required=True); ap.add_argument("--out", required=True)
-ap.add_argument("--shards", type=int, default=4, help="SmolTalk train shards (of 9)")
+ap.add_argument("--shards", type=int, default=4, help="SmolTalk train shards (of 9): the first N")
+ap.add_argument("--shard-list", default="", help="these SmolTalk train shards instead (e.g. 4,5,6,7,8)")
 ap.add_argument("--sources", default="smol-magpie-ultra,everyday-conversations,systemchats-30k,openhermes-100k,smol-rewrite,smol-summarize,smol-constraints,explore-instruct-rewriting,longalign")
 ap.add_argument("--lr", type=float, default=3e-4); ap.add_argument("--warmup", type=int, default=100); ap.add_argument("--hours", type=float, default=3.0)
 ap.add_argument("--stop-plateau", type=float, default=0.0, help="stop when the held-out score has not improved by this over --stop-evals evaluations (0: off; --hours stays the cap)")
@@ -161,7 +162,7 @@ def collections_counter():
 
 
 t0 = time.time()
-train_paths = [fetch(f"data/all/train-{i:05d}-of-00009.parquet") for i in range(A.shards)] + [x for x in A.jsonl.split(",") if x]
+train_paths = [fetch(f"data/all/train-{i:05d}-of-00009.parquet") for i in ([int(x) for x in A.shard_list.split(",")] if A.shard_list else range(A.shards))] + [x for x in A.jsonl.split(",") if x]
 TRAIN, sk = load(train_paths, A.max_convs); VAL, _ = load([A.val_jsonl] if A.val_jsonl else [fetch("data/all/test-00000-of-00001.parquet")], A.val_convs)
 ntr = sum(len(c[0]) for c in TRAIN); nas = sum(int(c[1].sum()) for c in TRAIN)
 out(f"[sft] {len(TRAIN)} training conversations ({ntr / 1e6:.0f}M chars, {nas / 1e6:.0f}M assistant chars learned); skipped {dict(sk)}; validation {len(VAL)} [{time.time() - t0:.0f}s]")
