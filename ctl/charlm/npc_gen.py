@@ -159,12 +159,14 @@ def parse_json(t):
 
 def engine():
     from vllm import LLM
-    for m in (A.model, A.fallback):
+    import torch
+    order = (A.model, A.fallback) if torch.cuda.get_device_capability()[0] >= 10 else (A.fallback, A.model)   # NVFP4 wants Blackwell
+    for m in order:
         try:
             return LLM(model=m, max_model_len=A.max_len, gpu_memory_utilization=A.gpu_mem, enable_prefix_caching=True, seed=A.seed), m
         except Exception as e:
             print(f"[gen] {m} did not load: {str(e)[:300]}", flush=True)
-            if m == A.fallback: raise
+            if m == order[-1]: raise
 
 
 def run(llm, prompts, temp, max_tokens):
