@@ -5,7 +5,7 @@
 # probes; the character model (npc1) is fine-tuned on them with the earlier public NPC data (npc2), and both models' replies
 # to the probes are graded by the same open model (charlm/npc_bench.py). Pull-based as the others; the log goes to the hub
 # every 10 minutes (charlm/npc2/boxlog_NP.txt) and to the container log every 5 (status.sh).
-BOXNP_SERIAL=12
+BOXNP_SERIAL=13
 if [ -f /root/.boxnp_serial ] && [ "$(cat /root/.boxnp_serial)" -gt "$BOXNP_SERIAL" ] 2>/dev/null; then echo "BOXNP_STALE $BOXNP_SERIAL"; exit 0; fi
 echo $BOXNP_SERIAL > /root/.boxnp_serial
 # serial 10: the host checked first (three hosts had a broken Docker, a slow network, or a GPU already half used by
@@ -71,6 +71,11 @@ fi
 if [ ! -e /root/.np_s12 ]; then touch /root/.np_s12
   pkill -f "npjo[b].sh"; pkill -f "npc_ge[n].py"; pkill -f "npc_benc[h].py"; sleep 3; fuser -k -9 /dev/nvidia* > /dev/null 2>&1; sleep 5
   rm -f /root/.npjob /root/np/*.tmp; echo "[np] s12: GPU $(nvidia-smi --query-gpu=memory.used --format=csv,noheader) used after clearing $(date -u)"
+fi
+# serial 13: serial 11's job, its parts all failed, went on to npc1's replies and was stopped in them: the partial replies
+# (and any fine-tuning start) dropped so the job makes them whole
+if [ ! -e /root/.np_s13 ]; then touch /root/.np_s13
+  echo "[np] s13: dropping $(ls /root/np/replies_*.jsonl /root/np/npc2 2>/dev/null | tr '\n' ' ')"; rm -rf /root/np/replies_*.jsonl /root/np/npc2
 fi
 [ -s /root/.hf_token ] || { [ -n "$HF_TOKEN" ] && printf '%s' "$HF_TOKEN" > /root/.hf_token && chmod 600 /root/.hf_token; }
 echo "[np] HF token: $([ -s /root/.hf_token ] && echo present || echo MISSING)"
