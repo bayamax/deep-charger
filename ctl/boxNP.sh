@@ -5,7 +5,7 @@
 # probes; the character model (npc1) is fine-tuned on them with the earlier public NPC data (npc2), and both models' replies
 # to the probes are graded by the same open model (charlm/npc_bench.py). Pull-based as the others; the log goes to the hub
 # every 10 minutes (charlm/npc2/boxlog_NP.txt) and to the container log every 5 (status.sh).
-BOXNP_SERIAL=6
+BOXNP_SERIAL=7
 if [ -f /root/.boxnp_serial ] && [ "$(cat /root/.boxnp_serial)" -gt "$BOXNP_SERIAL" ] 2>/dev/null; then echo "BOXNP_STALE $BOXNP_SERIAL"; exit 0; fi
 echo $BOXNP_SERIAL > /root/.boxnp_serial
 # serial 2: Vast's own vLLM image (theirs builds; the vllm-openai one did not): its Python is /venv/main, and its own server
@@ -34,6 +34,18 @@ if [ ! -e /root/.np_s6 ]; then touch /root/.np_s6
   pkill -f "npjo[b].sh"; pkill -f "npc_ge[n].py"; pkill -f "npc_benc[h].py"; pkill -f "charlm_sf[t].py"; pkill -f "uv pip install"; sleep 3
   rm -f /root/.npjob /root/np/*.tmp; rmdir /root/.bootstrap_lock /root/.vllm_lock 2>/dev/null
   echo "[np] s6: job stopped and reset $(date -u)"
+fi
+# serial 7: 16 of the 32 GB were held at the job's start (the image's own server): the job stopped, the image's vLLM
+# services switched off, whatever holds the GPU ended, the job's partial files dropped, and the job started again
+if [ ! -e /root/.np_s7 ]; then touch /root/.np_s7
+  pkill -f "npjo[b].sh"; pkill -f "npc_ge[n].py"; pkill -f "npc_benc[h].py"; pkill -f "charlm_sf[t].py"; sleep 3
+  for f in $(grep -l -i vllm /etc/supervisor/conf.d/* 2>/dev/null); do mv $f $f.off; echo "[np] s7: $f off"; done
+  supervisorctl reread > /dev/null 2>&1; supervisorctl update > /dev/null 2>&1; supervisorctl stop all > /dev/null 2>&1
+  nvidia-smi --query-compute-apps=pid,process_name,used_memory --format=csv,noheader | sed 's/^/[np] s7 GPU held by: /'
+  for p in $(nvidia-smi --query-compute-apps=pid --format=csv,noheader); do kill $p 2>/dev/null; done; sleep 10
+  for p in $(nvidia-smi --query-compute-apps=pid --format=csv,noheader); do kill -9 $p 2>/dev/null; done; sleep 3
+  rm -rf /root/.npjob /root/np/*.tmp /root/np/train_*.jsonl /root/np/npc_bench.jsonl /root/np/replies_*.jsonl /root/np/npc2
+  echo "[np] s7: GPU memory free $(nvidia-smi --query-gpu=memory.free --format=csv,noheader) $(date -u)"
 fi
 [ -s /root/.hf_token ] || { [ -n "$HF_TOKEN" ] && printf '%s' "$HF_TOKEN" > /root/.hf_token && chmod 600 /root/.hf_token; }
 echo "[np] HF token: $([ -s /root/.hf_token ] && echo present || echo MISSING)"
