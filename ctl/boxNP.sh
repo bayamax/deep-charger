@@ -5,7 +5,7 @@
 # probes; the character model (npc1) is fine-tuned on them with the earlier public NPC data (npc2), and both models' replies
 # to the probes are graded by the same open model (charlm/npc_bench.py). Pull-based as the others; the log goes to the hub
 # every 10 minutes (charlm/npc2/boxlog_NP.txt) and to the container log every 5 (status.sh).
-BOXNP_SERIAL=17
+BOXNP_SERIAL=18
 if [ -f /root/.boxnp_serial ] && [ "$(cat /root/.boxnp_serial)" -gt "$BOXNP_SERIAL" ] 2>/dev/null; then echo "BOXNP_STALE $BOXNP_SERIAL"; exit 0; fi
 echo $BOXNP_SERIAL > /root/.boxnp_serial
 # serial 10: the host checked first (three hosts had a broken Docker, a slow network, or a GPU already half used by
@@ -81,6 +81,11 @@ fi
 # round 4 1,500 situations; both were only waiting and are queued again
 if [ ! -e /root/.np_s17 ]; then touch /root/.np_s17
   pkill -f "npjob[34].sh"; rm -f /root/.npjob3 /root/.npjob4; echo "[np] s17: rounds 3 and 4 re-queued smaller $(date -u)"
+fi
+# serial 18, the user: the fine-tuning and grading move to a 3060 (box NQ, charlm/npc_q.sh): this box only finishes round 2
+# and makes round 3's dialogues (uploaded with what NQ needs), then is let go; round 4 does not run here
+if [ ! -e /root/.np_s18 ]; then touch /root/.np_s18
+  pkill -f "npjob[34].sh"; rm -f /root/.npjob3; touch /root/.npjob4; echo "[np] s18: round 3 here is the dialogues only; round 4 moves to NQ $(date -u)"
 fi
 [ -s /root/.hf_token ] || { [ -n "$HF_TOKEN" ] && printf '%s' "$HF_TOKEN" > /root/.hf_token && chmod 600 /root/.hf_token; }
 echo "[np] HF token: $([ -s /root/.hf_token ] && echo present || echo MISSING)"
@@ -236,20 +241,9 @@ for c in 0 1 2 3 4 5; do
   done
 done
 cat t3_*.jsonl > t3_all.jsonl; echo "[np3] round 3 dialogues: $(wc -l < t3_all.jsonl)"
-if [ ! -s npc4/model_final.pt ]; then
-  python3 -u charlm_sft.py --base npc1.pt --data sftdata --out npc4 --shards 0 --jsonl train_new.jsonl,t3_all.jsonl,rft.jsonl,stage2_public.jsonl \
-    --val-jsonl val_all.jsonl --val-convs 1000 --prompts-json prompts.json --epochs 2 --lr 1e-4 --warmup 50 --eval-every 10 --hours 1.5 \
-    --hub baya1116/hypernet-sp-distill:charlm/npc4 2>&1 | grep -vE "Warning|warn|^\[step"
-fi
-for m in best final 4bit; do
-  [ -s npc4/model_$m.pt ] && [ ! -s r4_$m.jsonl ] && python3 -u npc_bench.py reply --model npc4/model_$m.pt --tag npc4-$m --bench npc_bench.jsonl --out r4_$m.jsonl
-done
-cat r4_*.jsonl > replies_r4.jsonl
-[ -s judged_r4.jsonl ] || { gpu_clear; python3 -u npc_gen.py judge --inp replies_r4.jsonl --out judged_r4.jsonl; }
-cat judged_all.jsonl judged_r3.jsonl judged_r4.jsonl > judged_three.jsonl
-python3 npc_bench.py report --inp judged_three.jsonl > report3.txt; sed 's/^/[report3] /' report3.txt
-put judged_r4.jsonl npc4/judged_r4.jsonl; put report3.txt npc4/report3.txt
-echo "[np3] NPJOB3_DONE $(date -u)"
+for f in val_all.jsonl prompts.json train_new.jsonl; do put $f npc_data2/$f; done
+for f in judged_r3.jsonl replies_r3.jsonl; do [ -s $f ] && put $f npc3/$f; done
+echo "[np3] NPJOB3_DATA_DONE $(date -u)"
 JOB
   setsid nohup bash -c 'bash /root/npjob3.sh >> /root/np/np.log 2>&1' > /dev/null 2>&1 < /dev/null &
   echo "NPJOB3_QUEUED $(date -u)"
