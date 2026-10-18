@@ -3,14 +3,14 @@
 # grown 4 -> 8 -> 12 -> 16 layers at d 512 (charlm/charlm2.py), then tested against GPT-2 small on the same documents and
 # quantized to 4 bits by GPTQ. Pull-based as the others; the log goes to the hub every 10 minutes (boxlog_CH.txt), the
 # checkpoints to charlm/run2/ as they are made.
-BOXCH_SERIAL=26
+BOXCH_SERIAL=27
 if [ -f /root/.boxch_serial ] && [ "$(cat /root/.boxch_serial)" -gt "$BOXCH_SERIAL" ] 2>/dev/null; then echo "BOXCH_STALE $BOXCH_SERIAL"; exit 0; fi
 echo $BOXCH_SERIAL > /root/.boxch_serial
 [ -s /root/.hf_token ] || { [ -n "$HF_TOKEN" ] && printf '%s' "$HF_TOKEN" > /root/.hf_token && chmod 600 /root/.hf_token; }
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); R=baya1116/hypernet-sp-distill
 RAW="https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl"
 mkdir -p /root/charlm/data /root/charlm/run2
-for f in charlm/charlm2.py charlm/charlm_prep.py charlm/charlm_fold.py charlm/charlm_sft.py q4.py; do
+for f in charlm/charlm2.py charlm/charlm_prep.py charlm/charlm_fold.py charlm/charlm_sft.py charlm/charlm_chat.py q4.py; do
   for try in 1 2 3; do curl -sS -o /root/charlm/$(basename $f) "$RAW/$f?nocache=$(date +%s)" && python3 -m py_compile /root/charlm/$(basename $f) && break; sleep 5; done
 done
 
@@ -361,6 +361,12 @@ if [ ! -e /root/.ch_sft2lr26 ]; then touch /root/.ch_sft2lr26
   sed -i 's/ --lr 1.5e-4 / --lr 5e-5 /' /root/chsft2.sh
   grep -o -- "--lr [0-9.e-]*" /root/chsft2.sh | sed 's/^/[sft2_25] relaunched at /' | tee -a run2/train.log
   setsid nohup bash -c 'bash /root/chsft2.sh >> /root/charlm/job.log 2>&1' > /dev/null 2>&1 < /dev/null &
+fi
+# ---- serial 27: the NPC model talked to on this GPU (the box is idle): 8 character cards and a player's line each, one
+# sampled reply and the likeliest of 4; into npc1/train.log, which the mirror carries. ----
+if [ ! -e /root/.ch_npctest27 ]; then touch /root/.ch_npctest27
+  cd /root/charlm && python3 -u charlm_chat.py --model npc1/model_final.pt --n 4 --tag npctest 2>&1 | grep -vE "Warning|warn" >> npc1/train.log
+  echo "[npctest] done $(date -u)" >> npc1/train.log
 fi
 echo "BOXCH_OK serial $BOXCH_SERIAL $(date -u)"
 # CTL-END
