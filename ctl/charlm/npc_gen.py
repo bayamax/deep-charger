@@ -86,16 +86,16 @@ def card_text(c, fmt):
 def plan():
     """a sequence of 3-6 player purposes: about half about the card's facts, 'recall' only after 'self', no off-card purpose twice running"""
     n = R.choice([3, 4, 4, 5, 5, 6]); seq = ["greet"] if R.random() < 0.35 else []
-    other = ["unknown", "unknown", "self", "smalltalk", "npc_life", "rude", "meta", "bad_request", "bargain", "short"]
+    other = ["unknown", "unknown", "unknown", "self", "self", "smalltalk", "npc_life", "rude", "rude", "meta", "meta", "bad_request", "bargain", "short"]
     while len(seq) < n - (1 if R.random() < 0.25 else 0):
-        if R.random() < 0.45:
+        if R.random() < 0.4:
             seq.append(R.choice(["fact", "fact", "fact_indirect"]))
             if R.random() < 0.35: seq.append("followup")
             continue
         k = R.choice(other)
         if seq and k == seq[-1]: continue
         seq.append(k)
-        if k == "self" and R.random() < 0.7:
+        if k == "self" and R.random() < 0.8:
             if R.random() < 0.5: seq.append(R.choice(["fact", "unknown", "smalltalk"]))
             seq.append("recall")
     if not any(k.startswith("fact") for k in seq): seq.insert(1 if seq and seq[0] == "greet" else 0, "fact")

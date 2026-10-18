@@ -5,7 +5,7 @@
 # probes; the character model (npc1) is fine-tuned on them with the earlier public NPC data (npc2), and both models' replies
 # to the probes are graded by the same open model (charlm/npc_bench.py). Pull-based as the others; the log goes to the hub
 # every 10 minutes (charlm/npc2/boxlog_NP.txt) and to the container log every 5 (status.sh).
-BOXNP_SERIAL=14
+BOXNP_SERIAL=15
 if [ -f /root/.boxnp_serial ] && [ "$(cat /root/.boxnp_serial)" -gt "$BOXNP_SERIAL" ] 2>/dev/null; then echo "BOXNP_STALE $BOXNP_SERIAL"; exit 0; fi
 echo $BOXNP_SERIAL > /root/.boxnp_serial
 # serial 10: the host checked first (three hosts had a broken Docker, a slow network, or a GPU already half used by
@@ -210,6 +210,44 @@ echo "[np2] NPJOB2_DONE $(date -u)"
 JOB
   setsid nohup bash -c 'bash /root/npjob2.sh >> /root/np/np.log 2>&1' > /dev/null 2>&1 < /dev/null &
   echo "NPJOB2_QUEUED $(date -u)"
+fi
+# ---- serial 15, round 3 (queued behind round 2): more data. npc2 rose from 0% to 17% usable (first reply) on the probes,
+# fact questions most; rude and out-of-world lines, recall and follow-ups stayed near 10%. 40,000 more dialogues (fresh
+# syllable names, more unknown/rude/meta/self-recall lines), then npc4 from npc1 on all of it (+ round 2's picks + the
+# public set), graded alike ----
+if [ ! -e /root/.npjob3 ]; then touch /root/.npjob3
+  cat > /root/npjob3.sh <<'JOB'
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); cd /root/np
+gpu_clear() { fuser -k -9 /dev/nvidia* > /dev/null 2>&1; sleep 3; }
+put() { python3 -c "import sys; from huggingface_hub import HfApi; HfApi().upload_file(path_or_fileobj=sys.argv[1], path_in_repo='charlm/'+sys.argv[2], repo_id='baya1116/hypernet-sp-distill')" "$1" "$2" > /dev/null 2>&1 && echo "[hub] $2" || echo "[hub] $2 FAILED"; }
+until grep -q NPJOB2_DONE np.log 2>/dev/null; do sleep 120; done
+echo "[np3] round 3: 40,000 more dialogues $(date -u)"
+for c in 0 1 2 3 4 5 6 7; do
+  for try in 1 2; do
+    [ -s t3_$c.jsonl ] && break; gpu_clear
+    if [ -s t3_$c.tmp.raw ]; then python3 -u npc_gen.py train --from-raw t3_$c.tmp.raw --seed $((c + 11)) --out t3_$c.tmp
+    else python3 -u npc_gen.py train --n 2500 --seed $((c + 11)) --out t3_$c.tmp; fi
+    [ -s t3_$c.tmp ] && mv t3_$c.tmp t3_$c.jsonl && put t3_$c.jsonl npc_data2/t3_$c.jsonl
+  done
+done
+cat t3_*.jsonl > t3_all.jsonl; echo "[np3] round 3 dialogues: $(wc -l < t3_all.jsonl)"
+if [ ! -s npc4/model_final.pt ]; then
+  python3 -u charlm_sft.py --base npc1.pt --data sftdata --out npc4 --shards 0 --jsonl train_new.jsonl,t3_all.jsonl,rft.jsonl,stage2_public.jsonl \
+    --val-jsonl val_all.jsonl --val-convs 1000 --prompts-json prompts.json --epochs 2 --lr 1e-4 --warmup 50 --eval-every 10 --hours 1.5 \
+    --hub baya1116/hypernet-sp-distill:charlm/npc4 2>&1 | grep -vE "Warning|warn|^\[step"
+fi
+for m in best final 4bit; do
+  [ -s npc4/model_$m.pt ] && [ ! -s r4_$m.jsonl ] && python3 -u npc_bench.py reply --model npc4/model_$m.pt --tag npc4-$m --bench npc_bench.jsonl --out r4_$m.jsonl
+done
+cat r4_*.jsonl > replies_r4.jsonl
+[ -s judged_r4.jsonl ] || { gpu_clear; python3 -u npc_gen.py judge --inp replies_r4.jsonl --out judged_r4.jsonl; }
+cat judged_all.jsonl judged_r3.jsonl judged_r4.jsonl > judged_three.jsonl
+python3 npc_bench.py report --inp judged_three.jsonl > report3.txt; sed 's/^/[report3] /' report3.txt
+put judged_r4.jsonl npc4/judged_r4.jsonl; put report3.txt npc4/report3.txt
+echo "[np3] NPJOB3_DONE $(date -u)"
+JOB
+  setsid nohup bash -c 'bash /root/npjob3.sh >> /root/np/np.log 2>&1' > /dev/null 2>&1 < /dev/null &
+  echo "NPJOB3_QUEUED $(date -u)"
 fi
 echo "BOXNP_OK serial $BOXNP_SERIAL $(date -u)"
 # CTL-END
