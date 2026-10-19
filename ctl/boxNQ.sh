@@ -4,7 +4,7 @@
 # of them (+ round 2's picks + the public set); the probes' replies of npc1-npc4 are graded again, all by the same judge,
 # Qwen3.5-9B (AWQ, Apache-2.0, fits 12 GB), so they compare; then round 4, a reranker for the game (npc_bench.py rank).
 # Pull-based as the others; the log goes to the hub every 10 minutes (charlm/npc4/boxlog_NQ.txt).
-BOXNQ_SERIAL=3
+BOXNQ_SERIAL=4
 if [ -f /root/.boxnq_serial ] && [ "$(cat /root/.boxnq_serial)" -gt "$BOXNQ_SERIAL" ] 2>/dev/null; then echo "BOXNQ_STALE $BOXNQ_SERIAL"; exit 0; fi
 echo $BOXNQ_SERIAL > /root/.boxnq_serial
 if [ ! -e /root/.nq_pre ]; then touch /root/.nq_pre   # the host first (Vast has many bad ones)
@@ -24,6 +24,12 @@ supervisorctl reread > /dev/null 2>&1; supervisorctl update > /dev/null 2>&1; su
 if [ ! -e /root/.nq_s3 ]; then touch /root/.nq_s3
   ls -la --time-style=+%H:%M /root/nq/s4* /root/nq/r5* /root/nq/judged* /root/nq/rank* /root/nq/report* 2>&1 | sed 's/^/[nq] s3: /'
   grep -E "Error|error|Traceback|\[bench\]|\[rank\]|\[judge\]" /root/nq/nq.log | grep -v "it/s" | tail -n 12 | cut -c1-250 | sed 's/^/[nq] s3 log: /'
+fi
+# serial 4: 64 sequences still ran out of memory while loading (the 9B's unquantized embeddings and CUDA graphs on 12 GB):
+# now no CUDA graphs, 16 sequences, 3072 tokens, and Qwen3.5-4B (AWQ) if the 9B still does not fit; the job again
+if [ ! -e /root/.nq_s4 ]; then touch /root/.nq_s4
+  pkill -f "nqjo[b].sh"; pkill -f "npc_ge[n].py"; sleep 3; fuser -k -9 /dev/nvidia* > /dev/null 2>&1; sleep 5
+  rm -f /root/.nqjob /root/nq/judged_9b.jsonl /root/nq/report_9b.txt /root/nq/report4.txt; echo "[nq] s4: judge again, eager, 16 sequences $(date -u)"
 fi
 [ -s /root/.hf_token ] || { [ -n "$HF_TOKEN" ] && printf '%s' "$HF_TOKEN" > /root/.hf_token && chmod 600 /root/.hf_token; }
 echo "[nq] HF token: $([ -s /root/.hf_token ] && echo present || echo MISSING)"
@@ -64,7 +70,7 @@ fi
 if [ ! -e /root/.nqjob ]; then touch /root/.nqjob
   cat > /root/nqjob.sh <<'JOB'
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); cd /root/nq
-HUB="https://huggingface.co/baya1116/hypernet-sp-distill/resolve/main/charlm"; J="--model QuantTrio/Qwen3.5-9B-AWQ --fallback QuantTrio/Qwen3.5-9B-AWQ --max-len 4096 --gpu-mem 0.88 --max-seqs 64"
+HUB="https://huggingface.co/baya1116/hypernet-sp-distill/resolve/main/charlm"; J="--model QuantTrio/Qwen3.5-9B-AWQ --fallback QuantTrio/Qwen3.5-4B-AWQ --max-len 3072 --gpu-mem 0.93 --max-seqs 16 --eager 1"
 gpu_clear() { fuser -k -9 /dev/nvidia* > /dev/null 2>&1; sleep 3; }
 put() { python3 -c "import sys; from huggingface_hub import HfApi; HfApi().upload_file(path_or_fileobj=sys.argv[1], path_in_repo='charlm/'+sys.argv[2], repo_id='baya1116/hypernet-sp-distill')" "$1" "$2" > /dev/null 2>&1 && echo "[hub] $2" || echo "[hub] $2 FAILED"; }
 get() { [ -s $2 ] || curl -sSfL -o $2 "$HUB/$1" || { rm -f $2; return 1; }; }
@@ -100,7 +106,7 @@ for l in open('judged_9b.jsonl'):
     r = json.loads(l)
     if r['pick'] == 'first' and r['model'] in ('npc4-best', 'npc4-final'): u[r['model']].append(bool(r['judge'].get('usable')))
 print(max(u, key=lambda k: sum(u[k]) / len(u[k])) if u else 'npc4-final')")
-F=npc4/model_${M#*-}.pt; echo "[nq] round 4: the ranker for $F $(date -u)"
+M=${M:-npc4-final}; F=npc4/model_${M#*-}.pt; echo "[nq] round 4: the ranker for $F $(date -u)"
 [ -s s4.jsonl ] || python3 -u npc_bench.py sample --model $F --tag $M --bench t3_all.jsonl --situations 1500 --n 8 --seed 4 --out s4.jsonl
 [ -s s4_judged.jsonl ] || { gpu_clear; python3 -u npc_gen.py judge $J --inp s4.jsonl --out s4_judged.jsonl; }
 python3 -u npc_bench.py rank --model $F --inp s4_judged.jsonl --out rank_$M.pt; put rank_$M.pt npc4/rank_$M.pt

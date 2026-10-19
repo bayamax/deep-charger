@@ -23,6 +23,7 @@ ap.add_argument("--out", required=True); ap.add_argument("--inp", default="")
 ap.add_argument("--from-raw", default="", help="parse the outputs a run kept (OUT.raw) again instead of generating")
 ap.add_argument("--model", default="nvidia/Qwen3.6-35B-A3B-NVFP4"); ap.add_argument("--fallback", default="QuantTrio/Qwen3.6-35B-A3B-AWQ")
 ap.add_argument("--seed", type=int, default=0); ap.add_argument("--max-len", type=int, default=8192); ap.add_argument("--gpu-mem", type=float, default=0.90)
+ap.add_argument("--eager", type=int, default=0, help="1: no CUDA graphs (their memory matters on 12 GB)")
 ap.add_argument("--max-seqs", type=int, default=256, help="sequences in flight (fewer on a 12 GB card: the sampler's warm-up wants their logits at once)")
 A = ap.parse_args()
 R = random.Random(A.seed + {"train": 0, "bench": 1000003, "judge": 7}[A.mode])
@@ -178,7 +179,7 @@ def engine():
     order = (A.model, A.fallback) if torch.cuda.get_device_capability()[0] >= 10 else (A.fallback, A.model)   # NVFP4 wants Blackwell
     for m in order:
         try:
-            return LLM(model=m, max_model_len=A.max_len, gpu_memory_utilization=A.gpu_mem, enable_prefix_caching=True, seed=A.seed, max_num_seqs=A.max_seqs), m
+            return LLM(model=m, max_model_len=A.max_len, gpu_memory_utilization=A.gpu_mem, enable_prefix_caching=True, seed=A.seed, max_num_seqs=A.max_seqs, enforce_eager=bool(A.eager)), m
         except Exception as e:
             print(f"[gen] {m} did not load: {str(e)[:300]}", flush=True)
             if m == order[-1]: raise
