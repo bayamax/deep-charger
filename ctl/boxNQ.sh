@@ -4,7 +4,7 @@
 # of them (+ round 2's picks + the public set); the probes' replies of npc1-npc4 are graded again, all by the same judge,
 # Qwen3.5-9B (AWQ, Apache-2.0, fits 12 GB), so they compare; then round 4, a reranker for the game (npc_bench.py rank).
 # Pull-based as the others; the log goes to the hub every 10 minutes (charlm/npc4/boxlog_NQ.txt).
-BOXNQ_SERIAL=1
+BOXNQ_SERIAL=2
 if [ -f /root/.boxnq_serial ] && [ "$(cat /root/.boxnq_serial)" -gt "$BOXNQ_SERIAL" ] 2>/dev/null; then echo "BOXNQ_STALE $BOXNQ_SERIAL"; exit 0; fi
 echo $BOXNQ_SERIAL > /root/.boxnq_serial
 if [ ! -e /root/.nq_pre ]; then touch /root/.nq_pre   # the host first (Vast has many bad ones)
@@ -12,6 +12,12 @@ if [ ! -e /root/.nq_pre ]; then touch /root/.nq_pre   # the host first (Vast has
   echo "[nq] preflight hub: $(curl -sSL -o /dev/null -m 90 -w '%{size_download} bytes in %{time_total}s' https://huggingface.co/QuantTrio/Qwen3.5-9B-AWQ/resolve/main/model-00001-of-00002.safetensors -r 0-104857599 2>&1)"
 fi
 [ -d /venv/main/bin ] && export PATH=/venv/main/bin:$PATH
+# serial 2: the 9B judge ran out of memory in vLLM's warm-up (256 sequences' logits at once on 12 GB) and hung: the job
+# stopped, the GPU cleared, the job again with 64 sequences in flight (what is done - npc4, its replies - is kept)
+if [ ! -e /root/.nq_s2 ]; then touch /root/.nq_s2
+  pkill -f "nqjo[b].sh"; pkill -f "npc_ge[n].py"; sleep 3; fuser -k -9 /dev/nvidia* > /dev/null 2>&1; sleep 5
+  rm -f /root/.nqjob /root/nq/judged_9b.jsonl; echo "[nq] s2: judge restarted with 64 sequences, GPU $(nvidia-smi --query-gpu=memory.used --format=csv,noheader) used $(date -u)"
+fi
 for f in $(grep -l -i vllm /etc/supervisor/conf.d/* 2>/dev/null); do mv $f $f.off; done
 supervisorctl reread > /dev/null 2>&1; supervisorctl update > /dev/null 2>&1; supervisorctl stop all > /dev/null 2>&1; pkill -f "vllm serve" 2>/dev/null
 [ -s /root/.hf_token ] || { [ -n "$HF_TOKEN" ] && printf '%s' "$HF_TOKEN" > /root/.hf_token && chmod 600 /root/.hf_token; }
@@ -53,7 +59,7 @@ fi
 if [ ! -e /root/.nqjob ]; then touch /root/.nqjob
   cat > /root/nqjob.sh <<'JOB'
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); cd /root/nq
-HUB="https://huggingface.co/baya1116/hypernet-sp-distill/resolve/main/charlm"; J="--model QuantTrio/Qwen3.5-9B-AWQ --fallback QuantTrio/Qwen3.5-9B-AWQ --max-len 6144 --gpu-mem 0.88"
+HUB="https://huggingface.co/baya1116/hypernet-sp-distill/resolve/main/charlm"; J="--model QuantTrio/Qwen3.5-9B-AWQ --fallback QuantTrio/Qwen3.5-9B-AWQ --max-len 4096 --gpu-mem 0.88 --max-seqs 64"
 gpu_clear() { fuser -k -9 /dev/nvidia* > /dev/null 2>&1; sleep 3; }
 put() { python3 -c "import sys; from huggingface_hub import HfApi; HfApi().upload_file(path_or_fileobj=sys.argv[1], path_in_repo='charlm/'+sys.argv[2], repo_id='baya1116/hypernet-sp-distill')" "$1" "$2" > /dev/null 2>&1 && echo "[hub] $2" || echo "[hub] $2 FAILED"; }
 get() { [ -s $2 ] || curl -sSfL -o $2 "$HUB/$1" || { rm -f $2; return 1; }; }
