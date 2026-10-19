@@ -5,7 +5,7 @@
 # earlier NPC dialogues and some public chat (placeholder names dropped); npc4 and npc5 answer the probes and Qwen3.5-9B
 # grades them. Pull-based as the others; the log goes to the hub every 10 minutes (charlm/npc5/boxlog_NR.txt); the end
 # is charlm/npc5/DONE on the hub, after which the box is let go.
-BOXNR_SERIAL=6
+BOXNR_SERIAL=7
 if [ -f /root/.boxnr_serial ] && [ "$(cat /root/.boxnr_serial)" -gt "$BOXNR_SERIAL" ] 2>/dev/null; then echo "BOXNR_STALE $BOXNR_SERIAL"; exit 0; fi
 echo $BOXNR_SERIAL > /root/.boxnr_serial
 if [ ! -e /root/.nr_pre ]; then touch /root/.nr_pre   # the host first (Vast has many bad ones)
@@ -39,6 +39,11 @@ fi
 if [ ! -e /root/.nr_s6 ]; then touch /root/.nr_s6
   pkill -f "nrjo[b].sh"; pkill -f "npc_ge[n].py"; sleep 3; fuser -k -9 /dev/nvidia* > /dev/null 2>&1; sleep 3
   rm -f /root/.nrjob /root/nr/*.tmp /root/nr/*.tmp.raw; echo "[nr] s6: generation stopped; npc5 on SODA alone $(date -u)"
+fi
+# serial 7: each model's replies take 30 min; npc5's best and 4-bit files skipped (best ~ final), straight to the grading
+if [ ! -e /root/.nr_s7 ]; then touch /root/.nr_s7
+  cd /root/nr && mv npc5/model_4bit.pt npc5/model_4bit.keep 2>/dev/null; mv npc5/model_best.pt npc5/model_best.keep 2>/dev/null
+  pkill -f "npc_benc[h].py reply --model npc5/model_best" ; rm -f r_npc5-best.jsonl r_npc5-4bit.jsonl; cd /; echo "[nr] s7: npc5 best/4-bit replies skipped $(date -u)"
 fi
 [ -s /root/.hf_token ] || { [ -n "$HF_TOKEN" ] && printf '%s' "$HF_TOKEN" > /root/.hf_token && chmod 600 /root/.hf_token; }
 echo "[nr] HF token: $([ -s /root/.hf_token ] && echo present || echo MISSING)"
