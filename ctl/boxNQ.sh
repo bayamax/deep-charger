@@ -4,7 +4,7 @@
 # of them (+ round 2's picks + the public set); the probes' replies of npc1-npc4 are graded again, all by the same judge,
 # Qwen3.5-9B (AWQ, Apache-2.0, fits 12 GB), so they compare; then round 4, a reranker for the game (npc_bench.py rank).
 # Pull-based as the others; the log goes to the hub every 10 minutes (charlm/npc4/boxlog_NQ.txt).
-BOXNQ_SERIAL=2
+BOXNQ_SERIAL=3
 if [ -f /root/.boxnq_serial ] && [ "$(cat /root/.boxnq_serial)" -gt "$BOXNQ_SERIAL" ] 2>/dev/null; then echo "BOXNQ_STALE $BOXNQ_SERIAL"; exit 0; fi
 echo $BOXNQ_SERIAL > /root/.boxnq_serial
 if [ ! -e /root/.nq_pre ]; then touch /root/.nq_pre   # the host first (Vast has many bad ones)
@@ -20,6 +20,11 @@ if [ ! -e /root/.nq_s2 ]; then touch /root/.nq_s2
 fi
 for f in $(grep -l -i vllm /etc/supervisor/conf.d/* 2>/dev/null); do mv $f $f.off; done
 supervisorctl reread > /dev/null 2>&1; supervisorctl update > /dev/null 2>&1; supervisorctl stop all > /dev/null 2>&1; pkill -f "vllm serve" 2>/dev/null
+# serial 3: what serial 1's failed run left (it went on to the end without its judge)
+if [ ! -e /root/.nq_s3 ]; then touch /root/.nq_s3
+  ls -la --time-style=+%H:%M /root/nq/s4* /root/nq/r5* /root/nq/judged* /root/nq/rank* /root/nq/report* 2>&1 | sed 's/^/[nq] s3: /'
+  grep -E "Error|error|Traceback|\[bench\]|\[rank\]|\[judge\]" /root/nq/nq.log | grep -v "it/s" | tail -n 12 | cut -c1-250 | sed 's/^/[nq] s3 log: /'
+fi
 [ -s /root/.hf_token ] || { [ -n "$HF_TOKEN" ] && printf '%s' "$HF_TOKEN" > /root/.hf_token && chmod 600 /root/.hf_token; }
 echo "[nq] HF token: $([ -s /root/.hf_token ] && echo present || echo MISSING)"
 RAW="https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl"
