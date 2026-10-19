@@ -5,7 +5,7 @@
 # earlier NPC dialogues and some public chat (placeholder names dropped); npc4 and npc5 answer the probes and Qwen3.5-9B
 # grades them. Pull-based as the others; the log goes to the hub every 10 minutes (charlm/npc5/boxlog_NR.txt); the end
 # is charlm/npc5/DONE on the hub, after which the box is let go.
-BOXNR_SERIAL=5
+BOXNR_SERIAL=6
 if [ -f /root/.boxnr_serial ] && [ "$(cat /root/.boxnr_serial)" -gt "$BOXNR_SERIAL" ] 2>/dev/null; then echo "BOXNR_STALE $BOXNR_SERIAL"; exit 0; fi
 echo $BOXNR_SERIAL > /root/.boxnr_serial
 if [ ! -e /root/.nr_pre ]; then touch /root/.nr_pre   # the host first (Vast has many bad ones)
@@ -33,6 +33,12 @@ fi
 # (its running part left to finish and be picked up), and started again with SODA in the mix
 if [ ! -e /root/.nr_s5 ]; then touch /root/.nr_s5
   pkill -f "nrjo[b].sh"; rm -f /root/.nrjob; echo "[nr] s5: job script stopped (the running part goes on), SODA added $(date -u)"
+fi
+# serial 6, the user: for now SODA alone, at once - the generation stopped (parts 0-2 kept for later), npc5 from npc4 on
+# SODA's 40,000 only; npc4 and npc5 graded on the help probes
+if [ ! -e /root/.nr_s6 ]; then touch /root/.nr_s6
+  pkill -f "nrjo[b].sh"; pkill -f "npc_ge[n].py"; sleep 3; fuser -k -9 /dev/nvidia* > /dev/null 2>&1; sleep 3
+  rm -f /root/.nrjob /root/nr/*.tmp /root/nr/*.tmp.raw; echo "[nr] s6: generation stopped; npc5 on SODA alone $(date -u)"
 fi
 [ -s /root/.hf_token ] || { [ -n "$HF_TOKEN" ] && printf '%s' "$HF_TOKEN" > /root/.hf_token && chmod 600 /root/.hf_token; }
 echo "[nr] HF token: $([ -s /root/.hf_token ] && echo present || echo MISSING)"
@@ -88,7 +94,7 @@ get npc4/model_final.pt npc4.pt; get npc_data/stage2_public.jsonl stage2_public.
 for f in train_new.jsonl t3_0.jsonl t3_1.jsonl t3_2.jsonl val_all.jsonl; do get npc_data2/$f $f; done
 ls -la *.pt *.jsonl | sed 's/^/[nr] /'
 echo "[nr] probes $(date -u)"; [ -s helpbench.jsonl ] || { gpu_clear; python3 -u npc_gen.py helpbench --n 160 --seed 1 --out helpbench.tmp $J; [ -s helpbench.tmp ] && mv helpbench.tmp helpbench.jsonl && put helpbench.jsonl npc_data2/helpbench.jsonl; }
-DL=$(date -d "2026-10-19 11:07 UTC" +%s); c=0   # 3.5 h of conversations from the first start, 1,000 requests a part
+DL=0; c=0   # serial 6: no more generation   # 3.5 h of conversations from the first start, 1,000 requests a part
 while [ $(date +%s) -lt $DL ] && [ $c -lt 20 ]; do
   [ -s help_$c.jsonl ] || { echo "[nr] conversations part $c $(date -u)"; gen help 1000 $((c + 101)) help_$c.jsonl && put help_$c.jsonl npc_data2/help_$c.jsonl; }; c=$((c + 1))
 done
@@ -102,10 +108,9 @@ help_ = [l for l in open("help_all.jsonl")]; random.shuffle(help_)
 old = [l for f in ("train_new.jsonl", "t3_0.jsonl", "t3_1.jsonl", "t3_2.jsonl") for l in open(f)]; random.shuffle(old)
 pub = [l for l in open("stage2_public.jsonl") if not bad(json.loads(l))]; random.shuffle(pub)
 val, help_ = help_[:300], help_[300:]; soda = [l for l in open("soda.jsonl")]
-mix = help_ + old[:len(help_)] + soda + pub[:6000]; random.shuffle(mix)
+mix = soda; random.shuffle(mix)   # serial 6: SODA alone
 open("mix5.jsonl", "w").writelines(mix); open("val5.jsonl", "w").writelines(val + [l for l in open("soda_val.jsonl")] + [l for l in open("val_all.jsonl")])
-print(f"[nr] mix: {len(help_)} new, {min(len(old), len(help_))} NPC, {len(soda)} SODA, {min(len(pub), 6000)} public (placeholders dropped); "
-      f"held out {len(val)} new + 300 SODA", flush=True)
+print(f"[nr] mix: SODA alone, {len(soda)} conversations; held out {len(val)} new + 300 SODA + the NPC set", flush=True)
 json.dump([json.loads(l)["card"] + "\n\n" + json.loads(l)["probes"][0]["turns"][0] for l in list(open("helpbench.jsonl"))[:6]], open("prompts5.json", "w"))
 PY
 if [ ! -s npc5/model_final.pt ]; then
