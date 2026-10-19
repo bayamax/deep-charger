@@ -249,8 +249,11 @@ def engine():
     # an NVFP4 build wants Blackwell: on older GPUs its fallback goes first; any other model is tried first as asked
     order = (A.fallback, A.model) if "NVFP4" in A.model and torch.cuda.get_device_capability()[0] < 10 else (A.model, A.fallback)
     for m in order:
-        try:
-            return LLM(model=m, max_model_len=A.max_len, gpu_memory_utilization=A.gpu_mem, enable_prefix_caching=True, seed=A.seed, max_num_seqs=A.max_seqs, enforce_eager=bool(A.eager)), m
+        kw = dict(model=m, max_model_len=A.max_len, gpu_memory_utilization=A.gpu_mem, enable_prefix_caching=True, seed=A.seed, max_num_seqs=A.max_seqs,
+                  enforce_eager=bool(A.eager))
+        try:   # text only: the Qwen3.5 models carry a vision encoder that would take memory a 12 GB card does not have
+            try: return LLM(language_model_only=True, **kw), m
+            except TypeError: return LLM(**kw), m
         except Exception as e:
             print(f"[gen] {m} did not load: {str(e)[:300]}", flush=True)
             if m == order[-1]: raise
