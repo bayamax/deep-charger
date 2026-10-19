@@ -5,7 +5,7 @@
 # earlier NPC dialogues and some public chat (placeholder names dropped); npc4 and npc5 answer the probes and Qwen3.5-9B
 # grades them. Pull-based as the others; the log goes to the hub every 10 minutes (charlm/npc5/boxlog_NR.txt); the end
 # is charlm/npc5/DONE on the hub, after which the box is let go.
-BOXNR_SERIAL=4
+BOXNR_SERIAL=5
 if [ -f /root/.boxnr_serial ] && [ "$(cat /root/.boxnr_serial)" -gt "$BOXNR_SERIAL" ] 2>/dev/null; then echo "BOXNR_STALE $BOXNR_SERIAL"; exit 0; fi
 echo $BOXNR_SERIAL > /root/.boxnr_serial
 if [ ! -e /root/.nr_pre ]; then touch /root/.nr_pre   # the host first (Vast has many bad ones)
@@ -29,11 +29,16 @@ if [ ! -e /root/.nr_s3 ]; then touch /root/.nr_s3
 fi
 # serial 4: npc_gen.py loads the Qwen3.5 models text only (their vision encoder left out), so the 9B may fit for the
 # grading; this run only fetches the scripts again - the running job takes it from its next call
+# serial 5, the user: train on SODA (allenai/soda, CC BY 4.0, everyday social conversations) too. The job script stopped
+# (its running part left to finish and be picked up), and started again with SODA in the mix
+if [ ! -e /root/.nr_s5 ]; then touch /root/.nr_s5
+  pkill -f "nrjo[b].sh"; rm -f /root/.nrjob; echo "[nr] s5: job script stopped (the running part goes on), SODA added $(date -u)"
+fi
 [ -s /root/.hf_token ] || { [ -n "$HF_TOKEN" ] && printf '%s' "$HF_TOKEN" > /root/.hf_token && chmod 600 /root/.hf_token; }
 echo "[nr] HF token: $([ -s /root/.hf_token ] && echo present || echo MISSING)"
 RAW="https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl"
 mkdir -p /root/nr
-for f in charlm/npc_gen.py charlm/npc_bench.py charlm/charlm_sft.py charlm/charlm_fold.py q4.py; do
+for f in charlm/npc_gen.py charlm/npc_bench.py charlm/charlm_sft.py charlm/charlm_fold.py charlm/soda_prep.py q4.py; do
   for try in 1 2 3; do curl -sS -o /root/nr/$(basename $f) "$RAW/$f?nocache=$(date +%s)" && python3 -m py_compile /root/nr/$(basename $f) && break; sleep 5; done
 done
 if [ ! -f /root/.bootstrapped ]; then
@@ -77,6 +82,8 @@ gen() {   # gen MODE N SEED OUT: the light settings again if the first try made 
   [ -s $4.tmp ] || { echo "[nr] $4: again with the light settings"; gpu_clear; python3 -u npc_gen.py $1 --n $2 --seed $3 --out $4.tmp $GE; }
   [ -s $4.tmp ] && mv $4.tmp $4
 }
+while pgrep -f "npc_ge[n].py" > /dev/null; do sleep 30; done   # a part left running by the stopped job: let it finish, keep it
+for t in help_*.jsonl.tmp; do [ -s "$t" ] && mv "$t" "${t%.tmp}" && put "${t%.tmp}" npc_data2/$(basename "${t%.tmp}"); done
 get npc4/model_final.pt npc4.pt; get npc_data/stage2_public.jsonl stage2_public.jsonl
 for f in train_new.jsonl t3_0.jsonl t3_1.jsonl t3_2.jsonl val_all.jsonl; do get npc_data2/$f $f; done
 ls -la *.pt *.jsonl | sed 's/^/[nr] /'
@@ -86,21 +93,24 @@ while [ $(date +%s) -lt $DL ] && [ $c -lt 20 ]; do
   [ -s help_$c.jsonl ] || { echo "[nr] conversations part $c $(date -u)"; gen help 1000 $((c + 101)) help_$c.jsonl && put help_$c.jsonl npc_data2/help_$c.jsonl; }; c=$((c + 1))
 done
 cat help_*.jsonl > help_all.jsonl; N=$(wc -l < help_all.jsonl); echo "[nr] conversations: $N"
+[ -s soda_0.parquet ] || curl -sSfL -o soda_0.parquet "https://huggingface.co/api/datasets/allenai/soda/parquet/default/train/0.parquet"
+[ -s soda.jsonl ] || python3 -u soda_prep.py --parquet soda_0.parquet --n 40000 --val 300 --out soda.jsonl --val-out soda_val.jsonl
 python3 - <<'PY'
 import json, random
 random.seed(5); bad = lambda r: any("[user" in m["content"] or "[name]" in m["content"] for m in r["messages"])
 help_ = [l for l in open("help_all.jsonl")]; random.shuffle(help_)
 old = [l for f in ("train_new.jsonl", "t3_0.jsonl", "t3_1.jsonl", "t3_2.jsonl") for l in open(f)]; random.shuffle(old)
 pub = [l for l in open("stage2_public.jsonl") if not bad(json.loads(l))]; random.shuffle(pub)
-val, help_ = help_[:300], help_[300:]
-mix = help_ + old[:len(help_)] + pub[:8000]; random.shuffle(mix)
-open("mix5.jsonl", "w").writelines(mix); open("val5.jsonl", "w").writelines(val + [l for l in open("val_all.jsonl")])
-print(f"[nr] mix: {len(help_)} new, {min(len(old), len(help_))} NPC, {min(len(pub), 8000)} public (placeholders dropped); held out {len(val)} new", flush=True)
+val, help_ = help_[:300], help_[300:]; soda = [l for l in open("soda.jsonl")]
+mix = help_ + old[:len(help_)] + soda + pub[:6000]; random.shuffle(mix)
+open("mix5.jsonl", "w").writelines(mix); open("val5.jsonl", "w").writelines(val + [l for l in open("soda_val.jsonl")] + [l for l in open("val_all.jsonl")])
+print(f"[nr] mix: {len(help_)} new, {min(len(old), len(help_))} NPC, {len(soda)} SODA, {min(len(pub), 6000)} public (placeholders dropped); "
+      f"held out {len(val)} new + 300 SODA", flush=True)
 json.dump([json.loads(l)["card"] + "\n\n" + json.loads(l)["probes"][0]["turns"][0] for l in list(open("helpbench.jsonl"))[:6]], open("prompts5.json", "w"))
 PY
 if [ ! -s npc5/model_final.pt ]; then
   gpu_clear; python3 -u charlm_sft.py --base npc4.pt --data sftdata --out npc5 --shards 0 --jsonl mix5.jsonl --val-jsonl val5.jsonl --val-convs 1200 \
-    --prompts-json prompts5.json --epochs 1.5 --lr 5e-5 --warmup 50 --eval-every 15 --hours 3 --hub baya1116/hypernet-sp-distill:charlm/npc5 2>&1 | grep -vE "Warning|warn|^\[step"
+    --prompts-json prompts5.json --epochs 1.2 --lr 5e-5 --warmup 50 --eval-every 15 --hours 3.5 --hub baya1116/hypernet-sp-distill:charlm/npc5 2>&1 | grep -vE "Warning|warn|^\[step"
 fi
 for m in npc4:npc4.pt npc5-best:npc5/model_best.pt npc5-final:npc5/model_final.pt npc5-4bit:npc5/model_4bit.pt; do
   t=${m%%:*}; f=${m#*:}; [ -s $f ] && [ ! -s r_$t.jsonl ] && python3 -u npc_bench.py reply --model $f --tag $t --bench helpbench.jsonl --out r_$t.jsonl
