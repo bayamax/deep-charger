@@ -246,7 +246,8 @@ def parse_json(t):
 def engine():
     from vllm import LLM
     import torch
-    order = (A.model, A.fallback) if torch.cuda.get_device_capability()[0] >= 10 else (A.fallback, A.model)   # NVFP4 wants Blackwell
+    # an NVFP4 build wants Blackwell: on older GPUs its fallback goes first; any other model is tried first as asked
+    order = (A.fallback, A.model) if "NVFP4" in A.model and torch.cuda.get_device_capability()[0] < 10 else (A.model, A.fallback)
     for m in order:
         try:
             return LLM(model=m, max_model_len=A.max_len, gpu_memory_utilization=A.gpu_mem, enable_prefix_caching=True, seed=A.seed, max_num_seqs=A.max_seqs, enforce_eager=bool(A.eager)), m

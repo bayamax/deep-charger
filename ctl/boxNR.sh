@@ -5,7 +5,7 @@
 # earlier NPC dialogues and some public chat (placeholder names dropped); npc4 and npc5 answer the probes and Qwen3.5-9B
 # grades them. Pull-based as the others; the log goes to the hub every 10 minutes (charlm/npc5/boxlog_NR.txt); the end
 # is charlm/npc5/DONE on the hub, after which the box is let go.
-BOXNR_SERIAL=2
+BOXNR_SERIAL=3
 if [ -f /root/.boxnr_serial ] && [ "$(cat /root/.boxnr_serial)" -gt "$BOXNR_SERIAL" ] 2>/dev/null; then echo "BOXNR_STALE $BOXNR_SERIAL"; exit 0; fi
 echo $BOXNR_SERIAL > /root/.boxnr_serial
 if [ ! -e /root/.nr_pre ]; then touch /root/.nr_pre   # the host first (Vast has many bad ones)
@@ -20,6 +20,12 @@ supervisorctl reread > /dev/null 2>&1; supervisorctl update > /dev/null 2>&1; su
 if [ ! -e /root/.nr_s2 ]; then touch /root/.nr_s2
   pkill -f "nrjo[b].sh"; pkill -f "npc_ge[n].py"; sleep 3; fuser -k -9 /dev/nvidia* > /dev/null 2>&1; sleep 3
   rm -f /root/.nrjob /root/nr/helpbench.jsonl /root/nr/*.tmp; echo "[nr] s2: job stopped, probes to be made by the 9B $(date -u)"
+fi
+# serial 3: npc_gen.py put the fallback first on every pre-Blackwell GPU (meant for NVFP4 only), so the "9B" probes were the
+# 4B's again: fixed; the job stopped and started again, the probes by the 9B
+if [ ! -e /root/.nr_s3 ]; then touch /root/.nr_s3
+  pkill -f "nrjo[b].sh"; pkill -f "npc_ge[n].py"; sleep 3; fuser -k -9 /dev/nvidia* > /dev/null 2>&1; sleep 3
+  rm -f /root/.nrjob /root/nr/helpbench.jsonl /root/nr/*.tmp; echo "[nr] s3: job stopped, the model order fixed $(date -u)"
 fi
 [ -s /root/.hf_token ] || { [ -n "$HF_TOKEN" ] && printf '%s' "$HF_TOKEN" > /root/.hf_token && chmod 600 /root/.hf_token; }
 echo "[nr] HF token: $([ -s /root/.hf_token ] && echo present || echo MISSING)"
