@@ -5,7 +5,7 @@
 # earlier NPC dialogues and some public chat (placeholder names dropped); npc4 and npc5 answer the probes and Qwen3.5-9B
 # grades them. Pull-based as the others; the log goes to the hub every 10 minutes (charlm/npc5/boxlog_NR.txt); the end
 # is charlm/npc5/DONE on the hub, after which the box is let go.
-BOXNR_SERIAL=7
+BOXNR_SERIAL=8
 if [ -f /root/.boxnr_serial ] && [ "$(cat /root/.boxnr_serial)" -gt "$BOXNR_SERIAL" ] 2>/dev/null; then echo "BOXNR_STALE $BOXNR_SERIAL"; exit 0; fi
 echo $BOXNR_SERIAL > /root/.boxnr_serial
 if [ ! -e /root/.nr_pre ]; then touch /root/.nr_pre   # the host first (Vast has many bad ones)
@@ -58,7 +58,7 @@ if [ ! -f /root/.bootstrapped ]; then
   touch /root/.bootstrapped; echo "BOOTSTRAP_DONE $(date -u)"
 fi
 cat > /root/status.sh <<'ST'
-grep -E "^\[(nr|gen|bench|sft|val|judge|report|hub)\]|Error|Traceback" /root/nr/nr.log 2>/dev/null | tail -n 6 | cut -c1-300
+grep -E "^\[(nr|nr6|gen|bench|sft|val|judge|report|report6|hub)\]|Error|Traceback" /root/nr/nr.log 2>/dev/null | tail -n 6 | cut -c1-300
 nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv,noheader
 ST
 chmod +x /root/status.sh
@@ -133,6 +133,40 @@ date -u > DONE; put DONE npc5/DONE; echo "[nr] NRJOB_DONE $(date -u)"
 JOB
   setsid nohup bash -c 'bash /root/nrjob.sh >> /root/nr/nr.log 2>&1' > /dev/null 2>&1 < /dev/null &
   echo "NRJOB_LAUNCHED $(date -u)"
+fi
+# ---- serial 8, the user: keep training. SODA alone made the small talk more human but the role answers weaker, so npc6:
+# from npc4 on SODA (40,000) + the help conversations (3,375, twice) + the earlier NPC dialogues (15,000) + public chat
+# (6,000, placeholders dropped), one pass; its replies graded alike; the end is charlm/npc6/DONE ----
+if [ ! -e /root/.nrjob6 ]; then touch /root/.nrjob6
+  cat > /root/nrjob6.sh <<'JOB'
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); cd /root/nr
+J="--model QuantTrio/Qwen3.5-9B-AWQ --fallback QuantTrio/Qwen3.5-4B-AWQ --max-len 3072 --gpu-mem 0.93 --max-seqs 16 --eager 1 --chunk 1000"
+gpu_clear() { fuser -k -9 /dev/nvidia* > /dev/null 2>&1; sleep 3; }
+put() { python3 -c "import sys; from huggingface_hub import HfApi; HfApi().upload_file(path_or_fileobj=sys.argv[1], path_in_repo='charlm/'+sys.argv[2], repo_id='baya1116/hypernet-sp-distill')" "$1" "$2" > /dev/null 2>&1 && echo "[hub] $2" || echo "[hub] $2 FAILED"; }
+until grep -q NRJOB_DONE nr.log 2>/dev/null; do sleep 60; done
+python3 - <<'PY'
+import json, random
+random.seed(6); bad = lambda r: any("[user" in m["content"] or "[name]" in m["content"] for m in r["messages"])
+help_ = [l for l in open("help_all.jsonl")]; random.shuffle(help_); help_ = help_[300:]   # the first 300 (same seed as serial 1's split) were not held out here; fine
+soda = [l for l in open("soda.jsonl")]
+old = [l for f in ("train_new.jsonl", "t3_0.jsonl", "t3_1.jsonl", "t3_2.jsonl") for l in open(f)]; random.shuffle(old)
+pub = [l for l in open("stage2_public.jsonl") if not bad(json.loads(l))]; random.shuffle(pub)
+mix = soda + help_ * 2 + old[:15000] + pub[:6000]; random.shuffle(mix)
+open("mix6.jsonl", "w").writelines(mix)
+print(f"[nr6] mix: {len(soda)} SODA, {len(help_)} help x2, {min(15000, len(old))} NPC, {min(6000, len(pub))} public = {len(mix)}", flush=True)
+PY
+if [ ! -s npc6/model_final.pt ]; then
+  gpu_clear; python3 -u charlm_sft.py --base npc4.pt --data sftdata --out npc6 --shards 0 --jsonl mix6.jsonl --val-jsonl val5.jsonl --val-convs 1200 \
+    --prompts-json prompts5.json --epochs 1.0 --lr 5e-5 --warmup 50 --eval-every 20 --hours 3 --hub baya1116/hypernet-sp-distill:charlm/npc6 2>&1 | grep -vE "Warning|warn|^\[step"
+fi
+[ -s r_npc6-final.jsonl ] || python3 -u npc_bench.py reply --model npc6/model_final.pt --tag npc6-final --bench helpbench.jsonl --out r_npc6-final.jsonl
+[ -s judged6.jsonl ] || { gpu_clear; python3 -u npc_gen.py judge --inp r_npc6-final.jsonl --out judged6.jsonl $J; }
+cat judged5.jsonl judged6.jsonl > judged56.jsonl; python3 npc_bench.py report --inp judged56.jsonl > report6.txt; sed 's/^/[report6] /' report6.txt
+put judged6.jsonl npc6/judged6.jsonl; put report6.txt npc6/report6.txt
+date -u > DONE6; put DONE6 npc6/DONE; echo "[nr6] NRJOB6_DONE $(date -u)"
+JOB
+  setsid nohup bash -c 'bash /root/nrjob6.sh >> /root/nr/nr.log 2>&1' > /dev/null 2>&1 < /dev/null &
+  echo "NRJOB6_QUEUED $(date -u)"
 fi
 echo "BOXNR_OK serial $BOXNR_SERIAL $(date -u)"
 # CTL-END
