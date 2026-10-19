@@ -203,10 +203,10 @@ def help_prompt(spec, plans):
 def helpbench_prompt(spec):
     return (HELP_CARD.format(**spec) + "\n\nThen write test lines a player might say to this character:\n"
             "- directions: 2 questions asking the way to something named in the facts; for each give 'answer', the 1 to 4 words from that fact a "
-            "correct reply must contain.\n- howto: 2 questions asking how to do something to do with the character's work or everyday life.\n"
-            "- explain: 2 questions asking what something is or why (the character's trade or simple everyday knowledge).\n"
-            "- recommend: a question asking for a recommendation.\n- smalltalk: 2 small-talk lines.\n"
-            "- feeling: 2 lines where the player says how they feel or what happened to them.\n\n"
+            "correct reply must contain.\n- howto: 2 questions (each ending with '?') the PLAYER asks about how to do something to do with the character's work or everyday life.\n"
+            "- explain: 2 questions (each ending with '?') the PLAYER asks about what something is or why (the character's trade or simple everyday knowledge).\n"
+            "- recommend: a question (ending with '?') the PLAYER asks for a recommendation.\n- smalltalk: 2 small-talk lines.\n"
+            "- feeling: 2 lines where the PLAYER says how they themselves feel or what happened to them (e.g. 'I'm so tired today.').\n\n"
             'Return only JSON: {"name": str, "role": str, "place": str, "personality": str, "facts": [str, ...], "directions": [{"q": str, '
             '"answer": str}, ...], "howto": [str, ...], "explain": [str, ...], "recommend": str, "smalltalk": [str, ...], "feeling": [str, ...]}')
 
@@ -307,12 +307,12 @@ def bench_row(i, d, c, seen):
 
 
 def helpbench_row(i, d, c, seen):
-    lst = lambda k: [clean(x) for x in (d.get(k) or []) if isinstance(x, str) and x.strip()]
+    lst = lambda k: [clean(x) for x in (d.get(k) or []) if isinstance(x, str) and x.strip() and (k in ("smalltalk", "feeling") or x.strip().endswith("?"))]
     dq = [q for q in d.get("directions") or [] if isinstance(q, dict) and q.get("q") and q.get("answer")]
     if c["name"].lower() in seen or not dq or not lst("howto") or not lst("smalltalk") or not lst("feeling"): return None
     seen.add(c["name"].lower()); probes = [{"kind": "directions", "turns": [clean(q["q"])], "answer": clean(q["answer"])} for q in dq[:2]]
     for k in ("howto", "explain", "smalltalk", "feeling"): probes += [{"kind": k, "turns": [x]} for x in lst(k)[:2]]
-    if isinstance(d.get("recommend"), str) and d["recommend"].strip(): probes.append({"kind": "recommend", "turns": [clean(d["recommend"])]})
+    if isinstance(d.get("recommend"), str) and d["recommend"].strip().endswith("?"): probes.append({"kind": "recommend", "turns": [clean(d["recommend"])]})
     return {"card": card_text(c, i % 3), "card_fields": c, "probes": probes}
 
 

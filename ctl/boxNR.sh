@@ -5,7 +5,7 @@
 # earlier NPC dialogues and some public chat (placeholder names dropped); npc4 and npc5 answer the probes and Qwen3.5-9B
 # grades them. Pull-based as the others; the log goes to the hub every 10 minutes (charlm/npc5/boxlog_NR.txt); the end
 # is charlm/npc5/DONE on the hub, after which the box is let go.
-BOXNR_SERIAL=1
+BOXNR_SERIAL=2
 if [ -f /root/.boxnr_serial ] && [ "$(cat /root/.boxnr_serial)" -gt "$BOXNR_SERIAL" ] 2>/dev/null; then echo "BOXNR_STALE $BOXNR_SERIAL"; exit 0; fi
 echo $BOXNR_SERIAL > /root/.boxnr_serial
 if [ ! -e /root/.nr_pre ]; then touch /root/.nr_pre   # the host first (Vast has many bad ones)
@@ -15,6 +15,12 @@ fi
 [ -d /venv/main/bin ] && export PATH=/venv/main/bin:$PATH
 for f in $(grep -l -i vllm /etc/supervisor/conf.d/* 2>/dev/null); do mv $f $f.off; done
 supervisorctl reread > /dev/null 2>&1; supervisorctl update > /dev/null 2>&1; supervisorctl stop all > /dev/null 2>&1; pkill -f "vllm serve" 2>/dev/null
+# serial 2: the 4B wrote poor probes (answers in place of questions): the job stopped (part 0 kept), the probes made again
+# by the 9B with questions required; the conversations keep their 3.5 h from the first start (until 11:07 UTC)
+if [ ! -e /root/.nr_s2 ]; then touch /root/.nr_s2
+  pkill -f "nrjo[b].sh"; pkill -f "npc_ge[n].py"; sleep 3; fuser -k -9 /dev/nvidia* > /dev/null 2>&1; sleep 3
+  rm -f /root/.nrjob /root/nr/helpbench.jsonl /root/nr/*.tmp; echo "[nr] s2: job stopped, probes to be made by the 9B $(date -u)"
+fi
 [ -s /root/.hf_token ] || { [ -n "$HF_TOKEN" ] && printf '%s' "$HF_TOKEN" > /root/.hf_token && chmod 600 /root/.hf_token; }
 echo "[nr] HF token: $([ -s /root/.hf_token ] && echo present || echo MISSING)"
 RAW="https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl"
@@ -66,10 +72,10 @@ gen() {   # gen MODE N SEED OUT: the light settings again if the first try made 
 get npc4/model_final.pt npc4.pt; get npc_data/stage2_public.jsonl stage2_public.jsonl
 for f in train_new.jsonl t3_0.jsonl t3_1.jsonl t3_2.jsonl val_all.jsonl; do get npc_data2/$f $f; done
 ls -la *.pt *.jsonl | sed 's/^/[nr] /'
-echo "[nr] probes $(date -u)"; gen helpbench 140 0 helpbench.jsonl && put helpbench.jsonl npc_data2/helpbench.jsonl
-T0=$(date +%s); c=0
-while [ $(( $(date +%s) - T0 )) -lt 12600 ] && [ $c -lt 20 ]; do   # 3.5 h of conversations, 1,000 requests a part
-  echo "[nr] conversations part $c $(date -u)"; gen help 1000 $((c + 101)) help_$c.jsonl && put help_$c.jsonl npc_data2/help_$c.jsonl; c=$((c + 1))
+echo "[nr] probes $(date -u)"; [ -s helpbench.jsonl ] || { gpu_clear; python3 -u npc_gen.py helpbench --n 160 --seed 1 --out helpbench.tmp $J; [ -s helpbench.tmp ] && mv helpbench.tmp helpbench.jsonl && put helpbench.jsonl npc_data2/helpbench.jsonl; }
+DL=$(date -d "2026-10-19 11:07 UTC" +%s); c=0   # 3.5 h of conversations from the first start, 1,000 requests a part
+while [ $(date +%s) -lt $DL ] && [ $c -lt 20 ]; do
+  [ -s help_$c.jsonl ] || { echo "[nr] conversations part $c $(date -u)"; gen help 1000 $((c + 101)) help_$c.jsonl && put help_$c.jsonl npc_data2/help_$c.jsonl; }; c=$((c + 1))
 done
 cat help_*.jsonl > help_all.jsonl; N=$(wc -l < help_all.jsonl); echo "[nr] conversations: $N"
 python3 - <<'PY'
