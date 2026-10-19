@@ -5,7 +5,7 @@
 # earlier NPC dialogues and some public chat (placeholder names dropped); npc4 and npc5 answer the probes and Qwen3.5-9B
 # grades them. Pull-based as the others; the log goes to the hub every 10 minutes (charlm/npc5/boxlog_NR.txt); the end
 # is charlm/npc5/DONE on the hub, after which the box is let go.
-BOXNR_SERIAL=8
+BOXNR_SERIAL=9
 if [ -f /root/.boxnr_serial ] && [ "$(cat /root/.boxnr_serial)" -gt "$BOXNR_SERIAL" ] 2>/dev/null; then echo "BOXNR_STALE $BOXNR_SERIAL"; exit 0; fi
 echo $BOXNR_SERIAL > /root/.boxnr_serial
 if [ ! -e /root/.nr_pre ]; then touch /root/.nr_pre   # the host first (Vast has many bad ones)
@@ -45,6 +45,9 @@ if [ ! -e /root/.nr_s7 ]; then touch /root/.nr_s7
   cd /root/nr && mv npc5/model_4bit.pt npc5/model_4bit.keep 2>/dev/null; mv npc5/model_best.pt npc5/model_best.keep 2>/dev/null
   pkill -f "npc_benc[h].py reply --model npc5/model_best" ; rm -f r_npc5-best.jsonl r_npc5-4bit.jsonl; cd /; echo "[nr] s7: npc5 best/4-bit replies skipped $(date -u)"
 fi
+# serial 9: npc6's split shuffled the help conversations with another seed (its held-out 300 would have been trained on):
+# the waiting job queued again with npc5's seed
+if [ ! -e /root/.nr_s9 ]; then touch /root/.nr_s9; pkill -f "nrjob[6].sh"; rm -f /root/.nrjob6; echo "[nr] s9: npc6 re-queued $(date -u)"; fi
 [ -s /root/.hf_token ] || { [ -n "$HF_TOKEN" ] && printf '%s' "$HF_TOKEN" > /root/.hf_token && chmod 600 /root/.hf_token; }
 echo "[nr] HF token: $([ -s /root/.hf_token ] && echo present || echo MISSING)"
 RAW="https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl"
@@ -146,8 +149,8 @@ put() { python3 -c "import sys; from huggingface_hub import HfApi; HfApi().uploa
 until grep -q NRJOB_DONE nr.log 2>/dev/null; do sleep 60; done
 python3 - <<'PY'
 import json, random
-random.seed(6); bad = lambda r: any("[user" in m["content"] or "[name]" in m["content"] for m in r["messages"])
-help_ = [l for l in open("help_all.jsonl")]; random.shuffle(help_); help_ = help_[300:]   # the first 300 (same seed as serial 1's split) were not held out here; fine
+random.seed(5); bad = lambda r: any("[user" in m["content"] or "[name]" in m["content"] for m in r["messages"])
+help_ = [l for l in open("help_all.jsonl")]; random.shuffle(help_); help_ = help_[300:]   # the same shuffle as npc5's split: its 300 stay held out
 soda = [l for l in open("soda.jsonl")]
 old = [l for f in ("train_new.jsonl", "t3_0.jsonl", "t3_1.jsonl", "t3_2.jsonl") for l in open(f)]; random.shuffle(old)
 pub = [l for l in open("stage2_public.jsonl") if not bad(json.loads(l))]; random.shuffle(pub)
