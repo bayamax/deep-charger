@@ -25,6 +25,7 @@ ap.add_argument("--levels", default="1,2,3,4"); ap.add_argument("--out", default
 ap.add_argument("--model", default=""); ap.add_argument("--max-steps", type=int, default=8)
 ap.add_argument("--think", type=int, default=1, help="1: the answer starts with a short worked trace {...} (the steps the rule takes)")
 ap.add_argument("--repeat", type=int, default=1, help="1: the game sends the goal and the operations again every turn (they stay near)")
+ap.add_argument("--check", type=int, default=1, help="1: the trace reads out every need of a helper before calling it ok (agent5 and before: 0)")
 A = ap.parse_args()
 R = random.Random(A.seed + (0 if A.split == "train" else 77777))
 TRAIN = A.split == "train"
@@ -89,9 +90,10 @@ def policy(st, goals, ops):
     for o in helpers:
         if not can(o, st):
             nv, nk = next((x, kk) for x, kk in o["needs"] if st[x] < kk); parts.append(f"{o['name']} needs {nv}>={nk} {nv} {st[nv]} no"); continue
+        need = "".join(f" needs {x}>={kk} {x} {st[x]} yes" for x, kk in o["needs"]) if A.check else ""
         t = apply(o, st); broken = [g for g in goals if g is not bad[0] and direction(st, g) == "ok" and direction(t, g) != "ok"]
-        if broken: parts.append(f"{o['name']} breaks {broken[0][0]}"); continue
-        parts.append(f"{o['name']} ok"); return o["name"], ". ".join(parts)
+        if broken: parts.append(f"{o['name']}{need} breaks {broken[0][0]}"); continue
+        parts.append(f"{o['name']}{need} ok"); return o["name"], ". ".join(parts)
     first = helpers[0]   # all blocked: raise what the first one needs
     nv, nk = next(((x, kk) for x, kk in first["needs"] if st[x] < kk), (None, None))
     if nv:
