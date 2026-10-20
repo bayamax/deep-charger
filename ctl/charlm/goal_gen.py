@@ -23,6 +23,7 @@ ap.add_argument("mode", choices=["data", "play"])
 ap.add_argument("--n", type=int, default=1000); ap.add_argument("--split", default="train", choices=["train", "test"])
 ap.add_argument("--levels", default="1,2,3,4"); ap.add_argument("--out", default=""); ap.add_argument("--seed", type=int, default=0)
 ap.add_argument("--model", default=""); ap.add_argument("--max-steps", type=int, default=8)
+ap.add_argument("--think", type=int, default=1, help="1: the answer starts with a short worked trace <think>...</think> (the steps the rule takes)")
 A = ap.parse_args()
 R = random.Random(A.seed + (0 if A.split == "train" else 77777))
 TRAIN = A.split == "train"
@@ -67,6 +68,45 @@ def plan(st, goals, ops, depth=4):
     return None
 
 
+def direction(st, g):
+    v, c, k = g
+    if holds(st[v], c, k): return "ok"
+    return "up" if (c in (">=", ">") or (c == "==" and st[v] < k)) else "down"
+
+
+def policy(st, goals, ops):
+    """the rule the trace spells out: the first goal not met -> the operations that move its variable the right way (list
+    order) -> the first that may run and keeps the other goals that hold; if none may run, the first operation that raises
+    what the first helper needs. Returns (pick, trace)."""
+    parts = [f"{v} {st[v]} {c}{k} {direction(st, (v, c, k))}" for v, c, k in goals]
+    bad = [g for g in goals if direction(st, g) != "ok"]
+    if not bad: return "none", "; ".join(parts)
+    v, c, k = bad[0]; d = direction(st, bad[0])
+    helpers = [o for o in ops if any(x == v and ((dd > 0) == (d == "up")) for x, dd in o["eff"])]
+    if not helpers: return "none", "; ".join(parts) + f". {d}: nothing"
+    parts.append(f"{d}: " + " ".join(o["name"] + next(f"{dd:+d}" for x, dd in o["eff"] if x == v) for o in helpers))
+    for o in helpers:
+        if not can(o, st):
+            nv, nk = next((x, kk) for x, kk in o["needs"] if st[x] < kk); parts.append(f"{o['name']} needs {nv}>={nk} {nv} {st[nv]} no"); continue
+        t = apply(o, st); broken = [g for g in goals if g is not bad[0] and direction(st, g) == "ok" and direction(t, g) != "ok"]
+        if broken: parts.append(f"{o['name']} breaks {broken[0][0]}"); continue
+        parts.append(f"{o['name']} ok"); return o["name"], ". ".join(parts)
+    first = helpers[0]   # all blocked: raise what the first one needs
+    nv, nk = next(((x, kk) for x, kk in first["needs"] if st[x] < kk), (None, None))
+    if nv:
+        raisers = [o for o in ops if can(o, st) and any(x == nv and dd > 0 for x, dd in o["eff"])]
+        if raisers: parts.append(f"{nv} up: {raisers[0]['name']}"); return raisers[0]["name"], ". ".join(parts)
+    return "none", ". ".join(parts) + ". stuck"
+
+
+def greedy_run(st, goals, ops, steps=6):
+    for _ in range(steps):
+        pick, _ = policy(st, goals, ops)
+        if pick == "none": return ok_state(st, goals)
+        st = apply(next(o for o in ops if o["name"] == pick), st)
+    return False
+
+
 def episode(level):
     """a solvable start: goals, state, operations (with the helping one(s) placed anywhere)"""
     for _ in range(200):
@@ -91,6 +131,7 @@ def episode(level):
         p = plan(st, goals, ops)
         if p is None or len(p) > 4: continue
         if level == 3 and len(p) < 2: continue
+        if A.think and not greedy_run(dict(st), goals, ops): continue   # the rule must get there itself
         return st, goals, ops
     return None
 
@@ -111,8 +152,9 @@ def data(n):
         if not e: continue
         st, goals, ops = e; msgs = []
         for step in range(A.max_steps):
-            p = plan(st, goals, ops); pick = p[0] if p else "none"
-            msgs += [{"role": "user", "content": (head(goals, ops) + "\n" if step == 0 else "") + state_line(st)}, {"role": "assistant", "content": f"<{pick}>"}]
+            if A.think: pick, tr = policy(st, goals, ops); ans = f"<think>{tr}</think><{pick}>"
+            else: p = plan(st, goals, ops); pick = p[0] if p else "none"; ans = f"<{pick}>"
+            msgs += [{"role": "user", "content": (head(goals, ops) + "\n" if step == 0 else "") + state_line(st)}, {"role": "assistant", "content": ans}]
             if pick == "none": break
             st = apply(next(o for o in ops if o["name"] == pick), st)
         rows.append({"messages": msgs, "level": lv})
@@ -136,7 +178,7 @@ else:   # closed loop with the model: each turn it picks, the game applies, unti
             k += 1; st, goals, ops = e; best = len(plan(st, goals, ops)); turns = []; done = False
             for step in range(A.max_steps):
                 turns.append((head(goals, ops) + "\n" if step == 0 else "") + state_line(st))
-                y = m.reply(turns, n=24).strip(); turns.append(y); mm = re.fullmatch(r"<([a-z_]+)>", y)
+                y = m.reply(turns, n=260 if A.think else 24).strip(); turns.append(y); mm = re.search(r"<([a-z_]+)>$", y)
                 if not mm: bad += 1; break
                 if mm.group(1) == "none": done = ok_state(st, goals); break
                 op = next((o for o in ops if o["name"] == mm.group(1)), None)
