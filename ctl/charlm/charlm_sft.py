@@ -14,7 +14,7 @@ before and after. At the end: sample replies, GPTQ 4-bit, uploads.
 
   python3 charlm_sft.py --base run2/model_latest.pt --data sftdata --out sft1 --hours 3 --hub repo:charlm/sft1
 """
-import argparse, json, math, os, random, sys, time
+import argparse, json, math, os, random, shutil, sys, time
 
 import numpy as np
 import torch
@@ -35,6 +35,7 @@ ap.add_argument("--jsonl", default="", help="conversations of one's own, comma-s
 ap.add_argument("--val-jsonl", default="", help="held-out conversations as .jsonl (in place of SmolTalk's test split)")
 ap.add_argument("--prompts-json", default="", help="a JSON list of user turns for the sample replies")
 ap.add_argument("--min-learned", type=int, default=20, help="drop conversations with fewer assistant characters to learn")
+ap.add_argument("--ckpt-every", type=float, default=0.0, help="minutes between resume checkpoints (A.out/resume.pt; a rerun picks it up and continues; 0: off)")
 ap.add_argument("--hub", default=""); ap.add_argument("--seed", type=int, default=0); ap.add_argument("--max-convs", type=int, default=0)
 A = ap.parse_args()
 torch.manual_seed(A.seed); random.seed(A.seed); np.random.seed(A.seed)
@@ -226,13 +227,27 @@ def hub_put(local, remote):
 PROMPTS = ["Hi! How are you today?", "What is photosynthesis? Explain it simply.", "Write a short poem about the sea.",
            "Can you give me three tips for staying focused while studying?", "Rewrite this sentence to sound more polite: Give me the report now."]
 if A.prompts_json: PROMPTS = json.load(open(A.prompts_json))
-v0 = val_bpc(); out(f"[val] before fine-tuning: {v0:.3f} bits per assistant character")
-for p in PROMPTS[:2]: out(f"[reply before] {json.dumps(p)} -> {json.dumps(reply(p, 300))}")
+RESUME = os.path.join(A.out, "resume.pt"); RS = torch.load(RESUME, map_location="cpu", weights_only=False) if os.path.exists(RESUME) else None
+if RS: model.load_state_dict(RS["model"]); v0 = RS["v0"]; out(f"[resume] step {RS['step']} from {RESUME} ({RS['elapsed'] / 60:.0f} min done)")
+else:
+    v0 = val_bpc(); out(f"[val] before fine-tuning: {v0:.3f} bits per assistant character")
+    for p in PROMPTS[:2]: out(f"[reply before] {json.dumps(p)} -> {json.dumps(reply(p, 300))}")
 
 opt = torch.optim.AdamW(model.parameters(), lr=A.lr, betas=(0.9, 0.95), weight_decay=0.0, fused=DEV == "cuda")
 rows_per_step = max(1, A.chars_per_step // SEQ); epoch_rows = pack(TRAIN); total_steps = int(A.epochs * len(epoch_rows) / rows_per_step)
 out(f"[sft] {len(epoch_rows)} windows per epoch, {rows_per_step} per update -> {total_steps} updates for {A.epochs} epochs (or {A.hours} h)")
-T0 = time.time(); step = 0; ptr = 0; last_eval = time.time(); best = v0; acc = []; MICRO = A.micro; VH = [v0]
+T0 = time.time(); step = 0; ptr = 0; last_eval = time.time(); best = v0; acc = []; MICRO = A.micro; VH = [v0]; last_ck = time.time()
+if RS:
+    opt.load_state_dict(RS["opt"]); step, ptr, best, VH, epoch_rows = RS["step"], RS["ptr"], RS["best"], RS["VH"], RS["rows"]
+    T0 = time.time() - RS["elapsed"]; np.random.set_state(RS["np"]); del RS
+
+
+def save_resume():
+    """model, optimizer and place in the epoch; written beside the old one and swapped in, or over it when the disk is short"""
+    tmp = RESUME + ".tmp"; free = shutil.disk_usage(A.out).free
+    if os.path.exists(RESUME) and free < os.path.getsize(RESUME) + 700e6: os.remove(RESUME)
+    torch.save({"model": model.state_dict(), "opt": opt.state_dict(), "step": step, "ptr": ptr, "best": best, "VH": VH, "rows": epoch_rows,
+                "v0": v0, "elapsed": time.time() - T0, "np": np.random.get_state()}, tmp); os.replace(tmp, RESUME)
 while step < total_steps and time.time() - T0 < A.hours * 3600:
     frac = step / max(1, total_steps); lr = A.lr * min(1.0, (step + 1) / A.warmup) * (0.1 + 0.9 * 0.5 * (1 + math.cos(math.pi * frac)))
     for g in opt.param_groups: g["lr"] = lr
@@ -259,9 +274,11 @@ while step < total_steps and time.time() - T0 < A.hours * 3600:
         if A.stop_plateau > 0 and len(VH) > A.stop_evals and min(VH[:-A.stop_evals]) - min(VH[-A.stop_evals:]) < A.stop_plateau:
             out(f"[stop] the held-out score gained {min(VH[:-A.stop_evals]) - min(VH[-A.stop_evals:]):.4f} over the last {A.stop_evals} evaluations (< {A.stop_plateau}) - done"); break
 
+    if A.ckpt_every > 0 and time.time() - last_ck > A.ckpt_every * 60: save_resume(); last_ck = time.time(); out(f"[resume] saved at step {step}")
 v1 = val_bpc(); out(f"[val] after: {v1:.3f} bits per assistant character (before {v0:.3f}); {step} updates, {(time.time() - T0) / 60:.0f} min")
 p_ = os.path.join(A.out, "model_final.pt")
 torch.save({"model": model.state_dict(), "layers": CK["layers"], "args": BA, "vocab": V, "chars": CHARS, "special": {"UNK": UNK, "EOD": EOD, "USER": USR, "ASSISTANT": AST}}, p_); hub_put(p_, "model_final.pt")
+if os.path.exists(RESUME): os.remove(RESUME)   # the final model is saved: the checkpoint has done its job
 res = {"val_before": v0, "val_after": v1, "steps": step, "replies": {}}
 for p in PROMPTS:
     r = reply(p); res["replies"][p] = r; out(f"[reply] {json.dumps(p)} -> {json.dumps(r)}")
