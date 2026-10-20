@@ -55,6 +55,30 @@ class Model:
             x = x + s._lin(F.gelu(s._lin(s._ln(x, b + ".ln2"), b + ".fc"), approximate="tanh"), b + ".fc2")
         return s._lin(s._ln(x[0, -1], "ln_f"), "head").float()
 
+    @torch.no_grad()
+    def bits(s, messages):
+        """bits per assistant character of a {"messages": [...]} conversation (a system message goes in front of the first user
+        turn, as in charlm_sft.py), and how many characters were scored"""
+        ids, mask, sys_ = [], [], ""
+        for m in messages:
+            if m["role"] == "system": sys_ += m["content"].strip() + "\n\n"; continue
+            c = m["content"]
+            if m["role"] == "user" and sys_: c = sys_ + c; sys_ = ""
+            a = FM.encode(c.strip()).tolist()
+            ids += [USR if m["role"] == "user" else AST] + a; mask += [0] + [m["role"] == "assistant"] * len(a)
+        ids, mask = ids[:s.seq], mask[:s.seq]; T = len(ids)
+        x = (s.W["emb.weight"][torch.tensor(ids, device=s.dev)] + s.W["pos.weight"][:T])[None]
+        for i in range(s.L):
+            b = f"blocks.{i}"; q, k, v = s._lin(s._ln(x, b + ".ln1"), b + ".qkv").split(s.D, -1)
+            q, k, v = (z.view(1, T, s.H, s.HD) for z in (q, k, v))
+            if s.qk: q, k = s._ln(q, b + ".qn"), s._ln(k, b + ".kn")
+            o = F.scaled_dot_product_attention(q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2), is_causal=True)
+            x = x + s._lin(o.transpose(1, 2).reshape(1, T, s.D), b + ".proj")
+            x = x + s._lin(F.gelu(s._lin(s._ln(x, b + ".ln2"), b + ".fc"), approximate="tanh"), b + ".fc2")
+        lg = s._lin(s._ln(x[0, :-1], "ln_f"), "head").float(); nll = F.cross_entropy(lg, torch.tensor(ids[1:], device=s.dev), reduction="none")
+        m = torch.tensor(mask[1:], dtype=torch.bool, device=s.dev)
+        return float(nll[m].sum()) / 0.6931471805599453, int(m.sum())
+
     def ids(s, turns):
         out = []
         for i, t in enumerate(turns): out += [USR if i % 2 == 0 else AST] + FM.encode(t).tolist()
