@@ -44,7 +44,7 @@ if [ ! -s agent1/model_final.pt ]; then
 fi
 for m in final 4bit; do for t in seen new; do
   [ -s r_${m}_$t.jsonl ] || python3 -u npc_bench.py turns --model agent1/model_$m.pt --tag agent1-$m --bench test_$t.jsonl --out r_${m}_$t.jsonl --temp 0.05 --max-chars 200
-  echo "[na] score agent1-$m, test with $t action names:"; python3 agent_gen.py --score --inp r_${m}_$t.jsonl | tee -a score.txt
+  echo "[na] score agent1-$m, test with $t action names:" | tee -a score.txt; python3 agent_gen.py --score --inp r_${m}_$t.jsonl | tee -a score.txt
 done; done
 for f in score.txt r_final_seen.jsonl r_final_new.jsonl; do put $f agent1/$f; done
 date -u > DONE; put DONE agent1/DONE; echo "[na] NAJOB_DONE $(date -u)"
