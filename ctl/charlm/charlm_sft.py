@@ -34,6 +34,7 @@ ap.add_argument("--eval-every", type=float, default=20.0); ap.add_argument("--va
 ap.add_argument("--jsonl", default="", help="conversations of one's own, comma-separated .jsonl files of {\"messages\": [...]} (with --shards 0: only these)")
 ap.add_argument("--val-jsonl", default="", help="held-out conversations as .jsonl (in place of SmolTalk's test split)")
 ap.add_argument("--prompts-json", default="", help="a JSON list of user turns for the sample replies")
+ap.add_argument("--min-learned", type=int, default=20, help="drop conversations with fewer assistant characters to learn")
 ap.add_argument("--hub", default=""); ap.add_argument("--seed", type=int, default=0); ap.add_argument("--max-convs", type=int, default=0)
 A = ap.parse_args()
 torch.manual_seed(A.seed); random.seed(A.seed); np.random.seed(A.seed)
@@ -151,7 +152,8 @@ def load(paths, limit=0):
             ids, mask = conv_ids(msgs)
             if np.mean(np.array(ids) == UNK) > 0.005: skipped["non-ascii"] += 1; continue
             r = cut(ids, mask, SEQ)
-            if r is None or sum(r[1]) < 20: skipped["too long"] += 1; continue
+            if r is None: skipped["too long"] += 1; continue
+            if sum(r[1]) < A.min_learned: skipped["too little to learn"] += 1; continue
             convs.append((np.asarray(r[0], np.uint8), np.asarray(r[1], np.uint8)))   # one byte a symbol: as int lists 695M characters took tens of GB
             if limit and len(convs) >= limit: return convs, skipped
     return convs, skipped

@@ -4,7 +4,7 @@
 # tells it the new state). charlm/goal_gen.py makes 80,000 such episodes from rules (levels 1-4); npc4 is fine-tuned on
 # them (agent2); then it plays held-out episodes in a closed loop - with the training variable/operation names and with
 # made-up ones - and the share that reaches the goal is reported by level. The end is charlm/agent2/DONE on the hub.
-BOXNG_SERIAL=1
+BOXNG_SERIAL=2
 if [ -f /root/.boxng_serial ] && [ "$(cat /root/.boxng_serial)" -gt "$BOXNG_SERIAL" ] 2>/dev/null; then echo "BOXNG_STALE $BOXNG_SERIAL"; exit 0; fi
 echo $BOXNG_SERIAL > /root/.boxng_serial
 if [ ! -e /root/.ng_pre ]; then touch /root/.ng_pre
@@ -12,6 +12,12 @@ if [ ! -e /root/.ng_pre ]; then touch /root/.ng_pre
   echo "[ng] preflight hub: $(curl -sSL -o /dev/null -m 90 -w '%{size_download} bytes in %{time_total}s' https://huggingface.co/baya1116/hypernet-sp-distill/resolve/main/charlm/npc4/model_final.pt -r 0-104857599 2>&1)"
 fi
 [ -d /venv/main/bin ] && export PATH=/venv/main/bin:$PATH
+# serial 2: charlm_sft.py dropped every conversation with fewer than 20 characters to learn - 58,587 of the 80,000 short
+# episodes (the picks are 3-6 characters): --min-learned 2 now; the job stopped and run again from the start
+if [ ! -e /root/.ng_s2 ]; then touch /root/.ng_s2
+  pkill -f "ngjo[b].sh"; pkill -f "goal_ge[n].py"; pkill -f "charlm_sf[t].py"; sleep 3
+  rm -rf /root/.ngjob /root/ng/agent2 /root/ng/play.txt; echo "[ng] s2: restart with every episode $(date -u)"
+fi
 [ -s /root/.hf_token ] || { [ -n "$HF_TOKEN" ] && printf '%s' "$HF_TOKEN" > /root/.hf_token && chmod 600 /root/.hf_token; }
 echo "[ng] HF token: $([ -s /root/.hf_token ] && echo present || echo MISSING)"
 RAW="https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl"
@@ -36,7 +42,7 @@ python3 -c "
 import json; r = [json.loads(l) for l in open('goal_val.jsonl')][:4]
 json.dump([x['messages'][0]['content'] for x in r], open('prompts_g.json', 'w'))"
 if [ ! -s agent2/model_final.pt ]; then
-  python3 -u charlm_sft.py --base npc4.pt --data sftdata --out agent2 --shards 0 --jsonl goal_train.jsonl --val-jsonl goal_val.jsonl --val-convs 500 \
+  python3 -u charlm_sft.py --base npc4.pt --data sftdata --out agent2 --shards 0 --jsonl goal_train.jsonl --val-jsonl goal_val.jsonl --val-convs 500 --min-learned 2 \
     --prompts-json prompts_g.json --epochs 1 --lr 1e-4 --warmup 30 --eval-every 5 --hours 1 --hub baya1116/hypernet-sp-distill:charlm/agent2 2>&1 | grep -vE "Warning|warn|^\[step"
 fi
 for m in final 4bit; do for sp in test train; do
