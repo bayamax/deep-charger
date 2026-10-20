@@ -164,12 +164,12 @@ def data(n):
     return rows
 
 
-if A.mode == "data":
+if __name__ == "__main__" and A.mode == "data":
     rows = data(A.n)
     with open(A.out, "w") as f:
         for r in rows: f.write(json.dumps(r) + "\n")
     print(f"[goal] {len(rows)} {A.split} episodes ({sum(len(r['messages']) // 2 for r in rows)} decisions) -> {A.out}")
-else:   # closed loop with the model: each turn it picks, the game applies, until <none> or the step limit
+elif __name__ == "__main__":   # closed loop with the model: each turn it picks, the game applies, until <none> or the step limit
     sys.path.insert(0, __import__("os").path.dirname(__import__("os").path.abspath(__file__)))
     import charlm_run as CR
     m = CR.Model(A.model); res = {}; ex = []
