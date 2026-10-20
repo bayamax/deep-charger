@@ -23,7 +23,8 @@ ap.add_argument("mode", choices=["data", "play"])
 ap.add_argument("--n", type=int, default=1000); ap.add_argument("--split", default="train", choices=["train", "test"])
 ap.add_argument("--levels", default="1,2,3,4"); ap.add_argument("--out", default=""); ap.add_argument("--seed", type=int, default=0)
 ap.add_argument("--model", default=""); ap.add_argument("--max-steps", type=int, default=8)
-ap.add_argument("--think", type=int, default=1, help="1: the answer starts with a short worked trace <think>...</think> (the steps the rule takes)")
+ap.add_argument("--think", type=int, default=1, help="1: the answer starts with a short worked trace {...} (the steps the rule takes)")
+ap.add_argument("--repeat", type=int, default=1, help="1: the game sends the goal and the operations again every turn (they stay near)")
 A = ap.parse_args()
 R = random.Random(A.seed + (0 if A.split == "train" else 77777))
 TRAIN = A.split == "train"
@@ -152,9 +153,9 @@ def data(n):
         if not e: continue
         st, goals, ops = e; msgs = []
         for step in range(A.max_steps):
-            if A.think: pick, tr = policy(st, goals, ops); ans = f"<think>{tr}</think><{pick}>"
+            if A.think: pick, tr = policy(st, goals, ops); ans = f"{{{tr}}}<{pick}>"   # braces: a trace never starts like an operation tag
             else: p = plan(st, goals, ops); pick = p[0] if p else "none"; ans = f"<{pick}>"
-            msgs += [{"role": "user", "content": (head(goals, ops) + "\n" if step == 0 else "") + state_line(st)}, {"role": "assistant", "content": ans}]
+            msgs += [{"role": "user", "content": (head(goals, ops) + "\n" if step == 0 or A.repeat else "") + state_line(st)}, {"role": "assistant", "content": ans}]
             if pick == "none": break
             st = apply(next(o for o in ops if o["name"] == pick), st)
         rows.append({"messages": msgs, "level": lv})
@@ -177,7 +178,7 @@ else:   # closed loop with the model: each turn it picks, the game applies, unti
             if not e: continue
             k += 1; st, goals, ops = e; best = len(plan(st, goals, ops)); turns = []; done = False
             for step in range(A.max_steps):
-                turns.append((head(goals, ops) + "\n" if step == 0 else "") + state_line(st))
+                turns.append((head(goals, ops) + "\n" if step == 0 or A.repeat else "") + state_line(st))
                 y = m.reply(turns, n=260 if A.think else 24).strip(); turns.append(y); mm = re.search(r"<([a-z_]+)>$", y)
                 if not mm: bad += 1; break
                 if mm.group(1) == "none": done = ok_state(st, goals); break
