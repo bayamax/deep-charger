@@ -8,6 +8,8 @@
   sample  for situations cut from the training dialogues (the card, the turns so far, the player's line), N replies each,
           all kept, for the judge
   pick    the judged samples -> the best usable reply per situation as a training dialogue (rejection sampling)
+  turns   every assistant turn of conversations (e.g. agent_gen.py's) answered once, the earlier turns as written, for
+          scoring against the written answer ("gold")
   rank    a reranker for the game (no judge there): logistic regression on the model's own view of a reply (its last
           hidden state, the mean over the reply, the reply's log-probability and length), fit to the judge's 'usable' on
           the judged samples; tested on held-out situations as "pick the top of N" against the likeliest and the first;
@@ -22,7 +24,7 @@
 import argparse, collections, json, re, sys, time
 
 ap = argparse.ArgumentParser()
-ap.add_argument("mode", choices=["reply", "report", "sample", "pick", "rank"])
+ap.add_argument("mode", choices=["reply", "report", "sample", "pick", "rank", "turns"])
 ap.add_argument("--ranker", default="", help="reply: a rank.pt; its pick of the N is written too")
 ap.add_argument("--model", default=""); ap.add_argument("--tag", default=""); ap.add_argument("--bench", default=""); ap.add_argument("--out", default="")
 ap.add_argument("--inp", default=""); ap.add_argument("--n", type=int, default=4); ap.add_argument("--max-chars", type=int, default=300)
@@ -45,7 +47,7 @@ def echo(reply, line):
     return bool(a) and len(set(a) & set(b)) / max(1, len(set(a))) > 0.8 and len(a) <= len(b) + 2
 
 
-if A.mode in ("reply", "sample", "rank"):
+if A.mode in ("reply", "sample", "rank", "turns"):
     import torch, torch.nn.functional as F
     sys.path.insert(0, __import__("os").path.dirname(__import__("os").path.abspath(__file__)))
     import charlm_fold as FM
@@ -122,6 +124,11 @@ if A.mode in ("reply", "sample", "rank"):
         txt = ["".join(CHARS[i] if i < UNK else "" for i in o).strip() for o in outs]
         return txt, (lp / torch.tensor([len(o) + 1 for o in outs], device=DEV)).tolist()
 
+    def conv_turn_ids(turns):   # turns as written (the first one carries the card already)
+        ids = []
+        for i, t in enumerate(turns): ids += [USR if i % 2 == 0 else AST] + FM.encode(t).tolist()
+        return ids + [AST]
+
     def conv_ids(card, turns):
         ids = []
         for i, t in enumerate(turns): ids += [USR if i % 2 == 0 else AST] + FM.encode((card + "\n\n" + t) if i == 0 else t).tolist()
@@ -142,6 +149,13 @@ if A.mode in ("reply", "sample", "rank"):
                                             "reply": s, "hit": hit(s, p["answer"]) if p.get("answer") else None, "ai_talk": bool(AI_TALK.search(s)),
                                             "echo": echo(s, p["turns"][-1]), "chars": len(s)}) + "\n")
                     n += 1
+    elif A.mode == "turns":
+        with open(A.out, "w") as f:
+            for l in open(A.bench):
+                ms = json.loads(l)["messages"]
+                for k in range(1, len(ms), 2):
+                    ctx = [m["content"] for m in ms[:k]]; txt, _ = sample(conv_turn_ids(ctx), 1)
+                    f.write(json.dumps({"model": A.tag, "turns": ctx, "gold": ms[k]["content"], "reply": txt[0]}) + "\n"); n += 1
     elif A.mode == "rank":
         rows = [json.loads(l) for l in open(A.inp)]; X = []; y = []; sid = []
         for r in rows:
@@ -175,7 +189,7 @@ if A.mode in ("reply", "sample", "rank"):
                     f.write(json.dumps({"model": A.tag, "sid": k, "j": j, "lp": lps[j], "card": card, "turns": ctx, "reference": turns[cut], "reply": txt[j],
                                         "ai_talk": bool(AI_TALK.search(txt[j])), "echo": echo(txt[j], ctx[-1]), "chars": len(txt[j])}) + "\n")
                 n += 1
-    if A.mode != "rank": print(f"[bench] {A.mode} {A.tag}: {n} {'probes' if A.mode == 'reply' else 'situations'} x {A.n} samples [{(time.time() - T0) / 60:.1f} min] -> {A.out}", flush=True)
+    if A.mode != "rank": print(f"[bench] {A.mode} {A.tag}: {n} {'probes' if A.mode == 'reply' else 'turns' if A.mode == 'turns' else 'situations'} x {A.n} samples [{(time.time() - T0) / 60:.1f} min] -> {A.out}", flush=True)
 elif A.mode == "pick":
     rows = [json.loads(l) for l in open(A.inp)]; S = collections.defaultdict(list)
     for r in rows: S[r["sid"]].append(r)
