@@ -4,7 +4,7 @@
 # GPU: those villagers + NPC/help/everyday chat + the new goal format (state in any order, the raise step with effects);
 # (3) scoring: chat bits, goal play (agent6 and agent8 on the same shuffled test), and the villager bench judged by the 4B.
 # Everything goes to the hub (baya1116/hypernet-sp-distill, archive/charlm/agent8/) as it is made.
-BOXVB_SERIAL=6
+BOXVB_SERIAL=7
 if [ -f /root/.boxvb_serial ] && [ "$(cat /root/.boxvb_serial)" -gt "$BOXVB_SERIAL" ] 2>/dev/null; then echo "BOXVB_STALE $BOXVB_SERIAL"; exit 0; fi
 echo $BOXVB_SERIAL > /root/.boxvb_serial
 if [ ! -e /root/.vb_pre ]; then touch /root/.vb_pre
@@ -217,6 +217,28 @@ date -u > DONE9; put DONE9 DONE; echo "[vb] VBJOB4_DONE $(date -u)"
 JOB
   setsid nohup bash -c 'bash /root/vbjob4.sh >> /root/vb/vb3.log 2>&1' > /dev/null 2>&1 < /dev/null &
   echo "[vb] s6: job 3 stopped; job 4 (strict regrade + fact rules, agent9, agent8-float scored too) started $(date -u)"
+fi
+# serial 7, the user: a quality check on the judge itself: once job 4 is done, the 4B grades the reviewer's 150 gold lines
+# with three prompts (plain, a checklist of the failures the audit found, the checklist with 18 graded examples)
+if [ ! -e /root/.vb_s7 ]; then touch /root/.vb_s7
+  cat > /root/vbjob5.sh <<'JOB'
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); cd /root/vb
+R2="https://raw.githubusercontent.com/bayamax/charlm-agent/main"
+for f in npc_gen.py judge_audit.py eval/gold_villager_lines.jsonl eval/gold_shots.jsonl; do curl -sS -o $(basename $f) "$R2/$f?nocache=$(date +%s)"; done
+put() { python3 -c "import sys; from huggingface_hub import HfApi; HfApi().upload_file(path_or_fileobj=sys.argv[1], path_in_repo='archive/charlm/judge/'+sys.argv[2], repo_id='baya1116/hypernet-sp-distill')" "$1" "$2" > /dev/null 2>&1 && echo "[hub] $2" || echo "[hub] $2 FAILED"; }
+while [ ! -s DONE9 ]; do sleep 60; done
+J="--model QuantTrio/Qwen3.5-4B-AWQ --fallback cyankiwi/Qwen3.5-4B-AWQ-4bit --max-len 6144 --gpu-mem 0.88 --max-seqs 32"
+python3 -c "import json; open('gold_lab.jsonl','w').writelines(json.dumps({'id': json.loads(l)['id'], 'grade': json.loads(l)['grade']}) + '\n' for l in open('gold_villager_lines.jsonl'))"
+: > judge_eval.txt
+for v in plain checklist fewshot; do
+  fuser -k -9 /dev/nvidia* > /dev/null 2>&1; sleep 3
+  python3 -u npc_gen.py linejudge --variant $v --shots gold_shots.jsonl --inp gold_villager_lines.jsonl --out lj_$v.jsonl $J
+  echo "== 4B $v (the 132 lines not used as examples)" | tee -a judge_eval.txt; python3 judge_audit.py score --key lj_$v.jsonl --labels gold_lab.jsonl | tee -a judge_eval.txt
+done
+put judge_eval.txt judge_eval_4b.txt; date -u > DONE_J; put DONE_J DONE; echo "[vb] VBJOB5_DONE $(date -u)"
+JOB
+  setsid nohup bash -c 'bash /root/vbjob5.sh >> /root/vb/vb3.log 2>&1' > /dev/null 2>&1 < /dev/null &
+  echo "[vb] s7: job 5 (the judge on the gold lines) queued after job 4 $(date -u)"
 fi
 if [ ! -e /root/.vbjob ]; then touch /root/.vbjob
   cat > /root/vbjob.sh <<'JOB'
