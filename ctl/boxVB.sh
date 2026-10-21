@@ -4,7 +4,7 @@
 # GPU: those villagers + NPC/help/everyday chat + the new goal format (state in any order, the raise step with effects);
 # (3) scoring: chat bits, goal play (agent6 and agent8 on the same shuffled test), and the villager bench judged by the 4B.
 # Everything goes to the hub (baya1116/hypernet-sp-distill, archive/charlm/agent8/) as it is made.
-BOXVB_SERIAL=4
+BOXVB_SERIAL=5
 if [ -f /root/.boxvb_serial ] && [ "$(cat /root/.boxvb_serial)" -gt "$BOXVB_SERIAL" ] 2>/dev/null; then echo "BOXVB_STALE $BOXVB_SERIAL"; exit 0; fi
 echo $BOXVB_SERIAL > /root/.boxvb_serial
 if [ ! -e /root/.vb_pre ]; then touch /root/.vb_pre
@@ -103,6 +103,7 @@ fi
 # serial 4, the user: raise the judge's bar and polish on good data only: a strict regrade of every villager talk runs now
 # beside job 2 (its replies leave the GPU nearly free); once job 2 is done, agent9 = agent8 fine-tuned on the talks whose
 # every line got 2 (agent8's held-out villagers left out) with some of agent8's mix replayed, then scored the same way
+if [ ! -e /root/.vb_s5 ]; then touch /root/.vb_s5; rm -f /root/.vb_s4; pkill -f "vbjob[3].sh"; pkill -f "npc_ge[n].py vfilter --strict"; sleep 3; fi   # serial 5: job 3 again, now safe if job 2's GPU clearing cuts its regrade
 if [ ! -e /root/.vb_s4 ]; then touch /root/.vb_s4
   for f in npc_gen.py npc_bench.py; do curl -sS -o /root/vb/$f.new "$RAW/$f?nocache=$(date +%s)" && python3 -m py_compile /root/vb/$f.new && mv /root/vb/$f.new /root/vb/$f; done
   cat > /root/vbjob3.sh <<'JOB'
@@ -111,8 +112,9 @@ JS="--model QuantTrio/Qwen3.5-4B-AWQ --fallback cyankiwi/Qwen3.5-4B-AWQ-4bit --m
 J="--model QuantTrio/Qwen3.5-4B-AWQ --fallback cyankiwi/Qwen3.5-4B-AWQ-4bit --max-len 3072 --gpu-mem 0.88 --max-seqs 48 --chunk 1000"
 put() { python3 -c "import sys; from huggingface_hub import HfApi; HfApi().upload_file(path_or_fileobj=sys.argv[1], path_in_repo='archive/charlm/agent9/'+sys.argv[2], repo_id='baya1116/hypernet-sp-distill')" "$1" "$2" > /dev/null 2>&1 && echo "[hub] $2" || echo "[hub] $2 FAILED"; }
 [ -s villager_hq.jsonl ] || python3 -u npc_gen.py vfilter --strict 1 --min-grade 2 --inp villager_all.jsonl --out villager_hq.jsonl $JS
+while [ ! -s DONE ]; do sleep 60; done   # job 2 (agent8's scoring) first; its GPU clearing may have cut the regrade short
+[ -s villager_hq.jsonl ] || { fuser -k -9 /dev/nvidia* > /dev/null 2>&1; sleep 3; python3 -u npc_gen.py vfilter --strict 1 --min-grade 2 --inp villager_all.jsonl --out villager_hq.jsonl $J; }
 put villager_hq.jsonl villager_hq.jsonl; put villager_hq.jsonl.grades.jsonl villager_hq_grades.jsonl
-while [ ! -s DONE ]; do sleep 60; done   # job 2 (agent8's scoring) first
 python3 - <<'PY'
 import json, random
 key = lambda r: (r["messages"][0]["content"], r["messages"][1]["content"])
