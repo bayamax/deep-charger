@@ -2,7 +2,7 @@
 # Box VH (3060, vLLM image): the DPO step that fell over on box VF, again: agent12 = agent12a tuned on agent11's own
 # best-vs-worst pairs (charlm_dpo.py, micro-batched now, its log kept), then the 4-bit file and the same scoring as
 # agent12a (chat bits, goal play, the villager bench judged, the rules). To the hub: archive/charlm/agent12/b/
-BOXVH_SERIAL=1
+BOXVH_SERIAL=2
 if [ -f /root/.boxvh_serial ] && [ "$(cat /root/.boxvh_serial)" -gt "$BOXVH_SERIAL" ] 2>/dev/null; then echo "BOXVH_STALE $BOXVH_SERIAL"; exit 0; fi
 echo $BOXVH_SERIAL > /root/.boxvh_serial
 if [ ! -e /root/.vh_pre ]; then touch /root/.vh_pre
@@ -24,6 +24,41 @@ grep -E "^\[(vh|dpo|oom|val|gptq|chat|goal|judge|bench|hub)\]|Error|Traceback|ou
 nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv,noheader
 ST
 chmod +x /root/status.sh
+# serial 2: the first DPO drifted (chosen above rejected 92%, but held-out chat bits 0.82 -> 0.99): job 2, after job 1,
+# runs it gently (beta 0.3, lr 2e-6, one epoch, more plain learning) with the held-out tracked every 40 steps and the best
+# checkpoint kept, then the same 4-bit and scoring into agent12/c/
+if [ ! -e /root/.vh_s2 ]; then touch /root/.vh_s2
+  cat > /root/vhjob2.sh <<'JOB'
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); cd /root/vh
+J="--model QuantTrio/Qwen3.5-4B-AWQ --fallback cyankiwi/Qwen3.5-4B-AWQ-4bit --max-len 3072 --gpu-mem 0.88 --max-seqs 48 --chunk 1000"
+gpu_clear() { fuser -k -9 /dev/nvidia* > /dev/null 2>&1; sleep 3; }
+put() { python3 -c "import sys; from huggingface_hub import HfApi; HfApi().upload_file(path_or_fileobj=sys.argv[1], path_in_repo='archive/charlm/agent12/c/'+sys.argv[2], repo_id='baya1116/hypernet-sp-distill')" "$1" "$2" > /dev/null 2>&1 && echo "[hub] $2" || echo "[hub] $2 FAILED"; }
+while [ ! -s DONE ]; do sleep 60; done
+curl -sS -o charlm_dpo.py "https://raw.githubusercontent.com/bayamax/charlm-agent/main/charlm_dpo.py?nocache=$(date +%s)"; python3 -m py_compile charlm_dpo.py
+gpu_clear; mkdir -p agent12c
+python3 -u charlm_dpo.py --base agent12a.pt --pairs pairs.jsonl --anchor anchor.jsonl --val mix8_select.jsonl --val-n 300 --val-every 40 --out agent12c \
+  --beta 0.3 --lr 2e-6 --epochs 1 --batch 8 --micro 2 --anchor-batch 4 --sft-w 0.5 --anchor-w 1.0 --max-ctx 1400 2>&1 | grep -vE "Warning|detach"
+put agent12c/train.log train.log
+[ -s agent12c/model_best.pt ] || { echo "[vh] no step beat the base on the held-out: agent12c = agent12a"; cp agent12a.pt agent12c/model_best.pt; }
+put agent12c/model_best.pt model_best.pt
+python3 -u charlm_sft.py --base agent12c/model_best.pt --data sftdata --out agent12c --shards 0 --jsonl anchor.jsonl --val-jsonl mix8_select.jsonl --val-convs 450 --min-learned 2 \
+    --epochs 0 --prompts-json prompts12.json 2>&1 | grep -E "^\[(val|gptq|sft)\]"
+put agent12c/model_4bit.pt model_4bit.pt
+python3 -u chat_bits.py --models agent12a.pt,agent12c/model_best.pt,agent12c/model_4bit.pt --sets soda_val.jsonl,npc_val.jsonl,help_val.jsonl,mix8_villager_val.jsonl --n 300 2>&1 | grep "^\[chat\]" | tee chat12c.txt
+put chat12c.txt chat12c.txt
+python3 -u goal_gen.py play --model agent12c/model_4bit.pt --n 100 --split test --seed 5 2>&1 | grep -E "^\[goal\] level" | tee play12c.txt; put play12c.txt play12c.txt
+for i in 0 1 2; do python3 -u npc_bench.py reply --model agent12c/model_4bit.pt --tag agent12c-4bit --bench vb_part$i.jsonl --out r12c_$i.jsonl --n 4 > r12c_$i.log 2>&1 & done; wait
+cat r12c_0.jsonl r12c_1.jsonl r12c_2.jsonl > r_agent12c-4bit.jsonl; put r_agent12c-4bit.jsonl r_agent12c-4bit.jsonl
+gpu_clear; python3 -u npc_gen.py judge --inp r_agent12c-4bit.jsonl --out judged12c.jsonl $J
+cat judged12.jsonl judged12c.jsonl > judged_allc.jsonl
+python3 npc_bench.py report --inp judged_allc.jsonl > report12c.txt; python3 talk_rules.py score --inp judged_allc.jsonl > rules12c.txt
+sed 's/^/[report] /' report12c.txt | grep -E "best +(ALL|G:)"; cat rules12c.txt
+for f in judged12c.jsonl report12c.txt rules12c.txt; do put $f $f; done
+put /root/vh/vh.log run.log; date -u > DONE_C; put DONE_C DONE; echo "[vh] VHJOB2_DONE $(date -u)"
+JOB
+  setsid nohup bash -c 'bash /root/vhjob2.sh >> /root/vh/vh.log 2>&1' > /dev/null 2>&1 < /dev/null &
+  echo "[vh] s2: job 2 (the gentle DPO with the held-out tracked) queued after job 1 $(date -u)"
+fi
 if [ ! -e /root/.vhjob ]; then touch /root/.vhjob
   cat > /root/vhjob.sh <<'JOB'
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); cd /root/vh
