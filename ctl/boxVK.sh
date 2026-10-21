@@ -5,7 +5,7 @@
 # fact-asking talks again (--facts: name, hours, gifts, what is sold must be right in any voice), dark and friends heavy;
 # (2) the rules and the 4B judge filter them; (3) agent13 = agent12a on them (twice) + the replay; (4) the same scoring
 # as agent12 beside agent12a's rows and agent12c's (the same weights scored again: the bench's noise). To archive/charlm/agent13/
-BOXVK_SERIAL=3
+BOXVK_SERIAL=4
 if [ -f /root/.boxvk_serial ] && [ "$(cat /root/.boxvk_serial)" -gt "$BOXVK_SERIAL" ] 2>/dev/null; then echo "BOXVK_STALE $BOXVK_SERIAL"; exit 0; fi
 echo $BOXVK_SERIAL > /root/.boxvk_serial
 if [ ! -e /root/.vk_pre ]; then touch /root/.vk_pre
@@ -27,21 +27,21 @@ grep -E "^\[(vk|gen|filter|rules|sft|val|gptq|chat|goal|judge|report|hub)\]|Erro
 nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv,noheader
 ST
 chmod +x /root/status.sh
-if [ ! -e /root/.vkjob3 ]; then touch /root/.vkjob3
-  cat > /root/vkjob3.sh <<'JOB'
+if [ ! -e /root/.vkjob4 ]; then touch /root/.vkjob4
+  cat > /root/vkjob4.sh <<'JOB'
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); cd /root/vk
 H=https://huggingface.co/baya1116/hypernet-sp-distill/resolve/main/archive/charlm
 G="--model QuantTrio/Qwen3.5-4B-AWQ --fallback cyankiwi/Qwen3.5-4B-AWQ-4bit --max-len 4096 --gpu-mem 0.88 --max-seqs 48"
 JV="--model QuantTrio/Qwen3.5-4B-AWQ --fallback cyankiwi/Qwen3.5-4B-AWQ-4bit --max-len 8192 --gpu-mem 0.88 --max-seqs 32 --chunk 1000"
 J="--model QuantTrio/Qwen3.5-4B-AWQ --fallback cyankiwi/Qwen3.5-4B-AWQ-4bit --max-len 3072 --gpu-mem 0.88 --max-seqs 48 --chunk 1000"
 gpu_clear() { fuser -k -9 /dev/nvidia* > /dev/null 2>&1; sleep 3; }
-put() { python3 -c "import sys; from huggingface_hub import HfApi; HfApi().upload_file(path_or_fileobj=sys.argv[1], path_in_repo='archive/charlm/agent13/b/'+sys.argv[2], repo_id='baya1116/hypernet-sp-distill')" "$1" "$2" > /dev/null 2>&1 && echo "[hub] b/$2" || echo "[hub] b/$2 FAILED"; }
+put() { python3 -c "import sys; from huggingface_hub import HfApi; HfApi().upload_file(path_or_fileobj=sys.argv[1], path_in_repo='archive/charlm/agent13/c/'+sys.argv[2], repo_id='baya1116/hypernet-sp-distill')" "$1" "$2" > /dev/null 2>&1 && echo "[hub] c/$2" || echo "[hub] c/$2 FAILED"; }
 get() { [ -s $2 ] || curl -sSfL -o $2 "$1" || { rm -f $2; echo "[vk] could not get $1"; return 1; }; }
-get $H/agent12/a/model_final.pt agent12a.pt; get $H/agent10/villager_j.jsonl villager_j.jsonl
+get $H/agent12/a/model_final.pt agent12a.pt; get https://huggingface.co/baya1116/charlm-agent/resolve/main/agent13b/model_final.pt agent13b.pt; get $H/agent13/b/villager_fact3_j.jsonl villager_fact3_j.jsonl; get $H/agent10/villager_j.jsonl villager_j.jsonl
 for f in vbench.jsonl vbench_gen.jsonl; do get $H/villager/$f $f; done
 for f in mix8.jsonl mix8_select.jsonl mix8_villager_val.jsonl; do get $H/agent8/data/$f $f; done
 for f in soda_val.jsonl npc_val.jsonl; do get $H/agent6/data/$f $f; done
-get $H/agent12/data/help_val.jsonl help_val.jsonl; get $H/agent12/judged12.jsonl judged12.jsonl; get $H/agent12/c/judged12c.jsonl judged12c.jsonl
+get $H/agent12/data/help_val.jsonl help_val.jsonl; get $H/agent12/judged12.jsonl judged12.jsonl; get $H/agent12/c/judged12c.jsonl judged12c.jsonl; get $H/agent13/b/judged13b.jsonl judged13b.jsonl
 : > judged13.jsonl
 [ -s goal_r5.jsonl ] || python3 goal_gen.py data --n 4000 --levels 1,2,3,3,3,4,4 --split train --seed 73 --out goal_r5.jsonl
 python3 -c "import json; json.dump([json.loads(l)['messages'][0]['content'] + '\n\n' + json.loads(l)['messages'][1]['content'] for l in list(open('mix8_villager_val.jsonl'))[:3]], open('prompts13.json', 'w'))"
@@ -50,21 +50,22 @@ python3 - <<'PY'
 rows = open("vbench_all.jsonl").readlines()
 for i in range(3): open(f"vb_part{i}.jsonl", "w").writelines(rows[i::3])
 PY
-echo "[vk] serial 3 on a fresh box (the Thailand host ran vLLM 3x slow): the teacher step in chunks of 100, then agent13b"
-gpu_clear; rm -f villager_fact3.jsonl villager_fact3.jsonl.raw
-( while sleep 240; do put villager_fact3.jsonl villager_fact3.jsonl > /dev/null; done ) & MIR=$!
-timeout 100m python3 -u npc_gen.py villager --facts 1 --genres dark,friends,cozy,dark,friends --n 2400 --seed 43 --out villager_fact3.jsonl --chunk 100 $G 2>&1 | grep -vE "^INFO|^WARNING|^\(EngineCore|it/s\]"
-kill $MIR; put villager_fact3.jsonl villager_fact3.jsonl; echo "[vk] teacher wrote $(wc -l < villager_fact3.jsonl) talks"
-python3 talk_rules.py filter --inp villager_fact3.jsonl --out villager_fact3_r.jsonl
-gpu_clear; python3 -u npc_gen.py vfilter --shots gold_shots.jsonl --min-grade 1 --inp villager_fact3_r.jsonl --out villager_fact3_j.jsonl $JV
-put villager_fact3_j.jsonl villager_fact3_j.jsonl
+echo "[vk] serial 4: round 2 of the fact-asking talks (seed 45) learned from agent13b with round 1 beside -> agent13c"
+gpu_clear; rm -f villager_fact4.jsonl villager_fact4.jsonl.raw
+( while sleep 240; do put villager_fact4.jsonl villager_fact4.jsonl > /dev/null; done ) & MIR=$!
+timeout 100m python3 -u npc_gen.py villager --facts 1 --genres dark,friends,cozy,dark,friends --n 2400 --seed 45 --out villager_fact4.jsonl --chunk 100 $G 2>&1 | grep -vE "^INFO|^WARNING|^\(EngineCore|it/s\]"
+kill $MIR; put villager_fact4.jsonl villager_fact4.jsonl; echo "[vk] teacher wrote $(wc -l < villager_fact4.jsonl) talks"
+python3 talk_rules.py filter --inp villager_fact4.jsonl --out villager_fact4_r.jsonl
+gpu_clear; python3 -u npc_gen.py vfilter --shots gold_shots.jsonl --min-grade 1 --inp villager_fact4_r.jsonl --out villager_fact4_j.jsonl $JV
+put villager_fact4_j.jsonl villager_fact4_j.jsonl
 python3 - <<'PY'
 import json, random, re
 key = lambda r: (r["messages"][0]["content"], r["messages"][1]["content"])
 val = {key(json.loads(l)) for l in open("mix8_villager_val.jsonl")}
-R = random.Random(14)
+R = random.Random(15)
 card = lambda l: json.loads(l)["messages"][0]["role"] == "system"
-new = [l for l in open("villager_fact3_j.jsonl") if card(l) and key(json.loads(l)) not in val]
+new = [l for l in open("villager_fact4_j.jsonl") if card(l) and key(json.loads(l)) not in val]
+prev = [l for l in open("villager_fact3_j.jsonl") if card(l) and key(json.loads(l)) not in val]
 vil = [l for l in open("villager_j.jsonl") if card(l) and key(json.loads(l)) not in val]; R.shuffle(vil)
 def hard(l):
     m = json.loads(l)["messages"]; t = " ".join(x["content"] for x in m if x["role"] == "user")
@@ -72,31 +73,31 @@ def hard(l):
 old_hard = [l for l in vil if hard(l)]
 rest = [l for l in open("mix8.jsonl") if not str(json.loads(l).get("src", "")).startswith("villager")]
 goal = [l for l in rest if json.loads(l)["messages"][0]["content"].startswith("GOAL:")]; gs = set(goal); chat = [l for l in rest if l not in gs]; R.shuffle(chat)
-mix = new * 2 + old_hard + list(open("goal_r5.jsonl"))[:3000] + chat[:3000] + vil[:1500]; R.shuffle(mix)
-open("mix13b.jsonl", "w").writelines(mix)
-print(f"[vk] mix13b: {len(new)} new fact talks (x2) + {len(old_hard)} old hard talks + 3000 goal + 3000 chat + 1500 villager = {len(mix)}", flush=True)
+mix = new * 2 + prev + old_hard + list(open("goal_r5.jsonl"))[:3000] + chat[:3000] + vil[:1500]; R.shuffle(mix)
+open("mix13c.jsonl", "w").writelines(mix)
+print(f"[vk] mix13c: {len(new)} new fact talks (x2) + {len(prev)} round-1 fact talks + {len(old_hard)} old hard talks + 3000 goal + 3000 chat + 1500 villager = {len(mix)}", flush=True)
 assert len(new) >= 300, "too few new fact talks"
 PY
-[ $? = 0 ] || { echo "[vk] job 2: too few fact talks, stopping"; date -u > DONE_B; put DONE_B DONE; exit 1; }
-gpu_clear; mkdir -p agent13b
-( while sleep 300; do put agent13b/train.log train.log > /dev/null; done ) & MIR=$!
-python3 -u charlm_sft.py --base agent12a.pt --data sftdata --out agent13b --shards 0 --jsonl mix13b.jsonl --val-jsonl mix8_select.jsonl --val-convs 450 --min-learned 2 \
-    --prompts-json prompts13.json --epochs 1 --lr 2e-5 --warmup 10 --eval-every 4 --hours 1 --ckpt-every 10 --hub baya1116/hypernet-sp-distill:archive/charlm/agent13/b 2>&1 | grep -vE "Warning|detach|backward|^\[step"
-kill $MIR 2>/dev/null; put agent13b/train.log train.log
-[ -s agent13b/model_4bit.pt ] || { echo "[vk] job 2: no 4-bit model"; date -u > DONE_B; put DONE_B DONE; exit 1; }
-python3 -u chat_bits.py --models agent12a.pt,agent13b/model_final.pt,agent13b/model_4bit.pt --sets soda_val.jsonl,npc_val.jsonl,help_val.jsonl,mix8_villager_val.jsonl --n 300 2>&1 | grep "^\[chat\]" | tee chat13b.txt
-put chat13b.txt chat13b.txt
-python3 -u goal_gen.py play --model agent13b/model_4bit.pt --n 100 --split test --seed 5 2>&1 | grep -E "^\[goal\] level" | tee play13b.txt; put play13b.txt play13b.txt
-for i in 0 1 2; do python3 -u npc_bench.py reply --model agent13b/model_4bit.pt --tag agent13b-4bit --bench vb_part$i.jsonl --out r13b_$i.jsonl --n 4 > r13b_$i.log 2>&1 & done; wait
-cat r13b_0.jsonl r13b_1.jsonl r13b_2.jsonl > r_agent13b-4bit.jsonl; put r_agent13b-4bit.jsonl r_agent13b-4bit.jsonl
-gpu_clear; python3 -u npc_gen.py judge --inp r_agent13b-4bit.jsonl --out judged13b.jsonl $J
-cat judged12.jsonl judged12c.jsonl judged13.jsonl judged13b.jsonl > judged_all13b.jsonl
-python3 npc_bench.py report --inp judged_all13b.jsonl > report13b.txt; python3 talk_rules.py score --inp judged_all13b.jsonl > rules13b.txt
-sed 's/^/[report] /' report13b.txt | grep -E "best +(ALL|G:|dark:recall|gift_dislike|memory |town )"; cat rules13b.txt
-for f in judged13b.jsonl report13b.txt rules13b.txt; do put $f $f; done
-put /root/vk/vk.log run.log; date -u > DONE_B; put DONE_B DONE; echo "[vk] VKJOB2_DONE $(date -u)"
+[ $? = 0 ] || { echo "[vk] job 2: too few fact talks, stopping"; date -u > DONE_C; put DONE_C DONE; exit 1; }
+gpu_clear; mkdir -p agent13c
+( while sleep 300; do put agent13c/train.log train.log > /dev/null; done ) & MIR=$!
+python3 -u charlm_sft.py --base agent13b.pt --data sftdata --out agent13c --shards 0 --jsonl mix13c.jsonl --val-jsonl mix8_select.jsonl --val-convs 450 --min-learned 2 \
+    --prompts-json prompts13.json --epochs 1 --lr 2e-5 --warmup 10 --eval-every 4 --hours 1 --ckpt-every 10 --hub baya1116/hypernet-sp-distill:archive/charlm/agent13/c 2>&1 | grep -vE "Warning|detach|backward|^\[step"
+kill $MIR 2>/dev/null; put agent13c/train.log train.log
+[ -s agent13c/model_4bit.pt ] || { echo "[vk] job 2: no 4-bit model"; date -u > DONE_C; put DONE_C DONE; exit 1; }
+python3 -u chat_bits.py --models agent12a.pt,agent13b.pt,agent13c/model_final.pt,agent13c/model_4bit.pt --sets soda_val.jsonl,npc_val.jsonl,help_val.jsonl,mix8_villager_val.jsonl --n 300 2>&1 | grep "^\[chat\]" | tee chat13c.txt
+put chat13c.txt chat13c.txt
+python3 -u goal_gen.py play --model agent13c/model_4bit.pt --n 100 --split test --seed 5 2>&1 | grep -E "^\[goal\] level" | tee play13c.txt; put play13c.txt play13c.txt
+for i in 0 1 2; do python3 -u npc_bench.py reply --model agent13c/model_4bit.pt --tag agent13c-4bit --bench vb_part$i.jsonl --out r13c_$i.jsonl --n 4 > r13c_$i.log 2>&1 & done; wait
+cat r13c_0.jsonl r13c_1.jsonl r13c_2.jsonl > r_agent13c-4bit.jsonl; put r_agent13c-4bit.jsonl r_agent13c-4bit.jsonl
+gpu_clear; python3 -u npc_gen.py judge --inp r_agent13c-4bit.jsonl --out judged13c.jsonl $J
+cat judged12.jsonl judged12c.jsonl judged13b.jsonl judged13c.jsonl > judged_all13c.jsonl
+python3 npc_bench.py report --inp judged_all13c.jsonl > report13c.txt; python3 talk_rules.py score --inp judged_all13c.jsonl > rules13c.txt
+sed 's/^/[report] /' report13c.txt | grep -E "best +(ALL|G:|dark:recall|gift_dislike|memory |town )"; cat rules13c.txt
+for f in judged13c.jsonl report13c.txt rules13c.txt; do put $f $f; done
+put /root/vk/vk.log run.log; date -u > DONE_C; put DONE_C DONE; echo "[vk] VKJOB4_DONE $(date -u)"
 JOB
-  setsid nohup bash -c 'bash /root/vkjob3.sh >> /root/vk/vk.log 2>&1' > /dev/null 2>&1 < /dev/null &
-  echo "VKJOB3_LAUNCHED $(date -u)"
+  setsid nohup bash -c 'bash /root/vkjob4.sh >> /root/vk/vk.log 2>&1' > /dev/null 2>&1 < /dev/null &
+  echo "VKJOB4_LAUNCHED $(date -u)"
 fi
 # CTL-END
