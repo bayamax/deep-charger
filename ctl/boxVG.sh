@@ -2,7 +2,7 @@
 # Box VG (3060, pytorch image): the parallel SP-evict experiment on deep-charger's g14 (the model in the app, 16-bit here):
 # N bounded streams as one batch vs one at a time vs full KV - tokens/s, peak memory, GSM8K accuracy - and the task split
 # into parallel sub-streams. ctl/par_sp.py; results to the hub (archive/parsp/)
-BOXVG_SERIAL=1
+BOXVG_SERIAL=2
 if [ -f /root/.boxvg_serial ] && [ "$(cat /root/.boxvg_serial)" -gt "$BOXVG_SERIAL" ] 2>/dev/null; then echo "BOXVG_STALE $BOXVG_SERIAL"; exit 0; fi
 echo $BOXVG_SERIAL > /root/.boxvg_serial
 if [ ! -e /root/.vg_pre ]; then touch /root/.vg_pre
@@ -20,6 +20,26 @@ grep -E "^\[(vg|par|hub)\]|Error|Traceback|out of memory" /root/vg/vg.log 2>/dev
 nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv,noheader
 ST
 chmod +x /root/status.sh
+# serial 2, the user: the question is whether SPLITTING a task and running the parts in parallel raises the score, with the
+# split made by deep-charger itself, or by a large model when that is too hard for it. Job 2 waits for job 1, then runs the
+# decomp arm on 48 bundles (24 of 3 and 24 of 5 GSM8K questions): planner none / g14 / api (DeepSeek's splits, in bundles.jsonl)
+if [ ! -e /root/.vg_s2 ]; then touch /root/.vg_s2
+  cat > /root/vgjob2.sh <<'JOB'
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); cd /root/vg
+put() { python3 -c "import sys; from huggingface_hub import HfApi; HfApi().upload_file(path_or_fileobj=sys.argv[1], path_in_repo='archive/parsp/'+sys.argv[2], repo_id='baya1116/hypernet-sp-distill')" "$1" "$2" > /dev/null 2>&1 && echo "[hub] $2" || echo "[hub] $2 FAILED"; }
+while [ ! -s DONE ]; do sleep 60; done
+curl -sS -o par_sp.py "https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl/par_sp.py?nocache=$(date +%s)"
+curl -sSfL -o bundles.jsonl https://huggingface.co/baya1116/hypernet-sp-distill/resolve/main/archive/parsp/bundles.jsonl
+R="python3 -u par_sp.py --model g14 --gsm gsm8k_test.parquet --bundles bundles.jsonl --out results_decomp.jsonl --arm decomp --n 24"
+echo "[vg] decomp arm: 48 tasks (24 x 3 questions, 24 x 5); one stream (gen 3000) vs the parts in parallel (gen 1024 each), split by g14 (plan 600) or by DeepSeek"
+$R --planner none --gen 3000 --tag decomp 2>&1 | grep -E "^\[par\]|Error|Traceback"; put results_decomp.jsonl results_decomp.jsonl > /dev/null
+$R --planner api --gen 3000 --gen-split 1024 --tag decomp 2>&1 | grep -E "^\[par\]|Error|Traceback"; put results_decomp.jsonl results_decomp.jsonl > /dev/null
+$R --planner g14 --gen 3000 --gen-split 1024 --gen-plan 600 --tag decomp 2>&1 | grep -E "^\[par\]|Error|Traceback"
+put results_decomp.jsonl results_decomp.jsonl; put /root/vg/vg.log run.log; date -u > DONE2; put DONE2 DONE2; echo "[vg] VGJOB2_DONE $(date -u)"
+JOB
+  setsid nohup bash -c 'bash /root/vgjob2.sh >> /root/vg/vg.log 2>&1' > /dev/null 2>&1 < /dev/null &
+  echo "[vg] s2: job 2 (the decomp arm) queued after job 1 $(date -u)"
+fi
 if [ ! -e /root/.vgjob ]; then touch /root/.vgjob
   cat > /root/vgjob.sh <<'JOB'
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); cd /root/vg

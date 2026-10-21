@@ -7,7 +7,10 @@ run at once in a fixed memory, and the task can be split into sub-questions that
                  prompt and re-feed [SP(32) of the distant tokens + the last RW raw tokens]; MAXD distant tokens kept
                  by pooler mass
           full   plain generation, the KV grows with the length (the usual way)
-  arms    gsm    GSM8K questions, N streams at once: tokens/s, peak memory, accuracy, by N
+  arms    decomp a task of K independent questions (par_bundles.py): --planner none, one stream solves the whole task;
+                 g14, the model itself splits the task into sub-questions (a planning stream), the parts run as parallel
+                 streams and the answers are merged in order; api, the split made by a large model (in the bundles file)
+          gsm    GSM8K questions, N streams at once: tokens/s, peak memory, accuracy, by N
           split  three-part problems ((a)(b)(c) made of three GSM8K questions): one stream for all three, against the
                  three parts as three parallel streams; accuracy per part and wall time
 
@@ -22,12 +25,14 @@ import torch.nn.functional as F
 
 ap = argparse.ArgumentParser()
 ap.add_argument("--model", required=True, help="the 16-bit model directory (with pooler.safetensors)")
-ap.add_argument("--arm", default="gsm", choices=["gsm", "split"]); ap.add_argument("--mode", default="sp", choices=["sp", "full"])
+ap.add_argument("--arm", default="gsm", choices=["gsm", "split", "decomp"]); ap.add_argument("--mode", default="sp", choices=["sp", "full"])
 ap.add_argument("--n", type=int, default=8, help="streams per batch"); ap.add_argument("--questions", type=int, default=32); ap.add_argument("--problems", type=int, default=16)
 ap.add_argument("--gen", type=int, default=1024, help="model tokens per stream"); ap.add_argument("--gen-split", type=int, default=0, help="per sub-stream (default gen/2)")
 ap.add_argument("--rw", type=int, default=768); ap.add_argument("--maxd", type=int, default=384); ap.add_argument("--chunk", type=int, default=128)
 ap.add_argument("--temp", type=float, default=0.6); ap.add_argument("--seed", type=int, default=0); ap.add_argument("--gsm", default="gsm8k_test.parquet")
 ap.add_argument("--out", default=""); ap.add_argument("--tag", default="")
+ap.add_argument("--bundles", default="bundles.jsonl", help="decomp: par_bundles.py's bundles"); ap.add_argument("--planner", default="none", choices=["none", "g14", "api"])
+ap.add_argument("--gen-plan", type=int, default=600, help="decomp: model tokens for the planning stream (planner g14)")
 A = ap.parse_args()
 torch.manual_seed(A.seed)
 DEV = "cuda" if torch.cuda.is_available() else "cpu"; DT = torch.bfloat16 if DEV == "cuda" else torch.float32
@@ -209,7 +214,7 @@ if A.arm == "gsm":
         for r, t in zip(batch, texts):
             ok = same(final_number(t), gold(r)); correct += ok; n_done += 1; texts_out.append({"q": r["question"][:80], "gold": gold(r), "pred": final_number(t), "ok": bool(ok), "len": len(t), "text": t[:400]})
         print(f"[par] batch {a // A.n}: {len(batch)} streams, {sum(lens)} tokens in {time.time() - t1:.1f}s ({sum(lens) / (time.time() - t1):.1f} tok/s), kv {kv / 1e6:.0f} MB, correct so far {correct}/{n_done}", flush=True)
-else:
+elif A.arm == "split":
     gs = A.gen_split or A.gen // 2; probs = []
     for i in range(A.problems): probs.append([rows[j] for j in order[3 * i:3 * i + 3]])
     # one stream: the three parts in one prompt
@@ -235,6 +240,64 @@ else:
     sp_time = time.time() - t1
     print(f"[par] split into parallel sub-streams ({A.n} at a time): parts correct {sp_ok} = {sum(sp_ok)}/{3 * len(probs)}, {sp_toks} tokens, {sp_time:.0f}s, kv {sp_kv / 1e6:.0f} MB", flush=True)
     res.update(one={"ok": one_ok, "tokens": one_toks, "sec": one_time, "kv_mb": one_kv / 1e6}, split={"ok": sp_ok, "tokens": sp_toks, "sec": sp_time, "kv_mb": sp_kv / 1e6}, problems=len(probs))
+if A.arm == "decomp":
+    bundles = [json.loads(l) for l in open(A.bundles)]; gs = A.gen_split or A.gen // 2
+    task_text = lambda b: "Solve this task:\n" + "\n".join(f"({j + 1}) {q}" for j, q in enumerate(b["qs"]))
+    PLAN = ("Split the task below into independent sub-questions that can each be solved on their own, in the task's order. Each sub-question must be "
+            "self-contained: copy every number and name it needs. Do not solve anything. After thinking, write only a numbered list, one sub-question per line.\n\n")
+    nums = lambda t: re.findall(r"-?\d[\d,]*\.?\d*", t)
+    per_part = [0] * 5; whole = 0; whole_set = 0; plan_ok = 0; plan_toks = 0; solve_toks = 0; t_plan = 0.0; t_solve = 0.0; kvp = 0; details = []
+    if A.planner == "none":
+        t1 = time.time()
+        for a in range(0, len(bundles), A.n):
+            bb = bundles[a:a + A.n]
+            ps = [prompt_ids(task_text(b) + "\nPlease reason step by step, then give the final answers in order, each within its own \\boxed{}.") for b in bb]
+            texts, lens, kv, _ = generate(ps, A.gen); solve_toks += sum(lens); kvp = max(kvp, kv)
+            for b, t in zip(bb, texts):
+                ans = t.split("</think>")[-1] if "</think>" in t else t[-800:]; boxed = [x for x in re.findall(r"\\boxed\{([^{}]*)\}", ans)]
+                preds = [(nums(x)[-1].replace(",", "") if nums(x) else "") for x in boxed]
+                oks = [k < len(preds) and same(preds[k], b["golds"][k]) for k in range(b["k"])]
+                for k, o in enumerate(oks): per_part[k] += o
+                whole += all(oks); whole_set += sorted(preds[:b["k"]]) == sorted(b["golds"]) if len(preds) >= b["k"] else False
+                details.append({"id": b["id"], "preds": preds[:b["k"]], "golds": b["golds"], "ok": oks})
+        t_solve = time.time() - t1
+    else:
+        plans = {}
+        if A.planner == "api":
+            for b in bundles: plans[b["id"]] = b.get("api_sub") or []
+        else:
+            t1 = time.time()
+            for a in range(0, len(bundles), A.n):
+                bb = bundles[a:a + A.n]
+                texts, lens, kv, _ = generate([prompt_ids(PLAN + task_text(b)) for b in bb], A.gen_plan); plan_toks += sum(lens); kvp = max(kvp, kv)
+                for b, t in zip(bb, texts):
+                    ans = t.split("</think>")[-1] if "</think>" in t else ""
+                    subs = [m.group(2).strip() for m in re.finditer(r"^\s*(?:\(?\d+[.)]|[-*])\s*(.+)$", ans, re.M) for m in [m] if len(m.group(1)) > 15] if False else \
+                           [m.group(1).strip() for m in re.finditer(r"^\s*(?:\(?\d+[.)]|[-*•])\s*(.{15,})$", ans, re.M)]
+                    plans[b["id"]] = subs
+            t_plan = time.time() - t1
+        parts = []
+        for b in bundles:
+            subs = plans.get(b["id"]) or []; ok_ = len(subs) == b["k"]; plan_ok += ok_
+            if ok_:
+                for k, sq in enumerate(subs): parts.append((b["id"], k, sq))
+        t1 = time.time(); preds = {}
+        for a in range(0, len(parts), A.n):
+            pb = parts[a:a + A.n]
+            texts, lens, kv, _ = generate([prompt_ids(sq + SUFFIX) for _, _, sq in pb], gs); solve_toks += sum(lens); kvp = max(kvp, kv)
+            for (bid, k, _), t in zip(pb, texts): preds[(bid, k)] = final_number(t)
+        t_solve = time.time() - t1
+        for b in bundles:
+            pr = [preds.get((b["id"], k), "") for k in range(b["k"])]; oks = [same(pr[k], b["golds"][k]) for k in range(b["k"])]
+            for k, o in enumerate(oks): per_part[k] += o
+            whole += all(oks); whole_set += sorted(pr) == sorted(b["golds"])
+            details.append({"id": b["id"], "plan": (plans.get(b["id"]) or [])[:5], "preds": pr, "golds": b["golds"], "ok": oks})
+    nb = len(bundles); K = max(b["k"] for b in bundles); npart = sum(b["k"] for b in bundles)
+    print(f"[par] decomp planner={A.planner} K={sorted(set(b['k'] for b in bundles))}: {nb} tasks; plan with the right count {plan_ok if A.planner != 'none' else '-'}/{nb}; "
+          f"parts correct {sum(per_part)}/{npart} ({100 * sum(per_part) / npart:.0f}%) by position {per_part[:K]}; whole task correct {whole}/{nb} (as a set {whole_set}); "
+          f"plan {t_plan:.0f}s + solve {t_solve:.0f}s; tokens plan {plan_toks}, solve {solve_toks}; KV peak {kvp / 1e6:.0f} MB", flush=True)
+    res.update(planner=A.planner, tasks=nb, plan_ok=plan_ok, parts_ok=sum(per_part), parts=npart, by_pos=per_part[:K], whole=whole, whole_set=whole_set,
+               t_plan=t_plan, t_solve=t_solve, plan_tokens=plan_toks, solve_tokens=solve_toks, kv_peak_mb=kvp / 1e6, details=details[:12])
 sec = time.time() - T0
 res.update(tokens=toks, sec=sec, tok_per_s=toks / max(sec, 1e-9), kv_peak_mb=kvp / 1e6, correct=correct, done=n_done,
            peak_alloc_mb=(torch.cuda.max_memory_allocated() / 1e6 if DEV == "cuda" else None), samples=texts_out[:8])
