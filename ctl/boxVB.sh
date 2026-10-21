@@ -4,7 +4,7 @@
 # GPU: those villagers + NPC/help/everyday chat + the new goal format (state in any order, the raise step with effects);
 # (3) scoring: chat bits, goal play (agent6 and agent8 on the same shuffled test), and the villager bench judged by the 4B.
 # Everything goes to the hub (baya1116/hypernet-sp-distill, archive/charlm/agent8/) as it is made.
-BOXVB_SERIAL=3
+BOXVB_SERIAL=4
 if [ -f /root/.boxvb_serial ] && [ "$(cat /root/.boxvb_serial)" -gt "$BOXVB_SERIAL" ] 2>/dev/null; then echo "BOXVB_STALE $BOXVB_SERIAL"; exit 0; fi
 echo $BOXVB_SERIAL > /root/.boxvb_serial
 if [ ! -e /root/.vb_pre ]; then touch /root/.vb_pre
@@ -27,7 +27,7 @@ if [ ! -f /root/.bootstrapped ]; then
   touch /root/.bootstrapped; echo "BOOTSTRAP_DONE $(date -u)"
 fi
 cat > /root/status.sh <<'ST'
-grep -E "^\[(vb|gen|mix|sft|val|gptq|chat|goal|judge|hub|pad|soda)\]|Error|Traceback" /root/vb/vb.log 2>/dev/null | tail -n 6 | cut -c1-300
+grep -E "^\[(vb|gen|mix|sft|val|gptq|chat|goal|judge|hub|pad|soda|filter)\]|Error|Traceback" /root/vb/vb.log /root/vb/vb3.log 2>/dev/null | tail -n 8 | cut -c1-300
 nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv,noheader
 ST
 chmod +x /root/status.sh
@@ -99,6 +99,51 @@ date -u > DONE; put DONE DONE; echo "[vb] VBJOB_DONE $(date -u)"
 JOB
   setsid nohup bash -c 'bash /root/vbjob2.sh >> /root/vb/vb.log 2>&1' > /dev/null 2>&1 < /dev/null &
   echo "[vb] s3: job 2 (with the filter) started $(date -u)"
+fi
+# serial 4, the user: raise the judge's bar and polish on good data only: a strict regrade of every villager talk runs now
+# beside job 2 (its replies leave the GPU nearly free); once job 2 is done, agent9 = agent8 fine-tuned on the talks whose
+# every line got 2 (agent8's held-out villagers left out) with some of agent8's mix replayed, then scored the same way
+if [ ! -e /root/.vb_s4 ]; then touch /root/.vb_s4
+  for f in npc_gen.py npc_bench.py; do curl -sS -o /root/vb/$f.new "$RAW/$f?nocache=$(date +%s)" && python3 -m py_compile /root/vb/$f.new && mv /root/vb/$f.new /root/vb/$f; done
+  cat > /root/vbjob3.sh <<'JOB'
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); cd /root/vb
+JS="--model QuantTrio/Qwen3.5-4B-AWQ --fallback cyankiwi/Qwen3.5-4B-AWQ-4bit --max-len 3072 --gpu-mem 0.72 --max-seqs 32 --chunk 1000"
+J="--model QuantTrio/Qwen3.5-4B-AWQ --fallback cyankiwi/Qwen3.5-4B-AWQ-4bit --max-len 3072 --gpu-mem 0.88 --max-seqs 48 --chunk 1000"
+put() { python3 -c "import sys; from huggingface_hub import HfApi; HfApi().upload_file(path_or_fileobj=sys.argv[1], path_in_repo='archive/charlm/agent9/'+sys.argv[2], repo_id='baya1116/hypernet-sp-distill')" "$1" "$2" > /dev/null 2>&1 && echo "[hub] $2" || echo "[hub] $2 FAILED"; }
+[ -s villager_hq.jsonl ] || python3 -u npc_gen.py vfilter --strict 1 --min-grade 2 --inp villager_all.jsonl --out villager_hq.jsonl $JS
+put villager_hq.jsonl villager_hq.jsonl; put villager_hq.jsonl.grades.jsonl villager_hq_grades.jsonl
+while [ ! -s DONE ]; do sleep 60; done   # job 2 (agent8's scoring) first
+python3 - <<'PY'
+import json, random
+key = lambda r: (r["messages"][0]["content"], r["messages"][1]["content"])
+val = {key(json.loads(l)) for l in open("mix8_villager_val.jsonl")}
+hq = [l for l in open("villager_hq.jsonl") if key(json.loads(l)) not in val]
+rest = [l for l in open("mix8.jsonl") if not str(json.loads(l).get("src", "")).startswith("villager")]
+random.seed(9); random.shuffle(rest); mix = hq + rest[:6000]; random.shuffle(mix); open("mix9.jsonl", "w").writelines(mix)
+print(f"[vb] mix9: {len(hq)} villager talks with every line graded 2 (+ {len(rest[:6000])} replayed from agent8's mix)", flush=True)
+PY
+put mix9.jsonl data/mix9.jsonl
+if [ ! -s agent9/model_final.pt ]; then
+  python3 -u charlm_sft.py --base agent8/model_final.pt --data sftdata --out agent9 --shards 0 --jsonl mix9.jsonl --val-jsonl mix8_select.jsonl --val-convs 450 --min-learned 2 \
+    --prompts-json prompts8.json --epochs 1 --lr 3e-5 --warmup 10 --eval-every 5 --hours 1 --ckpt-every 10 --hub baya1116/hypernet-sp-distill:archive/charlm/agent9 2>&1 | grep -vE "Warning|detach|backward|^\[step"
+fi
+python3 -u chat_bits.py --models agent8/model_final.pt,agent9/model_final.pt,agent9/model_4bit.pt --sets soda_val.jsonl,npc_val.jsonl,mix8_help_val.jsonl,mix8_villager_val.jsonl --n 300 2>&1 | grep "^\[chat\]" | tee chat9.txt
+put chat9.txt chat9.txt
+python3 -u goal_gen.py play --model agent9/model_4bit.pt --n 100 --split test --seed 5 2>&1 | grep -E "^\[goal\] level" | tee play9.txt; put play9.txt play9.txt
+python3 - <<'PY'
+rows = open("vbench_all.jsonl").readlines()
+for i in range(3): open(f"vb_part{i}.jsonl", "w").writelines(rows[i::3])
+PY
+for i in 0 1 2; do python3 -u npc_bench.py reply --model agent9/model_4bit.pt --tag agent9-4bit --bench vb_part$i.jsonl --out r9_part$i.jsonl --n 4 > r9_part$i.log 2>&1 & done; wait
+cat r9_part0.jsonl r9_part1.jsonl r9_part2.jsonl > r_agent9-4bit.jsonl; put r_agent9-4bit.jsonl r_agent9-4bit.jsonl
+fuser -k -9 /dev/nvidia* > /dev/null 2>&1; sleep 3
+python3 -u npc_gen.py judge --inp r_agent9-4bit.jsonl --out judged9.jsonl $J
+cat judged8.jsonl judged9.jsonl > judged89.jsonl; python3 npc_bench.py report --inp judged89.jsonl > report9.txt; sed 's/^/[report] /' report9.txt | head -60
+for f in judged9.jsonl report9.txt; do put $f $f; done
+date -u > DONE9; put DONE9 DONE; echo "[vb] VBJOB3_DONE $(date -u)"
+JOB
+  setsid nohup bash -c 'bash /root/vbjob3.sh >> /root/vb/vb3.log 2>&1' > /dev/null 2>&1 < /dev/null &
+  echo "[vb] s4: job 3 (strict regrade, then agent9) started $(date -u)"
 fi
 if [ ! -e /root/.vbjob ]; then touch /root/.vbjob
   cat > /root/vbjob.sh <<'JOB'
