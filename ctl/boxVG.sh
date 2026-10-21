@@ -2,7 +2,7 @@
 # Box VG (3060, pytorch image): the parallel SP-evict experiment on deep-charger's g14 (the model in the app, 16-bit here):
 # N bounded streams as one batch vs one at a time vs full KV - tokens/s, peak memory, GSM8K accuracy - and the task split
 # into parallel sub-streams. ctl/par_sp.py; results to the hub (archive/parsp/)
-BOXVG_SERIAL=2
+BOXVG_SERIAL=3
 if [ -f /root/.boxvg_serial ] && [ "$(cat /root/.boxvg_serial)" -gt "$BOXVG_SERIAL" ] 2>/dev/null; then echo "BOXVG_STALE $BOXVG_SERIAL"; exit 0; fi
 echo $BOXVG_SERIAL > /root/.boxvg_serial
 if [ ! -e /root/.vg_pre ]; then touch /root/.vg_pre
@@ -39,6 +39,23 @@ put results_decomp.jsonl results_decomp.jsonl; put /root/vg/vg.log run.log; date
 JOB
   setsid nohup bash -c 'bash /root/vgjob2.sh >> /root/vg/vg.log 2>&1' > /dev/null 2>&1 < /dev/null &
   echo "[vg] s2: job 2 (the decomp arm) queued after job 1 $(date -u)"
+fi
+# serial 3: the rebuild step computed the logits of the whole block (N x 800 x 152k), so n=32 went out of memory; par_sp.py
+# now keeps only the last position's (re-fetched above, every later run uses it). Job 3 waits for job 2 and runs the two arms
+# that fell over: sp n=32 and the long arm's sp n=16
+if [ ! -e /root/.vg_s3 ]; then touch /root/.vg_s3
+  cat > /root/vgjob3.sh <<'JOB'
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); cd /root/vg
+put() { python3 -c "import sys; from huggingface_hub import HfApi; HfApi().upload_file(path_or_fileobj=sys.argv[1], path_in_repo='archive/parsp/'+sys.argv[2], repo_id='baya1116/hypernet-sp-distill')" "$1" "$2" > /dev/null 2>&1 && echo "[hub] $2" || echo "[hub] $2 FAILED"; }
+while [ ! -s DONE2 ]; do sleep 60; done
+curl -sS -o par_sp.py "https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl/par_sp.py?nocache=$(date +%s)"
+R="python3 -u par_sp.py --model g14 --gsm gsm8k_test.parquet --out results.jsonl"
+grep -q '"tag": "gsm", "mode": "sp", "n": 32' results.jsonl 2>/dev/null || grep -q '"mode": "sp", "n": 32, "gen": 1024' results.jsonl 2>/dev/null || $R --arm gsm --mode sp --n 32 --questions 64 --gen 1024 --tag gsm 2>&1 | grep -E "^\[par\]|Error|Traceback"
+grep -q '"mode": "sp", "n": 16, "gen": 3000' results.jsonl 2>/dev/null || $R --arm gsm --mode sp --n 16 --questions 16 --gen 3000 --tag long 2>&1 | grep -E "^\[par\]|Error|Traceback"
+put results.jsonl results.jsonl; put /root/vg/vg.log run.log; date -u > DONE3; put DONE3 DONE3; echo "[vg] VGJOB3_DONE $(date -u)"
+JOB
+  setsid nohup bash -c 'bash /root/vgjob3.sh >> /root/vg/vg.log 2>&1' > /dev/null 2>&1 < /dev/null &
+  echo "[vg] s3: par_sp.py fixed (last logits only); job 3 (the runs that went out of memory) queued after job 2 $(date -u)"
 fi
 if [ ! -e /root/.vgjob ]; then touch /root/.vgjob
   cat > /root/vgjob.sh <<'JOB'

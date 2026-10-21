@@ -166,8 +166,10 @@ def generate(prompts, gen_cap):
             pos = torch.zeros((N, Lmax), device=DEV, dtype=torch.long)
             for b in range(N): block[b, :lens[b]] = blocks[b][0]; amask[b, MQ:MQ + lens[b]] = 1; pos[b] = mqs[b] + torch.arange(Lmax, device=DEV)
             crop(cache, MQ)
-            out = model(inputs_embeds=block, past_key_values=cache, attention_mask=amask, position_ids=pos, cache_position=torch.arange(MQ, MQ + Lmax, device=DEV), use_cache=True)
-            last = torch.stack([out.logits[b, lens[b] - 1] for b in range(N)]); cur = MQ + Lmax
+            # only the last position's logits (the full block's would be N x 800 x 152k): the streams still running all share
+            # the same length (they step together), the finished ones are shorter and need no logits
+            out = fwd(inputs_embeds=block, past_key_values=cache, attention_mask=amask, position_ids=pos, cache_position=torch.arange(MQ, MQ + Lmax, device=DEV), use_cache=True)
+            last = out.logits[:, -1, :]; cur = MQ + Lmax
             for _ in range(A.chunk):
                 nx = [pick(b, last[b]) if not fin[b] else EOS for b in range(N)]
                 for b in range(N):
