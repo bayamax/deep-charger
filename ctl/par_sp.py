@@ -33,6 +33,7 @@ ap.add_argument("--temp", type=float, default=0.6); ap.add_argument("--seed", ty
 ap.add_argument("--out", default=""); ap.add_argument("--tag", default="")
 ap.add_argument("--bundles", default="bundles.jsonl", help="decomp: par_bundles.py's bundles"); ap.add_argument("--planner", default="none", choices=["none", "g14", "api"])
 ap.add_argument("--gen-plan", type=int, default=600, help="decomp: model tokens for the planning stream (planner g14)")
+ap.add_argument("--votes", type=int, default=1, help="gsm: streams per question (sampled); the answer is the majority of their final numbers")
 A = ap.parse_args()
 torch.manual_seed(A.seed)
 DEV = "cuda" if torch.cuda.is_available() else "cpu"; DT = torch.bfloat16 if DEV == "cuda" else torch.float32
@@ -208,14 +209,22 @@ res = {"arm": A.arm, "mode": A.mode, "n": A.n, "gen": A.gen, "rw": A.rw, "maxd":
 if DEV == "cuda": torch.cuda.reset_peak_memory_stats()
 T0 = time.time(); toks = 0; kvp = 0; correct = 0; n_done = 0; texts_out = []
 if A.arm == "gsm":
-    qs = [rows[i] for i in order[:A.questions]]
-    for a in range(0, len(qs), A.n):
-        batch = qs[a:a + A.n]; t1 = time.time()
-        texts, lens, kv, steps = generate([prompt_ids(r["question"] + SUFFIX) for r in batch], A.gen)
+    import collections
+    qs = [rows[i] for i in order[:A.questions]]; units = [(i, v) for i in range(len(qs)) for v in range(A.votes)]; preds = collections.defaultdict(list)
+    for a in range(0, len(units), A.n):
+        batch = units[a:a + A.n]; t1 = time.time()
+        texts, lens, kv, steps = generate([prompt_ids(qs[i]["question"] + SUFFIX) for i, _ in batch], A.gen)
         toks += sum(lens); kvp = max(kvp, kv)
-        for r, t in zip(batch, texts):
-            ok = same(final_number(t), gold(r)); correct += ok; n_done += 1; texts_out.append({"q": r["question"][:80], "gold": gold(r), "pred": final_number(t), "ok": bool(ok), "len": len(t), "text": t[:400]})
+        for (i, v), t in zip(batch, texts):
+            r = qs[i]; pred = final_number(t); preds[i].append(pred); ok = same(pred, gold(r))
+            if v == 0: texts_out.append({"q": r["question"][:80], "gold": gold(r), "pred": pred, "ok": bool(ok), "len": len(t), "text": t[:400]})
+        done_q = [i for i in preds if len(preds[i]) == A.votes]
+        correct = sum(same(collections.Counter([p for p in preds[i] if p]).most_common(1)[0][0] if any(preds[i]) else "", gold(qs[i])) for i in done_q); n_done = len(done_q)
         print(f"[par] batch {a // A.n}: {len(batch)} streams, {sum(lens)} tokens in {time.time() - t1:.1f}s ({sum(lens) / (time.time() - t1):.1f} tok/s), kv {kv / 1e6:.0f} MB, correct so far {correct}/{n_done}", flush=True)
+    if A.votes > 1:   # one sample vs the majority of the votes vs any of them right (the ceiling)
+        first = sum(same(preds[i][0], gold(qs[i])) for i in preds); oracle = sum(any(same(p, gold(qs[i])) for p in preds[i]) for i in preds)
+        res.update(votes=A.votes, first_correct=first, oracle_correct=oracle)
+        print(f"[par] votes {A.votes}: first sample {first}/{len(qs)}, majority {correct}/{len(qs)}, any right {oracle}/{len(qs)}", flush=True)
 elif A.arm == "split":
     gs = A.gen_split or A.gen // 2; probs = []
     for i in range(A.problems): probs.append([rows[j] for j in order[3 * i:3 * i + 3]])
