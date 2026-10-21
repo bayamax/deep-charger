@@ -1,0 +1,93 @@
+#!/bin/bash
+# Box VB (3060, vLLM image), all for github.com/bayamax/charlm-agent: (1) more villager talks from Qwen3.5-4B for three
+# kinds of games (cozy life-sim, friend-collection sim, dark fantasy), 50 minutes; (2) agent8 fine-tuned from agent6 on the
+# GPU: those villagers + NPC/help/everyday chat + the new goal format (state in any order, the raise step with effects);
+# (3) scoring: chat bits, goal play (agent6 and agent8 on the same shuffled test), and the villager bench judged by the 4B.
+# Everything goes to the hub (baya1116/hypernet-sp-distill, archive/charlm/agent8/) as it is made.
+BOXVB_SERIAL=1
+if [ -f /root/.boxvb_serial ] && [ "$(cat /root/.boxvb_serial)" -gt "$BOXVB_SERIAL" ] 2>/dev/null; then echo "BOXVB_STALE $BOXVB_SERIAL"; exit 0; fi
+echo $BOXVB_SERIAL > /root/.boxvb_serial
+if [ ! -e /root/.vb_pre ]; then touch /root/.vb_pre
+  echo "[vb] preflight GPU: $(nvidia-smi --query-gpu=name,memory.used,memory.total,utilization.gpu,power.draw --format=csv,noheader)"
+  echo "[vb] preflight hub: $(curl -sSL -o /dev/null -m 90 -w '%{size_download} bytes in %{time_total}s' https://huggingface.co/baya1116/charlm-agent/resolve/main/agent6/model_final.pt -r 0-104857599 2>&1)"
+fi
+[ -d /venv/main/bin ] && export PATH=/venv/main/bin:$PATH
+for f in $(grep -l -i vllm /etc/supervisor/conf.d/* 2>/dev/null); do mv $f $f.off; done
+supervisorctl reread > /dev/null 2>&1; supervisorctl update > /dev/null 2>&1; supervisorctl stop all > /dev/null 2>&1; pkill -f "vllm serve" 2>/dev/null
+[ -s /root/.hf_token ] || { [ -n "$HF_TOKEN" ] && printf '%s' "$HF_TOKEN" > /root/.hf_token && chmod 600 /root/.hf_token; }
+echo "[vb] HF token: $([ -s /root/.hf_token ] && echo present || echo MISSING)"
+RAW="https://raw.githubusercontent.com/bayamax/charlm-agent/main"
+mkdir -p /root/vb
+for f in npc_gen.py npc_bench.py charlm_sft.py charlm_fold.py charlm_run.py chat_bits.py soda_prep.py goal_gen.py card_pad.py mix_prep.py q4.py; do
+  for try in 1 2 3; do curl -sS -o /root/vb/$f "$RAW/$f?nocache=$(date +%s)" && python3 -m py_compile /root/vb/$f && break; sleep 5; done
+done
+if [ ! -f /root/.bootstrapped ]; then
+  python3 -m pip install -q pyarrow "huggingface_hub[hf_xet]" 2>&1 | tail -1
+  python3 -c "import vllm, torch; print('[vb] vllm', vllm.__version__, 'torch', torch.__version__, torch.cuda.get_device_name(0))" 2>&1 | tail -1
+  touch /root/.bootstrapped; echo "BOOTSTRAP_DONE $(date -u)"
+fi
+cat > /root/status.sh <<'ST'
+grep -E "^\[(vb|gen|mix|sft|val|gptq|chat|goal|judge|hub|pad|soda)\]|Error|Traceback" /root/vb/vb.log 2>/dev/null | tail -n 6 | cut -c1-300
+nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv,noheader
+ST
+chmod +x /root/status.sh
+
+if [ ! -e /root/.vbjob ]; then touch /root/.vbjob
+  cat > /root/vbjob.sh <<'JOB'
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); cd /root/vb
+H=https://huggingface.co/baya1116/hypernet-sp-distill/resolve/main/archive/charlm
+G="--model QuantTrio/Qwen3.5-4B-AWQ --fallback cyankiwi/Qwen3.5-4B-AWQ-4bit --max-len 4096 --gpu-mem 0.88 --max-seqs 48"
+J="--model QuantTrio/Qwen3.5-4B-AWQ --fallback cyankiwi/Qwen3.5-4B-AWQ-4bit --max-len 3072 --gpu-mem 0.88 --max-seqs 48 --chunk 1000"
+gpu_clear() { fuser -k -9 /dev/nvidia* > /dev/null 2>&1; sleep 3; }
+put() { python3 -c "import sys; from huggingface_hub import HfApi; HfApi().upload_file(path_or_fileobj=sys.argv[1], path_in_repo='archive/charlm/agent8/'+sys.argv[2], repo_id='baya1116/hypernet-sp-distill')" "$1" "$2" > /dev/null 2>&1 && echo "[hub] $2" || echo "[hub] $2 FAILED"; }
+get() { [ -s $2 ] || curl -sSfL -o $2 "$1" || { rm -f $2; echo "[vb] could not get $1"; return 1; }; }
+# what is already made, and the sources
+get https://huggingface.co/baya1116/charlm-agent/resolve/main/agent6/model_final.pt agent6.pt
+for f in villager_cozy.jsonl villager_gen.jsonl vbench.jsonl vbench_gen.jsonl; do get $H/villager/$f $f; done
+for f in train_new.jsonl t3_0.jsonl t3_1.jsonl help_0.jsonl help_1.jsonl help_2.jsonl val_all.jsonl; do get $H/npc_data2/$f $f; done
+get $H/npc_data/stage2_public.jsonl stage2_public.jsonl
+for f in soda_val.jsonl npc_val.jsonl; do get $H/agent6/data/$f $f; done
+# (1) more villagers, 50 minutes, mirrored every 4
+if [ ! -s villager_more.done ]; then
+  ( while sleep 240; do put villager_more.jsonl villager_more.jsonl > /dev/null; done ) & MIR=$!
+  gpu_clear; timeout 50m python3 -u npc_gen.py villager --genres cozy,friends,dark,cozy --n 4000 --seed 11 --out villager_more.jsonl --chunk 250 $G
+  kill $MIR; put villager_more.jsonl villager_more.jsonl; date > villager_more.done
+fi
+gpu_clear
+# (2) the mix and agent8
+[ -s soda_new.jsonl ] || { get "https://huggingface.co/api/datasets/allenai/soda/parquet/default/train/1.parquet" soda_1.parquet && python3 soda_prep.py --parquet soda_1.parquet --n 5000 --val 0 --seed 7 --out soda_new.jsonl --val-out /dev/null && rm -f soda_1.parquet; }
+[ -s goal_train.jsonl ] || python3 goal_gen.py data --n 8000 --levels 1,2,2,3,3,4,4 --split train --seed 51 --out goal_train.jsonl
+[ -s goal_val.jsonl ] || python3 goal_gen.py data --n 300 --split train --seed 9 --out goal_val.jsonl
+[ -s mix8.jsonl ] || python3 mix_prep.py --villager villager_cozy.jsonl,villager_gen.jsonl,villager_more.jsonl --npc train_new.jsonl,t3_0.jsonl,t3_1.jsonl \
+  --helpdata help_0.jsonl,help_1.jsonl,help_2.jsonl --soda soda_new.jsonl --public stage2_public.jsonl --goal goal_train.jsonl \
+  --npc-val npc_val.jsonl --soda-val soda_val.jsonl --goal-val goal_val.jsonl --out mix8.jsonl
+for f in mix8.jsonl mix8_villager_val.jsonl mix8_select.jsonl; do put $f data/$f; done
+python3 -c "import json; json.dump([json.loads(l)['messages'][0]['content'] + '\n\n' + json.loads(l)['messages'][1]['content'] for l in list(open('mix8_villager_val.jsonl'))[:3]] + [json.loads(l)['messages'][0]['content'] for l in list(open('goal_val.jsonl'))[:1]], open('prompts8.json', 'w'))"
+if [ ! -s agent8/model_final.pt ]; then
+  python3 -u charlm_sft.py --base agent6.pt --data sftdata --out agent8 --shards 0 --jsonl mix8.jsonl --val-jsonl mix8_select.jsonl --val-convs 450 --min-learned 2 \
+    --prompts-json prompts8.json --epochs 1 --lr 5e-5 --warmup 20 --eval-every 10 --hours 2 --ckpt-every 10 --hub baya1116/hypernet-sp-distill:archive/charlm/agent8 2>&1 | grep -vE "Warning|detach|backward|^\[step"
+fi
+# (3) scoring
+python3 -u chat_bits.py --models agent6.pt,agent8/model_final.pt,agent8/model_4bit.pt --sets soda_val.jsonl,npc_val.jsonl,mix8_help_val.jsonl,mix8_villager_val.jsonl --n 300 2>&1 | grep "^\[chat\]" | tee chat8.txt
+put chat8.txt chat8.txt
+: > play8.txt
+for m in agent8-final:agent8/model_final.pt:200 agent8-4bit:agent8/model_4bit.pt:100; do IFS=: read t f n <<< "$m"   # agent6 on this test: run locally
+  echo "[vb] $t, made-up names, state in any order:" | tee -a play8.txt
+  python3 -u goal_gen.py play --model $f --n $n --split test --seed 5 --raise-fx $([ $t = agent6 ] && echo 0 || echo 1) 2>&1 | grep -E "^\[goal\]" | tee -a play8.txt
+done
+put play8.txt play8.txt
+cat vbench.jsonl vbench_gen.jsonl > vbench_all.jsonl
+get $H/agent8/r_agent6.jsonl r_agent6.jsonl   # agent6's replies are made on the local CPU meanwhile
+[ -s r_agent8-4bit.jsonl ] || python3 -u npc_bench.py reply --model agent8/model_4bit.pt --tag agent8-4bit --bench vbench_all.jsonl --out r_agent8-4bit.jsonl --n 4
+[ -s r_agent6.jsonl ] || python3 -u npc_bench.py reply --model agent6.pt --tag agent6 --bench vbench_all.jsonl --out r_agent6.jsonl --n 4
+put r_agent8-4bit.jsonl r_agent8-4bit.jsonl; cat r_agent6.jsonl r_agent8-4bit.jsonl > replies8.jsonl
+gpu_clear; python3 -u npc_gen.py judge --inp replies8.jsonl --out judged8.jsonl $J
+python3 npc_bench.py report --inp judged8.jsonl > report8.txt; sed 's/^/[report] /' report8.txt | head -80
+for f in judged8.jsonl report8.txt; do put $f $f; done
+date -u > DONE; put DONE DONE; echo "[vb] VBJOB_DONE $(date -u)"
+JOB
+  setsid nohup bash -c 'bash /root/vbjob.sh >> /root/vb/vb.log 2>&1' > /dev/null 2>&1 < /dev/null &
+  echo "VBJOB_LAUNCHED $(date -u)"
+fi
+echo "BOXVB_OK serial $BOXVB_SERIAL $(date -u)"
+# CTL-END
