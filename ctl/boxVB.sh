@@ -4,7 +4,7 @@
 # GPU: those villagers + NPC/help/everyday chat + the new goal format (state in any order, the raise step with effects);
 # (3) scoring: chat bits, goal play (agent6 and agent8 on the same shuffled test), and the villager bench judged by the 4B.
 # Everything goes to the hub (baya1116/hypernet-sp-distill, archive/charlm/agent8/) as it is made.
-BOXVB_SERIAL=1
+BOXVB_SERIAL=2
 if [ -f /root/.boxvb_serial ] && [ "$(cat /root/.boxvb_serial)" -gt "$BOXVB_SERIAL" ] 2>/dev/null; then echo "BOXVB_STALE $BOXVB_SERIAL"; exit 0; fi
 echo $BOXVB_SERIAL > /root/.boxvb_serial
 if [ ! -e /root/.vb_pre ]; then touch /root/.vb_pre
@@ -32,6 +32,14 @@ nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv,noheader
 ST
 chmod +x /root/status.sh
 
+# serial 2, the user: the goal's variable first in STATE is fine as the game's protocol: goal_gen.py makes 75% of STATE
+# lines that way (25% in another order, for games that do not), and play scores both orders; the job takes the new
+# file when it gets to the goal data (not made yet: the villager run is still going)
+if [ ! -e /root/.vb_s2 ]; then touch /root/.vb_s2
+  curl -sS -o /root/vb/goal_gen.new "$RAW/goal_gen.py?nocache=$(date +%s)" && python3 -m py_compile /root/vb/goal_gen.new && mv /root/vb/goal_gen.new /root/vb/goal_gen.py
+  [ -d /root/vb/agent8 ] || rm -f /root/vb/goal_train.jsonl /root/vb/goal_val.jsonl /root/vb/mix8.jsonl
+  echo "[vb] s2: goal_gen.py with the protocol order $(grep -c 'SHUF = A.shuffle' /root/vb/goal_gen.py) $(date -u)"
+fi
 if [ ! -e /root/.vbjob ]; then touch /root/.vbjob
   cat > /root/vbjob.sh <<'JOB'
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); cd /root/vb
