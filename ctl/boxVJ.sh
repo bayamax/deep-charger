@@ -36,3 +36,4 @@ JOB
   setsid nohup bash -c 'bash /root/vjjob.sh >> /root/vj/vj.log 2>&1' > /dev/null 2>&1 < /dev/null &
   echo "VJJOB_LAUNCHED $(date -u)"
 fi
+# CTL-END

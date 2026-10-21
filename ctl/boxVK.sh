@@ -101,3 +101,4 @@ JOB
   setsid nohup bash -c 'bash /root/vkjob.sh >> /root/vk/vk.log 2>&1' > /dev/null 2>&1 < /dev/null &
   echo "VKJOB_LAUNCHED $(date -u)"
 fi
+# CTL-END
