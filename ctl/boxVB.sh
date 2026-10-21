@@ -4,7 +4,7 @@
 # GPU: those villagers + NPC/help/everyday chat + the new goal format (state in any order, the raise step with effects);
 # (3) scoring: chat bits, goal play (agent6 and agent8 on the same shuffled test), and the villager bench judged by the 4B.
 # Everything goes to the hub (baya1116/hypernet-sp-distill, archive/charlm/agent8/) as it is made.
-BOXVB_SERIAL=5
+BOXVB_SERIAL=6
 if [ -f /root/.boxvb_serial ] && [ "$(cat /root/.boxvb_serial)" -gt "$BOXVB_SERIAL" ] 2>/dev/null; then echo "BOXVB_STALE $BOXVB_SERIAL"; exit 0; fi
 echo $BOXVB_SERIAL > /root/.boxvb_serial
 if [ ! -e /root/.vb_pre ]; then touch /root/.vb_pre
@@ -146,6 +146,77 @@ date -u > DONE9; put DONE9 DONE; echo "[vb] VBJOB3_DONE $(date -u)"
 JOB
   setsid nohup bash -c 'bash /root/vbjob3.sh >> /root/vb/vb3.log 2>&1' > /dev/null 2>&1 < /dev/null &
   echo "[vb] s4: job 3 (strict regrade, then agent9) started $(date -u)"
+fi
+# serial 6: agent8 lost facts (the player's name recalled 100% -> 78%, shop hours 57% -> 26%) while the judge still called
+# such replies usable: job 3 stopped (its regrade had just begun) and job 4 runs it with rule checks on top: a talk is cut
+# before a line that misses the player's name when asked to recall it, or a shop's opening time when asked; more of the
+# fact-heavy NPC/help talks replayed; agent8's float replies scored too (is the loss the 4-bit's or the training's?)
+if [ ! -e /root/.vb_s6 ]; then touch /root/.vb_s6
+  pkill -f "vbjob[3].sh"; pkill -f "npc_ge[n].py vfilter"; sleep 3; fuser -k -9 /dev/nvidia* > /dev/null 2>&1; sleep 3
+  for f in npc_gen.py npc_bench.py; do curl -sS -o /root/vb/$f.new "$RAW/$f?nocache=$(date +%s)" && python3 -m py_compile /root/vb/$f.new && mv /root/vb/$f.new /root/vb/$f; done
+  cat > /root/vbjob4.sh <<'JOB'
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); cd /root/vb
+J="--model QuantTrio/Qwen3.5-4B-AWQ --fallback cyankiwi/Qwen3.5-4B-AWQ-4bit --max-len 3072 --gpu-mem 0.88 --max-seqs 48 --chunk 1000"
+gpu_clear() { fuser -k -9 /dev/nvidia* > /dev/null 2>&1; sleep 3; }
+put() { python3 -c "import sys; from huggingface_hub import HfApi; HfApi().upload_file(path_or_fileobj=sys.argv[1], path_in_repo='archive/charlm/agent9/'+sys.argv[2], repo_id='baya1116/hypernet-sp-distill')" "$1" "$2" > /dev/null 2>&1 && echo "[hub] $2" || echo "[hub] $2 FAILED"; }
+[ -s villager_hq.jsonl ] || { gpu_clear; python3 -u npc_gen.py vfilter --strict 1 --min-grade 2 --inp villager_all.jsonl --out villager_hq.jsonl $J; }
+put villager_hq.jsonl villager_hq.jsonl; put villager_hq.jsonl.grades.jsonl villager_hq_grades.jsonl
+python3 - <<'PY'
+import json, random, re
+key = lambda r: (r["messages"][0]["content"], r["messages"][1]["content"])
+val = {key(json.loads(l)) for l in open("mix8_villager_val.jsonl")}
+NAME = re.compile(r"\b(?:my name is|i'm|i am|call me)\s+([A-Z][a-z]+)", re.I)
+def facts_ok(r):
+    """cut before a line that misses the player's name when asked to recall it, or a shop's opening time when asked"""
+    card = r["messages"][0]["content"] if r["messages"][0]["role"] == "system" else ""
+    hours = {m.group(1).lower(): m.group(2) for m in re.finditer(r"([A-Za-z ]+?) is open (\d+ am) to", card)}
+    out, name, prev = [], None, ""
+    for m in r["messages"]:
+        if m["role"] == "user":
+            g = NAME.search(m["content"]); name = g.group(1) if g and g.group(1).lower() not in ("not", "so", "just", "here", "fine", "good", "sorry", "back") else name
+        if m["role"] == "assistant":
+            if name and re.search(r"\b(remember|know|what'?s|what is)\b.*\bname\b", prev, re.I) and name.lower() not in m["content"].lower(): break
+            shop = next((k for k in hours if k.split()[-1] in prev.lower()), None)
+            if shop and re.search(r"\b(open|hours|close)", prev, re.I) and hours[shop].split()[0] not in m["content"]: break
+        out.append(m); prev = m["content"] if m["role"] == "user" else prev
+    while out and out[-1]["role"] != "assistant": out.pop()
+    return out if sum(x["role"] == "assistant" for x in out) >= 2 else None
+hq, cut = [], 0
+for l in open("villager_hq.jsonl"):
+    r = json.loads(l)
+    if key(r) in val: continue
+    ms = facts_ok(r)
+    if ms is None: cut += 1; continue
+    cut += len(ms) < len(r["messages"]); r["messages"] = ms; hq.append(json.dumps(r) + "\n")
+rest = [l for l in open("mix8.jsonl") if not str(json.loads(l).get("src", "")).startswith("villager")]
+random.seed(9); random.shuffle(rest); mix = hq + rest[:8000]; random.shuffle(mix); open("mix9.jsonl", "w").writelines(mix)
+print(f"[vb] mix9: {len(hq)} villager talks with every line graded 2 and the facts right ({cut} cut or dropped by the fact rules), + {len(rest[:8000])} replayed", flush=True)
+PY
+put mix9.jsonl data/mix9.jsonl
+gpu_clear
+if [ ! -s agent9/model_final.pt ]; then
+  python3 -u charlm_sft.py --base agent8/model_final.pt --data sftdata --out agent9 --shards 0 --jsonl mix9.jsonl --val-jsonl mix8_select.jsonl --val-convs 450 --min-learned 2 \
+    --prompts-json prompts8.json --epochs 1 --lr 3e-5 --warmup 10 --eval-every 5 --hours 1 --ckpt-every 10 --hub baya1116/hypernet-sp-distill:archive/charlm/agent9 2>&1 | grep -vE "Warning|detach|backward|^\[step"
+fi
+python3 -u chat_bits.py --models agent8/model_final.pt,agent9/model_final.pt,agent9/model_4bit.pt --sets soda_val.jsonl,npc_val.jsonl,mix8_help_val.jsonl,mix8_villager_val.jsonl --n 300 2>&1 | grep "^\[chat\]" | tee chat9.txt
+put chat9.txt chat9.txt
+python3 -u goal_gen.py play --model agent9/model_4bit.pt --n 100 --split test --seed 5 2>&1 | grep -E "^\[goal\] level" | tee play9.txt; put play9.txt play9.txt
+python3 - <<'PY'
+rows = open("vbench_all.jsonl").readlines()
+for i in range(3): open(f"vb_part{i}.jsonl", "w").writelines(rows[i::3])
+PY
+for m in agent9-4bit:agent9/model_4bit.pt agent8-final:agent8/model_final.pt; do IFS=: read t f <<< "$m"
+  for i in 0 1 2; do python3 -u npc_bench.py reply --model $f --tag $t --bench vb_part$i.jsonl --out r_${t}_$i.jsonl --n 4 > r_${t}_$i.log 2>&1 & done; wait
+  cat r_${t}_0.jsonl r_${t}_1.jsonl r_${t}_2.jsonl > r_$t.jsonl; put r_$t.jsonl r_$t.jsonl
+done
+gpu_clear; cat r_agent9-4bit.jsonl r_agent8-final.jsonl > replies9.jsonl
+python3 -u npc_gen.py judge --inp replies9.jsonl --out judged9.jsonl $J
+cat judged8.jsonl judged9.jsonl > judged89.jsonl; python3 npc_bench.py report --inp judged89.jsonl > report9.txt; sed 's/^/[report] /' report9.txt | grep -E "ALL|G:" 
+for f in judged9.jsonl report9.txt; do put $f $f; done
+date -u > DONE9; put DONE9 DONE; echo "[vb] VBJOB4_DONE $(date -u)"
+JOB
+  setsid nohup bash -c 'bash /root/vbjob4.sh >> /root/vb/vb3.log 2>&1' > /dev/null 2>&1 < /dev/null &
+  echo "[vb] s6: job 3 stopped; job 4 (strict regrade + fact rules, agent9, agent8-float scored too) started $(date -u)"
 fi
 if [ ! -e /root/.vbjob ]; then touch /root/.vbjob
   cat > /root/vbjob.sh <<'JOB'
