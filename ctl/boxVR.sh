@@ -1,7 +1,7 @@
 #!/bin/bash
 # Box VR (3060, vLLM image): candidate bases for the app, as they come - Qwen3-1.7B and Qwen3-4B, thinking on, no search -
 # answer the use-case bench's app kinds (197 real prompts); the replies go to archive/uc/ for the judge against 4o-mini.
-BOXVR_SERIAL=3
+BOXVR_SERIAL=4
 if [ -f /root/.boxvr_serial ] && [ "$(cat /root/.boxvr_serial)" -gt "$BOXVR_SERIAL" ] 2>/dev/null; then echo "BOXVR_STALE $BOXVR_SERIAL"; exit 0; fi
 echo $BOXVR_SERIAL > /root/.boxvr_serial
 [ -e /root/.vr_pre ] || { touch /root/.vr_pre; echo "[vr] preflight GPU: $(nvidia-smi --query-gpu=name,memory.used,memory.total --format=csv,noheader)"; }
@@ -13,10 +13,30 @@ mkdir -p /root/vr; RAW="https://raw.githubusercontent.com/bayamax/deep-charger/c
 curl -sS -o /root/vr/uc_vllm.py "$RAW/tools/uc/uc_vllm.py?nocache=$(date +%s)"
 [ -f /root/.bootstrapped ] || { python3 -m pip install -q "huggingface_hub[hf_xet]" 2>&1 | tail -1; touch /root/.bootstrapped; echo "BOOTSTRAP_DONE $(date -u)"; }
 cat > /root/status.sh <<'ST'
-grep -E "^\[(vr|uc_vllm|hub|kvwin)\]|Error|Traceback|out of memory" /root/vr/vr.log 2>/dev/null | tail -n 5 | cut -c1-300
+grep -E "^\[(vr|uc_vllm|hub|kvwin|kvfit)\]|Error|Traceback|out of memory" /root/vr/vr.log 2>/dev/null | tail -n 5 | cut -c1-300
 nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv,noheader
 ST
 chmod +x /root/status.sh
+# serial 4 (the user: rethink the pooler from scratch, GPTQ's idea - reproduce the FULL model's generation; pooler <= KV):
+# job 4 after job 3, on job 3's own full-KV traces - which exposure window W and how many slots m can stand in for the
+# evicted span, by selection, by a least-squares fit on the window's queries, on a query bank, on all past queries, and
+# the oracle fit on the future queries (capacity bound). Teacher-forced KL / top-1 agreement vs full KV.
+if [ ! -e /root/.vr_s4 ]; then touch /root/.vr_s4
+  curl -sS -o /root/vr/kvfit_study.py "$RAW/tools/kvfit_study.py?nocache=$(date +%s)"
+  cat > /root/vrjob4.sh <<'JOB'
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); cd /root/vr
+R=baya1116/hypernet-sp-distill
+put() { python3 -c "import sys; from huggingface_hub import HfApi; HfApi().upload_file(path_or_fileobj=sys.argv[1], path_in_repo='archive/kvwin/'+sys.argv[2], repo_id='$R')" "$1" "$2" > /dev/null 2>&1 && echo "[hub] $2" || echo "[hub] $2 FAILED"; }
+python3 -c "import scipy" 2>/dev/null || python3 -m pip install -q scipy 2>&1 | grep -v -i warn | tail -1
+while [ ! -s DONE_VR3 ]; do sleep 60; done
+fuser -k -9 /dev/nvidia* > /dev/null 2>&1; sleep 3
+python3 kvfit_study.py --model Qwen/Qwen3-1.7B --traces kv_full.jsonl --n-traces 24 --cuts 1024,2048,3072 --N 256 --windows 128,256,512,1024 --slots 16,64 --bank 512 --out kvfit.jsonl 2>&1 | grep -E "^\[kvfit\]|Error|Traceback|out of memory"
+put kvfit.jsonl q17_kvfit.jsonl
+put /root/vr/vr.log run_vr4.log; date -u > DONE_VR4; put DONE_VR4 DONE_VR4; echo "[vr] VRJOB4_DONE $(date -u)"
+JOB
+  setsid nohup bash -c 'bash /root/vrjob4.sh >> /root/vr/vr.log 2>&1' > /dev/null 2>&1 < /dev/null &
+  echo "[vr] s4: job 4 (kvfit study, Qwen3-1.7B) queued after job 3 $(date -u)"
+fi
 # serial 3 (the user: not flagship-only - the floor is a 4 GB phone, ~1.3-1.5 GB for the whole app -> Qwen3-1.7B
 # at 4 bits is the ceiling; 8-9B are out): job 2 is cancelled. Job 3 after job 1: long CoT under a bounded KV cache
 # WITHOUT the hypernet (prompt + last R tokens, the rest dropped) vs full KV - the floor the new pooler has to beat.
