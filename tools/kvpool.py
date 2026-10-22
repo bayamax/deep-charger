@@ -318,7 +318,8 @@ def generate(prompts):
         pmask = enc.attention_mask
         pos = (pmask.cumsum(1) - 1).clamp(min=0)
         c = DynamicCache()
-        lo = model(input_ids=enc.input_ids, attention_mask=pmask, position_ids=pos, past_key_values=c, use_cache=True).logits[:, -1]
+        lo = model(input_ids=enc.input_ids, attention_mask=pmask, position_ids=pos, past_key_values=c, use_cache=True,
+                   logits_to_keep=1).logits[:, -1].clone()   # all-position logits of a batch prefill would pin GBs
         prompt_kv = [tuple(t for t in kv_of(c, li)) for li in range(NL)]
         pad_bias = torch.zeros(B, 1, 1, P, device=dev, dtype=model.dtype).masked_fill(pmask[:, None, None, :] == 0, float("-inf"))
         nxt = pos[:, -1] + 1
@@ -362,14 +363,15 @@ def generate(prompts):
             cache = make_cache(parts)
             lo = model(input_ids=nx[:, None], position_ids=nxt[:, None], attention_mask=mask, past_key_values=cache, use_cache=True).logits[:, -1]
             BETA["v"] = None
-            new = [tuple(t[:, :, L:] for t in kv_of(cache, li)) for li in range(NL)]
+            new = [tuple(t[:, :, L:].clone() for t in kv_of(cache, li)) for li in range(NL)]   # views would pin the whole cache
+            del cache, parts
             win = new if win is None else [(torch.cat([w[0], n_[0]], 2), torch.cat([w[1], n_[1]], 2)) for w, n_ in zip(win, new)]
             if FIT: winq = [QBUF[li] if winq is None else torch.cat([winq[li], QBUF[li]], 2) for li in range(NL)]
             nxt = nxt + 1
         QCAP["on"] = False
         log(f"[kvpool] gen batch {b0}: {step + 1} steps {time.time() - t0:.0f}s")
         outs += [tok.decode(x, skip_special_tokens=True) for x in gen]
-        del c, cache, prompt_kv, slots, win; torch.cuda.empty_cache() if dev == "cuda" else None
+        del c, prompt_kv, slots, win; torch.cuda.empty_cache() if dev == "cuda" else None
     return outs
 
 
