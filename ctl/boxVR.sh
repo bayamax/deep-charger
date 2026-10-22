@@ -1,7 +1,7 @@
 #!/bin/bash
 # Box VR (3060, vLLM image): candidate bases for the app, as they come - Qwen3-1.7B and Qwen3-4B, thinking on, no search -
 # answer the use-case bench's app kinds (197 real prompts); the replies go to archive/uc/ for the judge against 4o-mini.
-BOXVR_SERIAL=4
+BOXVR_SERIAL=5
 if [ -f /root/.boxvr_serial ] && [ "$(cat /root/.boxvr_serial)" -gt "$BOXVR_SERIAL" ] 2>/dev/null; then echo "BOXVR_STALE $BOXVR_SERIAL"; exit 0; fi
 echo $BOXVR_SERIAL > /root/.boxvr_serial
 [ -e /root/.vr_pre ] || { touch /root/.vr_pre; echo "[vr] preflight GPU: $(nvidia-smi --query-gpu=name,memory.used,memory.total --format=csv,noheader)"; }
@@ -13,10 +13,27 @@ mkdir -p /root/vr; RAW="https://raw.githubusercontent.com/bayamax/deep-charger/c
 curl -sS -o /root/vr/uc_vllm.py "$RAW/tools/uc/uc_vllm.py?nocache=$(date +%s)"
 [ -f /root/.bootstrapped ] || { python3 -m pip install -q "huggingface_hub[hf_xet]" 2>&1 | tail -1; touch /root/.bootstrapped; echo "BOOTSTRAP_DONE $(date -u)"; }
 cat > /root/status.sh <<'ST'
-grep -E "^\[(vr|uc_vllm|hub|kvwin|kvfit)\]|Error|Traceback|out of memory" /root/vr/vr.log 2>/dev/null | tail -n 5 | cut -c1-300
+grep -E "^\[(vr|uc_vllm|hub|kvwin|kvfit|trace_gen|kvpool)\]|Error|Traceback|out of memory" /root/vr/vr.log 2>/dev/null | tail -n 5 | cut -c1-300
 nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv,noheader
 ST
 chmod +x /root/status.sh
+# serial 5 (the user: the pooler's objective is token reproduction - output-level, like GPTQ matching outputs): job 5,
+# the model's own full-KV traces for training a learned pooler (700 use-case prompts + 500 MATH train, thinking on).
+if [ ! -e /root/.vr_s5 ]; then touch /root/.vr_s5
+  curl -sS -o /root/vr/trace_gen.py "$RAW/tools/trace_gen.py?nocache=$(date +%s)"
+  cat > /root/vrjob5.sh <<'JOB'
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); cd /root/vr
+R=baya1116/hypernet-sp-distill; H=https://huggingface.co/$R/resolve/main
+put() { python3 -c "import sys; from huggingface_hub import HfApi; HfApi().upload_file(path_or_fileobj=sys.argv[1], path_in_repo='archive/kvpool/'+sys.argv[2], repo_id='$R')" "$1" "$2" > /dev/null 2>&1 && echo "[hub] $2" || echo "[hub] $2 FAILED"; }
+curl -sSfL -o uc_pool.jsonl "$H/archive/uc/uc_pool.jsonl"
+fuser -k -9 /dev/nvidia* > /dev/null 2>&1; sleep 3
+python3 trace_gen.py --model Qwen/Qwen3-1.7B --uc uc_pool.jsonl --n-uc 700 --n-math 500 --out traces.jsonl 2>&1 | grep -E "^\[trace_gen\]|Error|Traceback"
+put traces.jsonl traces.jsonl
+date -u > DONE_VR5; put DONE_VR5 DONE_VR5; echo "[vr] VRJOB5_DONE $(date -u)"
+JOB
+  setsid nohup bash -c 'bash /root/vrjob5.sh >> /root/vr/vr.log 2>&1' > /dev/null 2>&1 < /dev/null &
+  echo "[vr] s5: job 5 (trace_gen 1200 traces) launched $(date -u)"
+fi
 # serial 4 (the user: rethink the pooler from scratch, GPTQ's idea - reproduce the FULL model's generation; pooler <= KV):
 # job 4 after job 3, on job 3's own full-KV traces - which exposure window W and how many slots m can stand in for the
 # evicted span, by selection, by a least-squares fit on the window's queries, on a query bank, on all past queries, and
