@@ -14,7 +14,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 ap = argparse.ArgumentParser()
 ap.add_argument("--a", required=True); ap.add_argument("--b", required=True); ap.add_argument("--out", required=True)
-ap.add_argument("--judge", default="gpt-5.4"); ap.add_argument("--threads", type=int, default=8); ap.add_argument("--limit", type=int, default=0)
+ap.add_argument("--judge", default="gpt-5.4-mini", help="gpt-5.4-mini for the routine reads (its totals within 2.5 points of gpt-5.4 on the 4o vs 4o-mini check, the winner flipped on 6%% of pairs); gpt-5.4 for a final call"); ap.add_argument("--threads", type=int, default=8); ap.add_argument("--limit", type=int, default=0)
 A = ap.parse_args()
 KEY = os.environ.get("OPENAI_API_KEY", "")
 SYS = ("A person sent the message below to an assistant on their phone. You see two replies. Judge in two steps.\n"
