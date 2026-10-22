@@ -23,8 +23,9 @@ PAGE_STEP = 256
 NOTICE = "(no searches left - answer from what you have read)"; NOMORE = "(no more of this page - search again or answer)"
 sys.path.insert(0, A.localsearch)
 from search import LocalSearch  # noqa: E402
-from transformers import AutoTokenizer  # noqa: E402
-tok = AutoTokenizer.from_pretrained(A.tok)
+from tokenizers import Tokenizer  # noqa: E402
+tok = Tokenizer.from_file(os.path.join(A.tok, "tokenizer.json"))   # (transformers' decode drops the spaces; the prompt is rendered by hand below)
+enc = lambda t: tok.encode(t, add_special_tokens=False).ids
 LS = LocalSearch(A.store, A.bge)
 cache = {}; CF = A.out + ".pages"
 if os.path.exists(CF):
@@ -97,7 +98,7 @@ def rollout(q, gold):
             else:
                 pg = get_page(kw) if kw else ""
                 if not pg: blk = "(no results)"; page_ids, off = [], 0
-                else: page_ids = tok.encode(pg, add_special_tokens=False); blk = tok.decode(page_ids[:PAGE_STEP]); off = PAGE_STEP; served.append(blk)
+                else: page_ids = enc(pg); blk = tok.decode(page_ids[:PAGE_STEP]); off = PAGE_STEP; served.append(blk)
             trace += out.rstrip() + "</search\n<information>\n" + blk + "\n[READER] (no extraction)\n</information>\n"
             msgs.append({"role": "assistant", "content": out + "</search>"}); msgs.append({"role": "user", "content": f"<information>\n{blk}\n</information>"}); continue
         if out.rstrip().endswith("<more") or re.search(r"<more\s*/?>\s*$", out):
@@ -143,8 +144,8 @@ with open(A.out, "a") as fh:
         passed = rec["correct"] and rec["grounded"] and not rec["answer_first"] and rec["ns"] <= A.maxs
         rec["passed"] = passed
         if passed:   # the supervised row: the student's prompt ids, then the trace as it would have generated it (served blocks included)
-            q_ids = tok.encode(tok.apply_chat_template([{"role": "user", "content": q}], add_generation_prompt=True, tokenize=False) + "<think>\n")
-            rec["q_ids"] = q_ids; rec["gen"] = tok.encode(rec["text"], add_special_tokens=False); rec["dialog"] = f"t{i}"; rec["turn"] = 0
+            q_ids = [tok.token_to_id("<｜begin▁of▁sentence｜>")] + enc("<｜User｜>" + q + "<｜Assistant｜><think>\n")   # the student's prompt as pool_eval renders it (memfit --ce-native rebuilds it anyway)
+            rec["q_ids"] = q_ids; rec["gen"] = enc(rec["text"]); rec["dialog"] = f"t{i}"; rec["turn"] = 0
         fh.write(json.dumps(rec, ensure_ascii=False) + "\n"); fh.flush()
         stat["n"] += 1; stat["correct"] += rec["correct"]; stat["grounded"] += rec["grounded"]; stat["answer_first"] += rec["answer_first"]; stat["passed"] += passed; stat["searches"] += rec["ns"]
         if (i + 1) % 10 == 0:
