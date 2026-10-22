@@ -1,7 +1,7 @@
 #!/bin/bash
 # Box VR (3060, vLLM image): candidate bases for the app, as they come - Qwen3-1.7B and Qwen3-4B, thinking on, no search -
 # answer the use-case bench's app kinds (197 real prompts); the replies go to archive/uc/ for the judge against 4o-mini.
-BOXVR_SERIAL=7
+BOXVR_SERIAL=8
 if [ -f /root/.boxvr_serial ] && [ "$(cat /root/.boxvr_serial)" -gt "$BOXVR_SERIAL" ] 2>/dev/null; then echo "BOXVR_STALE $BOXVR_SERIAL"; exit 0; fi
 echo $BOXVR_SERIAL > /root/.boxvr_serial
 [ -e /root/.vr_pre ] || { touch /root/.vr_pre; echo "[vr] preflight GPU: $(nvidia-smi --query-gpu=name,memory.used,memory.total --format=csv,noheader)"; }
@@ -17,6 +17,26 @@ grep -E "^\[(vr|uc_vllm|hub|kvwin|kvfit|trace_gen|kvpool)\]|Error|Traceback|out 
 nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv,noheader
 ST
 chmod +x /root/status.sh
+# serial 8 (Vast credit $0.70): job 7 cut short - only the end-to-end check, 32 MATH-500 problems, W256: drop vs fit
+# fold m128 R256 (the best memory point: KL 0.094 at 384 tokens of KV vs W512 m64's 0.098 at 576).
+if [ ! -e /root/.vr_s8 ]; then touch /root/.vr_s8
+  pkill -f vrjob7.sh; pkill -f "kvpool.py"; sleep 5
+  echo "[vr] s8: job 7 stopped $(date -u)"
+  cat > /root/vrjob8.sh <<'JOB'
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); cd /root/vr
+R=baya1116/hypernet-sp-distill
+put() { python3 -c "import sys; from huggingface_hub import HfApi; HfApi().upload_file(path_or_fileobj=sys.argv[1], path_in_repo='archive/kvpool/'+sys.argv[2], repo_id='$R')" "$1" "$2" > /dev/null 2>&1 && echo "[hub] $2" || echo "[hub] $2 FAILED"; }
+fuser -k -9 /dev/nvidia* > /dev/null 2>&1; sleep 3
+K="python3 kvpool.py"; LG=/root/vr/kvpool.log
+for spec in "256 128" "256 0"; do set -- $spec; x=""; [ $2 != 0 ] && x="--fold fit --reservoir 256"
+  $K gen --traces none --W $1 --m $2 --C 128 $x --gen-n 32 --gen-tokens 8000 --batch 32 --out gen_W$1_m$2.jsonl --log $LG 2>&1 | grep -E "^\[kvpool\] gen|Error|Traceback|out of memory"
+  put gen_W$1_m$2.jsonl gen_W$1_m$2.jsonl; put $LG kvpool.log
+done
+put /root/vr/vr.log run_vr8.log; date -u > DONE_VR8; put DONE_VR8 DONE_VR8; echo "[vr] VRJOB8_DONE $(date -u)"
+JOB
+  setsid nohup bash -c 'bash /root/vrjob8.sh >> /root/vr/vr.log 2>&1' > /dev/null 2>&1 < /dev/null &
+  echo "[vr] s8: job 8 (gen 32: fit W256 m128 vs drop) launched $(date -u)"
+fi
 # serial 7: the learned codebook pooler only cut KL ~5% (W512 m64: 0.198 -> 0.189 on MATH), job 6 is stopped. Job 7: the
 # weight-free fit fold (slots re-fitted at every fold so a reservoir of past queries + the window's queries read the same
 # attention output) - KL vs drop over (W, m, reservoir) on the held-out traces, then MATH-500 accuracy in the loop.
