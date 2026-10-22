@@ -4,7 +4,7 @@
 # judge against 4o-mini; (B) 2.1.0 on 600 training questions, one sampled rollout each; (C) the rollouts that are right
 # AND grounded learned back into 2.1.0 (memfit ce, the served pages masked, LoRA, mem10's settings) -> rft1;
 # (D) rft1 on the search held-out (eval300, two passes) and on the use-case bench. Results to archive/rft/ and archive/uc/.
-BOXVO_SERIAL=2
+BOXVO_SERIAL=3
 if [ -f /root/.boxvo_serial ] && [ "$(cat /root/.boxvo_serial)" -gt "$BOXVO_SERIAL" ] 2>/dev/null; then echo "BOXVO_STALE $BOXVO_SERIAL"; exit 0; fi
 echo $BOXVO_SERIAL > /root/.boxvo_serial
 if [ ! -e /root/.vo_pre ]; then touch /root/.vo_pre
@@ -29,6 +29,9 @@ chmod +x /root/status.sh
 # serial 2: a rollout that keeps searching after 'no searches left' ran to 4000 tokens (54 searches, 5 minutes a prompt):
 # the use-case bench and the training questions now stop at 2000 / 2500 tokens (a runaway is a failure either way);
 # the held-out keeps 4000 to stay comparable. The serial-1 job is stopped; the training files resume, the bench restarts.
+# serial 3: the use-case bench moves to box VQ (two processes there); its run here is stopped, so this process goes on to
+# the training questions it had queued behind it - both processes now work on (B)
+if [ ! -e /root/.vo_s3 ]; then touch /root/.vo_s3; pkill -f 'pool_eval.py.*uc_dc210.jsonl'; echo "[vo] s3: the use-case run stopped here (moved to box VQ) $(date -u)"; fi
 if [ ! -e /root/.vojob2 ]; then touch /root/.vojob2
   pkill -f vojob.sh; pkill -f pool_eval.py; sleep 5; rm -f /root/work/uc_dc210.jsonl
   cat > /root/vojob.sh <<'JOB'
