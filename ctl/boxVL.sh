@@ -3,7 +3,7 @@
 # vote. 2.1.0 (the adopted model: 2.0.0's 4-bit base + the mtg7 LoRA) on the search held-out (eval300, 150 questions)
 # with the local store, 8 passes of pool_eval.py (each pass one rollout per question, temperature 0.6, the lineage's
 # settings) in two processes; the passes go to the hub (archive/vote/), the vote is counted offline.
-BOXVL_SERIAL=2
+BOXVL_SERIAL=3
 if [ -f /root/.boxvl_serial ] && [ "$(cat /root/.boxvl_serial)" -gt "$BOXVL_SERIAL" ] 2>/dev/null; then echo "BOXVL_STALE $BOXVL_SERIAL"; exit 0; fi
 echo $BOXVL_SERIAL > /root/.boxvl_serial
 if [ ! -e /root/.vl_pre ]; then touch /root/.vl_pre
@@ -14,9 +14,10 @@ fi
 [ -s /root/.hf_token ] || { [ -n "$HF_TOKEN" ] && printf '%s' "$HF_TOKEN" > /root/.hf_token && chmod 600 /root/.hf_token; }
 RAW="https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl"
 mkdir -p /root/work/localsearch /root/work/fft_out
-for f in pool_eval.py localsearch/search.py localsearch/store.py localsearch/ivf.py localsearch/terms.py localsearch/pq.py localsearch/embed.py; do
+for f in pool_eval.py web_search.py localsearch/search.py localsearch/store.py localsearch/ivf.py localsearch/terms.py localsearch/pq.py localsearch/embed.py; do
   for try in 1 2 3; do curl -sS -o /root/work/$f "$RAW/$f?nocache=$(date +%s)" && break; sleep 5; done
 done
+mkdir -p /root/work/runtime; cp /root/work/web_search.py /root/work/runtime/web_search.py 2>/dev/null; touch /root/work/runtime/__init__.py
 [ -f /root/.bootstrapped ] || { python3 -m pip install -q "transformers>=4.51,<4.57" accelerate "huggingface_hub[hf_xet]>=0.34,<1.0" safetensors peft zstandard onnxruntime 2>&1 | tail -1; touch /root/.bootstrapped; echo "BOOTSTRAP_DONE $(date -u)"; }
 cat > /root/status.sh <<'ST'
 grep -E "^\[(vl|eval|load|cfg|search|hub)|EVAL_DONE|Error|Traceback|out of memory" /root/vl.log 2>/dev/null | tail -n 6 | cut -c1-300
@@ -27,7 +28,7 @@ chmod +x /root/status.sh
 # serial 2: job 2, after the vote passes - where the adopted model fails on TRAINING questions (the teacher's data is
 # aimed there): 2.1.0 on the first 600 of the training items in teach_traj.py's order (corpus questions with a gold of
 # at most six words, the held-out's 300 left out, shuffled with seed 0), one sampled rollout each, the local store.
-if [ ! -e /root/.vl_s2 ]; then touch /root/.vl_s2
+if [ ! -e /root/.vl_s3 ]; then touch /root/.vl_s3
   cat > /root/vljob2.sh <<'JOB'
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); cd /root/work
 R=baya1116/hypernet-sp-distill; H=https://huggingface.co/$R/resolve/main
@@ -66,7 +67,7 @@ JOB
   setsid nohup bash -c 'bash /root/vljob2.sh >> /root/vl.log 2>&1' > /dev/null 2>&1 < /dev/null &
   echo "[vl] s2: job 2 (the model on 600 training questions) queued after the vote passes $(date -u)"
 fi
-if [ ! -e /root/.vljob ]; then touch /root/.vljob
+if [ ! -e /root/.vljob3 ]; then touch /root/.vljob3
   cat > /root/vljob.sh <<'JOB'
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); cd /root/work
 R=baya1116/hypernet-sp-distill; H=https://huggingface.co/$R/resolve/main
@@ -97,6 +98,7 @@ wait $(jobs -p | grep -v $MIR) 2>/dev/null; kill $MIR 2>/dev/null
 cat /root/vl_p0.log /root/vl_p1.log | grep -E "EVAL_DONE|Traceback|Error" | cut -c1-300
 for i in 0 1; do for k in 0 1 2 3; do put /root/work/vote_p${i}_$k.jsonl vote_p${i}_$k.jsonl; done; done
 cat /root/vl_p0.log /root/vl_p1.log > /root/vl_runs.log; put /root/vl_runs.log vl_runs.log; put /root/vl.log run.log
+[ "$(cat /root/work/vote_p*_*.jsonl 2>/dev/null | wc -l)" -ge 100 ] || { echo "[vl] no pass produced rows - not done"; exit 1; }
 date -u > /root/DONE; put /root/DONE DONE; echo "[vl] VLJOB_DONE $(date -u)"
 JOB
   setsid nohup bash -c 'bash /root/vljob.sh >> /root/vl.log 2>&1' > /dev/null 2>&1 < /dev/null &
