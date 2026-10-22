@@ -3,7 +3,7 @@
 # vote. 2.1.0 (the adopted model: 2.0.0's 4-bit base + the mtg7 LoRA) on the search held-out (eval300, 150 questions)
 # with the local store, 8 passes of pool_eval.py (each pass one rollout per question, temperature 0.6, the lineage's
 # settings) in two processes; the passes go to the hub (archive/vote/), the vote is counted offline.
-BOXVL_SERIAL=4
+BOXVL_SERIAL=5
 if [ -f /root/.boxvl_serial ] && [ "$(cat /root/.boxvl_serial)" -gt "$BOXVL_SERIAL" ] 2>/dev/null; then echo "BOXVL_STALE $BOXVL_SERIAL"; exit 0; fi
 echo $BOXVL_SERIAL > /root/.boxvl_serial
 if [ ! -e /root/.vl_pre ]; then touch /root/.vl_pre
@@ -20,7 +20,9 @@ done
 mkdir -p /root/work/runtime; cp /root/work/web_search.py /root/work/runtime/web_search.py 2>/dev/null; touch /root/work/runtime/__init__.py
 [ -f /root/.bootstrapped ] || { python3 -m pip install -q "transformers>=4.51,<4.57" accelerate "huggingface_hub[hf_xet]>=0.34,<1.0" safetensors peft zstandard onnxruntime datasets certifi 2>&1 | tail -1; touch /root/.bootstrapped; echo "BOOTSTRAP_DONE $(date -u)"; }
 cat > /root/status.sh <<'ST'
-grep -E "^\[(vl|eval|load|cfg|search|hub)|EVAL_DONE|Error|Traceback|out of memory" /root/vl.log 2>/dev/null | tail -n 6 | cut -c1-300
+grep -E "^\[(vl|eval|load|cfg|search|hub)|EVAL_DONE|Error|Traceback|out of memory" /root/vl.log 2>/dev/null | tail -n 4 | cut -c1-300
+for f in /root/vl_p0.log /root/vl_p1.log /root/vl_t0.log /root/vl_t1.log; do [ -s $f ] && { echo "--- $(basename $f)"; tail -n 3 $f | cut -c1-300; }; done
+pgrep -fc "pool_eval.py" | sed "s/^/pool_eval processes: /"
 for i in 0 1; do f=/root/work/vote_p$i.jsonl; [ -s $f ] && echo "pass file $i: $(wc -l < $f) rows"; done
 nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv,noheader
 ST
