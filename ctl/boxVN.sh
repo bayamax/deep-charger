@@ -4,7 +4,7 @@
 # memfit.py --objective ce (the served pages masked, LoRA r16, mem10's settings), then the search held-out (eval300,
 # 150 questions x 2) with the local store. The teacher rows arrive on the hub (archive/teach/traj_rows.jsonl) from the
 # session's own machine; the job waits for them. Results to archive/teach/.
-BOXVN_SERIAL=3
+BOXVN_SERIAL=4
 if [ -f /root/.boxvn_serial ] && [ "$(cat /root/.boxvn_serial)" -gt "$BOXVN_SERIAL" ] 2>/dev/null; then echo "BOXVN_STALE $BOXVN_SERIAL"; exit 0; fi
 echo $BOXVN_SERIAL > /root/.boxvn_serial
 if [ ! -e /root/.vn_pre ]; then touch /root/.vn_pre
@@ -24,10 +24,37 @@ cat > /root/status.sh <<'ST'
 grep -E "^\[(vn|eval|load|cfg|search|hub|memfit|pooler|lora|step)|MEMFIT_DONE|EVAL_DONE|Error|Traceback|out of memory" /root/vn.log 2>/dev/null | tail -n 6 | cut -c1-300
 grep -E "^\[step|val" /root/memfit_teach1.log 2>/dev/null | tail -n 2 | cut -c1-200
 for i in 0 1; do f=/root/work/teach1_ev$i.jsonl; [ -s $f ] && echo "eval file $i: $(wc -l < $f) rows"; done
+for t in dc210 teach1; do f=/root/work/uc_$t.jsonl; [ -s $f ] && echo "uc file $t: $(wc -l < $f) rows"; done
 nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv,noheader
 ST
 chmod +x /root/status.sh
 python3 -c 'import datasets, peft, zstandard, onnxruntime' 2>/dev/null || python3 -m pip install -q datasets peft zstandard onnxruntime certifi 2>&1 | tail -1
+# serial 4: the use-case bench (real WildChat prompts, tools/uc) - job 2, after job 1: 2.1.0 and teach1 answer the 301
+# prompts the way the app runs (search on, the local store, the reply after </think> up to 600 tokens), one process each;
+# the replies go to archive/uc/ for the pairwise judge against 4o-mini.
+if [ ! -e /root/.vn_s4 ]; then touch /root/.vn_s4
+  cat > /root/vnjob2.sh <<'JOB'
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); cd /root/work
+R=baya1116/hypernet-sp-distill; H=https://huggingface.co/$R/resolve/main
+put() { python3 -c "import sys; from huggingface_hub import HfApi; HfApi().upload_file(path_or_fileobj=sys.argv[1], path_in_repo='archive/uc/'+sys.argv[2], repo_id='$R')" "$1" "$2" > /dev/null 2>&1 && echo "[hub] $2" || echo "[hub] $2 FAILED"; }
+while [ ! -s /root/DONE ]; do sleep 60; done
+curl -sSfL -o /root/work/uc_bench.jsonl "$H/archive/uc/uc_bench.jsonl?$(date +%s)"
+echo "[vn] job 2: the use-case bench, $(wc -l < /root/work/uc_bench.jsonl) prompts, 2.1.0 and teach1 $(date -u)"
+ENV="SP_BASE=/root/gptq_hf_gq14 SP_RANK=16 SP_NOSYS=1 SP_EPISODIC=1 SP_LOCAL_STORE=/root/wiki_store SP_LOCAL_MODEL=/root/bge-small OMP_NUM_THREADS=2 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True"
+EVARGS="--rw 768 --maxd 384 --samepage 1 --decode plain --temp 0.6 --gen 4000 --stop eos --replycap 600 --n 400"
+( while sleep 600; do for t in dc210 teach1; do [ -s /root/work/uc_$t.jsonl ] && put /root/work/uc_$t.jsonl uc_$t.jsonl > /dev/null; done; done ) & MIR=$!
+for spec in dc210:/root/mtg7_s40.safetensors teach1:/root/teach1.safetensors; do t=${spec%%:*}; ck=${spec#*:}; [ -s $ck ] || continue
+  ( env $ENV python3 /root/work/pool_eval.py $ck /root/work/uc_bench.jsonl /root/work/uc_$t.jsonl $EVARGS --tag "[uc $t]" 2>&1 | grep -E "^\[(eval|load|cfg)|EVAL_DONE|Error|Traceback|out of memory" | sed "s/^/[uc $t] /" ) > /root/vn_uc_$t.log 2>&1 &
+  sleep 90
+done
+wait $(jobs -p | grep -v $MIR) 2>/dev/null; kill $MIR 2>/dev/null
+cat /root/vn_uc_*.log | grep -E "EVAL_DONE|Traceback|Error" | cut -c1-300
+for t in dc210 teach1; do [ -s /root/work/uc_$t.jsonl ] && put /root/work/uc_$t.jsonl uc_$t.jsonl; done
+put /root/vn.log run_uc.log; date -u > /root/DONE_UC; put /root/DONE_UC DONE_UC; echo "[vn] VNJOB2_DONE $(date -u)"
+JOB
+  setsid nohup bash -c 'bash /root/vnjob2.sh >> /root/vn.log 2>&1' > /dev/null 2>&1 < /dev/null &
+  echo "[vn] s4: job 2 (the use-case bench) queued after job 1 $(date -u)"
+fi
 if [ ! -e /root/.vnjob ]; then touch /root/.vnjob
   cat > /root/vnjob.sh <<'JOB'
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); cd /root/work
