@@ -14,9 +14,11 @@ from concurrent.futures import ThreadPoolExecutor
 
 ap = argparse.ArgumentParser()
 ap.add_argument("--a", required=True); ap.add_argument("--b", required=True); ap.add_argument("--out", required=True)
-ap.add_argument("--judge", default="gpt-5.4-mini", help="gpt-5.4-mini for the routine reads (its totals within 2.5 points of gpt-5.4 on the 4o vs 4o-mini check, the winner flipped on 6%% of pairs); gpt-5.4 for a final call"); ap.add_argument("--threads", type=int, default=8); ap.add_argument("--limit", type=int, default=0)
+ap.add_argument("--judge", default="gpt-5.4-mini", help="gpt-5.4-mini for the routine reads (its totals within 2.5 points of gpt-5.4 on the 4o vs 4o-mini check, the winner flipped on 6%% of pairs); gpt-5.4 for a final call"); ap.add_argument("--api", default="openai", choices=["openai", "deepseek"], help="deepseek: --judge deepseek-chat with DEEPSEEK_API_KEY")
+ap.add_argument("--threads", type=int, default=8); ap.add_argument("--limit", type=int, default=0)
 A = ap.parse_args()
-KEY = os.environ.get("OPENAI_API_KEY", "")
+KEY = os.environ.get("OPENAI_API_KEY" if A.api == "openai" else "DEEPSEEK_API_KEY", "")
+URL = "https://api.openai.com/v1/chat/completions" if A.api == "openai" else "https://api.deepseek.com/chat/completions"
 SYS = ("A person sent the message below to an assistant on their phone. You see two replies. Judge in two steps.\n"
        "STEP 1 - the problem itself. For each reply decide whether it actually solves what was asked: the facts are right, the "
        "reasoning or code works, the advice is sound, the requested text is produced, nothing is made up. A reply that is wrong, "
@@ -30,11 +32,12 @@ SYS = ("A person sent the message below to an assistant on their phone. You see 
 
 def ask(q, r1, r2):
     msg = f"MESSAGE:\n{q[:3000]}\n\nREPLY 1:\n{(r1 or '(empty)')[:4000]}\n\nREPLY 2:\n{(r2 or '(empty)')[:4000]}"
-    body = {"model": A.judge, "messages": [{"role": "system", "content": SYS}, {"role": "user", "content": msg}], "max_completion_tokens": 2000,
-            "response_format": {"type": "json_object"}}
+    body = {"model": A.judge, "messages": [{"role": "system", "content": SYS}, {"role": "user", "content": msg}], "response_format": {"type": "json_object"}}
+    body["max_completion_tokens" if A.api == "openai" else "max_tokens"] = 2000
+    if A.api == "deepseek": body["temperature"] = 0
     for t in range(4):
         try:
-            req = urllib.request.Request("https://api.openai.com/v1/chat/completions", data=json.dumps(body).encode(),
+            req = urllib.request.Request(URL, data=json.dumps(body).encode(),
                                          headers={"Content-Type": "application/json", "Authorization": "Bearer " + KEY})
             d = json.load(urllib.request.urlopen(req, timeout=300)); return json.loads(d["choices"][0]["message"]["content"]), d.get("usage", {})
         except Exception as ex:
