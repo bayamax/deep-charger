@@ -4,7 +4,7 @@
 # memfit.py --objective ce (the served pages masked, LoRA r16, mem10's settings), then the search held-out (eval300,
 # 150 questions x 2) with the local store. The teacher rows arrive on the hub (archive/teach/traj_rows.jsonl) from the
 # session's own machine; the job waits for them. Results to archive/teach/.
-BOXVN_SERIAL=2
+BOXVN_SERIAL=3
 if [ -f /root/.boxvn_serial ] && [ "$(cat /root/.boxvn_serial)" -gt "$BOXVN_SERIAL" ] 2>/dev/null; then echo "BOXVN_STALE $BOXVN_SERIAL"; exit 0; fi
 echo $BOXVN_SERIAL > /root/.boxvn_serial
 if [ ! -e /root/.vn_pre ]; then touch /root/.vn_pre
@@ -35,6 +35,13 @@ R=baya1116/hypernet-sp-distill; H=https://huggingface.co/$R/resolve/main
 put() { python3 -c "import sys; from huggingface_hub import HfApi; HfApi().upload_file(path_or_fileobj=sys.argv[1], path_in_repo='archive/teach/'+sys.argv[2], repo_id='$R')" "$1" "$2" > /dev/null 2>&1 && echo "[hub] $2" || echo "[hub] $2 FAILED"; }
 get() { [ -s $2 ] || curl -sSfL -o $2 "$1" || { rm -f $2; echo "[vn] could not get $1"; return 1; }; }
 for f in grpo_e2e_torch.py pooler_torch.py; do get $H/box_recover/scripts/$f /root/work/$f; done
+python3 - <<'PY'   # transformers 4.56+ rejects a positive crop (keep N); the harness's crop_cache made version-proof
+import re
+p = "/root/work/grpo_e2e_torch.py"; s = open(p).read()
+new = ('def crop_cache(past, length):\n    if hasattr(past, "crop"):\n        L = past.get_seq_length()\n        if L > length: past.crop(length - L)\n        return past\n')
+s2 = re.sub(r'def crop_cache\(past, length\):\n(    .*\n)+?        past\.crop\(length\); return past\n', new, s, count=1)
+print("[patch] crop_cache", "patched" if s2 != s else "NOT FOUND"); open(p, "w").write(s2)
+PY
 get $H/fft_out/pooler.pt /root/work/fft_out/pooler.pt
 mkdir -p /root/gptq_hf_gq14; for f in config.json generation_config.json special_tokens_map.json tokenizer.json tokenizer_config.json model.safetensors; do get $H/versions/2.0.0/base/$f /root/gptq_hf_gq14/$f; done
 get $H/versions/2.1.0/lora.safetensors /root/mtg7_s40.safetensors
