@@ -3,7 +3,7 @@
 # vote. 2.1.0 (the adopted model: 2.0.0's 4-bit base + the mtg7 LoRA) on the search held-out (eval300, 150 questions)
 # with the local store, 8 passes of pool_eval.py (each pass one rollout per question, temperature 0.6, the lineage's
 # settings) in two processes; the passes go to the hub (archive/vote/), the vote is counted offline.
-BOXVL_SERIAL=3
+BOXVL_SERIAL=4
 if [ -f /root/.boxvl_serial ] && [ "$(cat /root/.boxvl_serial)" -gt "$BOXVL_SERIAL" ] 2>/dev/null; then echo "BOXVL_STALE $BOXVL_SERIAL"; exit 0; fi
 echo $BOXVL_SERIAL > /root/.boxvl_serial
 if [ ! -e /root/.vl_pre ]; then touch /root/.vl_pre
@@ -18,17 +18,18 @@ for f in pool_eval.py web_search.py localsearch/search.py localsearch/store.py l
   for try in 1 2 3; do curl -sS -o /root/work/$f "$RAW/$f?nocache=$(date +%s)" && break; sleep 5; done
 done
 mkdir -p /root/work/runtime; cp /root/work/web_search.py /root/work/runtime/web_search.py 2>/dev/null; touch /root/work/runtime/__init__.py
-[ -f /root/.bootstrapped ] || { python3 -m pip install -q "transformers>=4.51,<4.57" accelerate "huggingface_hub[hf_xet]>=0.34,<1.0" safetensors peft zstandard onnxruntime 2>&1 | tail -1; touch /root/.bootstrapped; echo "BOOTSTRAP_DONE $(date -u)"; }
+[ -f /root/.bootstrapped ] || { python3 -m pip install -q "transformers>=4.51,<4.57" accelerate "huggingface_hub[hf_xet]>=0.34,<1.0" safetensors peft zstandard onnxruntime datasets certifi 2>&1 | tail -1; touch /root/.bootstrapped; echo "BOOTSTRAP_DONE $(date -u)"; }
 cat > /root/status.sh <<'ST'
 grep -E "^\[(vl|eval|load|cfg|search|hub)|EVAL_DONE|Error|Traceback|out of memory" /root/vl.log 2>/dev/null | tail -n 6 | cut -c1-300
 for i in 0 1; do f=/root/work/vote_p$i.jsonl; [ -s $f ] && echo "pass file $i: $(wc -l < $f) rows"; done
 nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv,noheader
 ST
 chmod +x /root/status.sh
+python3 -c 'import datasets, peft, zstandard, onnxruntime' 2>/dev/null || python3 -m pip install -q datasets peft zstandard onnxruntime certifi 2>&1 | tail -1
 # serial 2: job 2, after the vote passes - where the adopted model fails on TRAINING questions (the teacher's data is
 # aimed there): 2.1.0 on the first 600 of the training items in teach_traj.py's order (corpus questions with a gold of
 # at most six words, the held-out's 300 left out, shuffled with seed 0), one sampled rollout each, the local store.
-if [ ! -e /root/.vl_s3 ]; then touch /root/.vl_s3
+if [ ! -e /root/.vl_s4 ]; then touch /root/.vl_s4
   cat > /root/vljob2.sh <<'JOB'
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); cd /root/work
 R=baya1116/hypernet-sp-distill; H=https://huggingface.co/$R/resolve/main
@@ -67,7 +68,7 @@ JOB
   setsid nohup bash -c 'bash /root/vljob2.sh >> /root/vl.log 2>&1' > /dev/null 2>&1 < /dev/null &
   echo "[vl] s2: job 2 (the model on 600 training questions) queued after the vote passes $(date -u)"
 fi
-if [ ! -e /root/.vljob3 ]; then touch /root/.vljob3
+if [ ! -e /root/.vljob4 ]; then touch /root/.vljob4
   cat > /root/vljob.sh <<'JOB'
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); cd /root/work
 R=baya1116/hypernet-sp-distill; H=https://huggingface.co/$R/resolve/main

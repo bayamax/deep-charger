@@ -4,7 +4,7 @@
 # memfit.py --objective ce (the served pages masked, LoRA r16, mem10's settings), then the search held-out (eval300,
 # 150 questions x 2) with the local store. The teacher rows arrive on the hub (archive/teach/traj_rows.jsonl) from the
 # session's own machine; the job waits for them. Results to archive/teach/.
-BOXVN_SERIAL=1
+BOXVN_SERIAL=2
 if [ -f /root/.boxvn_serial ] && [ "$(cat /root/.boxvn_serial)" -gt "$BOXVN_SERIAL" ] 2>/dev/null; then echo "BOXVN_STALE $BOXVN_SERIAL"; exit 0; fi
 echo $BOXVN_SERIAL > /root/.boxvn_serial
 if [ ! -e /root/.vn_pre ]; then touch /root/.vn_pre
@@ -19,7 +19,7 @@ for f in pool_eval.py memfit.py web_search.py localsearch/search.py localsearch/
   for try in 1 2 3; do curl -sS -o /root/work/$f "$RAW/$f?nocache=$(date +%s)" && break; sleep 5; done
 done
 cp /root/work/web_search.py /root/work/runtime/web_search.py 2>/dev/null; touch /root/work/runtime/__init__.py
-[ -f /root/.bootstrapped ] || { python3 -m pip install -q "transformers>=4.51,<4.57" accelerate "huggingface_hub[hf_xet]>=0.34,<1.0" safetensors peft zstandard onnxruntime 2>&1 | tail -1; touch /root/.bootstrapped; echo "BOOTSTRAP_DONE $(date -u)"; }
+[ -f /root/.bootstrapped ] || { python3 -m pip install -q "transformers>=4.51,<4.57" accelerate "huggingface_hub[hf_xet]>=0.34,<1.0" safetensors peft zstandard onnxruntime datasets certifi 2>&1 | tail -1; touch /root/.bootstrapped; echo "BOOTSTRAP_DONE $(date -u)"; }
 cat > /root/status.sh <<'ST'
 grep -E "^\[(vn|eval|load|cfg|search|hub|memfit|pooler|lora|step)|MEMFIT_DONE|EVAL_DONE|Error|Traceback|out of memory" /root/vn.log 2>/dev/null | tail -n 6 | cut -c1-300
 grep -E "^\[step|val" /root/memfit_teach1.log 2>/dev/null | tail -n 2 | cut -c1-200
@@ -27,6 +27,7 @@ for i in 0 1; do f=/root/work/teach1_ev$i.jsonl; [ -s $f ] && echo "eval file $i
 nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv,noheader
 ST
 chmod +x /root/status.sh
+python3 -c 'import datasets, peft, zstandard, onnxruntime' 2>/dev/null || python3 -m pip install -q datasets peft zstandard onnxruntime certifi 2>&1 | tail -1
 if [ ! -e /root/.vnjob ]; then touch /root/.vnjob
   cat > /root/vnjob.sh <<'JOB'
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); cd /root/work
