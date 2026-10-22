@@ -1,7 +1,7 @@
 #!/bin/bash
 # Box VR (3060, vLLM image): candidate bases for the app, as they come - Qwen3-1.7B and Qwen3-4B, thinking on, no search -
 # answer the use-case bench's app kinds (197 real prompts); the replies go to archive/uc/ for the judge against 4o-mini.
-BOXVR_SERIAL=2
+BOXVR_SERIAL=3
 if [ -f /root/.boxvr_serial ] && [ "$(cat /root/.boxvr_serial)" -gt "$BOXVR_SERIAL" ] 2>/dev/null; then echo "BOXVR_STALE $BOXVR_SERIAL"; exit 0; fi
 echo $BOXVR_SERIAL > /root/.boxvr_serial
 [ -e /root/.vr_pre ] || { touch /root/.vr_pre; echo "[vr] preflight GPU: $(nvidia-smi --query-gpu=name,memory.used,memory.total --format=csv,noheader)"; }
@@ -13,10 +13,36 @@ mkdir -p /root/vr; RAW="https://raw.githubusercontent.com/bayamax/deep-charger/c
 curl -sS -o /root/vr/uc_vllm.py "$RAW/tools/uc/uc_vllm.py?nocache=$(date +%s)"
 [ -f /root/.bootstrapped ] || { python3 -m pip install -q "huggingface_hub[hf_xet]" 2>&1 | tail -1; touch /root/.bootstrapped; echo "BOOTSTRAP_DONE $(date -u)"; }
 cat > /root/status.sh <<'ST'
-grep -E "^\[(vr|uc_vllm|hub)\]|Error|Traceback|out of memory" /root/vr/vr.log 2>/dev/null | tail -n 5 | cut -c1-300
+grep -E "^\[(vr|uc_vllm|hub|kvwin)\]|Error|Traceback|out of memory" /root/vr/vr.log 2>/dev/null | tail -n 5 | cut -c1-300
 nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv,noheader
 ST
 chmod +x /root/status.sh
+# serial 3 (the user: not flagship-only - the floor is a 4 GB phone, ~1.3-1.5 GB for the whole app -> Qwen3-1.7B
+# at 4 bits is the ceiling; 8-9B are out): job 2 is cancelled. Job 3 after job 1: long CoT under a bounded KV cache
+# WITHOUT the hypernet (prompt + last R tokens, the rest dropped) vs full KV - the floor the new pooler has to beat.
+if [ ! -e /root/.vr_s3 ]; then touch /root/.vr_s3
+  [ -s /root/vr/DONE_VR2 ] || { pkill -f vrjob2.sh; echo "[vr] s3: job 2 (8-9B) cancelled $(date -u)"; }
+  curl -sS -o /root/vr/kvwin_eval.py "$RAW/tools/kvwin_eval.py?nocache=$(date +%s)"
+  cat > /root/vrjob3.sh <<'JOB'
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); cd /root/vr
+R=baya1116/hypernet-sp-distill
+put() { python3 -c "import sys; from huggingface_hub import HfApi; HfApi().upload_file(path_or_fileobj=sys.argv[1], path_in_repo='archive/kvwin/'+sys.argv[2], repo_id='$R')" "$1" "$2" > /dev/null 2>&1 && echo "[hub] $2" || echo "[hub] $2 FAILED"; }
+python3 -m pip install -q datasets "math-verify[antlr4_13_2]" 2>&1 | grep -v -i warn | tail -1
+while [ ! -s DONE_VR ]; do sleep 60; done
+M=Qwen/Qwen3-1.7B
+fuser -k -9 /dev/nvidia* > /dev/null 2>&1; sleep 3
+python3 kvwin_eval.py --engine vllm --model $M --n 64 --gen 8000 --out kv_full.jsonl 2>&1 | grep -E "^\[kvwin\]|Error|Traceback"
+put kv_full.jsonl q17_full.jsonl
+for spec in 768:32 2048:16; do r=${spec%%:*}; b=${spec#*:}
+  fuser -k -9 /dev/nvidia* > /dev/null 2>&1; sleep 3
+  python3 kvwin_eval.py --engine hf --recent $r --batch $b --model $M --n 64 --gen 8000 --out kv_r$r.jsonl 2>&1 | grep -E "^\[kvwin\]|Error|Traceback|out of memory"
+  put kv_r$r.jsonl q17_r$r.jsonl
+done
+put /root/vr/vr.log run_vr3.log; date -u > DONE_VR3; put DONE_VR3 DONE_VR3; echo "[vr] VRJOB3_DONE $(date -u)"
+JOB
+  setsid nohup bash -c 'bash /root/vrjob3.sh >> /root/vr/vr.log 2>&1' > /dev/null 2>&1 < /dev/null &
+  echo "[vr] s3: job 3 (Qwen3-1.7B full KV vs naive window 768/2048, MATH-500 L4-5 x64) queued after job 1 $(date -u)"
+fi
 # serial 2 (the user: the largest model the app can hold, made KV-light by the hypernet): job 2 after job 1 - the 8-9B
 # class at 4 bits, Qwen3-8B (AWQ, ~4.6 GB at 4 bits on the phone) and Qwen3.5-9B (AWQ; hybrid attention, 8 of 32 layers
 # keep a KV cache), the same 197 prompts, thinking on, no search.
