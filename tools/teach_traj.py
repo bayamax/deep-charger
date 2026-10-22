@@ -63,8 +63,8 @@ EXAMPLE = ("We need answer. Need find state common between 2008 McDonald's All-A
 SYS = ("You solve a question with ONE tool, a Wikipedia search, thinking aloud in short plain sentences exactly in the style of the "
        "example below (clipped notes: 'We need answer. Need find ... Let's search.'). To search, write <search>keywords</search> and stop "
        "at once; the first part of the best page is then shown to you inside <information>...</information>. Write <more> and stop to "
-       f"read the next part of the same page. At most {A.maxs} searches. Search for what you need to find, never for the answer itself. "
-       "When you know the answer, write a line of reasoning ending with 'The answer is X.' then on a new line '</think> The answer is X.' "
+       f"read the next part of the same page. At most {A.maxs} searches. Pretend you do not know the answer: search for the things the question names (one entity per search) and read the answer off the page; a query must never contain the answer itself. "
+       "When the page has shown you the answer, write one line of reasoning that ends with 'The answer is X.' and then, on its own line, exactly: </think> The answer is X. "
        "(X as short as possible, as Wikipedia would name it). Never write <information> yourself.\n\nExample of the style:\n" + EXAMPLE)
 URL = "https://api.deepseek.com/chat/completions" if A.api == "deepseek" else "https://api.openai.com/v1/chat/completions"
 KEY = os.environ.get("DEEPSEEK_API_KEY" if A.api == "deepseek" else "OPENAI_API_KEY", "")
