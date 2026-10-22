@@ -49,6 +49,9 @@ ap.add_argument("--fold", default="learned", choices=["learned", "fit"], help="f
 ap.add_argument("--reservoir", type=int, default=256, help="fit: past queries kept per q head (uniform reservoir)")
 ap.add_argument("--lora", type=int, default=0, help="unfreeze the model: LoRA rank on q,k,v,o,gate,up,down (0 = frozen)")
 ap.add_argument("--lora-ckpt", default="", help="eval/gen: a trained LoRA (kvpool train --lora ... --out)")
+ap.add_argument("--ft-layers", type=int, default=0, help="full fine-tune of the first N decoder layers (input side), rest frozen; "
+               "fp32 master weights (bf16 alone would round small updates away)")
+ap.add_argument("--ft-ckpt", default="", help="eval/gen: the trained input-side layers (kvpool train --ft-layers N --out x.safetensors)")
 ap.add_argument("--full", action="store_true", help="eval: never evict (full KV) - checks a LoRA keeps the frozen model's normal behaviour")
 ap.add_argument("--init-traces", default="", help="gen without --ckpt: traces whose keys seed the codebook")
 a = ap.parse_args()
@@ -71,8 +74,28 @@ if a.lora or a.lora_ckpt:
         PEFT = get_peft_model(model, LoraConfig(r=a.lora, lora_alpha=2 * a.lora, lora_dropout=0.0,
                               target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]))
     # the LoRA layers are injected into `model` in place; PEFT.disable_adapter() gives the frozen teacher
-from contextlib import nullcontext
-def teacher_ctx(): return PEFT.disable_adapter() if PEFT is not None else nullcontext()
+FT_SD0 = None   # the frozen weights of the tuned layers, to serve as the teacher
+if a.ft_layers or a.ft_ckpt:
+    if a.ft_ckpt:
+        sd = load_file(a.ft_ckpt)
+        FT_N = 1 + max(int(k.split(".")[2]) for k in sd)
+    else:
+        sd, FT_N = None, a.ft_layers
+    FT_KEYS = [k for k in model.state_dict() if k.startswith("model.layers.") and int(k.split(".")[2]) < FT_N]
+    FT_SD0 = {k: v.detach().to('cpu', copy=True) for k, v in model.state_dict().items() if k in FT_KEYS}   # on CPU: GPU memory goes to the fp32 master + Adam
+    if sd is not None:
+        missing = model.load_state_dict({k: v.to(dev, model.dtype) for k, v in sd.items()}, strict=False)
+from contextlib import nullcontext, contextmanager
+@contextmanager
+def ft_teacher():
+    """swap the frozen input-side layers back in for the teacher pass"""
+    cur = {k: v.detach().to('cpu', copy=True) for k, v in model.state_dict().items() if k in FT_SD0}
+    model.load_state_dict(FT_SD0, strict=False)
+    try: yield
+    finally: model.load_state_dict(cur, strict=False)
+def teacher_ctx():
+    if FT_SD0 is not None: return ft_teacher()
+    return PEFT.disable_adapter() if PEFT is not None else nullcontext()
 cfg = model.config
 NL, H, G = cfg.num_hidden_layers, cfg.num_attention_heads, cfg.num_key_value_heads
 D = getattr(cfg, "head_dim", cfg.hidden_size // H); REP = H // G
@@ -254,7 +277,7 @@ def run_trace(ids, P, pooler, opt=None):
         e = min(pos + a.C, T)
         # evict the oldest tokens beyond W, folding them into the slots (grad through this one fold)
         n_ev = 0 if a.full else win[0][0].shape[2] - a.W
-        train = opt is not None and (pooler is not None or PEFT is not None)
+        train = opt is not None
         with torch.set_grad_enabled(train):
             if n_ev > 0:
                 ev = [(k[:, :, :n_ev], v[:, :, :n_ev]) for k, v in win]
@@ -282,7 +305,7 @@ def run_trace(ids, P, pooler, opt=None):
         pos = e
     QCAP["on"] = False
     if opt is not None:
-        torch.nn.utils.clip_grad_norm_(TRAINABLE, 1.0); opt.step(); opt.zero_grad(set_to_none=True)
+        do_step()
     return kl_sum, ag_sum, n
 
 
@@ -408,24 +431,38 @@ if a.mode == "gen":
             f.write(json.dumps({"id": r["unique_id"], "level": r["level"], "gold": r["answer"], "ok": ok, "fin": fin, "text": t}) + "\n")
     log(f"[kvpool] gen W{a.W} m{a.m} C{a.C} {os.path.basename(a.ckpt) or ('drop' if a.m == 0 else ('fit R%d' % a.reservoir if FIT else 'init'))}: {n_ok}/{len(ds)} = {100 * n_ok / len(ds):.1f}%  finished {n_fin}/{len(ds)}")
 
-tag = f"W{a.W} m{a.m} C{a.C}" + (f" fit R{a.reservoir}" if FIT else "") + (f" LoRA" if PEFT is not None else "")
+tag = f"W{a.W} m{a.m} C{a.C}" + (f" fit R{a.reservoir}" if FIT else "") + (f" LoRA" if PEFT is not None else "") + (" FT-in" if FT_SD0 is not None else "")
 def save_all():
     if not a.out: return
     if pooler is not None: save_file({k_: v.detach().cpu().contiguous() for k_, v in pooler.state_dict().items()}, a.out)
     if PEFT is not None: PEFT.save_pretrained(a.out if pooler is None else a.out + ".lora")
+    if a.ft_layers:
+        save_file({k: v.detach().cpu().contiguous() for k, v in model.state_dict().items() if k in FT_SD0}, a.out)
 if a.mode == "gen":
     pass
 elif a.mode == "eval":
     t0 = time.time(); K = A = N = 0
     for ids, P in data:
         k, g_, n = run_trace(ids, P, pooler); K += k; A += g_; N += n
-    log(f"[kvpool] eval {tag} {os.path.basename(a.ckpt or a.lora_ckpt) or ('drop' if a.m == 0 else ('fit' if FIT else 'init'))}: {len(data)} traces {N} tokens  "
+    log(f"[kvpool] eval {tag} {os.path.basename(a.ckpt or a.lora_ckpt or a.ft_ckpt) or ('drop' if a.m == 0 else ('fit' if FIT else 'init'))}: {len(data)} traces {N} tokens  "
         f"KL {K / max(N, 1):.4f}  top1 agree {100 * A / max(N, 1):.2f}%  ({time.time() - t0:.0f}s)")
 else:
     TRAINABLE = ([p_ for p_ in pooler.parameters()] if pooler is not None else []) + \
                 ([p_ for p_ in model.parameters() if p_.requires_grad] if PEFT is not None else [])
-    log(f"[kvpool] trainable params: {sum(p_.numel() for p_ in TRAINABLE) / 1e6:.1f}M (pooler {'yes' if pooler is not None else 'no'}, LoRA r{a.lora})")
-    opt = torch.optim.AdamW(TRAINABLE, lr=a.lr, weight_decay=0.0)
+    FTP = []
+    if a.ft_layers:
+        FTP = [p_ for li in range(a.ft_layers) for p_ in model.model.layers[li].parameters()]
+        for p_ in FTP: p_.requires_grad_(True)
+    MASTER = [p_.detach().float().clone().requires_grad_(True) for p_ in FTP]
+    log(f"[kvpool] trainable params: {(sum(p_.numel() for p_ in TRAINABLE) + sum(p_.numel() for p_ in FTP)) / 1e6:.1f}M "
+        f"(pooler {'yes' if pooler is not None else 'no'}, LoRA r{a.lora}, full FT of layers 0-{a.ft_layers - 1})")
+    opt = torch.optim.AdamW(TRAINABLE + MASTER, lr=a.lr, weight_decay=0.0)
+    def do_step():
+        for p_, m_ in zip(FTP, MASTER):
+            m_.grad = p_.grad.float() if p_.grad is not None else None; p_.grad = None
+        torch.nn.utils.clip_grad_norm_(TRAINABLE + MASTER, 1.0); opt.step(); opt.zero_grad(set_to_none=True)
+        with torch.no_grad():
+            for p_, m_ in zip(FTP, MASTER): p_.copy_(m_.to(p_.dtype))
     steps = int(len(data) * a.epochs); t0 = time.time(); K = A = N = 0
     sched = torch.optim.lr_scheduler.LambdaLR(opt, lambda s: min(1.0, (s + 1) / 20) * max(0.1, 1 - s / max(steps, 1)))
     for st in range(steps):
