@@ -29,6 +29,7 @@ python3 -c 'import datasets, peft, zstandard, onnxruntime' 2>/dev/null || python
 # serial 2: job 2, after the vote passes - where the adopted model fails on TRAINING questions (the teacher's data is
 # aimed there): 2.1.0 on the first 600 of the training items in teach_traj.py's order (corpus questions with a gold of
 # at most six words, the held-out's 300 left out, shuffled with seed 0), one sampled rollout each, the local store.
+pkill -f 'vljob2.sh' 2>/dev/null   # earlier serials' job-2 waiters, so only this one follows the passes
 if [ ! -e /root/.vl_s4 ]; then touch /root/.vl_s4
   cat > /root/vljob2.sh <<'JOB'
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); cd /root/work
