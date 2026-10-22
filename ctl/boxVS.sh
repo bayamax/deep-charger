@@ -1,7 +1,7 @@
 #!/bin/bash
 # Box VS (3060, vLLM image, short): the end-to-end check box VR ran out of memory on - 32 MATH-500 level 4-5 problems,
 # Qwen3-1.7B thinking, 8000 tokens, exposure window 256: the weight-free fit fold (128 slots, reservoir 256) vs dropping.
-BOXVS_SERIAL=3
+BOXVS_SERIAL=4
 if [ -f /root/.boxvs_serial ] && [ "$(cat /root/.boxvs_serial)" -gt "$BOXVS_SERIAL" ] 2>/dev/null; then echo "BOXVS_STALE $BOXVS_SERIAL"; exit 0; fi
 echo $BOXVS_SERIAL > /root/.boxvs_serial
 echo "[vs] preflight GPU: $(nvidia-smi --query-gpu=name,memory.used,memory.total --format=csv,noheader)"
@@ -13,6 +13,7 @@ mkdir -p /root/vs; RAW="https://raw.githubusercontent.com/bayamax/deep-charger/c
 curl -sS -o /root/vs/kvpool.py "$RAW/tools/kvpool.py?nocache=$(date +%s)"
 cat > /root/status.sh <<'ST'
 grep -E "^\[(vs|kvpool|hub|math|mix|sweep [a-z]+ [A-Za-z0-9_]+)\]|Error|Traceback|out of memory" /root/vs/vs.log 2>/dev/null | tail -n 5 | cut -c1-300
+tail -n 2 /root/vs/kvpool_lora.log /root/vs/sweep.log /root/vs/kvpool_lora2.log 2>/dev/null | grep "^\[kvpool\]" | cut -c1-200
 nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv,noheader
 ST
 chmod +x /root/status.sh
