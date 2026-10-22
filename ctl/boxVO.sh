@@ -4,7 +4,7 @@
 # judge against 4o-mini; (B) 2.1.0 on 600 training questions, one sampled rollout each; (C) the rollouts that are right
 # AND grounded learned back into 2.1.0 (memfit ce, the served pages masked, LoRA, mem10's settings) -> rft1;
 # (D) rft1 on the search held-out (eval300, two passes) and on the use-case bench. Results to archive/rft/ and archive/uc/.
-BOXVO_SERIAL=1
+BOXVO_SERIAL=2
 if [ -f /root/.boxvo_serial ] && [ "$(cat /root/.boxvo_serial)" -gt "$BOXVO_SERIAL" ] 2>/dev/null; then echo "BOXVO_STALE $BOXVO_SERIAL"; exit 0; fi
 echo $BOXVO_SERIAL > /root/.boxvo_serial
 if [ ! -e /root/.vo_pre ]; then touch /root/.vo_pre
@@ -26,7 +26,11 @@ grep -E "^val" /root/memfit_rft1.log 2>/dev/null | tail -n 1
 nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv,noheader
 ST
 chmod +x /root/status.sh
-if [ ! -e /root/.vojob ]; then touch /root/.vojob
+# serial 2: a rollout that keeps searching after 'no searches left' ran to 4000 tokens (54 searches, 5 minutes a prompt):
+# the use-case bench and the training questions now stop at 2000 / 2500 tokens (a runaway is a failure either way);
+# the held-out keeps 4000 to stay comparable. The serial-1 job is stopped; the training files resume, the bench restarts.
+if [ ! -e /root/.vojob2 ]; then touch /root/.vojob2
+  pkill -f vojob.sh; pkill -f pool_eval.py; sleep 5; rm -f /root/work/uc_dc210.jsonl
   cat > /root/vojob.sh <<'JOB'
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); cd /root/work
 R=baya1116/hypernet-sp-distill; H=https://huggingface.co/$R/resolve/main
@@ -62,13 +66,13 @@ print(f"[vo] training questions: 450 + 150 written", flush=True)
 PY
 echo "[vo] assets in place $(date -u)"
 ENV="SP_BASE=/root/gptq_hf_gq14 SP_RANK=16 SP_NOSYS=1 SP_EPISODIC=1 SP_LOCAL_STORE=/root/wiki_store SP_LOCAL_MODEL=/root/bge-small OMP_NUM_THREADS=2 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True"
-EVARGS="--rw 768 --maxd 384 --samepage 1 --decode plain --temp 0.6 --gen 4000 --stop eos --replycap 600"
+EVARGS="--rw 768 --maxd 384 --samepage 1 --decode plain --temp 0.6 --stop eos --replycap 600"; G_UC="--gen 2000"; G_TR="--gen 2500"; G_EV="--gen 4000"
 ( while sleep 600; do for f in uc_dc210 tr_a tr_b; do [ -s /root/work/$f.jsonl ] && put /root/work/$f.jsonl rft/$f.jsonl > /dev/null; done; done ) & MIR=$!
 # (A)+(B): two processes - the use-case bench then 150 training questions; 450 training questions
-( env $ENV python3 /root/work/pool_eval.py /root/mtg7_s40.safetensors /root/work/uc_bench.jsonl /root/work/uc_dc210.jsonl $EVARGS --n 400 --tag "[uc dc210]" 2>&1 | grep -E "EVAL_DONE|Traceback|Error" | sed "s/^/[vo] /"
-  env $ENV python3 /root/work/pool_eval.py /root/mtg7_s40.safetensors /root/work/tr_qb.jsonl /root/work/tr_b.jsonl $EVARGS --n 400 --tag "[tr b]" 2>&1 | grep -E "EVAL_DONE|Traceback|Error" | sed "s/^/[vo] /" ) &
+( env $ENV python3 /root/work/pool_eval.py /root/mtg7_s40.safetensors /root/work/uc_bench.jsonl /root/work/uc_dc210.jsonl $EVARGS $G_UC --n 400 --tag "[uc dc210]" 2>&1 | grep -E "EVAL_DONE|Traceback|Error" | sed "s/^/[vo] /"
+  env $ENV python3 /root/work/pool_eval.py /root/mtg7_s40.safetensors /root/work/tr_qb.jsonl /root/work/tr_b.jsonl $EVARGS $G_TR --n 400 --tag "[tr b]" 2>&1 | grep -E "EVAL_DONE|Traceback|Error" | sed "s/^/[vo] /" ) &
 sleep 90
-( env $ENV python3 /root/work/pool_eval.py /root/mtg7_s40.safetensors /root/work/tr_qa.jsonl /root/work/tr_a.jsonl $EVARGS --n 500 --tag "[tr a]" 2>&1 | grep -E "EVAL_DONE|Traceback|Error" | sed "s/^/[vo] /" ) &
+( env $ENV python3 /root/work/pool_eval.py /root/mtg7_s40.safetensors /root/work/tr_qa.jsonl /root/work/tr_a.jsonl $EVARGS $G_TR --n 500 --tag "[tr a]" 2>&1 | grep -E "EVAL_DONE|Traceback|Error" | sed "s/^/[vo] /" ) &
 wait $(jobs -p | grep -v $MIR) 2>/dev/null; kill $MIR 2>/dev/null
 put /root/work/uc_dc210.jsonl uc/uc_dc210.jsonl; for f in tr_a tr_b; do put /root/work/$f.jsonl rft/$f.jsonl; done
 # (C) the student's own right-and-grounded rollouts -> memfit rows (the prompt as pool_eval renders it, the trace as generated)
@@ -94,9 +98,9 @@ grep -E "MEMFIT_DONE|Traceback|Error" /root/memfit_rft1_run.log | tail -2 | sed 
 put /root/rft1.safetensors rft/rft1.safetensors
 # (D) rft1: the held-out (two passes) and the use-case bench
 ( while sleep 600; do for f in rft1_ev0 rft1_ev1 uc_rft1; do [ -s /root/work/$f.jsonl ] && put /root/work/$f.jsonl rft/$f.jsonl > /dev/null; done; done ) & MIR=$!
-( for i in 0 1; do env $ENV python3 /root/work/pool_eval.py /root/rft1.safetensors /root/work/eval300.jsonl /root/work/rft1_ev$i.jsonl $EVARGS --n 150 --tag "[rft1 ev$i]" 2>&1 | grep -E "EVAL_DONE|Traceback|Error" | sed "s/^/[vo] /"; done ) &
+( for i in 0 1; do env $ENV python3 /root/work/pool_eval.py /root/rft1.safetensors /root/work/eval300.jsonl /root/work/rft1_ev$i.jsonl $EVARGS $G_EV --n 150 --tag "[rft1 ev$i]" 2>&1 | grep -E "EVAL_DONE|Traceback|Error" | sed "s/^/[vo] /"; done ) &
 sleep 90
-( env $ENV python3 /root/work/pool_eval.py /root/rft1.safetensors /root/work/uc_bench.jsonl /root/work/uc_rft1.jsonl $EVARGS --n 400 --tag "[uc rft1]" 2>&1 | grep -E "EVAL_DONE|Traceback|Error" | sed "s/^/[vo] /" ) &
+( env $ENV python3 /root/work/pool_eval.py /root/rft1.safetensors /root/work/uc_bench.jsonl /root/work/uc_rft1.jsonl $EVARGS $G_UC --n 400 --tag "[uc rft1]" 2>&1 | grep -E "EVAL_DONE|Traceback|Error" | sed "s/^/[vo] /" ) &
 wait $(jobs -p | grep -v $MIR) 2>/dev/null; kill $MIR 2>/dev/null
 for f in rft1_ev0 rft1_ev1; do put /root/work/$f.jsonl rft/$f.jsonl; done; put /root/work/uc_rft1.jsonl uc/uc_rft1.jsonl
 put /root/vo.log rft/run.log; date -u > /root/DONE_VO; put /root/DONE_VO rft/DONE; echo "[vo] VOJOB_DONE $(date -u)"
