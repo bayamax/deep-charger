@@ -1,7 +1,7 @@
 #!/bin/bash
 # Box VR (3060, vLLM image): candidate bases for the app, as they come - Qwen3-1.7B and Qwen3-4B, thinking on, no search -
 # answer the use-case bench's app kinds (197 real prompts); the replies go to archive/uc/ for the judge against 4o-mini.
-BOXVR_SERIAL=6
+BOXVR_SERIAL=7
 if [ -f /root/.boxvr_serial ] && [ "$(cat /root/.boxvr_serial)" -gt "$BOXVR_SERIAL" ] 2>/dev/null; then echo "BOXVR_STALE $BOXVR_SERIAL"; exit 0; fi
 echo $BOXVR_SERIAL > /root/.boxvr_serial
 [ -e /root/.vr_pre ] || { touch /root/.vr_pre; echo "[vr] preflight GPU: $(nvidia-smi --query-gpu=name,memory.used,memory.total --format=csv,noheader)"; }
@@ -17,6 +17,37 @@ grep -E "^\[(vr|uc_vllm|hub|kvwin|kvfit|trace_gen|kvpool)\]|Error|Traceback|out 
 nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv,noheader
 ST
 chmod +x /root/status.sh
+# serial 7: the learned codebook pooler only cut KL ~5% (W512 m64: 0.198 -> 0.189 on MATH), job 6 is stopped. Job 7: the
+# weight-free fit fold (slots re-fitted at every fold so a reservoir of past queries + the window's queries read the same
+# attention output) - KL vs drop over (W, m, reservoir) on the held-out traces, then MATH-500 accuracy in the loop.
+if [ ! -e /root/.vr_s7 ]; then touch /root/.vr_s7
+  pkill -f vrjob6.sh; pkill -f "kvpool.py"; sleep 5
+  echo "[vr] s7: job 6 stopped $(date -u)"
+  curl -sS -o /root/vr/kvpool.py "$RAW/tools/kvpool.py?nocache=$(date +%s)"
+  cat > /root/vrjob7.sh <<'JOB'
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); cd /root/vr
+R=baya1116/hypernet-sp-distill
+put() { python3 -c "import sys; from huggingface_hub import HfApi; HfApi().upload_file(path_or_fileobj=sys.argv[1], path_in_repo='archive/kvpool/'+sys.argv[2], repo_id='$R')" "$1" "$2" > /dev/null 2>&1 && echo "[hub] $2" || echo "[hub] $2 FAILED"; }
+fuser -k -9 /dev/nvidia* > /dev/null 2>&1; sleep 3
+K="python3 kvpool.py"; LG=/root/vr/kvpool.log
+ev() { for e in kv_full.jsonl:math traces.jsonl:mix; do f=${e%%:*}; n=${e#*:}; x=""; [ $n = mix ] && x="--n 60"
+  $K eval --traces $f $x --max-len 4096 --log $LG "$@" 2>&1 | grep -E "^\[kvpool\]|Error|Traceback|out of memory" | sed "s/^/[$n] /"; done; put $LG kvpool.log; }
+ev --W 512 --m 64 --C 128 --fold fit --reservoir 256
+ev --W 256 --m 0 --C 128
+ev --W 256 --m 64 --C 128 --fold fit --reservoir 256
+ev --W 256 --m 64 --C 128 --fold fit --reservoir 64
+ev --W 256 --m 128 --C 128 --fold fit --reservoir 256
+ev --W 128 --m 0 --C 64
+ev --W 128 --m 64 --C 64 --fold fit --reservoir 256
+for spec in "256 0" "256 64"; do set -- $spec; x=""; [ $2 != 0 ] && x="--fold fit --reservoir 256"
+  $K gen --traces none --W $1 --m $2 --C 128 $x --gen-n 64 --gen-tokens 8000 --batch 32 --out gen_W$1_m$2.jsonl --log $LG 2>&1 | grep -E "^\[kvpool\] gen W|Error|Traceback|out of memory"
+  put gen_W$1_m$2.jsonl gen_W$1_m$2.jsonl; put $LG kvpool.log
+done
+put /root/vr/vr.log run_vr7.log; date -u > DONE_VR7; put DONE_VR7 DONE_VR7; echo "[vr] VRJOB7_DONE $(date -u)"
+JOB
+  setsid nohup bash -c 'bash /root/vrjob7.sh >> /root/vr/vr.log 2>&1' > /dev/null 2>&1 < /dev/null &
+  echo "[vr] s7: job 7 (fit fold evals + gen) launched $(date -u)"
+fi
 # serial 6: job 6 after job 5 - the learned KV pooler (tools/kvpool.py), trained for token reproduction (KL to the full
 # model) on 500 own traces; three (exposure window W, slots m, chunk C) points, each scored against dropping the evicted
 # span (m=0) on held-out traces (MATH-500 64 + 60 mixed); then MATH-500 accuracy with the pooler in the sampling loop.

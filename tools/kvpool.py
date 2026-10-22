@@ -43,6 +43,10 @@ ap.add_argument("--seed", type=int, default=0)
 ap.add_argument("--gen-n", type=int, default=64, help="gen: MATH-500 level>=4 problems (same draw as kvwin_eval)")
 ap.add_argument("--gen-tokens", type=int, default=8000)
 ap.add_argument("--batch", type=int, default=32)
+ap.add_argument("--fold", default="learned", choices=["learned", "fit"], help="fit: no weights - at every fold the slots are "
+               "re-fitted (top-mass keys, NNLS mass, least-squares values) so that a reservoir of past queries + the window's "
+               "queries read the same attention output as from (old slots + evicted tokens)")
+ap.add_argument("--reservoir", type=int, default=256, help="fit: past queries kept per q head (uniform reservoir)")
 ap.add_argument("--init-traces", default="", help="gen without --ckpt: traces whose keys seed the codebook")
 a = ap.parse_args()
 
@@ -113,6 +117,67 @@ class KVPooler(nn.Module):
         return k, v, M + self.b[l][None]
 
 
+# ---- post-RoPE query capture (fit fold): QBUF[layer] = queries of the tokens being forwarded
+from transformers.models.qwen3.modeling_qwen3 import rotate_half
+QCAP = {"on": False}; QBUF = {}
+def _qhook(li):
+    def hook(mod, args, kwargs):
+        if not QCAP["on"]: return
+        hs = kwargs["hidden_states"]; cos, sin = kwargs["position_embeddings"]
+        Bq, n = hs.shape[:2]
+        q = mod.q_norm(mod.q_proj(hs).view(Bq, n, H, D)).transpose(1, 2)
+        QBUF[li] = (q * cos.unsqueeze(1) + rotate_half(q) * sin.unsqueeze(1)).half()
+    return hook
+for _li, _layer in enumerate(model.model.layers):
+    _layer.self_attn.register_forward_pre_hook(_qhook(_li), with_kwargs=True)
+
+
+@torch.no_grad()
+def fit_fold(m, slot, ek, ev, calq, ctx_k):
+    """slot: (k,v,beta) or None; ek/ev (B,G,e,D); calq (B,H,Q,D) calibration queries; ctx_k (B,G,L,D) the other keys
+    the queries also see (prompt + window). -> new (k, v, beta) with m slots, attention-matched on calq."""
+    SC = D ** -0.5
+    xk = ek.float() if slot is None else torch.cat([slot[0].float(), ek.float()], 2)
+    xv = ev.float() if slot is None else torch.cat([slot[1].float(), ev.float()], 2)
+    xb = torch.zeros(ek.shape[:3], device=dev) if slot is None else torch.cat([slot[2].float(), torch.zeros(ek.shape[:3], device=dev)], 2)
+    Bq, Gq, n, _ = xk.shape
+    if n <= m:
+        return xk, xv, xb
+    q = calq.float().view(Bq, Gq, REP * calq.shape[2], D)                           # q heads of a group stacked
+    sx = torch.einsum("bgqd,bgnd->bgqn", q, xk) * SC + xb[:, :, None, :]
+    sc = torch.einsum("bgqd,bgld->bgql", q, ctx_k.float()) * SC
+    lZ = torch.logsumexp(torch.cat([sx, sc], -1), -1, keepdim=True)
+    pE = torch.exp(sx - lZ)                                                         # share of each X member
+    f = pE.sum(-1)                                                                  # (B,G,Q)
+    tgt = pE @ xv                                                                   # (B,G,Q,D)
+    idx = pE.sum(2).topk(m, -1).indices                                             # (B,G,m)
+    kc = torch.gather(xk, 2, idx[..., None].expand(-1, -1, -1, D))
+    vc = torch.gather(xv, 2, idx[..., None].expand(-1, -1, -1, D))
+    A = torch.exp(torch.einsum("bgqd,bgmd->bgqm", q, kc) * SC - lZ)                 # (B,G,Q,m)
+    w = torch.exp(torch.gather(xb, 2, idx)).clamp(min=1e-6)                         # start from the members' own mass
+    AtA = A.transpose(-1, -2) @ A; Atf = (A.transpose(-1, -2) @ f[..., None]).squeeze(-1)
+    for _ in range(100):                                                            # NNLS by multiplicative updates
+        w = w * Atf / ((AtA @ w[..., None]).squeeze(-1) + 1e-12)
+    w = w.clamp(min=1e-8)
+    Bm = A * w[:, :, None, :]
+    BtB = Bm.transpose(-1, -2) @ Bm
+    lam = 1e-3 * BtB.diagonal(dim1=-2, dim2=-1).mean(-1)[..., None, None].clamp(min=1e-12)
+    eye = torch.eye(m, device=dev)
+    vfit = torch.linalg.solve(BtB + lam * eye, Bm.transpose(-1, -2) @ tgt + lam * vc)
+    return kc, vfit, torch.log(w)
+
+
+def reservoir_add(res, n_seen, newq, R):
+    """uniform reservoir over token positions (all heads keep the same tokens). res (B,H,r,D) or None, newq (B,H,e,D)."""
+    if res is None: pool, wts = newq, torch.ones(newq.shape[2], device=dev)
+    else:
+        pool = torch.cat([res, newq], 2)
+        wts = torch.cat([torch.full((res.shape[2],), n_seen / res.shape[2], device=dev), torch.ones(newq.shape[2], device=dev)])
+    if pool.shape[2] <= R: return pool
+    keep = torch.multinomial(wts, R, replacement=False)
+    return pool[:, :, keep]
+
+
 def kv_of(cache, li):
     if hasattr(cache, "layers"): return cache.layers[li].keys, cache.layers[li].values
     return cache.key_cache[li], cache.value_cache[li]
@@ -164,7 +229,10 @@ def run_trace(ids, P, pooler, opt=None):
         c = DynamicCache()
         model(input_ids=ids[None, :P], past_key_values=c, use_cache=True)
         prompt_kv = [tuple(t.detach() for t in kv_of(c, li)) for li in range(NL)]
+        QCAP["on"] = FIT
         _, win = chunk_forward(ids[None, P:P + a.W + a.C], P, prompt_kv, None, None, False)
+        winq = [QBUF[li] for li in range(NL)] if FIT else None
+    res, n_seen = [None] * NL, 0
     slots, kl_sum, ag_sum, n = None, 0.0, 0.0, 0
     pos = first
     while pos + 1 < T:
@@ -176,11 +244,18 @@ def run_trace(ids, P, pooler, opt=None):
             if n_ev > 0:
                 ev = [(k[:, :, :n_ev], v[:, :, :n_ev]) for k, v in win]
                 win = [(k[:, :, n_ev:], v[:, :, n_ev:]) for k, v in win]
-                if pooler is not None:
+                if FIT:
+                    evq = [q[:, :, :n_ev] for q in winq]; winq = [q[:, :, n_ev:] for q in winq]
+                    res = [reservoir_add(res[li], n_seen, evq[li], a.reservoir) for li in range(NL)]; n_seen += n_ev
+                    slots = [fit_fold(a.m, slots[li] if slots is not None else None, ev[li][0], ev[li][1],
+                                      torch.cat([res[li], winq[li]], 2),
+                                      torch.cat([prompt_kv[li][0], win[li][0]], 2)) for li in range(NL)]
+                elif pooler is not None:
                     prev = slots
                     slots = [pooler.fold(li, *(tuple(t.detach() for t in prev[li]) if prev is not None else (None, None, None)),
                                          ev[li][0], ev[li][1]) for li in range(NL)]
         lg, new = chunk_forward(ids[None, pos:e], pos, prompt_kv, slots, win, train)
+        if FIT: winq = [torch.cat([winq[li], QBUF[li]], 2) for li in range(NL)]
         lp = F.log_softmax(lg[0].float(), -1)
         r = ref[pos - first:e - first].float()
         kl = (r.exp() * (r - lp)).sum(-1)
@@ -190,6 +265,7 @@ def run_trace(ids, P, pooler, opt=None):
         win = [(torch.cat([w[0], nw[0]], 2), torch.cat([w[1], nw[1]], 2)) for w, nw in zip(win, new)]
         if slots is not None: slots = [tuple(t.detach() for t in s) for s in slots]
         pos = e
+    QCAP["on"] = False
     if opt is not None and pooler is not None:
         torch.nn.utils.clip_grad_norm_(pooler.parameters(), 1.0); opt.step(); opt.zero_grad(set_to_none=True)
     return kl_sum, ag_sum, n
@@ -215,8 +291,9 @@ if a.mode == "gen" and a.init_traces:
     for r in [json.loads(l) for l in open(a.init_traces)][:4]:
         pid = tok.encode(r["prompt"], add_special_tokens=False)
         INIT.append((torch.tensor(pid + tok.encode(r["text"], add_special_tokens=False), device=dev), len(pid)))
+FIT = a.fold == "fit" and a.m > 0
 pooler = None
-if a.m > 0:
+if a.m > 0 and not FIT:
     pooler = KVPooler(a.m).to(dev)
     if a.ckpt:
         pooler.load_state_dict({k: v.to(dev) for k, v in load_file(a.ckpt).items()})
@@ -245,7 +322,8 @@ def generate(prompts):
         prompt_kv = [tuple(t for t in kv_of(c, li)) for li in range(NL)]
         pad_bias = torch.zeros(B, 1, 1, P, device=dev, dtype=model.dtype).masked_fill(pmask[:, None, None, :] == 0, float("-inf"))
         nxt = pos[:, -1] + 1
-        slots, win = None, None
+        slots, win, winq, res, n_seen = None, None, None, [None] * NL, 0
+        QCAP["on"] = FIT
         gen = [[] for _ in range(B)]; done = torch.zeros(B, dtype=torch.bool, device=dev); t0 = time.time()
         for step in range(a.gen_tokens):
             l_ = lo.float() / Tt
@@ -263,7 +341,13 @@ def generate(prompts):
             if win is not None and win[0][0].shape[2] >= a.W + a.C:      # fold the oldest C tokens
                 ev = [(k[:, :, :a.C], v[:, :, :a.C]) for k, v in win]
                 win = [(k[:, :, a.C:], v[:, :, a.C:]) for k, v in win]
-                if pooler is not None:
+                if FIT:
+                    evq = [q[:, :, :a.C] for q in winq]; winq = [q[:, :, a.C:] for q in winq]
+                    res = [reservoir_add(res[li], n_seen, evq[li], a.reservoir) for li in range(NL)]; n_seen += a.C
+                    slots = [fit_fold(a.m, slots[li] if slots is not None else None, ev[li][0], ev[li][1],
+                                      torch.cat([res[li], winq[li]], 2), torch.cat([prompt_kv[li][0], win[li][0]], 2))
+                             for li in range(NL)]
+                elif pooler is not None:
                     slots = [pooler.fold(li, *(slots[li] if slots is not None else (None, None, None)), ev[li][0], ev[li][1])
                              for li in range(NL)]
             parts = []
@@ -280,7 +364,9 @@ def generate(prompts):
             BETA["v"] = None
             new = [tuple(t[:, :, L:] for t in kv_of(cache, li)) for li in range(NL)]
             win = new if win is None else [(torch.cat([w[0], n_[0]], 2), torch.cat([w[1], n_[1]], 2)) for w, n_ in zip(win, new)]
+            if FIT: winq = [QBUF[li] if winq is None else torch.cat([winq[li], QBUF[li]], 2) for li in range(NL)]
             nxt = nxt + 1
+        QCAP["on"] = False
         log(f"[kvpool] gen batch {b0}: {step + 1} steps {time.time() - t0:.0f}s")
         outs += [tok.decode(x, skip_special_tokens=True) for x in gen]
         del c, cache, prompt_kv, slots, win; torch.cuda.empty_cache() if dev == "cuda" else None
@@ -303,16 +389,16 @@ if a.mode == "gen":
             ok = bool(fin and verify(parse("$" + r["answer"] + "$"), parse(t.split("</think>")[-1])))
             n_ok += ok; n_fin += fin
             f.write(json.dumps({"id": r["unique_id"], "level": r["level"], "gold": r["answer"], "ok": ok, "fin": fin, "text": t}) + "\n")
-    log(f"[kvpool] gen W{a.W} m{a.m} C{a.C} {os.path.basename(a.ckpt) or ('drop' if a.m == 0 else 'init')}: {n_ok}/{len(ds)} = {100 * n_ok / len(ds):.1f}%  finished {n_fin}/{len(ds)}")
+    log(f"[kvpool] gen W{a.W} m{a.m} C{a.C} {os.path.basename(a.ckpt) or ('drop' if a.m == 0 else ('fit R%d' % a.reservoir if FIT else 'init'))}: {n_ok}/{len(ds)} = {100 * n_ok / len(ds):.1f}%  finished {n_fin}/{len(ds)}")
 
-tag = f"W{a.W} m{a.m} C{a.C}"
+tag = f"W{a.W} m{a.m} C{a.C}" + (f" fit R{a.reservoir}" if FIT else "")
 if a.mode == "gen":
     pass
 elif a.mode == "eval":
     t0 = time.time(); K = A = N = 0
     for ids, P in data:
         k, g_, n = run_trace(ids, P, pooler); K += k; A += g_; N += n
-    log(f"[kvpool] eval {tag} {os.path.basename(a.ckpt) or ('drop' if a.m == 0 else 'init')}: {len(data)} traces {N} tokens  "
+    log(f"[kvpool] eval {tag} {os.path.basename(a.ckpt) or ('drop' if a.m == 0 else ('fit' if FIT else 'init'))}: {len(data)} traces {N} tokens  "
         f"KL {K / max(N, 1):.4f}  top1 agree {100 * A / max(N, 1):.2f}%  ({time.time() - t0:.0f}s)")
 else:
     opt = torch.optim.AdamW(pooler.parameters(), lr=a.lr, weight_decay=0.0)
