@@ -16,6 +16,7 @@ ap.add_argument("--q", required=True); ap.add_argument("--out", required=True); 
 ap.add_argument("--g", type=int, default=2, help="rollouts per distinct question"); ap.add_argument("--model", default="gpt-4o-mini")
 ap.add_argument("--api", default="openai", choices=["openai", "deepseek"]); ap.add_argument("--temp", type=float, default=0.6)
 ap.add_argument("--maxs", type=int, default=5); ap.add_argument("--maxm", type=int, default=8); ap.add_argument("--search", type=int, default=1)
+ap.add_argument("--style", default="search", choices=["search", "verify"], help="verify: answer from knowledge, the search only to check when unsure")
 ap.add_argument("--localsearch", default=os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "ctl", "localsearch"))
 A = ap.parse_args()
 PAGE_STEP = 256
@@ -58,6 +59,10 @@ SYS_SEARCH = ("You answer questions with the help of a Wikipedia search tool. To
               "the first part of the best matching page is then shown to you inside <information>...</information>. Write <more> and stop to read "
               f"the next part of the same page. You may search at most {A.maxs} times. When you know the answer, reply with ONE line that begins "
               "'The answer is X.' (X as short as possible, as it would appear in Wikipedia), followed at most by one sentence of justification.")
+SYS_VERIFY = ("You answer questions from your own knowledge, and you have a Wikipedia search tool to check facts you are unsure of. To search, write exactly <search>keywords</search> and stop; "
+              "the first part of the best matching page is then shown to you inside <information>...</information>. Write <more> and stop to read the next part. "
+              f"At most {A.maxs} searches; do not search when you already know the answer. If a page contradicts your belief, weigh which is more reliable. When ready, reply with ONE line that begins "
+              "'The answer is X.' (X as short as possible, as it would appear in Wikipedia), followed at most by one sentence of justification.")
 SYS_PLAIN = "Answer the question from your own knowledge. Reply with ONE line that begins 'The answer is X.' (X as short as possible, as it would appear in Wikipedia)."
 URL = "https://api.openai.com/v1/chat/completions" if A.api == "openai" else "https://api.deepseek.com/chat/completions"
 KEY = os.environ.get("OPENAI_API_KEY" if A.api == "openai" else "DEEPSEEK_API_KEY", "")
@@ -78,7 +83,7 @@ def chat(msgs, stop):
 
 
 def rollout(q):
-    msgs = [{"role": "system", "content": SYS_SEARCH if A.search else SYS_PLAIN}, {"role": "user", "content": q}]
+    msgs = [{"role": "system", "content": (SYS_VERIFY if A.style == "verify" else SYS_SEARCH) if A.search else SYS_PLAIN}, {"role": "user", "content": q}]
     ns = nm = 0; served, queries, page_ids, off = [], [], [], 0; txt = ""
     for step in range(A.maxs + A.maxm + 3):
         out, fin = chat(msgs, ["</search>", "<more>"] if A.search else None)
@@ -118,7 +123,7 @@ with open(A.out, "a") as fh:
     for i, (q, GOLD) in enumerate(qs):
         for j in range(A.g):
             if done[q] > j: continue
-            r = rollout(q); r.update(q=q, gold=GOLD, model=A.model, search=A.search)
+            r = rollout(q); r.update(q=q, gold=GOLD, model=A.model, search=A.search, style=A.style)
             r["correct"] = r["landed"] and has(r["answer"], GOLD)
             fh.write(json.dumps(r, ensure_ascii=False) + "\n"); fh.flush()
             stat["n"] += 1; stat["c"] += r["correct"]; stat["g"] += r["grounded"]; stat["s"] += r["ns"]
