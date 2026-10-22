@@ -47,6 +47,9 @@ ap.add_argument("--fold", default="learned", choices=["learned", "fit"], help="f
                "re-fitted (top-mass keys, NNLS mass, least-squares values) so that a reservoir of past queries + the window's "
                "queries read the same attention output as from (old slots + evicted tokens)")
 ap.add_argument("--reservoir", type=int, default=256, help="fit: past queries kept per q head (uniform reservoir)")
+ap.add_argument("--lora", type=int, default=0, help="unfreeze the model: LoRA rank on q,k,v,o,gate,up,down (0 = frozen)")
+ap.add_argument("--lora-ckpt", default="", help="eval/gen: a trained LoRA (kvpool train --lora ... --out)")
+ap.add_argument("--full", action="store_true", help="eval: never evict (full KV) - checks a LoRA keeps the frozen model's normal behaviour")
 ap.add_argument("--init-traces", default="", help="gen without --ckpt: traces whose keys seed the codebook")
 a = ap.parse_args()
 
@@ -59,6 +62,17 @@ dev = a.device
 tok = AutoTokenizer.from_pretrained(a.model)
 model = AutoModelForCausalLM.from_pretrained(a.model, dtype=getattr(torch, a.dtype), attn_implementation="eager").to(dev).eval()
 for p_ in model.parameters(): p_.requires_grad_(False)
+PEFT = None
+if a.lora or a.lora_ckpt:
+    from peft import LoraConfig, get_peft_model, PeftModel
+    if a.lora_ckpt:
+        PEFT = PeftModel.from_pretrained(model, a.lora_ckpt, is_trainable=a.mode == "train")
+    else:
+        PEFT = get_peft_model(model, LoraConfig(r=a.lora, lora_alpha=2 * a.lora, lora_dropout=0.0,
+                              target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]))
+    # the LoRA layers are injected into `model` in place; PEFT.disable_adapter() gives the frozen teacher
+from contextlib import nullcontext
+def teacher_ctx(): return PEFT.disable_adapter() if PEFT is not None else nullcontext()
 cfg = model.config
 NL, H, G = cfg.num_hidden_layers, cfg.num_attention_heads, cfg.num_key_value_heads
 D = getattr(cfg, "head_dim", cfg.hidden_size // H); REP = H // G
@@ -126,7 +140,7 @@ def _qhook(li):
         hs = kwargs["hidden_states"]; cos, sin = kwargs["position_embeddings"]
         Bq, n = hs.shape[:2]
         q = mod.q_norm(mod.q_proj(hs).view(Bq, n, H, D)).transpose(1, 2)
-        QBUF[li] = (q * cos.unsqueeze(1) + rotate_half(q) * sin.unsqueeze(1)).half()
+        QBUF[li] = (q * cos.unsqueeze(1) + rotate_half(q) * sin.unsqueeze(1)).detach().half()
     return hook
 for _li, _layer in enumerate(model.model.layers):
     _layer.self_attn.register_forward_pre_hook(_qhook(_li), with_kwargs=True)
@@ -215,14 +229,15 @@ def chunk_forward(ids_chunk, pos0, prompt_kv, slots, window, need_grad):
 @torch.no_grad()
 def teacher_logp(ids, lo, hi):
     """the full model's log-probs for positions [lo, hi) (predicting lo+1 .. hi), in chunks of the lm head."""
-    h = model.model(input_ids=ids[None, :hi]).last_hidden_state[0, lo:hi]
+    with teacher_ctx():   # the frozen full-KV model is the teacher, also when the student carries a LoRA
+        h = model.model(input_ids=ids[None, :hi]).last_hidden_state[0, lo:hi]
     return torch.cat([F.log_softmax(model.lm_head(h[i:i + 256]).float(), -1).to(torch.bfloat16) for i in range(0, h.shape[0], 256)])
 
 
 def run_trace(ids, P, pooler, opt=None):
     """one trace through the bounded loop; returns (sum KL, sum agree, n tokens)."""
     T = min(len(ids), P + a.max_len)
-    first = P + a.W + a.C              # tokens before this are seen with the full context in both models
+    first = P + (256 if a.full else a.W + a.C)   # tokens before this are seen with the full context in both models
     if T - first < a.C: return 0.0, 0.0, 0
     ref = teacher_logp(ids, first, T)   # (T-first, V)
     with torch.no_grad():
@@ -230,7 +245,7 @@ def run_trace(ids, P, pooler, opt=None):
         model(input_ids=ids[None, :P], past_key_values=c, use_cache=True)
         prompt_kv = [tuple(t.detach() for t in kv_of(c, li)) for li in range(NL)]
         QCAP["on"] = FIT
-        _, win = chunk_forward(ids[None, P:P + a.W + a.C], P, prompt_kv, None, None, False)
+        _, win = chunk_forward(ids[None, P:first], P, prompt_kv, None, None, False)
         winq = [QBUF[li] for li in range(NL)] if FIT else None
     res, n_seen = [None] * NL, 0
     slots, kl_sum, ag_sum, n = None, 0.0, 0.0, 0
@@ -238,8 +253,8 @@ def run_trace(ids, P, pooler, opt=None):
     while pos + 1 < T:
         e = min(pos + a.C, T)
         # evict the oldest tokens beyond W, folding them into the slots (grad through this one fold)
-        n_ev = win[0][0].shape[2] - a.W
-        train = opt is not None and pooler is not None
+        n_ev = 0 if a.full else win[0][0].shape[2] - a.W
+        train = opt is not None and (pooler is not None or PEFT is not None)
         with torch.set_grad_enabled(train):
             if n_ev > 0:
                 ev = [(k[:, :, :n_ev], v[:, :, :n_ev]) for k, v in win]
@@ -266,8 +281,8 @@ def run_trace(ids, P, pooler, opt=None):
         if slots is not None: slots = [tuple(t.detach() for t in s) for s in slots]
         pos = e
     QCAP["on"] = False
-    if opt is not None and pooler is not None:
-        torch.nn.utils.clip_grad_norm_(pooler.parameters(), 1.0); opt.step(); opt.zero_grad(set_to_none=True)
+    if opt is not None:
+        torch.nn.utils.clip_grad_norm_(TRAINABLE, 1.0); opt.step(); opt.zero_grad(set_to_none=True)
     return kl_sum, ag_sum, n
 
 
@@ -393,17 +408,24 @@ if a.mode == "gen":
             f.write(json.dumps({"id": r["unique_id"], "level": r["level"], "gold": r["answer"], "ok": ok, "fin": fin, "text": t}) + "\n")
     log(f"[kvpool] gen W{a.W} m{a.m} C{a.C} {os.path.basename(a.ckpt) or ('drop' if a.m == 0 else ('fit R%d' % a.reservoir if FIT else 'init'))}: {n_ok}/{len(ds)} = {100 * n_ok / len(ds):.1f}%  finished {n_fin}/{len(ds)}")
 
-tag = f"W{a.W} m{a.m} C{a.C}" + (f" fit R{a.reservoir}" if FIT else "")
+tag = f"W{a.W} m{a.m} C{a.C}" + (f" fit R{a.reservoir}" if FIT else "") + (f" LoRA" if PEFT is not None else "")
+def save_all():
+    if not a.out: return
+    if pooler is not None: save_file({k_: v.detach().cpu().contiguous() for k_, v in pooler.state_dict().items()}, a.out)
+    if PEFT is not None: PEFT.save_pretrained(a.out if pooler is None else a.out + ".lora")
 if a.mode == "gen":
     pass
 elif a.mode == "eval":
     t0 = time.time(); K = A = N = 0
     for ids, P in data:
         k, g_, n = run_trace(ids, P, pooler); K += k; A += g_; N += n
-    log(f"[kvpool] eval {tag} {os.path.basename(a.ckpt) or ('drop' if a.m == 0 else ('fit' if FIT else 'init'))}: {len(data)} traces {N} tokens  "
+    log(f"[kvpool] eval {tag} {os.path.basename(a.ckpt or a.lora_ckpt) or ('drop' if a.m == 0 else ('fit' if FIT else 'init'))}: {len(data)} traces {N} tokens  "
         f"KL {K / max(N, 1):.4f}  top1 agree {100 * A / max(N, 1):.2f}%  ({time.time() - t0:.0f}s)")
 else:
-    opt = torch.optim.AdamW(pooler.parameters(), lr=a.lr, weight_decay=0.0)
+    TRAINABLE = ([p_ for p_ in pooler.parameters()] if pooler is not None else []) + \
+                ([p_ for p_ in model.parameters() if p_.requires_grad] if PEFT is not None else [])
+    log(f"[kvpool] trainable params: {sum(p_.numel() for p_ in TRAINABLE) / 1e6:.1f}M (pooler {'yes' if pooler is not None else 'no'}, LoRA r{a.lora})")
+    opt = torch.optim.AdamW(TRAINABLE, lr=a.lr, weight_decay=0.0)
     steps = int(len(data) * a.epochs); t0 = time.time(); K = A = N = 0
     sched = torch.optim.lr_scheduler.LambdaLR(opt, lambda s: min(1.0, (s + 1) / 20) * max(0.1, 1 - s / max(steps, 1)))
     for st in range(steps):
@@ -413,6 +435,6 @@ else:
         if (st + 1) % 25 == 0 or st + 1 == steps:
             log(f"[kvpool] train {tag} step {st + 1}/{steps}: KL {K / max(N, 1):.4f} top1 {100 * A / max(N, 1):.2f}% ({time.time() - t0:.0f}s)")
             K = A = N = 0
-            if a.out: save_file({k_: v.detach().cpu().contiguous() for k_, v in pooler.state_dict().items()}, a.out)
-    if a.out: save_file({k_: v.detach().cpu().contiguous() for k_, v in pooler.state_dict().items()}, a.out)
+            save_all()
+    save_all()
     log(f"[kvpool] trained {tag} -> {a.out}")
