@@ -4,7 +4,7 @@
 # Starts from stage C's weights (spC_spnext_fft_t400.pt); data = the stage-C traces it has not seen (stage B's 8000 unseen
 # traces from 4801, minus the 625 stage C used) - every trace once. The original model stays the teacher. At the end:
 # held-out KL by window length (profile) and the deployment loop, both against stages A / B.
-SER=3
+SER=4
 if [ -f /root/.boxtc_serial ] && [ "$(cat /root/.boxtc_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxtc_serial
 echo "[tc] preflight GPU: $(nvidia-smi --query-gpu=name,memory.used,memory.total --format=csv,noheader)"
@@ -18,6 +18,13 @@ tail -n 1 /root/w/sp.log 2>/dev/null | cut -c1-200
 nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv,noheader
 ST
 chmod +x /root/status.sh
+# serial 4: side measurement while stage D trains - the window-0 ceiling of a pooler that just copies: [prompt | the
+# embeddings of the last S tokens] -> KL vs the full model (raw and fixed-norm embeddings; S = 1, 8, 32).
+if [ ! -e /root/.orc ]; then touch /root/.orc
+  cd /root/w; curl -sS -o sp_oracle.py "$RAW/tools/sp_oracle.py?nocache=$(date +%s)"
+  setsid nohup bash -c 'cd /root/w; python3 sp_oracle.py kv_full_p.jsonl Qwen/Qwen3-1.7B 8 1,8,32 2>&1 | grep -E "^\{|Error" | tail -2 | sed "s/^/[tc] oracle /" >> /root/w/w.log' > /dev/null 2>&1 < /dev/null &
+  echo "[tc] s4: oracle started $(date -u)"; cd /root
+fi
 # serial 3: the pooler's sinusoidal positions had norm sqrt(H/2) = 32 against token embeddings of ~1.5, so the keys and
 # values it reads were ~95% position and ~5% content: the SP carried almost nothing (window-0 KL ~5.5 in every run).
 # Fix (--pe-norm: positions scaled to the embedding norm) + newest-first positions; a NEW pooler on the original model
