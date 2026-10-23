@@ -4,7 +4,7 @@
 # raw window 1024, chunk 128, maxD 384, 1 block / ffn 1024 (~19 MB at 4 bits). Held-out KL (MATH 64 / mixed 60) on the
 # default region (from the first eviction, 4096 tokens) and on the common region (1792+). The model is fetched first
 # (timeout + retry without xet): an earlier box hung inside the first eval on a stalled download.
-SER=14
+SER=15
 if [ -f /root/.boxta_serial ] && [ "$(cat /root/.boxta_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxta_serial
 echo "[ta] preflight GPU: $(nvidia-smi --query-gpu=name,memory.used,memory.total --format=csv,noheader)"
@@ -18,6 +18,14 @@ tail -n 1 /root/w/sp.log 2>/dev/null | cut -c1-200
 nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv,noheader
 ST
 chmod +x /root/status.sh
+# serial 15: stage C ran out of memory (FFT state ~17 GB + 32 positions x prompt KV) - rerun with 8 positions per batch
+if [ ! -e /root/.jobc2 ]; then touch /root/.jobc2
+  pkill -f jobc.sh; pkill -f sp_qwen3.py; sleep 3
+  sed 's/--sn-batch 32 --sn-tokens 12000/--sn-batch 8 --sn-tokens 3000/' /root/jobc.sh > /root/jobc2.sh
+  grep -q -- "--sn-batch 8 --sn-tokens 3000" /root/jobc2.sh && echo "[ta] s15: batch 8 set" || echo "[ta] s15: WARNING batch not changed"
+  setsid nohup bash -c 'bash /root/jobc2.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
+  echo "[ta] s15: stage C relaunched $(date -u)"
+fi
 # serial 14: diagnostics - stage C stopped within minutes
 if [ ! -e /root/.diag14 ]; then touch /root/.diag14
   echo "[ta] d14 err: $(grep -E 'Error' /root/w/run_trainC.log | tail -2 | tr '\n' ' ' | cut -c1-500)"
