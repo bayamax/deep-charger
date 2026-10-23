@@ -2,7 +2,7 @@
 # Box SN (3060, pytorch image): does the window-0 "SP-next" training help? From stage A's pooler (spA, rw1024, 1 block),
 # model frozen, 600 unseen traces (shard 3), every 4th position... 512 positions per trace in batches of 64:
 # [prompt | SP_t] -> token t. Scored with the deployment loop (MATH 64 / mixed 60, default + from1792) vs spA.
-SER=5
+SER=6
 if [ -f /root/.boxsn_serial ] && [ "$(cat /root/.boxsn_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxsn_serial
 echo "[sn] preflight GPU: $(nvidia-smi --query-gpu=name,memory.used,memory.total --format=csv,noheader)"
@@ -16,6 +16,13 @@ tail -n 1 /root/w/sp.log 2>/dev/null | cut -c1-200
 nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv,noheader
 ST
 chmod +x /root/status.sh
+if [ ! -e /root/.rerun6 ]; then touch /root/.rerun6
+  pkill -f job.sh; pkill -f sp_qwen3.py; sleep 2
+  sed -i 's/--sn-batch 64 --accum 8/--sn-batch 16 --sn-tokens 6000 --accum 8/' /root/job.sh
+  grep -q -- "--sn-batch 16" /root/job.sh && echo "[sn] s6: batch 16 set" || echo "[sn] s6: WARNING batch not changed"
+  rm -f /root/w/sp.log; setsid nohup bash -c 'bash /root/job.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
+  echo "[sn] s6: rerun with 16 positions per batch $(date -u)"
+fi
 if [ ! -e /root/.diag5 ]; then touch /root/.diag5
   echo "[sn] d5 err: $(grep -E 'Error' /root/w/run_train.log | tail -2 | tr '\n' ' ' | cut -c1-400)"
   echo "[sn] d5 frames: $(grep -E 'File \"/root/w/sp_qwen3.py' /root/w/run_train.log | tail -2 | tr '\n' ' ')"
@@ -53,7 +60,7 @@ echo "[sn] data: $(wc -l < traces_big_3.jsonl) traces, spA $(du -h spA.pt | cut 
 LG=/root/w/sp.log; F="--S 32 --rw 1024 --C 128 --maxd 384 --layers 1 --ffn 1024"
 ev() { for e in kv_full_p.jsonl:math traces.jsonl:mix; do f=${e%%:*}; n=${e#*:}; x=""; [ $n = mix ] && x="--n 60"
   for sf in 0 1792; do python3 sp_qwen3.py eval --traces $f $x --max-len 4096 --score-from $sf $F "$@" --log $LG 2>&1 | grep -E "^\[sp\] eval|Error|Traceback|out of memory" | sed "s/^/[$n] /"; done; done; }
-python3 sp_qwen3.py train --traces traces_big_3.jsonl --n 600 --max-len 3072 $F --ckpt spA.pt --spnext --sn-pos 512 --sn-batch 64 --accum 8 --lr 1e-4 --out spSN.pt --log $LG > run_train.log 2>&1
+python3 sp_qwen3.py train --traces traces_big_3.jsonl --n 600 --max-len 3072 $F --ckpt spA.pt --spnext --sn-pos 512 --sn-batch 16 --sn-tokens 6000 --accum 8 --lr 1e-4 --out spSN.pt --log $LG > run_train.log 2>&1
 grep -E "^\[sp\] (train .*: [0-9]+ traces|trained)|Error|Traceback|out of memory" run_train.log | tail -3
 put spSN.pt spSN.pt; put $LG spSN.log
 ev --ckpt spSN.pt
