@@ -21,7 +21,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 ap = argparse.ArgumentParser()
-ap.add_argument("mode", choices=["train", "eval"])
+ap.add_argument("mode", choices=["train", "eval", "profile"])
 ap.add_argument("--model", default="Qwen/Qwen3-1.7B")
 ap.add_argument("--traces", required=True)
 ap.add_argument("--n", type=int, default=0); ap.add_argument("--skip", type=int, default=0)
@@ -338,6 +338,37 @@ def run_trace_spnext(ids, P, ref_h=None):
     return K, A_, N
 
 
+@torch.no_grad()
+def profile_trace(ids, P, acc):
+    """KL by window length: one [prompt | SP_b | a[b : b+rw+C]] forward per boundary b (as --par training sees it)."""
+    T = min(len(ids), P + a.max_len)
+    ids = ids.to(dev); a_ids = ids[None, P:T]; La = a_ids.size(1)
+    L = a.rw + a.C
+    bounds = list(range(a.C, La - L + 1, a.C))
+    if not bounds: return
+    ref_h = teacher_hidden(ids, P + a.C, T)
+    pc = DynamicCache(); llm(input_ids=ids[None, :P], past_key_values=pc, use_cache=True)
+    pkv = [tuple(t for t in kv_of(pc, li)) for li in range(NL)]
+    kept = torch.zeros(1, 0, dtype=torch.long, device=dev); absorbed = 0
+    for b in bounds:
+        kept, absorbed = update_buffer(kept, absorbed, a_ids, b)
+        sp = pooler(embed(kept).float()) if kept.size(1) > 0 else pooler(torch.zeros(1, 0, H, device=dev))
+        block = torch.cat([sp.to(dt), embed(a_ids[:, b:b + L - 1]).to(dt)], 1); nb = block.size(1)
+        cache = DynamicCache()
+        for li, (k_, v_) in enumerate(pkv): cache.update(k_, v_, li)
+        pos = torch.arange(P, P + nb, device=dev)[None]
+        hs = llm.model(inputs_embeds=block, attention_mask=torch.ones(1, P + nb, device=dev), past_key_values=cache,
+                       position_ids=pos, cache_position=pos[0], use_cache=True).last_hidden_state[0, a.S - 1:]
+        for i in range(0, L, 256):
+            tr = teacher_rows(ref_h[b - a.C + i:b - a.C + min(i + 256, L)])
+            lp = F.log_softmax(llm.lm_head(hs[i:i + 256]).float(), -1)
+            kl = (tr.exp() * (tr - lp)).sum(-1)
+            for j, v in enumerate(kl.tolist()):
+                w = i + j
+                key = "0" if w == 0 else "1-7" if w < 8 else "8-63" if w < 64 else "64-511" if w < 512 else "512+"
+                acc.setdefault(key, [0.0, 0]); acc[key][0] += v; acc[key][1] += 1
+
+
 rows = [json.loads(l) for f_ in a.traces.split(",") for l in open(f_)]
 if not all("prompt" in r for r in rows):
     from datasets import load_dataset
@@ -354,7 +385,14 @@ for r in rows:
     data.append((torch.tensor(pid + tok.encode(r["text"], add_special_tokens=False)), len(pid)))   # CPU; moved per trace
 
 tag = f"S{a.S} rw{a.rw} C{a.C} maxd{a.maxd} L{a.layers} ffn{a.ffn}" + (" par" if a.par and a.mode == "train" else "") + (" spnext" if a.spnext and a.mode == "train" else "") + (f" FT{a.ft_layers}" if a.ft_layers else "") + (f" from{a.score_from}" if a.score_from else "")
-if a.mode == "eval":
+if a.mode == "profile":
+    pooler.eval(); acc = {}
+    for ids, P in data: profile_trace(ids, P, acc)
+    tot = sum(v[0] for v in acc.values()); n = sum(v[1] for v in acc.values())
+    log(f"[sp] profile {tag} {os.path.basename(a.ckpt) or 'untrained'}: mean KL over all windows {tot / max(n, 1):.4f}")
+    for key in ["0", "1-7", "8-63", "64-511", "512+"]:
+        if key in acc: log(f"[sp] profile   window {key:>7}: KL {acc[key][0] / acc[key][1]:.4f}  share of the summed KL {100 * acc[key][0] / max(tot, 1e-9):.1f}%  ({acc[key][1]} tokens)")
+elif a.mode == "eval":
     pooler.eval(); t0 = time.time(); K = A_ = N = 0
     for ids, P in data:
         k, g, n = run_trace(ids, P, False); K += k; A_ += g; N += n
