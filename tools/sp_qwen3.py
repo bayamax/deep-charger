@@ -49,6 +49,8 @@ ap.add_argument("--spnext", action="store_true", help="train: window 0 only - [p
                "position t of a trace, in batches of --sn-batch positions (memory fixed by the batch, not the trace)")
 ap.add_argument("--sn-step", type=int, default=16, help="spnext: buffer snapshot granularity (tokens)")
 ap.add_argument("--sn-batch", type=int, default=64, help="spnext: positions per forward")
+ap.add_argument("--sn-tokens", type=int, default=16384, help="spnext: cap on batch x (prompt + S) - the prompt KV is "
+               "repeated per batch item, so long prompts get smaller batches")
 ap.add_argument("--sn-pos", type=int, default=0, help="spnext: positions sampled per trace (0 = all)")
 ap.add_argument("--sn-t0", type=int, default=16, help="spnext: first answer position trained")
 ap.add_argument("--score-from", type=int, default=0, help="count only answer tokens at index >= this (a common region when rw differs)")
@@ -310,8 +312,9 @@ def run_trace_spnext(ids, P, ref_h=None):
     pos = list(range(t0, La))
     if a.sn_pos and len(pos) > a.sn_pos: pos = sorted(random.sample(pos, a.sn_pos))
     K = A_ = N = 0.0
-    for i in range(0, len(pos), a.sn_batch):
-        ts = pos[i:i + a.sn_batch]; B = len(ts)
+    bsz = max(2, min(a.sn_batch, a.sn_tokens // (P + a.S)))
+    for i in range(0, len(pos), bsz):
+        ts = pos[i:i + bsz]; B = len(ts)
         bufs = []
         for t in ts:
             g = (t // a.sn_step) * a.sn_step
