@@ -4,7 +4,7 @@
 # raw window 1024, chunk 128, maxD 384, 1 block / ffn 1024 (~19 MB at 4 bits). Held-out KL (MATH 64 / mixed 60) on the
 # default region (from the first eviction, 4096 tokens) and on the common region (1792+). The model is fetched first
 # (timeout + retry without xet): an earlier box hung inside the first eval on a stalled download.
-SER=11
+SER=12
 if [ -f /root/.boxta_serial ] && [ "$(cat /root/.boxta_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxta_serial
 echo "[ta] preflight GPU: $(nvidia-smi --query-gpu=name,memory.used,memory.total --format=csv,noheader)"
@@ -18,6 +18,20 @@ tail -n 1 /root/w/sp.log 2>/dev/null | cut -c1-200
 nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv,noheader
 ST
 chmod +x /root/status.sh
+# serial 12: a background uploader - the stage-B checkpoint (saved every 200 traces) to the hub every 45 min, so it can
+# be scored mid-run elsewhere without stopping the training
+if [ ! -e /root/.upl ]; then touch /root/.upl
+  cat > /root/upl.sh <<'JOB'
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); cd /root/w
+while pgrep -f jobb5.sh > /dev/null; do
+  sleep 2700
+  [ -s spB.pt ] && cp spB.pt spB_mid.pt && python3 -c "import sys; from huggingface_hub import HfApi; HfApi().upload_file(path_or_fileobj='spB_mid.pt', path_in_repo='archive/sp3/spB_mid.pt', repo_id='baya1116/hypernet-sp-distill')" > /dev/null 2>&1 \
+    && echo "[ta] mid ckpt uploaded at $(grep -o 'trace [0-9]*/8000' /root/w/sp.log | tail -1) $(date -u)"
+done
+JOB
+  setsid nohup bash -c 'bash /root/upl.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
+  echo "[ta] s12: mid-run checkpoint uploader started $(date -u)"
+fi
 # serial 11 (the user: use the parallel all-window training if it runs smoothly): stage B again from spA_stop.pt with
 # --par - one forward of [prompt | SP_b | the next rw+C tokens] scores every prediction in it (window 0 .. rw+C), 4
 # boundaries per trace, all-layer FFT + pooler, the same 8000 unseen traces; scoring unchanged (deployment loop).
