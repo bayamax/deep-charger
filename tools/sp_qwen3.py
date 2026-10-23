@@ -40,6 +40,8 @@ ap.add_argument("--epochs", type=float, default=1.0)
 ap.add_argument("--ckpt", default="")
 ap.add_argument("--out", default="")
 ap.add_argument("--log", default="")
+ap.add_argument("--chunks-per-trace", type=int, default=0, help="train: back-propagate only this many random chunks per trace "
+               "(the rest only advance the buffer) - more distinct traces per hour (0 = every chunk)")
 ap.add_argument("--score-from", type=int, default=0, help="count only answer tokens at index >= this (a common region when rw differs)")
 ap.add_argument("--seed", type=int, default=0)
 ap.add_argument("--device", default="cuda"); ap.add_argument("--dtype", default="bfloat16")
@@ -171,10 +173,16 @@ class _Frozen:
 
 
 @torch.no_grad()
-def teacher_logp(ids, lo, hi):
+def teacher_hidden(ids, lo, hi):
+    """the full-context teacher's last hidden states whose rows predict tokens lo..hi-1 (lm head applied per chunk)"""
     with _Frozen():
-        h = llm.model(input_ids=ids[None, :hi]).last_hidden_state[0, lo - 1:hi - 1]   # predicts tokens lo..hi-1
-    return torch.cat([F.log_softmax(llm.lm_head(h[i:i + 256]).float(), -1).to(torch.bfloat16) for i in range(0, h.shape[0], 256)])
+        return llm.model(input_ids=ids[None, :hi]).last_hidden_state[0, lo - 1:hi - 1]
+
+
+@torch.no_grad()
+def teacher_rows(h):
+    with _Frozen():
+        return F.log_softmax(llm.lm_head(h).float(), -1)
 
 
 def run_trace(ids, P, train):
@@ -183,7 +191,12 @@ def run_trace(ids, P, train):
     a_ids = ids[None, P:T]; La = a_ids.size(1)
     first = a.rw + a.C          # chunks before this see the whole answer so far in the raw window (no eviction yet)
     if La - first < a.C: return 0.0, 0.0, 0
-    ref = teacher_logp(ids, P + first, T)
+    ids = ids.to(dev); a_ids = a_ids.to(dev)
+    ref_h = teacher_hidden(ids, P + first, T)
+    c0s = list(range(first, La, a.C))
+    pick = set(c0s)
+    if train and a.chunks_per_trace and len(c0s) > a.chunks_per_trace:
+        pick = set(random.sample(c0s, a.chunks_per_trace))
     with torch.no_grad():
         pc = DynamicCache(); llm(input_ids=ids[None, :P], past_key_values=pc, use_cache=True)
         pkv = [tuple(t for t in kv_of(pc, li)) for li in range(NL)]
@@ -194,6 +207,7 @@ def run_trace(ids, P, train):
         if cur < 4: break
         R = min(c0, a.rw); nd_end = c0 - R
         kept, absorbed = update_buffer(kept, absorbed, a_ids, nd_end)
+        if c0 not in pick: continue
         with torch.set_grad_enabled(train):
             sp = pooler(embed(kept).float()) if kept.size(1) > 0 else pooler(torch.zeros(1, 0, H, device=dev))
             block = torch.cat([sp.to(dt), embed(a_ids[:, c0 - R:c0]).to(dt), embed(a_ids[:, c0:c1]).to(dt)], 1)
@@ -205,7 +219,7 @@ def run_trace(ids, P, train):
                     position_ids=pos, cache_position=pos[0], use_cache=True, logits_to_keep=cur + 1)
             # kept rows: the last window token + the chunk's tokens but its last -> they predict answer tokens c0 .. c1-1
             sl = F.log_softmax(o.logits[0, :cur].float(), -1)
-            tr = ref[c0 - first:c1 - first].float()            # teacher row j predicts answer token first + j
+            tr = teacher_rows(ref_h[c0 - first:c1 - first])     # teacher row j predicts answer token first + j
             kl = (tr.exp() * (tr - sl)).sum(-1)
             if train: (kl.sum() / 1000.0).backward()
         if c0 >= a.score_from:
@@ -213,7 +227,7 @@ def run_trace(ids, P, train):
     return K, A_, N
 
 
-rows = [json.loads(l) for l in open(a.traces)]
+rows = [json.loads(l) for f_ in a.traces.split(",") for l in open(f_)]
 if not all("prompt" in r for r in rows):
     from datasets import load_dataset
     PROB = {x["unique_id"]: x["problem"] for x in load_dataset("HuggingFaceH4/MATH-500", split="test")}
@@ -226,7 +240,7 @@ if a.n: rows = rows[:a.n]
 data = []
 for r in rows:
     pid = tok.encode(r["prompt"], add_special_tokens=False)
-    data.append((torch.tensor(pid + tok.encode(r["text"], add_special_tokens=False), device=dev), len(pid)))
+    data.append((torch.tensor(pid + tok.encode(r["text"], add_special_tokens=False)), len(pid)))   # CPU; moved per trace
 
 tag = f"S{a.S} rw{a.rw} C{a.C} maxd{a.maxd} L{a.layers} ffn{a.ffn}" + (f" FT{a.ft_layers}" if a.ft_layers else "") + (f" from{a.score_from}" if a.score_from else "")
 if a.mode == "eval":
