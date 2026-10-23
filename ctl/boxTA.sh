@@ -25,7 +25,7 @@ export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); cd /root/w
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 R=baya1116/hypernet-sp-distill; H=https://huggingface.co/$R/resolve/main
 put() { python3 -c "import sys; from huggingface_hub import HfApi; HfApi().upload_file(path_or_fileobj=sys.argv[1], path_in_repo='archive/sp3/'+sys.argv[2], repo_id='$R')" "$1" "$2" > /dev/null 2>&1 && echo "[hub] $2" || echo "[hub] $2 FAILED"; }
-python3 -m pip install -q "huggingface_hub[hf_xet]" bitsandbytes datasets 2>&1 | grep -v -i warn | tail -1
+python3 -m pip install -q "huggingface_hub[hf_xet]" transformers bitsandbytes datasets 2>&1 | grep -v -i warn | tail -1
 curl -sSfL -H "Authorization: Bearer $HF_TOKEN" -o traces.jsonl "$H/archive/kvpool/traces.jsonl"
 curl -sSfL -H "Authorization: Bearer $HF_TOKEN" -o kv_full.jsonl "$H/archive/kvwin/q17_full.jsonl"
 for i in 0 1 2; do until curl -sSfL -H "Authorization: Bearer $HF_TOKEN" -o traces_big_$i.jsonl "$H/archive/sp3/traces_big_$i.jsonl"; do sleep 120; done; done
