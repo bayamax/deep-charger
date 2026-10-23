@@ -54,6 +54,8 @@ ap.add_argument("--sn-tokens", type=int, default=16384, help="spnext: cap on bat
 ap.add_argument("--sn-pos", type=int, default=0, help="spnext: positions sampled per trace (0 = all)")
 ap.add_argument("--sn-t0", type=int, default=16, help="spnext: first answer position trained")
 ap.add_argument("--score-from", type=int, default=0, help="count only answer tokens at index >= this (a common region when rw differs)")
+ap.add_argument("--pe-rev", action="store_true", help="pooler positions counted from the NEWEST buffer token (0 = the token "
+               "just before the window / the predicted position) instead of from the oldest - saved in the checkpoint")
 ap.add_argument("--seed", type=int, default=0)
 ap.add_argument("--device", default="cuda"); ap.add_argument("--dtype", default="bfloat16")
 a = ap.parse_args()
@@ -110,6 +112,7 @@ class AttnPoolSP(nn.Module):
         self.ln_out = nn.LayerNorm(Hd)
         self.out_scale = nn.Parameter(torch.tensor(float(target_norm)))
         self._pe = None
+        self.pe_rev = False
 
     def pe(self, L, device):
         if self._pe is None or self._pe.size(0) < L: self._pe = sinusoidal(max(L, 1024), self.H, device)
@@ -117,7 +120,14 @@ class AttnPoolSP(nn.Module):
 
     def _run(self, past_emb, want_mass, kpm=None):
         B, L = past_emb.size(0), past_emb.size(1)
-        past = past_emb + self.pe(L, past_emb.device).unsqueeze(0) if L > 0 else past_emb
+        if L > 0 and self.pe_rev:   # distance from the newest real token of each row (right padding)
+            lens = (~kpm).sum(1) if kpm is not None else torch.full((B,), L, device=past_emb.device)
+            idx = (lens[:, None] - 1 - torch.arange(L, device=past_emb.device)[None]).clamp(min=0)
+            past = past_emb + self.pe(L, past_emb.device)[idx]
+        elif L > 0:
+            past = past_emb + self.pe(L, past_emb.device).unsqueeze(0)
+        else:
+            past = past_emb
         q = self.query.unsqueeze(0).expand(B, -1, -1).contiguous()
         mass = torch.zeros(B, L, device=past_emb.device) if want_mass else None
         for blk in self.blocks:
@@ -141,9 +151,11 @@ FT_SD = None
 if a.ckpt:
     ck = torch.load(a.ckpt, map_location="cpu", weights_only=False)
     pooler.load_state_dict(ck["pooler"])
+    if a.mode != "train" and (ck.get("args") or {}).get("pe_rev"): a.pe_rev = True   # eval follows the checkpoint
     if ck.get("ft"):
         FT_SD = {k: v.detach().to("cpu", copy=True) for k, v in llm.state_dict().items() if k in ck["ft"]}   # frozen copy = teacher
         llm.load_state_dict({k: v.to(dev, dt) for k, v in ck["ft"].items()}, strict=False)
+pooler.pe_rev = a.pe_rev
 n_pool = sum(x.numel() for x in pooler.parameters())
 KV_TOK = NL * 2 * llm.config.num_key_value_heads * getattr(llm.config, "head_dim", H // llm.config.num_attention_heads) * 2
 log(f"[sp] pooler {n_pool / 1e6:.1f}M params (4-bit ~{n_pool / 2 / 2**20:.0f} MB) | S={a.S} rw={a.rw} C={a.C} maxd={a.maxd} | "
@@ -384,7 +396,7 @@ for r in rows:
     pid = tok.encode(r["prompt"], add_special_tokens=False)
     data.append((torch.tensor(pid + tok.encode(r["text"], add_special_tokens=False)), len(pid)))   # CPU; moved per trace
 
-tag = f"S{a.S} rw{a.rw} C{a.C} maxd{a.maxd} L{a.layers} ffn{a.ffn}" + (" par" if a.par and a.mode == "train" else "") + (" spnext" if a.spnext and a.mode == "train" else "") + (f" FT{a.ft_layers}" if a.ft_layers else "") + (f" from{a.score_from}" if a.score_from else "")
+tag = f"S{a.S} rw{a.rw} C{a.C} maxd{a.maxd} L{a.layers} ffn{a.ffn}" + (" par" if a.par and a.mode == "train" else "") + (" spnext" if a.spnext and a.mode == "train" else "") + (" pe-rev" if a.pe_rev else "") + (f" FT{a.ft_layers}" if a.ft_layers else "") + (f" from{a.score_from}" if a.score_from else "")
 if a.mode == "profile":
     pooler.eval(); acc = {}
     for ids, P in data: profile_trace(ids, P, acc)
