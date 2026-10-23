@@ -42,6 +42,9 @@ ap.add_argument("--out", default="")
 ap.add_argument("--log", default="")
 ap.add_argument("--chunks-per-trace", type=int, default=0, help="train: back-propagate only this many random chunks per trace "
                "(the rest only advance the buffer) - more distinct traces per hour (0 = every chunk)")
+ap.add_argument("--par", action="store_true", help="train: one forward of [prompt | SP(buffer at boundary b) | the next rw+C "
+               "tokens] scores EVERY next-token prediction in it - window 0 (right after the soft prompts) up to rw+C - instead of "
+               "one chunk after a full window; --chunks-per-trace boundaries per trace")
 ap.add_argument("--score-from", type=int, default=0, help="count only answer tokens at index >= this (a common region when rw differs)")
 ap.add_argument("--seed", type=int, default=0)
 ap.add_argument("--device", default="cuda"); ap.add_argument("--dtype", default="bfloat16")
@@ -241,6 +244,50 @@ def run_trace(ids, P, train, ref_h=None):
     return K, A_, N
 
 
+from torch.utils.checkpoint import checkpoint
+
+
+def _kl_rows(h, tr):
+    """KL(teacher rows || student rows from hidden h) summed, plus top-1 agreements (logits rebuilt in backward)"""
+    lp = F.log_softmax(llm.lm_head(h).float(), -1)
+    return (tr.exp() * (tr - lp)).sum(), (lp.argmax(-1) == tr.argmax(-1)).float().sum().detach()
+
+
+def run_trace_par(ids, P, ref_h=None):
+    """--par training on one trace: buffer snapshots at chunk boundaries (sequential, no grad - eviction never had a
+    gradient), then for a few boundaries b one forward of [prompt | SP_b | a[b : b+rw+C]] scoring all rw+C predictions."""
+    T = min(len(ids), P + a.max_len)
+    ids = ids.to(dev); a_ids = ids[None, P:T]; La = a_ids.size(1)
+    L = a.rw + a.C
+    bounds = [b for b in range(a.C, La - L + 1, a.C)]
+    if not bounds: return 0.0, 0.0, 0
+    if ref_h is None: ref_h = teacher_hidden(ids, P + a.C, T)     # row j predicts answer token C + j
+    pick = set(random.sample(bounds, min(len(bounds), a.chunks_per_trace or len(bounds))))
+    with torch.no_grad():
+        pc = DynamicCache(); llm(input_ids=ids[None, :P], past_key_values=pc, use_cache=True)
+        pkv = [tuple(t for t in kv_of(pc, li)) for li in range(NL)]
+    kept = torch.zeros(1, 0, dtype=torch.long, device=dev); absorbed = 0
+    K = A_ = N = 0.0
+    for b in bounds:
+        kept, absorbed = update_buffer(kept, absorbed, a_ids, b)
+        if b not in pick: continue
+        sp = pooler(embed(kept).float()) if kept.size(1) > 0 else pooler(torch.zeros(1, 0, H, device=dev))
+        block = torch.cat([sp.to(dt), embed(a_ids[:, b:b + L - 1]).to(dt)], 1)       # predicts a[b .. b+L-1]
+        nb = block.size(1)
+        cache = DynamicCache()
+        for li, (k_, v_) in enumerate(pkv): cache.update(k_, v_, li)
+        pos = torch.arange(P, P + nb, device=dev)[None]
+        hs = llm.model(inputs_embeds=block, attention_mask=torch.ones(1, P + nb, device=dev), past_key_values=cache,
+                       position_ids=pos, cache_position=pos[0], use_cache=True).last_hidden_state[0, a.S - 1:]   # (L, H)
+        loss = 0.0
+        for i in range(0, L, 256):
+            tr = teacher_rows(ref_h[b - a.C + i:b - a.C + min(i + 256, L)])
+            kl, ag = checkpoint(_kl_rows, hs[i:i + 256], tr, use_reentrant=False)
+            loss = loss + kl; K += kl.item(); A_ += ag.item(); N += tr.shape[0]
+        (loss / 1000.0).backward()
+    return K, A_, N
+
+
 rows = [json.loads(l) for f_ in a.traces.split(",") for l in open(f_)]
 if not all("prompt" in r for r in rows):
     from datasets import load_dataset
@@ -256,7 +303,7 @@ for r in rows:
     pid = tok.encode(r["prompt"], add_special_tokens=False)
     data.append((torch.tensor(pid + tok.encode(r["text"], add_special_tokens=False)), len(pid)))   # CPU; moved per trace
 
-tag = f"S{a.S} rw{a.rw} C{a.C} maxd{a.maxd} L{a.layers} ffn{a.ffn}" + (f" FT{a.ft_layers}" if a.ft_layers else "") + (f" from{a.score_from}" if a.score_from else "")
+tag = f"S{a.S} rw{a.rw} C{a.C} maxd{a.maxd} L{a.layers} ffn{a.ffn}" + (" par" if a.par and a.mode == "train" else "") + (f" FT{a.ft_layers}" if a.ft_layers else "") + (f" from{a.score_from}" if a.score_from else "")
 if a.mode == "eval":
     pooler.eval(); t0 = time.time(); K = A_ = N = 0
     for ids, P in data:
@@ -310,9 +357,12 @@ else:
                 for j in range(st, min(st + a.accum, steps)):
                     ids_j, P_j = data[j % len(data)]
                     T_j = min(len(ids_j), P_j + a.max_len)
-                    if T_j - P_j - (a.rw + a.C) >= a.C:
-                        refs[j] = teacher_hidden(ids_j.to(dev), P_j + a.rw + a.C, T_j)
-        k, g, n = run_trace(ids, P, True, ref_h=refs.pop(st, None)); K += k; A_ += g; N += n
+                    lo_j = a.C if a.par else a.rw + a.C
+                    if T_j - P_j - lo_j >= (a.rw + a.C if a.par else a.C):
+                        refs[j] = teacher_hidden(ids_j.to(dev), P_j + lo_j, T_j)
+        if a.par: k, g, n = run_trace_par(ids, P, ref_h=refs.pop(st, None))
+        else: k, g, n = run_trace(ids, P, True, ref_h=refs.pop(st, None))
+        K += k; A_ += g; N += n
         if (st + 1) % a.accum == 0 or st + 1 == steps:
             torch.nn.utils.clip_grad_norm_(list(pooler.parameters()) + MASTER, 1.0)
             opt.step(); opt.zero_grad(set_to_none=True); sched.step()

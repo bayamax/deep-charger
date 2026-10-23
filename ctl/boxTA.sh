@@ -4,7 +4,7 @@
 # raw window 1024, chunk 128, maxD 384, 1 block / ffn 1024 (~19 MB at 4 bits). Held-out KL (MATH 64 / mixed 60) on the
 # default region (from the first eviction, 4096 tokens) and on the common region (1792+). The model is fetched first
 # (timeout + retry without xet): an earlier box hung inside the first eval on a stalled download.
-SER=10
+SER=11
 if [ -f /root/.boxta_serial ] && [ "$(cat /root/.boxta_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxta_serial
 echo "[ta] preflight GPU: $(nvidia-smi --query-gpu=name,memory.used,memory.total --format=csv,noheader)"
@@ -18,6 +18,17 @@ tail -n 1 /root/w/sp.log 2>/dev/null | cut -c1-200
 nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv,noheader
 ST
 chmod +x /root/status.sh
+# serial 11 (the user: use the parallel all-window training if it runs smoothly): stage B again from spA_stop.pt with
+# --par - one forward of [prompt | SP_b | the next rw+C tokens] scores every prediction in it (window 0 .. rw+C), 4
+# boundaries per trace, all-layer FFT + pooler, the same 8000 unseen traces; scoring unchanged (deployment loop).
+if [ ! -e /root/.jobb5 ]; then touch /root/.jobb5
+  pkill -f jobb4.sh; pkill -f sp_qwen3.py; sleep 3
+  curl -sS -o /root/w/sp_qwen3.py "$RAW/tools/sp_qwen3.py?nocache=$(date +%s)"
+  sed 's/s7: stage B training on/s11: stage B (par) training on/; s/--chunks-per-trace 4 --accum 8 --out spB.pt/--par --chunks-per-trace 4 --accum 8 --out spB.pt/' /root/jobb2.sh > /root/jobb5.sh
+  grep -q -- "--par --chunks-per-trace" /root/jobb5.sh && echo "[ta] s11: job uses --par" || echo "[ta] s11: WARNING --par not set"
+  setsid nohup bash -c 'bash /root/jobb5.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
+  echo "[ta] s11: stage B (par) launched $(date -u)"
+fi
 # serial 10: stage B ran at ~20 s/trace (a full 2.8 GB weight swap through the CPU for every trace's teacher pass) -
 # new sp_qwen3.py does one swap per 8 traces, frozen copy pinned, restore from the fp32 master on the GPU; restart stage B
 if [ ! -e /root/.jobb4 ]; then touch /root/.jobb4
