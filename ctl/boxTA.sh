@@ -28,8 +28,8 @@ put() { python3 -c "import sys; from huggingface_hub import HfApi; HfApi().uploa
 python3 -m pip install -q "huggingface_hub[hf_xet]" bitsandbytes datasets 2>&1 | grep -v -i warn | tail -1
 curl -sSfL -H "Authorization: Bearer $HF_TOKEN" -o traces.jsonl "$H/archive/kvpool/traces.jsonl"
 curl -sSfL -H "Authorization: Bearer $HF_TOKEN" -o kv_full.jsonl "$H/archive/kvwin/q17_full.jsonl"
-for i in 0 1 2 3 4 5; do until curl -sSfL -H "Authorization: Bearer $HF_TOKEN" -o traces_big_$i.jsonl "$H/archive/sp3/traces_big_$i.jsonl"; do sleep 120; done; done
-echo "[ta] data: $(cat traces_big_?.jsonl | wc -l) big traces"
+for i in 0 1 2; do until curl -sSfL -H "Authorization: Bearer $HF_TOKEN" -o traces_big_$i.jsonl "$H/archive/sp3/traces_big_$i.jsonl"; do sleep 120; done; done
+echo "[ta] data: $(cat traces_big_[012].jsonl | wc -l) big traces (shards 0-2)"
 LG=/root/w/sp.log; F="--S 32 --rw 1024 --C 128 --maxd 384 --layers 1 --ffn 1024"
 ev() { for e in kv_full.jsonl:math traces.jsonl:mix; do f=${e%%:*}; n=${e#*:}; x=""; [ $n = mix ] && x="--n 60"
   for sf in 0 1792; do python3 sp_qwen3.py eval --traces $f $x --max-len 4096 --score-from $sf $F "$@" --log $LG 2>&1 | grep -E "^\[sp\] eval|Error|Traceback|out of memory" | sed "s/^/[$n] /"; done; done; }
