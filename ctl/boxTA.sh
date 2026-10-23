@@ -4,7 +4,7 @@
 # raw window 1024, chunk 128, maxD 384, 1 block / ffn 1024 (~19 MB at 4 bits). Held-out KL (MATH 64 / mixed 60) on the
 # default region (from the first eviction, 4096 tokens) and on the common region (1792+). The model is fetched first
 # (timeout + retry without xet): an earlier box hung inside the first eval on a stalled download.
-SER=9
+SER=10
 if [ -f /root/.boxta_serial ] && [ "$(cat /root/.boxta_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxta_serial
 echo "[ta] preflight GPU: $(nvidia-smi --query-gpu=name,memory.used,memory.total --format=csv,noheader)"
@@ -18,6 +18,15 @@ tail -n 1 /root/w/sp.log 2>/dev/null | cut -c1-200
 nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv,noheader
 ST
 chmod +x /root/status.sh
+# serial 10: stage B ran at ~20 s/trace (a full 2.8 GB weight swap through the CPU for every trace's teacher pass) -
+# new sp_qwen3.py does one swap per 8 traces, frozen copy pinned, restore from the fp32 master on the GPU; restart stage B
+if [ ! -e /root/.jobb4 ]; then touch /root/.jobb4
+  pkill -f jobb3.sh; pkill -f sp_qwen3.py; sleep 3
+  curl -sS -o /root/w/sp_qwen3.py "$RAW/tools/sp_qwen3.py?nocache=$(date +%s)"
+  sed 's/s7: stage B training on/s10: stage B training on/' /root/jobb2.sh > /root/jobb4.sh
+  setsid nohup bash -c 'bash /root/jobb4.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
+  echo "[ta] s10: stage B restarted with the fast swap $(date -u)"
+fi
 # serial 9: stage B crashed at its first backward (the teacher's lm-head step swapped the frozen weights in place, between
 # the student's forward and backward) - fixed in sp_qwen3.py; relaunch stage B with the new code
 if [ ! -e /root/.jobb3 ]; then touch /root/.jobb3

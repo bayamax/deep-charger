@@ -161,14 +161,27 @@ def kv_of(cache, li):
     return cache.key_cache[li], cache.value_cache[li]
 
 
+SWAP = {"pairs": None, "depth": 0}   # training: (param, pinned frozen copy, fp32 master) - fast in-place swap
+
+
 class _Frozen:
-    """swap the frozen copy of the tuned layers in for the teacher pass"""
+    """swap the frozen copy of the tuned layers in for the teacher pass (re-entrant: nested uses are no-ops)"""
     def __enter__(self):
-        if FT_SD is None: return
+        SWAP["depth"] += 1
+        if FT_SD is None or SWAP["depth"] > 1: return
+        if SWAP["pairs"] is not None:      # training: frozen copy from pinned CPU, restore from the fp32 master (on GPU)
+            with torch.no_grad():
+                for p_, f_, m_ in SWAP["pairs"]: p_.copy_(f_, non_blocking=True)
+            return
         self.cur = {k: v.detach().to("cpu", copy=True) for k, v in llm.state_dict().items() if k in FT_SD}
         llm.load_state_dict(FT_SD, strict=False)
     def __exit__(self, *e):
-        if FT_SD is None: return
+        SWAP["depth"] -= 1
+        if FT_SD is None or SWAP["depth"] > 0: return
+        if SWAP["pairs"] is not None:
+            with torch.no_grad():
+                for p_, f_, m_ in SWAP["pairs"]: p_.copy_(m_.to(p_.dtype))
+            return
         llm.load_state_dict(self.cur, strict=False)
 
 
@@ -186,14 +199,14 @@ def teacher_rows(h):
     return F.log_softmax(llm.lm_head(h).float(), -1)
 
 
-def run_trace(ids, P, train):
+def run_trace(ids, P, train, ref_h=None):
     """teacher-forced SP-evict over one trace: returns (sum KL, sum top-1 agree, n tokens) on tokens past the window."""
     T = min(len(ids), P + a.max_len)
     a_ids = ids[None, P:T]; La = a_ids.size(1)
     first = a.rw + a.C          # chunks before this see the whole answer so far in the raw window (no eviction yet)
     if La - first < a.C: return 0.0, 0.0, 0
     ids = ids.to(dev); a_ids = a_ids.to(dev)
-    ref_h = teacher_hidden(ids, P + first, T)
+    if ref_h is None: ref_h = teacher_hidden(ids, P + first, T)
     c0s = list(range(first, La, a.C))
     pick = set(c0s)
     if train and a.chunks_per_trace and len(c0s) > a.chunks_per_trace:
@@ -285,9 +298,21 @@ else:
         torch.save(ck, a.out)
 
     t0 = time.time(); K = A_ = N = 0
+    if FTP:   # pinned frozen copies in the same order as the tuned params, for the fast swap
+        names = [n_ for li in range(a.ft_layers) for n_, _ in llm.model.layers[li].named_parameters(prefix=f"model.layers.{li}")]
+        SWAP["pairs"] = [(p_, FT_SD[n_].pin_memory() if dev == "cuda" else FT_SD[n_], m_) for p_, n_, m_ in zip(FTP, names, MASTER)]
+    refs = {}
     for st in range(steps):
         ids, P = data[st % len(data)]
-        k, g, n = run_trace(ids, P, True); K += k; A_ += g; N += n
+        if FTP and st % a.accum == 0:   # the teacher pass for the next group of traces in ONE weight swap
+            refs = {}
+            with _Frozen():
+                for j in range(st, min(st + a.accum, steps)):
+                    ids_j, P_j = data[j % len(data)]
+                    T_j = min(len(ids_j), P_j + a.max_len)
+                    if T_j - P_j - (a.rw + a.C) >= a.C:
+                        refs[j] = teacher_hidden(ids_j.to(dev), P_j + a.rw + a.C, T_j)
+        k, g, n = run_trace(ids, P, True, ref_h=refs.pop(st, None)); K += k; A_ += g; N += n
         if (st + 1) % a.accum == 0 or st + 1 == steps:
             torch.nn.utils.clip_grad_norm_(list(pooler.parameters()) + MASTER, 1.0)
             opt.step(); opt.zero_grad(set_to_none=True); sched.step()
