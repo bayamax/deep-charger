@@ -4,7 +4,7 @@
 # raw window 1024, chunk 128, maxD 384, 1 block / ffn 1024 (~19 MB at 4 bits). Held-out KL (MATH 64 / mixed 60) on the
 # default region (from the first eviction, 4096 tokens) and on the common region (1792+). The model is fetched first
 # (timeout + retry without xet): an earlier box hung inside the first eval on a stalled download.
-SER=12
+SER=13
 if [ -f /root/.boxta_serial ] && [ "$(cat /root/.boxta_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxta_serial
 echo "[ta] preflight GPU: $(nvidia-smi --query-gpu=name,memory.used,memory.total --format=csv,noheader)"
@@ -18,6 +18,35 @@ tail -n 1 /root/w/sp.log 2>/dev/null | cut -c1-200
 nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv,noheader
 ST
 chmod +x /root/status.sh
+# serial 13 (the user's hypothesis holds: SP alone predicts almost nothing (window-0 KL ~5), the raw window hides it):
+# stop the --par stage B at its last checkpoint and continue with window-0 SP-next training + all-layer FFT on the
+# traces stage B has not seen; scored with the deployment loop at the end.
+if [ ! -e /root/.jobc ]; then touch /root/.jobc
+  cd /root/w
+  LAST=$(grep -o 'par FT28 trace [0-9]*/8000' sp.log | tail -1 | grep -o '[0-9]*/' | tr -d '/'); NS=$(( LAST / 200 * 200 ))
+  pkill -f upl.sh; pkill -f jobb5.sh; pkill -f sp_qwen3.py; sleep 5
+  cp spB.pt spB_par_stop.pt
+  tail -n +$(( NS + 1 )) trainB.jsonl > trainC.jsonl
+  echo "[ta] s13: stage B (par) stopped at trace $LAST, checkpoint = trace $NS; stage C data: $(wc -l < trainC.jsonl) unseen traces"
+  curl -sS -o /root/w/sp_qwen3.py "$RAW/tools/sp_qwen3.py?nocache=$(date +%s)"
+  cd /root
+  cat > /root/jobc.sh <<'JOB'
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); cd /root/w
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+R=baya1116/hypernet-sp-distill
+put() { python3 -c "import sys; from huggingface_hub import HfApi; HfApi().upload_file(path_or_fileobj=sys.argv[1], path_in_repo='archive/sp3/'+sys.argv[2], repo_id='$R')" "$1" "$2" > /dev/null 2>&1 && echo "[hub] $2" || echo "[hub] $2 FAILED"; }
+LG=/root/w/sp.log; F="--S 32 --rw 1024 --C 128 --maxd 384 --layers 1 --ffn 1024"
+ev() { for e in kv_full_p.jsonl:math traces.jsonl:mix; do f=${e%%:*}; n=${e#*:}; x=""; [ $n = mix ] && x="--n 60"
+  for sf in 0 1792; do python3 sp_qwen3.py eval --traces $f $x --max-len 4096 --score-from $sf $F "$@" --log $LG 2>&1 | grep -E "^\[sp\] eval|Error|Traceback|out of memory" | sed "s/^/[$n] /"; done; done; }
+python3 sp_qwen3.py train --traces trainC.jsonl --max-len 3072 $F --ckpt spB_par_stop.pt --ft-layers 28 --opt8bit --ft-lr 1e-5 --lr 1e-4 --spnext --sn-pos 256 --sn-batch 32 --sn-tokens 12000 --accum 8 --out spC.pt --log $LG > run_trainC.log 2>&1
+grep -E "^\[sp\] (train .*: [0-9]+ traces|trained)|Error|Traceback|out of memory" run_trainC.log | tail -3
+put spC.pt spC_spnext_fft.pt; put $LG spC.log
+ev --ckpt spC.pt
+put $LG spC.log; date -u > DONE_TA_C; put DONE_TA_C DONE_TA_C; echo "[ta] STAGE_C_DONE $(date -u)"
+JOB
+  setsid nohup bash -c 'bash /root/jobc.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
+  echo "[ta] s13: stage C (spnext + FFT) launched $(date -u)"
+fi
 # serial 12: a background uploader - the stage-B checkpoint (saved every 200 traces) to the hub every 45 min, so it can
 # be scored mid-run elsewhere without stopping the training
 if [ ! -e /root/.upl ]; then touch /root/.upl

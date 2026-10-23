@@ -403,8 +403,9 @@ else:
     groups = [{"params": list(pooler.parameters()), "lr": a.lr}]
     FTP, MASTER = [], []
     if a.ft_layers:
-        FT_SD = {k: v.detach().to("cpu", copy=True) for k, v in llm.state_dict().items()
-                 if k.startswith("model.layers.") and int(k.split(".")[2]) < a.ft_layers}
+        if FT_SD is None:   # fresh run: the frozen original is the teacher; resuming from an FT ckpt keeps the original taken at load
+            FT_SD = {k: v.detach().to("cpu", copy=True) for k, v in llm.state_dict().items()
+                     if k.startswith("model.layers.") and int(k.split(".")[2]) < a.ft_layers}
         FTP = [p_ for li in range(a.ft_layers) for p_ in llm.model.layers[li].parameters()]
         for p_ in FTP: p_.requires_grad_(True)
         MASTER = [p_.detach().float().clone().requires_grad_(True) for p_ in FTP]
