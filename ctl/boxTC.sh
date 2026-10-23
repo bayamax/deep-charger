@@ -4,7 +4,7 @@
 # Starts from stage C's weights (spC_spnext_fft_t400.pt); data = the stage-C traces it has not seen (stage B's 8000 unseen
 # traces from 4801, minus the 625 stage C used) - every trace once. The original model stays the teacher. At the end:
 # held-out KL by window length (profile) and the deployment loop, both against stages A / B.
-SER=1
+SER=2
 if [ -f /root/.boxtc_serial ] && [ "$(cat /root/.boxtc_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxtc_serial
 echo "[tc] preflight GPU: $(nvidia-smi --query-gpu=name,memory.used,memory.total --format=csv,noheader)"
@@ -18,6 +18,18 @@ tail -n 1 /root/w/sp.log 2>/dev/null | cut -c1-200
 nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv,noheader
 ST
 chmod +x /root/status.sh
+# serial 2: KL flat at 5.6 after 100 traces = only 12 optimizer steps (8 traces per update). Restart with one update per
+# trace (256 positions each) and pooler lr 5e-4 so it can learn to carry the newest tokens; the ~250 traces the first run used are skipped.
+if [ ! -e /root/.job2 ]; then touch /root/.job2
+  pkill -f job.sh; pkill -f sp_qwen3.py; sleep 5; cd /root/w
+  curl -sS -o /root/w/sp_qwen3.py "$RAW/tools/sp_qwen3.py?nocache=$(date +%s)"
+  { sed -n '1,4p' /root/job.sh; grep -E '^(LG=|ev\(\)|  python3 sp_qwen3.py eval)' /root/job.sh; sed -n '/^echo "\[tc\] training launched/,$p' /root/job.sh; } > /root/job2.sh
+  sed -i 's/--accum 8 --out spC2.pt/--accum 1 --skip 250 --out spC2.pt/; s/--ft-lr 1e-5 --lr 1e-4 --spnext/--ft-lr 1e-5 --lr 5e-4 --spnext/' /root/job2.sh
+  grep -q -- "--accum 1 --skip 250" /root/job2.sh && grep -q -- "--lr 5e-4 --spnext" /root/job2.sh && echo "[tc] s2: args set" || echo "[tc] s2: WARNING args not set"
+  echo "[tc] s2: job2 lines $(wc -l < /root/job2.sh)"; cd /root
+  setsid nohup bash -c 'bash /root/job2.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
+  echo "[tc] s2: relaunched $(date -u)"
+fi
 if [ ! -e /root/.job ]; then touch /root/.job
   cat > /root/job.sh <<'JOB'
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); cd /root/w
