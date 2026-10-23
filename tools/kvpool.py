@@ -51,6 +51,8 @@ ap.add_argument("--lora", type=int, default=0, help="unfreeze the model: LoRA ra
 ap.add_argument("--lora-ckpt", default="", help="eval/gen: a trained LoRA (kvpool train --lora ... --out)")
 ap.add_argument("--ft-layers", type=int, default=0, help="full fine-tune of the first N decoder layers (input side), rest frozen; "
                "fp32 master weights (bf16 alone would round small updates away)")
+ap.add_argument("--opt8bit", action="store_true", help="8-bit AdamW states (bitsandbytes) on the fp32 master weights - a full fine-tune of all "
+               "decoder layers then fits a 24 GB card")
 ap.add_argument("--ft-ckpt", default="", help="eval/gen: the trained input-side layers (kvpool train --ft-layers N --out x.safetensors)")
 ap.add_argument("--full", action="store_true", help="eval: never evict (full KV) - checks a LoRA keeps the frozen model's normal behaviour")
 ap.add_argument("--init-traces", default="", help="gen without --ckpt: traces whose keys seed the codebook")
@@ -454,12 +456,21 @@ else:
         FTP = [p_ for li in range(a.ft_layers) for p_ in model.model.layers[li].parameters()]
         for p_ in FTP: p_.requires_grad_(True)
     MASTER = [p_.detach().float().clone().requires_grad_(True) for p_ in FTP]
+    def _acc(m_):   # every chunk's bf16 grad goes straight into the fp32 master grad (bf16 accumulation would lose it)
+        def hook(p_):
+            if m_.grad is None: m_.grad = p_.grad.float()
+            else: m_.grad.add_(p_.grad.float())
+            p_.grad = None
+        return hook
+    for p_, m_ in zip(FTP, MASTER): p_.register_post_accumulate_grad_hook(_acc(m_))
     log(f"[kvpool] trainable params: {(sum(p_.numel() for p_ in TRAINABLE) + sum(p_.numel() for p_ in FTP)) / 1e6:.1f}M "
         f"(pooler {'yes' if pooler is not None else 'no'}, LoRA r{a.lora}, full FT of layers 0-{a.ft_layers - 1})")
-    opt = torch.optim.AdamW(TRAINABLE + MASTER, lr=a.lr, weight_decay=0.0)
+    if a.opt8bit:
+        import bitsandbytes as bnb
+        opt = bnb.optim.AdamW8bit(TRAINABLE + MASTER, lr=a.lr, weight_decay=0.0)
+    else:
+        opt = torch.optim.AdamW(TRAINABLE + MASTER, lr=a.lr, weight_decay=0.0)
     def do_step():
-        for p_, m_ in zip(FTP, MASTER):
-            m_.grad = p_.grad.float() if p_.grad is not None else None; p_.grad = None
         torch.nn.utils.clip_grad_norm_(TRAINABLE + MASTER, 1.0); opt.step(); opt.zero_grad(set_to_none=True)
         with torch.no_grad():
             for p_, m_ in zip(FTP, MASTER): p_.copy_(m_.to(p_.dtype))
