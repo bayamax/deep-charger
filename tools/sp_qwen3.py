@@ -56,6 +56,9 @@ ap.add_argument("--sn-t0", type=int, default=16, help="spnext: first answer posi
 ap.add_argument("--score-from", type=int, default=0, help="count only answer tokens at index >= this (a common region when rw differs)")
 ap.add_argument("--pe-rev", action="store_true", help="pooler positions counted from the NEWEST buffer token (0 = the token "
                "just before the window / the predicted position) instead of from the oldest - saved in the checkpoint")
+ap.add_argument("--pe-norm", action="store_true", help="scale the pooler's sinusoidal positions to the mean embedding norm "
+                "(raw sinusoids have norm sqrt(H/2) = 32 against token embeddings of ~1.5: the content was ~5%% of the key/value signal)")
+ap.add_argument("--fresh-pooler", action="store_true", help="train: take only the fine-tuned model weights from --ckpt, start a new pooler")
 ap.add_argument("--seed", type=int, default=0)
 ap.add_argument("--device", default="cuda"); ap.add_argument("--dtype", default="bfloat16")
 a = ap.parse_args()
@@ -112,10 +115,10 @@ class AttnPoolSP(nn.Module):
         self.ln_out = nn.LayerNorm(Hd)
         self.out_scale = nn.Parameter(torch.tensor(float(target_norm)))
         self._pe = None
-        self.pe_rev = False
+        self.pe_rev = False; self.pe_gain = 1.0
 
     def pe(self, L, device):
-        if self._pe is None or self._pe.size(0) < L: self._pe = sinusoidal(max(L, 1024), self.H, device)
+        if self._pe is None or self._pe.size(0) < L: self._pe = sinusoidal(max(L, 1024), self.H, device) * self.pe_gain
         return self._pe[:L]
 
     def _run(self, past_emb, want_mass, kpm=None):
@@ -150,12 +153,15 @@ pooler = AttnPoolSP(H, a.S, a.heads, a.layers, a.ffn, target_norm).to(dev)
 FT_SD = None
 if a.ckpt:
     ck = torch.load(a.ckpt, map_location="cpu", weights_only=False)
-    pooler.load_state_dict(ck["pooler"])
-    if a.mode != "train" and (ck.get("args") or {}).get("pe_rev"): a.pe_rev = True   # eval follows the checkpoint
+    if not (a.fresh_pooler and a.mode == "train"): pooler.load_state_dict(ck["pooler"])
+    if a.mode != "train":   # eval follows the checkpoint
+        if (ck.get("args") or {}).get("pe_rev"): a.pe_rev = True
+        if (ck.get("args") or {}).get("pe_norm"): a.pe_norm = True
     if ck.get("ft"):
         FT_SD = {k: v.detach().to("cpu", copy=True) for k, v in llm.state_dict().items() if k in ck["ft"]}   # frozen copy = teacher
         llm.load_state_dict({k: v.to(dev, dt) for k, v in ck["ft"].items()}, strict=False)
 pooler.pe_rev = a.pe_rev
+if a.pe_norm: pooler.pe_gain = target_norm / math.sqrt(H / 2)   # sinusoid norm sqrt(H/2) -> the embedding norm
 n_pool = sum(x.numel() for x in pooler.parameters())
 KV_TOK = NL * 2 * llm.config.num_key_value_heads * getattr(llm.config, "head_dim", H // llm.config.num_attention_heads) * 2
 log(f"[sp] pooler {n_pool / 1e6:.1f}M params (4-bit ~{n_pool / 2 / 2**20:.0f} MB) | S={a.S} rw={a.rw} C={a.C} maxd={a.maxd} | "
@@ -396,7 +402,7 @@ for r in rows:
     pid = tok.encode(r["prompt"], add_special_tokens=False)
     data.append((torch.tensor(pid + tok.encode(r["text"], add_special_tokens=False)), len(pid)))   # CPU; moved per trace
 
-tag = f"S{a.S} rw{a.rw} C{a.C} maxd{a.maxd} L{a.layers} ffn{a.ffn}" + (" par" if a.par and a.mode == "train" else "") + (" spnext" if a.spnext and a.mode == "train" else "") + (" pe-rev" if a.pe_rev else "") + (f" FT{a.ft_layers}" if a.ft_layers else "") + (f" from{a.score_from}" if a.score_from else "")
+tag = f"S{a.S} rw{a.rw} C{a.C} maxd{a.maxd} L{a.layers} ffn{a.ffn}" + (" par" if a.par and a.mode == "train" else "") + (" spnext" if a.spnext and a.mode == "train" else "") + (" pe-rev" if a.pe_rev else "") + (" pe-norm" if a.pe_norm else "") + (f" FT{a.ft_layers}" if a.ft_layers else "") + (f" from{a.score_from}" if a.score_from else "")
 if a.mode == "profile":
     pooler.eval(); acc = {}
     for ids, P in data: profile_trace(ids, P, acc)

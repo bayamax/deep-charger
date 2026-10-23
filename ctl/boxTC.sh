@@ -4,7 +4,7 @@
 # Starts from stage C's weights (spC_spnext_fft_t400.pt); data = the stage-C traces it has not seen (stage B's 8000 unseen
 # traces from 4801, minus the 625 stage C used) - every trace once. The original model stays the teacher. At the end:
 # held-out KL by window length (profile) and the deployment loop, both against stages A / B.
-SER=2
+SER=3
 if [ -f /root/.boxtc_serial ] && [ "$(cat /root/.boxtc_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxtc_serial
 echo "[tc] preflight GPU: $(nvidia-smi --query-gpu=name,memory.used,memory.total --format=csv,noheader)"
@@ -18,6 +18,21 @@ tail -n 1 /root/w/sp.log 2>/dev/null | cut -c1-200
 nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv,noheader
 ST
 chmod +x /root/status.sh
+# serial 3: the pooler's sinusoidal positions had norm sqrt(H/2) = 32 against token embeddings of ~1.5, so the keys and
+# values it reads were ~95% position and ~5% content: the SP carried almost nothing (window-0 KL ~5.5 in every run).
+# Fix (--pe-norm: positions scaled to the embedding norm) + newest-first positions; a NEW pooler on the original model
+# (frozen, pooler only - the stage-A recipe) on window-0 SP-next, one update per trace; FFT comes after if this moves.
+if [ ! -e /root/.job3 ]; then touch /root/.job3
+  pkill -f job2.sh; pkill -f sp_qwen3.py; sleep 5; cd /root/w
+  curl -sS -o /root/w/sp_qwen3.py "$RAW/tools/sp_qwen3.py?nocache=$(date +%s)"
+  grep -q "pe_norm" sp_qwen3.py && echo "[tc] s3: trainer has --pe-norm" || echo "[tc] s3: WARNING old trainer"
+  sed -e 's/--ckpt spC0.pt --pe-rev --ft-layers 28 --opt8bit --ft-lr 1e-5 --lr 5e-4/--pe-rev --pe-norm --lr 5e-4/' \
+      -e 's/--sn-batch 8 --sn-tokens 3000 --accum 1 --skip 250 --out spC2.pt/--sn-batch 32 --sn-tokens 12000 --accum 1 --skip 650 --out spD.pt/' \
+      -e 's/spC2\.pt/spD.pt/g; s/spC2_spnext_perev_fft\.pt/spD_spnext_penorm.pt/; s/spC2\.log/spD.log/g; s/DONE_TC/DONE_TD/g' /root/job2.sh > /root/job3.sh
+  grep -q -- "--pe-rev --pe-norm --lr 5e-4 --spnext" /root/job3.sh && grep -q -- "--skip 650 --out spD.pt" /root/job3.sh && echo "[tc] s3: args set" || echo "[tc] s3: WARNING args not set"
+  cd /root; setsid nohup bash -c 'bash /root/job3.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
+  echo "[tc] s3: launched $(date -u)"
+fi
 # serial 2: KL flat at 5.6 after 100 traces = only 12 optimizer steps (8 traces per update). Restart with one update per
 # trace (256 positions each) and pooler lr 5e-4 so it can learn to carry the newest tokens; the ~250 traces the first run used are skipped.
 if [ ! -e /root/.job2 ]; then touch /root/.job2
