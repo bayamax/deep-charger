@@ -4,7 +4,7 @@
 # raw window 1024, chunk 128, maxD 384, 1 block / ffn 1024 (~19 MB at 4 bits). Held-out KL (MATH 64 / mixed 60) on the
 # default region (from the first eviction, 4096 tokens) and on the common region (1792+). The model is fetched first
 # (timeout + retry without xet): an earlier box hung inside the first eval on a stalled download.
-SER=15
+SER=16
 if [ -f /root/.boxta_serial ] && [ "$(cat /root/.boxta_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxta_serial
 echo "[ta] preflight GPU: $(nvidia-smi --query-gpu=name,memory.used,memory.total --format=csv,noheader)"
@@ -18,6 +18,18 @@ tail -n 1 /root/w/sp.log 2>/dev/null | cut -c1-200
 nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv,noheader
 ST
 chmod +x /root/status.sh
+# serial 16: stop stage C (window-0 KL only 6.06 -> 5.7 in 500 traces: the pooler's positions count from the oldest
+# token, so "the newest token" has no fixed index); keep its weights: upload the latest checkpoints, then the box goes
+if [ ! -e /root/.stopc ]; then touch /root/.stopc
+  pkill -f jobc2.sh; pkill -f sp_qwen3.py; sleep 3; cd /root/w
+  for f in spC.pt:spC_spnext_fft_t400.pt spB_par_stop.pt:spB_par_fft_t4800.pt; do src=${f%%:*}; dst=${f#*:}
+    python3 -c "import sys; from huggingface_hub import HfApi; HfApi().upload_file(path_or_fileobj='$src', path_in_repo='archive/sp3/$dst', repo_id='baya1116/hypernet-sp-distill')" > /dev/null 2>&1 && echo "[hub] $dst" || echo "[hub] $dst FAILED"
+  done
+  python3 -c "import sys; from huggingface_hub import HfApi; HfApi().upload_file(path_or_fileobj='sp.log', path_in_repo='archive/sp3/spC.log', repo_id='baya1116/hypernet-sp-distill')" > /dev/null 2>&1
+  cp trainC.jsonl /root/w/trainC_all.jsonl; date -u > STOPPED_C
+  python3 -c "import sys; from huggingface_hub import HfApi; HfApi().upload_file(path_or_fileobj='STOPPED_C', path_in_repo='archive/sp3/STOPPED_C', repo_id='baya1116/hypernet-sp-distill')" > /dev/null 2>&1
+  echo "[ta] s16: stage C stopped, checkpoints uploaded $(date -u)"; cd /root
+fi
 # serial 15: stage C ran out of memory (FFT state ~17 GB + 32 positions x prompt KV) - rerun with 8 positions per batch
 if [ ! -e /root/.jobc2 ]; then touch /root/.jobc2
   pkill -f jobc.sh; pkill -f sp_qwen3.py; sleep 3
