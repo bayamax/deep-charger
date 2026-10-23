@@ -4,7 +4,7 @@
 # raw window 1024, chunk 128, maxD 384, 1 block / ffn 1024 (~19 MB at 4 bits). Held-out KL (MATH 64 / mixed 60) on the
 # default region (from the first eviction, 4096 tokens) and on the common region (1792+). The model is fetched first
 # (timeout + retry without xet): an earlier box hung inside the first eval on a stalled download.
-SER=7
+SER=8
 if [ -f /root/.boxta_serial ] && [ "$(cat /root/.boxta_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxta_serial
 echo "[ta] preflight GPU: $(nvidia-smi --query-gpu=name,memory.used,memory.total --format=csv,noheader)"
@@ -18,6 +18,13 @@ tail -n 1 /root/w/sp.log 2>/dev/null | cut -c1-200
 nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv,noheader
 ST
 chmod +x /root/status.sh
+# serial 8: diagnostics - stage B header printed but the GPU looks empty
+if [ ! -e /root/.diag8 ]; then touch /root/.diag8
+  echo "[ta] d8 ps: $(ps aux | grep -E 'sp_qwen3|jobb' | grep -v grep | awk '{print $3"%cpu", $6/1e6"GB", $12, $13, $14}' | tr '\n' ';')"
+  echo "[ta] d8 smi: $(nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv,noheader) | $(nvidia-smi --query-compute-apps=pid,used_memory --format=csv,noheader | tr '\n' ' ')"
+  echo "[ta] d8 trainB: $(tail -c 700 /root/w/run_trainB.log | tr '\n' ' ')"
+  echo "[ta] d8 mem: $(free -g | awk 'NR==2{print $3"G used of "$2"G"}')"
+fi
 # serial 7: serial 6 stopped the started stage-B training without relaunching it - relaunch training + scoring on the fixed data
 if [ ! -e /root/.jobb2 ]; then touch /root/.jobb2
   pkill -f jobb.sh; pkill -f sp_qwen3.py; sleep 5
