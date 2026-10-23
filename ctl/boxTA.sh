@@ -3,7 +3,7 @@
 # shards 0-2 (~6.5k traces, each seen once, 4 chunks back-propagated per trace), numbers from the sweep: S32, raw window
 # 1024, chunk 128, maxD 384, 1 block / ffn 1024 (~19 MB at 4 bits). Held-out KL (MATH 64 / mixed 60) on the default region
 # (from the first eviction, 4096 tokens) and on the common region (1792+). Stage B (full FT + pooler) comes as serial 2.
-SER=2
+SER=3
 if [ -f /root/.boxta_serial ] && [ "$(cat /root/.boxta_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxta_serial
 echo "[ta] preflight GPU: $(nvidia-smi --query-gpu=name,memory.used,memory.total --format=csv,noheader)"
@@ -19,6 +19,35 @@ tail -n 1 /root/w/sp.log 2>/dev/null | cut -c1-200
 nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv,noheader
 ST
 chmod +x /root/status.sh
+# serial 3: the stall was a hung download inside the first eval (python at 2% CPU, nothing logged, GPU idle): restart
+# stage A with the model fetched first (timeout + retry without xet) and the MATH eval traces carrying their prompts.
+if [ ! -e /root/.joba3 ]; then touch /root/.joba3
+  pkill -f joba.sh; pkill -f sp_qwen3.py; sleep 3; echo "[ta] s3: stalled stage A stopped $(date -u)"
+  cat > /root/joba3.sh <<'JOB'
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); cd /root/w
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+R=baya1116/hypernet-sp-distill; H=https://huggingface.co/$R/resolve/main
+put() { python3 -c "import sys; from huggingface_hub import HfApi; HfApi().upload_file(path_or_fileobj=sys.argv[1], path_in_repo='archive/sp3/'+sys.argv[2], repo_id='$R')" "$1" "$2" > /dev/null 2>&1 && echo "[hub] $2" || echo "[hub] $2 FAILED"; }
+curl -sSfL -H "Authorization: Bearer $HF_TOKEN" -o kv_full_p.jsonl "$H/archive/kvwin/q17_full_p.jsonl"
+for t in 1 2 3; do
+  x=""; [ $t -gt 1 ] && x="HF_HUB_DISABLE_XET=1"
+  env $x timeout 900 python3 -c "from huggingface_hub import snapshot_download; print(snapshot_download('Qwen/Qwen3-1.7B'))" > dl.log 2>&1 && break
+  echo "[ta] model download attempt $t failed: $(tail -1 dl.log | cut -c1-150)"
+done
+echo "[ta] model: $(tail -1 dl.log | cut -c1-120)"
+LG=/root/w/sp.log; F="--S 32 --rw 1024 --C 128 --maxd 384 --layers 1 --ffn 1024"
+ev() { for e in kv_full_p.jsonl:math traces.jsonl:mix; do f=${e%%:*}; n=${e#*:}; x=""; [ $n = mix ] && x="--n 60"
+  for sf in 0 1792; do python3 sp_qwen3.py eval --traces $f $x --max-len 4096 --score-from $sf $F "$@" --log $LG 2>&1 | grep -E "^\[sp\] eval|Error|Traceback|out of memory" | sed "s/^/[$n] /"; done; done; }
+ev
+python3 sp_qwen3.py train --traces traces_big_0.jsonl,traces_big_1.jsonl,traces_big_2.jsonl --max-len 3072 $F --chunks-per-trace 4 --accum 8 --lr 2e-4 --out spA.pt --log $LG > run_trainA.log 2>&1
+grep -E "^\[sp\] (train .*: [0-9]+ traces|trained)|Error|Traceback|out of memory" run_trainA.log | tail -3
+put spA.pt spA_rw1024_L1.pt; put $LG spA.log
+ev --ckpt spA.pt
+put $LG spA.log; date -u > DONE_TA_A; put DONE_TA_A DONE_TA_A; echo "[ta] STAGE_A_DONE $(date -u)"
+JOB
+  setsid nohup bash -c 'bash /root/joba3.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
+  echo "[ta] s3: stage A relaunched $(date -u)"
+fi
 # serial 2: diagnostics - stage A stalled (GPU idle 60 min after the data line)
 if [ ! -e /root/.diag2 ]; then touch /root/.diag2
   echo "[ta] diag: $(python3 -c 'import torch,transformers;print(torch.__version__, torch.cuda.is_available(), transformers.__version__)' 2>&1 | tail -1)"
