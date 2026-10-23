@@ -51,6 +51,7 @@ ap.add_argument("--lora", type=int, default=0, help="unfreeze the model: LoRA ra
 ap.add_argument("--lora-ckpt", default="", help="eval/gen: a trained LoRA (kvpool train --lora ... --out)")
 ap.add_argument("--ft-layers", type=int, default=0, help="full fine-tune of the first N decoder layers (input side), rest frozen; "
                "fp32 master weights (bf16 alone would round small updates away)")
+ap.add_argument("--accum", type=int, default=1, help="traces per optimizer step (one trace is a noisy batch for a full fine-tune)")
 ap.add_argument("--opt8bit", action="store_true", help="8-bit AdamW states (bitsandbytes) on the fp32 master weights - a full fine-tune of all "
                "decoder layers then fits a 24 GB card")
 ap.add_argument("--ft-ckpt", default="", help="eval/gen: the trained input-side layers (kvpool train --ft-layers N --out x.safetensors)")
@@ -259,7 +260,7 @@ def teacher_logp(ids, lo, hi):
     return torch.cat([F.log_softmax(model.lm_head(h[i:i + 256]).float(), -1).to(torch.bfloat16) for i in range(0, h.shape[0], 256)])
 
 
-def run_trace(ids, P, pooler, opt=None):
+def run_trace(ids, P, pooler, opt=None, step_now=True):
     """one trace through the bounded loop; returns (sum KL, sum agree, n tokens)."""
     T = min(len(ids), P + a.max_len)
     first = P + (256 if a.full else a.W + a.C)   # tokens before this are seen with the full context in both models
@@ -306,7 +307,7 @@ def run_trace(ids, P, pooler, opt=None):
         if slots is not None: slots = [tuple(t.detach() for t in s) for s in slots]
         pos = e
     QCAP["on"] = False
-    if opt is not None:
+    if opt is not None and step_now:
         do_step()
     return kl_sum, ag_sum, n
 
@@ -475,10 +476,13 @@ else:
         with torch.no_grad():
             for p_, m_ in zip(FTP, MASTER): p_.copy_(m_.to(p_.dtype))
     steps = int(len(data) * a.epochs); t0 = time.time(); K = A = N = 0
-    sched = torch.optim.lr_scheduler.LambdaLR(opt, lambda s: min(1.0, (s + 1) / 20) * max(0.1, 1 - s / max(steps, 1)))
+    n_upd = max(1, steps // a.accum)
+    sched = torch.optim.lr_scheduler.LambdaLR(opt, lambda s: min(1.0, (s + 1) / max(2, n_upd // 15)) * max(0.1, 1 - s / n_upd))
     for st in range(steps):
         ids, P = data[st % len(data)] if st >= len(data) else data[st]
-        k, g_, n = run_trace(ids, P, pooler, opt); sched.step()
+        last = (st + 1) % a.accum == 0 or st + 1 == steps
+        k, g_, n = run_trace(ids, P, pooler, opt, step_now=last)
+        if last: sched.step()
         K += k; A += g_; N += n
         if (st + 1) % 25 == 0 or st + 1 == steps:
             log(f"[kvpool] train {tag} step {st + 1}/{steps}: KL {K / max(N, 1):.4f} top1 {100 * A / max(N, 1):.2f}% ({time.time() - t0:.0f}s)")

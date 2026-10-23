@@ -30,7 +30,7 @@ curl -sSfL -H "Authorization: Bearer $HF_TOKEN" -o kv_full.jsonl "$H/archive/kvw
 echo "[vw] data: $(wc -l < traces.jsonl) traces, $(wc -l < kv_full.jsonl) math"
 LG=/root/vw/kvpool_fft.log; F="--W 256 --m 128 --C 128 --fold fit --reservoir 256"
 NL=28
-python3 kvpool.py train --traces traces.jsonl --skip 60 --n 300 --max-len 3072 $F --ft-layers 28 --opt8bit --lr 1e-5 --out ftin$NL.safetensors --log $LG > run_train$NL.log 2>&1
+python3 kvpool.py train --traces traces.jsonl --skip 60 --n 300 --max-len 3072 $F --ft-layers 28 --opt8bit --accum 8 --epochs 2 --lr 1e-5 --out ftin$NL.safetensors --log $LG > run_train$NL.log 2>&1
 grep -E "^\[kvpool\] (trainable|trained)|Error|Traceback|out of memory" run_train$NL.log | tail -3
 put ftin$NL.safetensors fft_W256_m128.safetensors; put $LG kvpool_fft.log
 for e in kv_full.jsonl:math traces.jsonl:mix; do f=${e%%:*}; n=${e#*:}; x=""; [ $n = mix ] && x="--n 60"
