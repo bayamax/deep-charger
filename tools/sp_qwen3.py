@@ -181,8 +181,9 @@ def teacher_hidden(ids, lo, hi):
 
 @torch.no_grad()
 def teacher_rows(h):
-    with _Frozen():
-        return F.log_softmax(llm.lm_head(h).float(), -1)
+    # the lm head is never tuned, so no weight swap here (swapping in place between the student's forward and backward
+    # would invalidate its graph)
+    return F.log_softmax(llm.lm_head(h).float(), -1)
 
 
 def run_trace(ids, P, train):
