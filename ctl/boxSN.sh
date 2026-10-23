@@ -2,7 +2,7 @@
 # Box SN (3060, pytorch image): does the window-0 "SP-next" training help? From stage A's pooler (spA, rw1024, 1 block),
 # model frozen, 600 unseen traces (shard 3), every 4th position... 512 positions per trace in batches of 64:
 # [prompt | SP_t] -> token t. Scored with the deployment loop (MATH 64 / mixed 60, default + from1792) vs spA.
-SER=2
+SER=3
 if [ -f /root/.boxsn_serial ] && [ "$(cat /root/.boxsn_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxsn_serial
 echo "[sn] preflight GPU: $(nvidia-smi --query-gpu=name,memory.used,memory.total --format=csv,noheader)"
@@ -16,6 +16,10 @@ tail -n 1 /root/w/sp.log 2>/dev/null | cut -c1-200
 nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv,noheader
 ST
 chmod +x /root/status.sh
+if [ ! -e /root/.diag3 ]; then touch /root/.diag3
+  echo "[sn] d3 err: $(grep -E 'Error|error' /root/w/run_train.log | tail -2 | tr '\n' ' ' | cut -c1-500)"
+  echo "[sn] d3 frames: $(grep -E '^  File \"/root/w/sp_qwen3.py' /root/w/run_train.log | tail -3 | tr '\n' ' ')"
+fi
 if [ ! -e /root/.diag2 ]; then touch /root/.diag2
   echo "[sn] d2 trainlog: $(tail -c 900 /root/w/run_train.log | tr '\n' ' ')"
   echo "[sn] d2 mem: $(free -g | awk 'NR==2{print $2"G total"}') dmesg: $(dmesg 2>/dev/null | grep -i -E 'killed|oom' | tail -2 | tr '\n' ' ')"
