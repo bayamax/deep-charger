@@ -3,7 +3,7 @@
 # shards 0-2 (~6.5k traces, each seen once, 4 chunks back-propagated per trace), numbers from the sweep: S32, raw window
 # 1024, chunk 128, maxD 384, 1 block / ffn 1024 (~19 MB at 4 bits). Held-out KL (MATH 64 / mixed 60) on the default region
 # (from the first eviction, 4096 tokens) and on the common region (1792+). Stage B (full FT + pooler) comes as serial 2.
-SER=1
+SER=2
 if [ -f /root/.boxta_serial ] && [ "$(cat /root/.boxta_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxta_serial
 echo "[ta] preflight GPU: $(nvidia-smi --query-gpu=name,memory.used,memory.total --format=csv,noheader)"
@@ -19,6 +19,13 @@ tail -n 1 /root/w/sp.log 2>/dev/null | cut -c1-200
 nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv,noheader
 ST
 chmod +x /root/status.sh
+# serial 2: diagnostics - stage A stalled (GPU idle 60 min after the data line)
+if [ ! -e /root/.diag2 ]; then touch /root/.diag2
+  echo "[ta] diag: $(python3 -c 'import torch,transformers;print(torch.__version__, torch.cuda.is_available(), transformers.__version__)' 2>&1 | tail -1)"
+  echo "[ta] diag ps: $(ps aux | grep -E 'sp_qwen3|joba' | grep -v grep | awk '{print $3"%cpu", $11, $12, $13, $14}' | tr '\n' ';')"
+  echo "[ta] diag log: $(tail -c 600 /root/w/sp.log 2>/dev/null | tr '\n' ' ')"
+  echo "[ta] diag w.log: $(tail -n 5 /root/w/w.log | tr '\n' ' ' | cut -c1-600)"
+fi
 if [ ! -e /root/.joba ]; then touch /root/.joba
   cat > /root/joba.sh <<'JOB'
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); cd /root/w
