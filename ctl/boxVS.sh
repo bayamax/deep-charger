@@ -1,7 +1,7 @@
 #!/bin/bash
 # Box VS (3060, vLLM image, short): the end-to-end check box VR ran out of memory on - 32 MATH-500 level 4-5 problems,
 # Qwen3-1.7B thinking, 8000 tokens, exposure window 256: the weight-free fit fold (128 slots, reservoir 256) vs dropping.
-BOXVS_SERIAL=4
+BOXVS_SERIAL=5
 if [ -f /root/.boxvs_serial ] && [ "$(cat /root/.boxvs_serial)" -gt "$BOXVS_SERIAL" ] 2>/dev/null; then echo "BOXVS_STALE $BOXVS_SERIAL"; exit 0; fi
 echo $BOXVS_SERIAL > /root/.boxvs_serial
 echo "[vs] preflight GPU: $(nvidia-smi --query-gpu=name,memory.used,memory.total --format=csv,noheader)"
@@ -17,6 +17,29 @@ tail -n 2 /root/vs/kvpool_lora.log /root/vs/sweep.log /root/vs/kvpool_lora2.log 
 nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv,noheader
 ST
 chmod +x /root/status.sh
+# serial 5 (the user: LoRA is not the answer - judge by KL on the model's own traces; the unfreeze moves to the
+# input-side full fine-tune on box VU): stop job 2's LoRA evals and job 3; run only the frozen W/m/C/R sweep.
+if [ ! -e /root/.vsjob5 ]; then touch /root/.vsjob5
+  pkill -f vsjob2.sh; pkill -f vsjob3.sh; pkill -f "kvpool.py"; sleep 5; echo "[vs] s5: LoRA evals + job 3 stopped $(date -u)"
+  cat > /root/vsjob5.sh <<'JOB'
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); cd /root/vs
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+R=baya1116/hypernet-sp-distill
+put() { python3 -c "import sys; from huggingface_hub import HfApi; HfApi().upload_file(path_or_fileobj=sys.argv[1], path_in_repo='archive/kvpool/'+sys.argv[2], repo_id='$R')" "$1" "$2" > /dev/null 2>&1 && echo "[hub] $2" || echo "[hub] $2 FAILED"; }
+fuser -k -9 /dev/nvidia* > /dev/null 2>&1; sleep 3
+SW=/root/vs/sweep.log
+for cfg in "256 128 128 256" "128 256 128 256" "64 384 64 256" "128 320 64 256" "192 256 64 256" "128 192 64 256" "64 256 64 256" "128 256 128 512" "128 256 128 128"; do
+  set -- $cfg; T="W$1_m$2_C$3_R$4"
+  for e in kv_full.jsonl:math:32 traces.jsonl:mix:30; do IFS=: read f n k <<< "$e"
+    python3 kvpool.py eval --traces $f --n $k --max-len 3072 --W $1 --m $2 --C $3 --fold fit --reservoir $4 --log $SW 2>&1 | grep -E "^\[kvpool\] eval|Error|Traceback|out of memory" | sed "s/^/[sweep $n $T] /"
+  done
+  put $SW sweep.log
+done
+put /root/vs/vs.log run_vs5.log; date -u > DONE_VS5; put DONE_VS5 DONE_VS5; echo "[vs] VSJOB5_DONE $(date -u)"
+JOB
+  setsid nohup bash -c 'bash /root/vsjob5.sh >> /root/vs/vs.log 2>&1' > /dev/null 2>&1 < /dev/null &
+  echo "[vs] s5: job 5 (frozen sweep only) launched $(date -u)"
+fi
 # serial 3 (the user: optimise exposure window, soft-prompt length (slots), chunk length, pooler capacity): job 3 after
 # job 2. Frozen-model screen on a smaller held-out set (MATH 32 / mixed 30, 3072 tokens), memory counted at the peak KV
 # = slots m + window W + chunk C, reservoir R <= that peak (pooler <= KV); then the LoRA unfreeze on the best point.
