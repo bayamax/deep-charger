@@ -4,7 +4,7 @@
 # Starts from stage C's weights (spC_spnext_fft_t400.pt); data = the stage-C traces it has not seen (stage B's 8000 unseen
 # traces from 4801, minus the 625 stage C used) - every trace once. The original model stays the teacher. At the end:
 # held-out KL by window length (profile) and the deployment loop, both against stages A / B.
-SER=4
+SER=5
 if [ -f /root/.boxtc_serial ] && [ "$(cat /root/.boxtc_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxtc_serial
 echo "[tc] preflight GPU: $(nvidia-smi --query-gpu=name,memory.used,memory.total --format=csv,noheader)"
@@ -18,6 +18,32 @@ tail -n 1 /root/w/sp.log 2>/dev/null | cut -c1-200
 nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv,noheader
 ST
 chmod +x /root/status.sh
+# serial 5: stage D (new pooler, model frozen, pe-norm) took window-0 KL 6.8 -> ~3.9 by trace ~1800 and is flattening
+# (copy ceiling 0.79 at S=32). Stage E = unfreeze: all-layer FFT (fp32 master, 8-bit AdamW) + the pooler from D's
+# 1800-trace checkpoint, pooler lr 1e-3, one update per trace, 2000 traces neither D's pooler nor the model has seen
+# (shards 0-2 lines 1-3200, then trainB lines 1-5425 - only discarded poolers / discarded FFT runs saw them).
+if [ ! -e /root/.job5 ]; then touch /root/.job5
+  cd /root/w
+  for i in $(seq 1 40); do n=$(grep -o 'pe-norm trace [0-9]*/3725' sp.log | tail -1 | grep -o '[0-9]*/' | tr -d '/'); [ "${n:-0}" -ge 1825 ] && break; sleep 30; done
+  pkill -f job3.sh; pkill -f sp_qwen3.py; sleep 5
+  cp spD.pt spD_t1800.pt; echo "[tc] s5: stage D stopped at trace $n (checkpoint 1800)"
+  { cat traces_big_[012].jsonl | head -n 3200; head -n 5425 trainB.jsonl; } > trainE.jsonl; echo "[tc] s5: stage E pool $(wc -l < trainE.jsonl) traces"
+  curl -sS -o /root/w/sp_qwen3.py "$RAW/tools/sp_qwen3.py?nocache=$(date +%s)"
+  { sed -n '1,4p' /root/job3.sh; grep -E '^(LG=|ev\(\)|  python3 sp_qwen3.py eval)' /root/job3.sh; } > /root/job5.sh
+  cat >> /root/job5.sh <<'JOB'
+put spD_t1800.pt spD_spnext_penorm_t1800.pt; put $LG spD.log
+echo "[tc] stage E launched $(date -u)"
+python3 sp_qwen3.py train --traces trainE.jsonl --n 2000 --max-len 3072 $F --ckpt spD_t1800.pt --pe-rev --pe-norm --ft-layers 28 --opt8bit --ft-lr 1e-5 --lr 1e-3 --spnext --sn-pos 256 --sn-batch 8 --sn-tokens 3000 --accum 1 --out spE.pt --log $LG > run_trainE.log 2>&1
+grep -E "^\[sp\] (train .*: [0-9]+ traces|trained)|Error|Traceback|out of memory" run_trainE.log | tail -3
+put spE.pt spE_spnext_penorm_fft.pt; put $LG spE.log
+python3 sp_qwen3.py profile --traces kv_full_p.jsonl --n 16 --max-len 4096 $F --ckpt spE.pt --log $LG 2>&1 | grep -E "^\[sp\]|Error|Traceback" | tail -7 | sed "s/^/[math] /"
+ev --ckpt spE.pt
+put $LG spE.log; date -u > DONE_TE; put DONE_TE DONE_TE; echo "[tc] DONE_E $(date -u)"
+JOB
+  echo "[tc] s5: job5 $(wc -l < /root/job5.sh) lines"; cd /root
+  setsid nohup bash -c 'bash /root/job5.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
+  echo "[tc] s5: launched $(date -u)"
+fi
 # serial 4: side measurement while stage D trains - the window-0 ceiling of a pooler that just copies: [prompt | the
 # embeddings of the last S tokens] -> KL vs the full model (raw and fixed-norm embeddings; S = 1, 8, 32).
 if [ ! -e /root/.orc ]; then touch /root/.orc
