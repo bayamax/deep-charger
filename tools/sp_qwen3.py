@@ -45,6 +45,12 @@ ap.add_argument("--chunks-per-trace", type=int, default=0, help="train: back-pro
 ap.add_argument("--par", action="store_true", help="train: one forward of [prompt | SP(buffer at boundary b) | the next rw+C "
                "tokens] scores EVERY next-token prediction in it - window 0 (right after the soft prompts) up to rw+C - instead of "
                "one chunk after a full window; --chunks-per-trace boundaries per trace")
+ap.add_argument("--spnext", action="store_true", help="train: window 0 only - [prompt | SP_t] -> token t for (nearly) every "
+               "position t of a trace, in batches of --sn-batch positions (memory fixed by the batch, not the trace)")
+ap.add_argument("--sn-step", type=int, default=16, help="spnext: buffer snapshot granularity (tokens)")
+ap.add_argument("--sn-batch", type=int, default=64, help="spnext: positions per forward")
+ap.add_argument("--sn-pos", type=int, default=0, help="spnext: positions sampled per trace (0 = all)")
+ap.add_argument("--sn-t0", type=int, default=16, help="spnext: first answer position trained")
 ap.add_argument("--score-from", type=int, default=0, help="count only answer tokens at index >= this (a common region when rw differs)")
 ap.add_argument("--seed", type=int, default=0)
 ap.add_argument("--device", default="cuda"); ap.add_argument("--dtype", default="bfloat16")
@@ -82,11 +88,11 @@ class Block(nn.Module):
         self.lnq3 = nn.LayerNorm(Hd)
         self.ffn = nn.Sequential(nn.Linear(Hd, ffn), nn.GELU(), nn.Linear(ffn, Hd))
 
-    def forward(self, q, past, return_w=False):
+    def forward(self, q, past, return_w=False, kpm=None):
         w = None
         if past is not None and past.size(1) > 0:
             kn = self.lnk(past)
-            a_, w = self.cross(self.lnq1(q), kn, kn, need_weights=return_w)
+            a_, w = self.cross(self.lnq1(q), kn, kn, need_weights=return_w, key_padding_mask=kpm)
             q = q + a_
         s, _ = self.selfa(self.lnq2(q), self.lnq2(q), self.lnq2(q), need_weights=False); q = q + s
         q = q + self.ffn(self.lnq3(q))
@@ -107,7 +113,7 @@ class AttnPoolSP(nn.Module):
         if self._pe is None or self._pe.size(0) < L: self._pe = sinusoidal(max(L, 1024), self.H, device)
         return self._pe[:L]
 
-    def _run(self, past_emb, want_mass):
+    def _run(self, past_emb, want_mass, kpm=None):
         B, L = past_emb.size(0), past_emb.size(1)
         past = past_emb + self.pe(L, past_emb.device).unsqueeze(0) if L > 0 else past_emb
         q = self.query.unsqueeze(0).expand(B, -1, -1).contiguous()
@@ -117,12 +123,12 @@ class AttnPoolSP(nn.Module):
                 q, w = blk(q, past, return_w=True)
                 if w is not None: mass = mass + w.sum(dim=1)
             else:
-                q = blk(q, past)
+                q = blk(q, past, kpm=kpm)
         sp = self.ln_out(q)
         sp = sp / sp.norm(dim=-1, keepdim=True).clamp(min=1e-6) * self.out_scale.abs()   # output normalisation
         return (sp, mass) if want_mass else sp
 
-    def forward(self, past_emb): return self._run(past_emb, False)
+    def forward(self, past_emb, kpm=None): return self._run(past_emb, False, kpm)   # kpm: (B, L) True = padding
     def forward_with_mass(self, past_emb): return self._run(past_emb, True)
 
 
@@ -288,6 +294,47 @@ def run_trace_par(ids, P, ref_h=None):
     return K, A_, N
 
 
+def run_trace_spnext(ids, P, ref_h=None):
+    """--spnext training on one trace: the buffer before every position t (snapshots every sn_step tokens, mass-evicted,
+    no grad) -> SP_t -> [prompt | SP_t] predicts answer token t; positions batched, backward per batch."""
+    T = min(len(ids), P + a.max_len)
+    ids = ids.to(dev); a_ids = ids[None, P:T]; La = a_ids.size(1); t0 = a.sn_t0
+    if La - t0 < a.sn_batch // 4: return 0.0, 0.0, 0
+    if ref_h is None: ref_h = teacher_hidden(ids, P + t0, T)          # row j predicts answer token t0 + j
+    with torch.no_grad():
+        pc = DynamicCache(); llm(input_ids=ids[None, :P], past_key_values=pc, use_cache=True)
+        pkv = [tuple(t for t in kv_of(pc, li)) for li in range(NL)]
+        snaps = {}; kept = torch.zeros(1, 0, dtype=torch.long, device=dev); absorbed = 0
+        for g in range(0, La, a.sn_step):
+            kept, absorbed = update_buffer(kept, absorbed, a_ids, g); snaps[g] = kept[0]
+    pos = list(range(t0, La))
+    if a.sn_pos and len(pos) > a.sn_pos: pos = sorted(random.sample(pos, a.sn_pos))
+    K = A_ = N = 0.0
+    for i in range(0, len(pos), a.sn_batch):
+        ts = pos[i:i + a.sn_batch]; B = len(ts)
+        bufs = []
+        for t in ts:
+            g = (t // a.sn_step) * a.sn_step
+            bufs.append(torch.cat([snaps[g], a_ids[0, g:t]]))             # snapshot + the raw tokens since it
+        Lb = max(1, max(len(x) for x in bufs))
+        pad = torch.zeros(B, Lb, dtype=torch.long, device=dev); kpm = torch.ones(B, Lb, dtype=torch.bool, device=dev)
+        for j, x in enumerate(bufs):
+            pad[j, :len(x)] = x; kpm[j, :len(x)] = False
+        kpm[:, 0] = False                                                  # an empty buffer still attends to one slot
+        sp = pooler(embed(pad).float(), kpm=kpm)                          # (B, S, H)
+        cache = DynamicCache()
+        for li, (k_, v_) in enumerate(pkv): cache.update(k_.expand(B, -1, -1, -1), v_.expand(B, -1, -1, -1), li)
+        pp = torch.arange(P, P + a.S, device=dev)[None].expand(B, -1)
+        h = llm.model(inputs_embeds=sp.to(dt), attention_mask=torch.ones(B, P + a.S, device=dev), past_key_values=cache,
+                      position_ids=pp, cache_position=pp[0], use_cache=True).last_hidden_state[:, -1]   # (B, H)
+        tr = teacher_rows(ref_h[torch.tensor(ts, device=dev) - t0])
+        lp = F.log_softmax(llm.lm_head(h).float(), -1)
+        kl = (tr.exp() * (tr - lp)).sum(-1)
+        (kl.sum() / 1000.0).backward()
+        K += kl.sum().item(); A_ += (lp.argmax(-1) == tr.argmax(-1)).float().sum().item(); N += B
+    return K, A_, N
+
+
 rows = [json.loads(l) for f_ in a.traces.split(",") for l in open(f_)]
 if not all("prompt" in r for r in rows):
     from datasets import load_dataset
@@ -303,7 +350,7 @@ for r in rows:
     pid = tok.encode(r["prompt"], add_special_tokens=False)
     data.append((torch.tensor(pid + tok.encode(r["text"], add_special_tokens=False)), len(pid)))   # CPU; moved per trace
 
-tag = f"S{a.S} rw{a.rw} C{a.C} maxd{a.maxd} L{a.layers} ffn{a.ffn}" + (" par" if a.par and a.mode == "train" else "") + (f" FT{a.ft_layers}" if a.ft_layers else "") + (f" from{a.score_from}" if a.score_from else "")
+tag = f"S{a.S} rw{a.rw} C{a.C} maxd{a.maxd} L{a.layers} ffn{a.ffn}" + (" par" if a.par and a.mode == "train" else "") + (" spnext" if a.spnext and a.mode == "train" else "") + (f" FT{a.ft_layers}" if a.ft_layers else "") + (f" from{a.score_from}" if a.score_from else "")
 if a.mode == "eval":
     pooler.eval(); t0 = time.time(); K = A_ = N = 0
     for ids, P in data:
@@ -357,10 +404,11 @@ else:
                 for j in range(st, min(st + a.accum, steps)):
                     ids_j, P_j = data[j % len(data)]
                     T_j = min(len(ids_j), P_j + a.max_len)
-                    lo_j = a.C if a.par else a.rw + a.C
-                    if T_j - P_j - lo_j >= (a.rw + a.C if a.par else a.C):
+                    lo_j = a.sn_t0 if a.spnext else (a.C if a.par else a.rw + a.C)
+                    if T_j - P_j - lo_j >= (a.sn_batch // 4 if a.spnext else (a.rw + a.C if a.par else a.C)):
                         refs[j] = teacher_hidden(ids_j.to(dev), P_j + lo_j, T_j)
-        if a.par: k, g, n = run_trace_par(ids, P, ref_h=refs.pop(st, None))
+        if a.spnext: k, g, n = run_trace_spnext(ids, P, ref_h=refs.pop(st, None))
+        elif a.par: k, g, n = run_trace_par(ids, P, ref_h=refs.pop(st, None))
         else: k, g, n = run_trace(ids, P, True, ref_h=refs.pop(st, None))
         K += k; A_ += g; N += n
         if (st + 1) % a.accum == 0 or st + 1 == steps:
