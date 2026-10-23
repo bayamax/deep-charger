@@ -4,7 +4,7 @@
 # Starts from stage C's weights (spC_spnext_fft_t400.pt); data = the stage-C traces it has not seen (stage B's 8000 unseen
 # traces from 4801, minus the 625 stage C used) - every trace once. The original model stays the teacher. At the end:
 # held-out KL by window length (profile) and the deployment loop, both against stages A / B.
-SER=5
+SER=6
 if [ -f /root/.boxtc_serial ] && [ "$(cat /root/.boxtc_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxtc_serial
 echo "[tc] preflight GPU: $(nvidia-smi --query-gpu=name,memory.used,memory.total --format=csv,noheader)"
@@ -18,6 +18,24 @@ tail -n 1 /root/w/sp.log 2>/dev/null | cut -c1-200
 nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv,noheader
 ST
 chmod +x /root/status.sh
+# serial 6: stage E (FFT) went 3.97 -> ~3.46 by trace 450, then flat to 650 - stop it (600-trace checkpoint kept). The numbers sweep that chose a 1-layer
+# pooler ran with the broken positions while the raw window did all the work, so re-test depth on window-0: a NEW 3-layer
+# pooler, model frozen, pe-rev + pe-norm, lr 1e-3, 800 traces (stage D was at KL 4.39 by 800) from trainE lines 2001+.
+if [ ! -e /root/.job6 ]; then touch /root/.job6
+  pkill -f job5.sh; pkill -f sp_qwen3.py; sleep 5; cd /root/w
+  echo "[tc] s6: stage E stopped at $(grep -o 'FT28 trace [0-9]*/2000' sp.log | tail -1)"
+  tail -n +2001 trainE.jsonl > trainF.jsonl
+  { sed -n '1,4p' /root/job5.sh; grep -E '^(LG=|ev\(\)|  python3 sp_qwen3.py eval)' /root/job5.sh; } > /root/job6.sh
+  cat >> /root/job6.sh <<'JOB'
+cp spE.pt spE_t600.pt; (put spE_t600.pt spE_spnext_penorm_fft_t600.pt) &
+echo "[tc] stage F launched $(date -u)"
+python3 sp_qwen3.py train --traces trainF.jsonl --n 800 --max-len 3072 --S 32 --rw 1024 --C 128 --maxd 384 --layers 3 --ffn 1024 --pe-rev --pe-norm --lr 1e-3 --spnext --sn-pos 256 --sn-batch 32 --sn-tokens 12000 --accum 1 --out spF.pt --log $LG > run_trainF.log 2>&1
+grep -E "^\[sp\] (train .*: [0-9]+ traces|trained)|Error|Traceback|out of memory" run_trainF.log | tail -3
+put spF.pt spF_L3_spnext.pt; put $LG spF.log; date -u > DONE_TF; put DONE_TF DONE_TF; echo "[tc] DONE_F $(date -u)"
+JOB
+  cd /root; setsid nohup bash -c 'bash /root/job6.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
+  echo "[tc] s6: launched $(date -u)"
+fi
 # serial 5: stage D (new pooler, model frozen, pe-norm) took window-0 KL 6.8 -> ~3.9 by trace ~1800 and is flattening
 # (copy ceiling 0.79 at S=32). Stage E = unfreeze: all-layer FFT (fp32 master, 8-bit AdamW) + the pooler from D's
 # 1800-trace checkpoint, pooler lr 1e-3, one update per trace, 2000 traces neither D's pooler nor the model has seen
