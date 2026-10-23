@@ -4,7 +4,7 @@
 # raw window 1024, chunk 128, maxD 384, 1 block / ffn 1024 (~19 MB at 4 bits). Held-out KL (MATH 64 / mixed 60) on the
 # default region (from the first eviction, 4096 tokens) and on the common region (1792+). The model is fetched first
 # (timeout + retry without xet): an earlier box hung inside the first eval on a stalled download.
-SER=13
+SER=14
 if [ -f /root/.boxta_serial ] && [ "$(cat /root/.boxta_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxta_serial
 echo "[ta] preflight GPU: $(nvidia-smi --query-gpu=name,memory.used,memory.total --format=csv,noheader)"
@@ -18,6 +18,11 @@ tail -n 1 /root/w/sp.log 2>/dev/null | cut -c1-200
 nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv,noheader
 ST
 chmod +x /root/status.sh
+# serial 14: diagnostics - stage C stopped within minutes
+if [ ! -e /root/.diag14 ]; then touch /root/.diag14
+  echo "[ta] d14 err: $(grep -E 'Error' /root/w/run_trainC.log | tail -2 | tr '\n' ' ' | cut -c1-500)"
+  echo "[ta] d14 frames: $(grep -E 'File \"/root/w/sp_qwen3.py' /root/w/run_trainC.log | tail -3 | tr '\n' ' ')"
+fi
 # serial 13 (the user's hypothesis holds: SP alone predicts almost nothing (window-0 KL ~5), the raw window hides it):
 # stop the --par stage B at its last checkpoint and continue with window-0 SP-next training + all-layer FFT on the
 # traces stage B has not seen; scored with the deployment loop at the end.
