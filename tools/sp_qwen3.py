@@ -40,6 +40,7 @@ ap.add_argument("--epochs", type=float, default=1.0)
 ap.add_argument("--ckpt", default="")
 ap.add_argument("--out", default="")
 ap.add_argument("--log", default="")
+ap.add_argument("--score-from", type=int, default=0, help="count only answer tokens at index >= this (a common region when rw differs)")
 ap.add_argument("--seed", type=int, default=0)
 ap.add_argument("--device", default="cuda"); ap.add_argument("--dtype", default="bfloat16")
 a = ap.parse_args()
@@ -207,7 +208,8 @@ def run_trace(ids, P, train):
             tr = ref[c0 - first:c1 - first].float()            # teacher row j predicts answer token first + j
             kl = (tr.exp() * (tr - sl)).sum(-1)
             if train: (kl.sum() / 1000.0).backward()
-        K += kl.sum().item(); A_ += (sl.argmax(-1) == tr.argmax(-1)).float().sum().item(); N += kl.numel()
+        if c0 >= a.score_from:
+            K += kl.sum().item(); A_ += (sl.argmax(-1) == tr.argmax(-1)).float().sum().item(); N += kl.numel()
     return K, A_, N
 
 
@@ -226,7 +228,7 @@ for r in rows:
     pid = tok.encode(r["prompt"], add_special_tokens=False)
     data.append((torch.tensor(pid + tok.encode(r["text"], add_special_tokens=False), device=dev), len(pid)))
 
-tag = f"S{a.S} rw{a.rw} C{a.C} maxd{a.maxd}" + (f" FT{a.ft_layers}" if a.ft_layers else "")
+tag = f"S{a.S} rw{a.rw} C{a.C} maxd{a.maxd} L{a.layers} ffn{a.ffn}" + (f" FT{a.ft_layers}" if a.ft_layers else "") + (f" from{a.score_from}" if a.score_from else "")
 if a.mode == "eval":
     pooler.eval(); t0 = time.time(); K = A_ = N = 0
     for ids, P in data:
