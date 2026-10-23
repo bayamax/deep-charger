@@ -4,7 +4,7 @@
 # raw window 1024, chunk 128, maxD 384, 1 block / ffn 1024 (~19 MB at 4 bits). Held-out KL (MATH 64 / mixed 60) on the
 # default region (from the first eviction, 4096 tokens) and on the common region (1792+). The model is fetched first
 # (timeout + retry without xet): an earlier box hung inside the first eval on a stalled download.
-SER=5
+SER=6
 if [ -f /root/.boxta_serial ] && [ "$(cat /root/.boxta_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxta_serial
 echo "[ta] preflight GPU: $(nvidia-smi --query-gpu=name,memory.used,memory.total --format=csv,noheader)"
@@ -18,6 +18,14 @@ tail -n 1 /root/w/sp.log 2>/dev/null | cut -c1-200
 nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv,noheader
 ST
 chmod +x /root/status.sh
+# serial 6: stage A had reached trace 5075 (spA.pt = trace 5000), so stage B starts at trace 5001 of shards 0-2, not 3201
+if [ ! -e /root/.fixb ]; then touch /root/.fixb
+  cd /root/w
+  if [ -e run_trainB.log ]; then pkill -f "sp_qwen3.py train"; echo "[ta] s6: stage B training had started - restarting it"; RESTART=1; fi
+  cat traces_big_[012].jsonl | tail -n +5001 > restA.jsonl; cat restA.jsonl traces_big_3.jsonl traces_big_4.jsonl traces_big_5.jsonl > trainB.jsonl
+  echo "[ta] s6: stage B data fixed: $(wc -l < trainB.jsonl) unseen traces (spA saw 1-5000)"
+  cd /root
+fi
 # serial 5 (the user: KL is falling - move on now): stop stage A where it is (spA.pt is saved every 200 traces), score it,
 # then stage B = full fine-tune of all decoder layers (fp32 master, 8-bit AdamW) + the pooler, on traces never seen:
 # the rest of shards 0-2 (from 3201) + shards 3-5 (~9.8k), 4 chunks per trace, 8 traces per update.
