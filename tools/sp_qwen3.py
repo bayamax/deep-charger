@@ -52,6 +52,9 @@ ap.add_argument("--sn-batch", type=int, default=64, help="spnext: positions per 
 ap.add_argument("--sn-tokens", type=int, default=16384, help="spnext: cap on batch x (prompt + S) - the prompt KV is "
                "repeated per batch item, so long prompts get smaller batches")
 ap.add_argument("--sn-pos", type=int, default=0, help="spnext: positions sampled per trace (0 = all)")
+ap.add_argument("--sn-win", default="1", help="spnext curriculum: tokens predicted after SP_t (1 = window 0 only; w = SP_t + the next "
+                "w-1 raw tokens, scoring windows 0..w-1), comma list stepped every --sn-win-every traces, e.g. 1,2,4,8,16")
+ap.add_argument("--sn-win-every", type=int, default=150, help="spnext curriculum: traces per --sn-win step")
 ap.add_argument("--sn-t0", type=int, default=16, help="spnext: first answer position trained")
 ap.add_argument("--score-from", type=int, default=0, help="count only answer tokens at index >= this (a common region when rw differs)")
 ap.add_argument("--pe-rev", action="store_true", help="pooler positions counted from the NEWEST buffer token (0 = the token "
@@ -314,12 +317,17 @@ def run_trace_par(ids, P, ref_h=None):
     return K, A_, N
 
 
+SNW = {"w": 1, "k0": 0.0, "n0": 0}   # spnext: the current curriculum window and the window-0 KL since the last log
+
+
 def run_trace_spnext(ids, P, ref_h=None):
     """--spnext training on one trace: the buffer before every position t (snapshots every sn_step tokens, mass-evicted,
-    no grad) -> SP_t -> [prompt | SP_t] predicts answer token t; positions batched, backward per batch."""
+    no grad) -> SP_t -> [prompt | SP_t | a[t : t+w-1]] predicts answer tokens t .. t+w-1 (windows 0 .. w-1, w = the
+    curriculum step, 1 = SP alone); positions batched, backward per batch."""
+    w = SNW["w"]
     T = min(len(ids), P + a.max_len)
     ids = ids.to(dev); a_ids = ids[None, P:T]; La = a_ids.size(1); t0 = a.sn_t0
-    if La - t0 < a.sn_batch // 4: return 0.0, 0.0, 0
+    if La - t0 - w + 1 < a.sn_batch // 4: return 0.0, 0.0, 0
     if ref_h is None: ref_h = teacher_hidden(ids, P + t0, T)          # row j predicts answer token t0 + j
     with torch.no_grad():
         pc = DynamicCache(); llm(input_ids=ids[None, :P], past_key_values=pc, use_cache=True)
@@ -327,10 +335,11 @@ def run_trace_spnext(ids, P, ref_h=None):
         snaps = {}; kept = torch.zeros(1, 0, dtype=torch.long, device=dev); absorbed = 0
         for g in range(0, La, a.sn_step):
             kept, absorbed = update_buffer(kept, absorbed, a_ids, g); snaps[g] = kept[0]
-    pos = list(range(t0, La))
-    if a.sn_pos and len(pos) > a.sn_pos: pos = sorted(random.sample(pos, a.sn_pos))
+    pos = list(range(t0, La - w + 1))
+    npos = max(16, a.sn_pos // w) if a.sn_pos else 0                  # about the same scored tokens per trace at every w
+    if npos and len(pos) > npos: pos = sorted(random.sample(pos, npos))
     K = A_ = N = 0.0
-    bsz = max(2, min(a.sn_batch, a.sn_tokens // (P + a.S)))
+    bsz = max(1, min(a.sn_batch, a.sn_tokens // (P + a.S + w), max(1, 256 // w)))   # <= ~256 scored rows (B x w x vocab) per forward
     for i in range(0, len(pos), bsz):
         ts = pos[i:i + bsz]; B = len(ts)
         bufs = []
@@ -343,16 +352,23 @@ def run_trace_spnext(ids, P, ref_h=None):
             pad[j, :len(x)] = x; kpm[j, :len(x)] = False
         kpm[:, 0] = False                                                  # an empty buffer still attends to one slot
         sp = pooler(embed(pad).float(), kpm=kpm)                          # (B, S, H)
+        x_in = sp.to(dt)
+        if w > 1:                                                          # the raw window after SP_t: a[t : t+w-1]
+            raw = torch.stack([a_ids[0, t:t + w - 1] for t in ts])
+            x_in = torch.cat([x_in, embed(raw).to(dt)], 1)
+        nb = a.S + w - 1
         cache = DynamicCache()
         for li, (k_, v_) in enumerate(pkv): cache.update(k_.expand(B, -1, -1, -1), v_.expand(B, -1, -1, -1), li)
-        pp = torch.arange(P, P + a.S, device=dev)[None].expand(B, -1)
-        h = llm.model(inputs_embeds=sp.to(dt), attention_mask=torch.ones(B, P + a.S, device=dev), past_key_values=cache,
-                      position_ids=pp, cache_position=pp[0], use_cache=True).last_hidden_state[:, -1]   # (B, H)
-        tr = teacher_rows(ref_h[torch.tensor(ts, device=dev) - t0])
+        pp = torch.arange(P, P + nb, device=dev)[None].expand(B, -1)
+        h = llm.model(inputs_embeds=x_in, attention_mask=torch.ones(B, P + nb, device=dev), past_key_values=cache,
+                      position_ids=pp, cache_position=pp[0], use_cache=True).last_hidden_state[:, a.S - 1:]   # (B, w, H)
+        rows = (torch.tensor(ts, device=dev) - t0)[:, None] + torch.arange(w, device=dev)[None]          # (B, w)
+        tr = teacher_rows(ref_h[rows.reshape(-1)]).view(B, w, -1)
         lp = F.log_softmax(llm.lm_head(h).float(), -1)
-        kl = (tr.exp() * (tr - lp)).sum(-1)
+        kl = (tr.exp() * (tr - lp)).sum(-1)                                # (B, w)
         (kl.sum() / 1000.0).backward()
-        K += kl.sum().item(); A_ += (lp.argmax(-1) == tr.argmax(-1)).float().sum().item(); N += B
+        K += kl.sum().item(); A_ += (lp.argmax(-1) == tr.argmax(-1)).float().sum().item(); N += B * w
+        SNW["k0"] += kl[:, 0].sum().item(); SNW["n0"] += B
     return K, A_, N
 
 
@@ -402,7 +418,7 @@ for r in rows:
     pid = tok.encode(r["prompt"], add_special_tokens=False)
     data.append((torch.tensor(pid + tok.encode(r["text"], add_special_tokens=False)), len(pid)))   # CPU; moved per trace
 
-tag = f"S{a.S} rw{a.rw} C{a.C} maxd{a.maxd} L{a.layers} ffn{a.ffn}" + (" par" if a.par and a.mode == "train" else "") + (" spnext" if a.spnext and a.mode == "train" else "") + (" pe-rev" if a.pe_rev else "") + (" pe-norm" if a.pe_norm else "") + (f" FT{a.ft_layers}" if a.ft_layers else "") + (f" from{a.score_from}" if a.score_from else "")
+tag = f"S{a.S} rw{a.rw} C{a.C} maxd{a.maxd} L{a.layers} ffn{a.ffn}" + (" par" if a.par and a.mode == "train" else "") + (" spnext" + (f" win{a.sn_win}/{a.sn_win_every}" if a.sn_win != "1" else "") if a.spnext and a.mode == "train" else "") + (" pe-rev" if a.pe_rev else "") + (" pe-norm" if a.pe_norm else "") + (f" FT{a.ft_layers}" if a.ft_layers else "") + (f" from{a.score_from}" if a.score_from else "")
 if a.mode == "profile":
     pooler.eval(); acc = {}
     for ids, P in data: profile_trace(ids, P, acc)
@@ -455,7 +471,7 @@ else:
     if FTP:   # pinned frozen copies in the same order as the tuned params, for the fast swap
         names = [n_ for li in range(a.ft_layers) for n_, _ in llm.model.layers[li].named_parameters(prefix=f"model.layers.{li}")]
         SWAP["pairs"] = [(p_, FT_SD[n_].pin_memory() if dev == "cuda" else FT_SD[n_], m_) for p_, n_, m_ in zip(FTP, names, MASTER)]
-    refs = {}
+    refs = {}; WINS = [int(x) for x in a.sn_win.split(",")]
     for st in range(steps):
         ids, P = data[st % len(data)]
         if FTP and st % a.accum == 0:   # the teacher pass for the next group of traces in ONE weight swap
@@ -467,7 +483,9 @@ else:
                     lo_j = a.sn_t0 if a.spnext else (a.C if a.par else a.rw + a.C)
                     if T_j - P_j - lo_j >= (a.sn_batch // 4 if a.spnext else (a.rw + a.C if a.par else a.C)):
                         refs[j] = teacher_hidden(ids_j.to(dev), P_j + lo_j, T_j)
-        if a.spnext: k, g, n = run_trace_spnext(ids, P, ref_h=refs.pop(st, None))
+        if a.spnext:
+            SNW["w"] = WINS[min(st // a.sn_win_every, len(WINS) - 1)]
+            k, g, n = run_trace_spnext(ids, P, ref_h=refs.pop(st, None))
         elif a.par: k, g, n = run_trace_par(ids, P, ref_h=refs.pop(st, None))
         else: k, g, n = run_trace(ids, P, True, ref_h=refs.pop(st, None))
         K += k; A_ += g; N += n
@@ -478,7 +496,8 @@ else:
                 with torch.no_grad():
                     for p_, m_ in zip(FTP, MASTER): p_.copy_(m_.to(p_.dtype))
         if (st + 1) % 25 == 0 or st + 1 == steps:
-            log(f"[sp] train {tag} trace {st + 1}/{steps}: KL {K / max(N, 1):.4f} top1 {100 * A_ / max(N, 1):.2f}% ({time.time() - t0:.0f}s)")
-            K = A_ = N = 0
+            x = f" | w{SNW['w']} window-0 KL {SNW['k0'] / max(SNW['n0'], 1):.4f}" if a.spnext and len(WINS) > 1 else ""
+            log(f"[sp] train {tag} trace {st + 1}/{steps}: KL {K / max(N, 1):.4f} top1 {100 * A_ / max(N, 1):.2f}%{x} ({time.time() - t0:.0f}s)")
+            K = A_ = N = 0; SNW["k0"] = 0.0; SNW["n0"] = 0
         if (st + 1) % 200 == 0: save()
     save(); log(f"[sp] trained {tag} -> {a.out}")
