@@ -72,6 +72,9 @@ ap.add_argument("--roll-batch", type=int, default=24, help="rollout: streams gen
 ap.add_argument("--temp", type=float, default=0.6); ap.add_argument("--top-p", type=float, default=0.95); ap.add_argument("--top-k", type=int, default=20)
 ap.add_argument("--no-sp", action="store_true", help="eval/rollout baseline without soft prompts: [raw window | chunk] only "
                 "(with a window as long as the trace it is the full-KV model)")
+ap.add_argument("--ctx-hidden", type=int, default=0, help="pooler input = the frozen model's layer-N hidden states of the distant "
+                "tokens (full-context pass, rescaled to the embedding norm) instead of raw token embeddings - the lever the original "
+                "deep-charger INVESTIGATION found (overfit floor 0.16 -> 0.11); chunk mode (train/eval) only")
 ap.add_argument("--seed", type=int, default=0)
 ap.add_argument("--device", default="cuda"); ap.add_argument("--dtype", default="bfloat16")
 a = ap.parse_args()
@@ -170,6 +173,7 @@ if a.ckpt:
     if a.mode != "train":   # eval follows the checkpoint
         if (ck.get("args") or {}).get("pe_rev"): a.pe_rev = True
         if (ck.get("args") or {}).get("pe_norm"): a.pe_norm = True
+        if (ck.get("args") or {}).get("ctx_hidden"): a.ctx_hidden = ck["args"]["ctx_hidden"]
     if ck.get("ft"):
         FT_SD = {k: v.detach().to("cpu", copy=True) for k, v in llm.state_dict().items() if k in ck["ft"]}   # frozen copy = teacher
         llm.load_state_dict({k: v.to(dev, dt) for k, v in ck["ft"].items()}, strict=False)
@@ -189,11 +193,11 @@ def evict_topk(ids, mass, maxD):
 
 
 @torch.no_grad()
-def update_buffer(kept, absorbed, src, nd_end):
+def update_buffer(kept, absorbed, src, nd_end, feat=None):
     if nd_end > absorbed:
         kept = torch.cat([kept, src[:, absorbed:nd_end]], 1); absorbed = nd_end
         if a.maxd and kept.size(1) > a.maxd:
-            _, mass = pooler.forward_with_mass(embed(kept).float())
+            _, mass = pooler.forward_with_mass(feat(kept) if feat else embed(kept).float())
             kept = evict_topk(kept, mass, a.maxd)
     return kept, absorbed
 
@@ -256,17 +260,23 @@ def run_trace(ids, P, train, ref_h=None):
     with torch.no_grad():
         pc = DynamicCache(); llm(input_ids=ids[None, :P], past_key_values=pc, use_cache=True)
         pkv = [tuple(t for t in kv_of(pc, li)) for li in range(NL)]
+        feat, src = None, a_ids
+        if a.ctx_hidden:   # contextualised pooler input: buffer holds answer positions, features = layer-N hidden states
+            with _Frozen():
+                hs = llm.model(input_ids=ids[None, :T], output_hidden_states=True).hidden_states[a.ctx_hidden][0, P:T].float()
+            hs = hs / hs.norm(dim=-1, keepdim=True).clamp(min=1e-6) * target_norm
+            feat = lambda k: hs[k[0]][None]; src = torch.arange(La, device=dev)[None]
     kept = torch.zeros(1, 0, dtype=torch.long, device=dev); absorbed = 0
     K = A_ = N = 0.0
     for c0 in range(first, La, a.C):
         c1 = min(c0 + a.C, La); cur = c1 - c0
         if cur < 4: break
         R = min(c0, a.rw); nd_end = c0 - R
-        kept, absorbed = update_buffer(kept, absorbed, a_ids, nd_end)
+        kept, absorbed = update_buffer(kept, absorbed, src, nd_end, feat)
         if c0 not in pick: continue
         with torch.set_grad_enabled(train):
             if a.no_sp: parts = []
-            else: parts = [(pooler(embed(kept).float()) if kept.size(1) > 0 else pooler(torch.zeros(1, 0, H, device=dev))).to(dt)]
+            else: parts = [(pooler(feat(kept) if feat else embed(kept).float()) if kept.size(1) > 0 else pooler(torch.zeros(1, 0, H, device=dev))).to(dt)]
             block = torch.cat(parts + [embed(a_ids[:, c0 - R:c0]).to(dt), embed(a_ids[:, c0:c1]).to(dt)], 1)
             nb = block.size(1)
             cache = DynamicCache()
@@ -498,7 +508,7 @@ for r in rows:
     pid = tok.encode(r["prompt"], add_special_tokens=False)
     data.append((torch.tensor(pid + tok.encode(r.get("text", ""), add_special_tokens=False)), len(pid)))   # CPU; moved per trace
 
-tag = f"S{a.S} rw{a.rw} C{a.C} maxd{a.maxd} L{a.layers} ffn{a.ffn}" + (" par" if a.par and a.mode == "train" else "") + (" spnext" + (f" win{a.sn_win}/{a.sn_win_every}" if a.sn_win != "1" else "") if a.spnext and a.mode == "train" else "") + (" no-SP" if a.no_sp else "") + (" pe-rev" if a.pe_rev else "") + (" pe-norm" if a.pe_norm else "") + (f" FT{a.ft_layers}" if a.ft_layers else "") + (f" from{a.score_from}" if a.score_from else "")
+tag = f"S{a.S} rw{a.rw} C{a.C} maxd{a.maxd} L{a.layers} ffn{a.ffn}" + (" par" if a.par and a.mode == "train" else "") + (" spnext" + (f" win{a.sn_win}/{a.sn_win_every}" if a.sn_win != "1" else "") if a.spnext and a.mode == "train" else "") + (" no-SP" if a.no_sp else "") + (f" ctxL{a.ctx_hidden}" if a.ctx_hidden else "") + (" pe-rev" if a.pe_rev else "") + (" pe-norm" if a.pe_norm else "") + (f" FT{a.ft_layers}" if a.ft_layers else "") + (f" from{a.score_from}" if a.score_from else "")
 if a.mode == "profile":
     pooler.eval(); acc = {}
     for ids, P in data: profile_trace(ids, P, acc)
