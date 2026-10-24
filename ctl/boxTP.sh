@@ -5,7 +5,7 @@
 # lr 3e-4. Two poolers side by side: the original (raw sinusoids, oldest-first) and pe-rev + pe-norm. Then held-out deep KL vs
 # the equal-budget raw window (160) and the plain 128, the inference-time wider window (512 on 4096-token traces), and a
 # generation check: 32 MATH problems, full KV vs SP + window 512 vs raw window 544 alone (accuracy, </think>, repetition).
-SER=3
+SER=4
 if [ -f /root/.boxtp_serial ] && [ "$(cat /root/.boxtp_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxtp_serial
 echo "[tp] preflight GPU: $(nvidia-smi --query-gpu=name,memory.used,memory.total --format=csv,noheader)"
@@ -19,6 +19,49 @@ tail -n 1 /root/w/sp.log 2>/dev/null | cut -c1-220
 nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv,noheader
 ST
 chmod +x /root/status.sh
+# serial 4 (the user: if the loss does not get low enough with the model frozen, unfreeze it): after the frozen-model
+# results (DONE_TP2), stage Q = the better recipe pooler + all-layer FFT (fp32 master, 8-bit AdamW), the same rw 128 / C 64,
+# 3072-token contexts (distant up to ~2.9k, cap 4096 = no eviction in practice), 8 chunks per trace, 1500 traces nobody has
+# seen (shards 2-5), teacher = the original model; then the same scores (deep KL at rw 128, rw 512, stage-A conditions) and
+# the generation check (MATH 32: SP + rw 512 / 1024 vs full KV).
+if [ ! -e /root/.job4 ]; then touch /root/.job4
+  cat > /root/job4.sh <<'JOB'
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); cd /root/w
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+R=baya1116/hypernet-sp-distill
+put() { for t in 1 2 3 4 5; do python3 -c "import sys; from huggingface_hub import HfApi; HfApi().upload_file(path_or_fileobj=sys.argv[1], path_in_repo='archive/sp3/'+sys.argv[2], repo_id='$R')" "$1" "$2" > put.err 2>&1 && { echo "[hub] $2"; return 0; }; sleep 90; done; echo "[hub] $2 FAILED"; }
+while [ ! -e DONE_TP2 ]; do sleep 30; done
+LG=/root/w/sp.log; L3="--S 32 --heads 8 --layers 3 --ffn 2048"
+B=$(python3 - <<'PY'
+import re
+L=open("/root/w/sp.log").read()
+def k(c):
+    m=re.findall(r"%s: 64 traces \d+ tokens  KL ([0-9.]+)" % c, L); return float(m[0]) if m else 9
+print("spP_orig.pt" if k("spP_orig.pt") <= k("spP_norm.pt") else "spP_norm.pt")
+PY
+)
+PE=""; [ "$B" = spP_norm.pt ] && PE="--pe-rev --pe-norm"
+echo "[tp] stage Q: FFT + pooler from $B $PE $(date -u)"
+cat traces_big_2.jsonl traces_big_3.jsonl traces_big_4.jsonl traces_big_5.jsonl > trainQ.jsonl
+python3 sp_qwen3.py train --traces trainQ.jsonl --n 1500 --max-len 3072 $L3 --rw 128 --C 64 --maxd 4096 --ckpt $B $PE --ft-layers 28 --opt8bit --ft-lr 1e-5 --lr 1e-4 --chunks-per-trace 8 --accum 1 --out spQ.pt --log $LG > run_trainQ.log 2>&1
+grep -E "^\[sp\] (trained)|Error|Traceback|out of memory" run_trainQ.log | tail -3 | sed "s/^/[tp] Q: /"
+put spQ.pt spQ_ap32recipe_fft.pt; put $LG spP.log
+for e in kv_full_p.jsonl:math traces.jsonl:mix; do f=${e%%:*}; n=${e#*:}; x=""; [ $n = mix ] && x="--n 60"
+  python3 sp_qwen3.py eval --traces $f $x --max-len 768 --score-from 224 --rw 128 $L3 --C 64 --maxd 0 --ckpt spQ.pt --log $LG 2>&1 | grep -E "^\[sp\] eval|Error|Traceback" | sed "s/^/[$n] Q rw128: /"
+  python3 sp_qwen3.py eval --traces $f $x --max-len 4096 --score-from 608 --rw 512 $L3 --C 64 --maxd 4096 --ckpt spQ.pt --log $LG 2>&1 | grep -E "^\[sp\] eval|Error|Traceback" | sed "s/^/[$n] Q rw512: /"
+  python3 sp_qwen3.py eval --traces $f $x --max-len 4096 --rw 1024 $L3 --C 128 --maxd 384 --ckpt spQ.pt --log $LG 2>&1 | grep -E "^\[sp\] eval|Error|Traceback" | sed "s/^/[$n] Q stageA-cond: /"; done
+put $LG spP.log
+G="--traces kv_full_p.jsonl --n 32 --max-len 4096 --roll-batch 16 $L3 --log $LG"
+python3 sp_qwen3.py rollout $G --rw 512 --C 64 --maxd 4096 --ckpt spQ.pt --roll-out genQ_sp512.jsonl > run_gq.log 2>&1
+python3 sp_qwen3.py rollout $G --rw 1024 --C 128 --maxd 384 --ckpt spQ.pt --roll-out genQ_sp1024.jsonl >> run_gq.log 2>&1
+grep -E "Error|Traceback|out of memory" run_gq.log | tail -2
+python3 sp_mathcheck.py gen_full.jsonl genQ_sp512.jsonl genQ_sp1024.jsonl | sed "s/^/[tp] /"
+for g in sp512 sp1024; do put genQ_$g.jsonl ap32genQ_$g.jsonl; done
+put $LG spP.log; date -u > DONE_TQ; put DONE_TQ DONE_TQ; echo "[tp] DONE_TQ $(date -u)"
+JOB
+  setsid nohup bash -c 'bash /root/job4.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
+  echo "[tp] s4: stage Q (FFT) queued after the frozen-model results $(date -u)"
+fi
 # serial 3 (the user: score them under the same conditions as the earlier 0.06-0.08 numbers): after the pipeline, the deployment
 # loop exactly as stages A / B / W3 were scored - rw 1024, C 128, maxD 384, 4096-token traces, MATH 64 / mixed 60 - for both
 # poolers, plus the no-SP equal-budget window (1056).
