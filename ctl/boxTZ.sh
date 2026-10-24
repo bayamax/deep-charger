@@ -4,7 +4,7 @@
 # stops falling (200-trace means < 1%, up to 1500), score window 0, then the fine window curriculum 2 .. 1024 by plateau,
 # then the held-out profile + deployment loop. Pool traces 1-850 are skipped (TY used up to ~800). A live log goes to the
 # hub every 10 min (Vast's log relay was unreliable).
-SER=2
+SER=3
 if [ -f /root/.boxtz_serial ] && [ "$(cat /root/.boxtz_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxtz_serial
 echo "[tz] preflight GPU: $(nvidia-smi --query-gpu=name,memory.used,memory.total --format=csv,noheader)"
@@ -18,6 +18,31 @@ tail -n 1 /root/w/sp.log 2>/dev/null | cut -c1-220
 nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv,noheader
 ST
 chmod +x /root/status.sh
+# serial 3 (the user: W is the best - window-0 2.66 held-out with a 1-layer pooler, ~18 MB at 4 bits, while the 3-layer one
+# reaches 2.76 at ~54 MB, over the 4-bit KV ~33 MB): stop the 3-layer curriculum, continue W instead - its window curriculum
+# to the deployment window, w = 256, 512, 1024 by plateau (100-trace means < 2%, min 200, max 400), middle lr (pooler 2e-4,
+# FFT 5e-6), on traces W has not seen (its pool from 1201); then profile + deployment loop (W 0.107 / 0.097, A 0.079 / 0.066).
+if [ ! -e /root/.job3 ]; then touch /root/.job3
+  pkill -f job2.sh; pkill -f sp_qwen3.py; sleep 5; cd /root/w
+  { sed -n '701,2000p' trainE.jsonl; tail -n +2801 trainE.jsonl; } > trainW.jsonl; echo "[tz] s3: W pool $(wc -l < trainW.jsonl) (expect 7125)"
+  sed -n '1,5p' /root/job.sh > /root/job3.sh
+  cat >> /root/job3.sh <<'JOB'
+get archive/sp3/spW_wincurr_fft.pt spW.pt; echo "[tz] W ckpt $(stat -c %s spW.pt) bytes"
+LG=/root/w/spW2.log; F="--S 32 --rw 1024 --C 128 --maxd 384 --layers 1 --ffn 1024"
+echo "[tz] W curriculum launched $(date -u)"
+python3 sp_qwen3.py train --traces trainW.jsonl --skip 1200 --n 1200 --max-len 3072 $F --ckpt spW.pt --pe-rev --pe-norm --ft-layers 28 --opt8bit --ft-lr 5e-6 --lr 2e-4 --spnext --sn-win 256,512,1024 --sn-win-plateau 0.02 --sn-win-block 4 --sn-win-max 400 --sn-pos 256 --sn-batch 8 --sn-tokens 3000 --accum 1 --out spW2.pt --log $LG > run_trainW2.log 2>&1
+grep -E "^\[sp\] (trained|curriculum)|Error|Traceback|out of memory" run_trainW2.log | tail -4
+python3 sp_qwen3.py profile --traces kv_full_p.jsonl --n 16 --max-len 4096 $F --ckpt spW2.pt --log $LG 2>&1 | grep -E "^\[sp\] profile|Error|Traceback" | tail -7 | sed "s/^/[math] /"
+for e in kv_full_p.jsonl:math traces.jsonl:mix; do f=${e%%:*}; n=${e#*:}; x=""; [ $n = mix ] && x="--n 60"
+  python3 sp_qwen3.py eval --traces $f $x --max-len 4096 $F --ckpt spW2.pt --log $LG 2>&1 | grep -E "^\[sp\] eval|Error|Traceback|out of memory" | sed "s/^/[$n] /"; done
+put spW2.pt spW2_wincurr1024_fft.pt; put $LG spW2.log; date -u > DONE_TW2; put DONE_TW2 DONE_TW2; echo "[tz] DONE_W2 $(date -u)"
+JOB
+  sed -i 's#tail -n 12 sp.log;#tail -n 12 spW2.log;#; s#while \[ ! -e DONE_TZ \]#while [ ! -e DONE_TW2 ]#' /root/live.sh
+  pkill -f live.sh; setsid nohup bash -c 'bash /root/live.sh' > /dev/null 2>&1 < /dev/null &
+  sed -i 's#tail -n 1 /root/w/sp.log#tail -n 1 /root/w/spW2.log#' /root/status.sh
+  cd /root; setsid nohup bash -c 'bash /root/job3.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
+  echo "[tz] s3: W continuation launched $(date -u)"
+fi
 # serial 2: at the full peak lr the continuation climbs (3.46 -> 3.57 -> 3.93 by 150) - TY's 600-trace gains came late, at
 # the decayed lr. Restart it at the late-run lr (pooler 1e-4, FFT 2e-6), the curriculum at pooler 2e-4 / FFT 5e-6; the
 # traces this run used are skipped.
