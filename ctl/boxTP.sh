@@ -5,7 +5,7 @@
 # lr 3e-4. Two poolers side by side: the original (raw sinusoids, oldest-first) and pe-rev + pe-norm. Then held-out deep KL vs
 # the equal-budget raw window (160) and the plain 128, the inference-time wider window (512 on 4096-token traces), and a
 # generation check: 32 MATH problems, full KV vs SP + window 512 vs raw window 544 alone (accuracy, </think>, repetition).
-SER=5
+SER=6
 if [ -f /root/.boxtp_serial ] && [ "$(cat /root/.boxtp_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxtp_serial
 echo "[tp] preflight GPU: $(nvidia-smi --query-gpu=name,memory.used,memory.total --format=csv,noheader)"
@@ -19,6 +19,31 @@ tail -n 1 /root/w/sp.log 2>/dev/null | cut -c1-220
 nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv,noheader
 ST
 chmod +x /root/status.sh
+# serial 6: the 4096-token generation check is not usable (full KV left 19/32 thoughts unfinished; the window-only path
+# stops early and "wins") - after stage Q, generate to 8192 tokens: full KV, SP (stage Q weights) at the deployment setting
+# (rw 1024, C 128, maxD 384), the frozen recipe pooler the same way, and the equal-budget window alone (1056).
+if [ ! -e /root/.job6 ]; then touch /root/.job6
+  cat > /root/job6.sh <<'JOB'
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); cd /root/w
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+R=baya1116/hypernet-sp-distill
+put() { for t in 1 2 3 4 5; do python3 -c "import sys; from huggingface_hub import HfApi; HfApi().upload_file(path_or_fileobj=sys.argv[1], path_in_repo='archive/sp3/'+sys.argv[2], repo_id='$R')" "$1" "$2" > put.err 2>&1 && { echo "[hub] $2"; return 0; }; sleep 90; done; echo "[hub] $2 FAILED"; }
+while [ ! -e DONE_TQ ]; do sleep 30; done
+LG=/root/w/sp.log; G="--traces kv_full_p.jsonl --n 32 --max-len 8192 --roll-batch 16 --S 32 --heads 8 --layers 3 --ffn 2048 --log $LG"
+echo "[tp] generation check at 8192 tokens $(date -u)"
+python3 sp_qwen3.py rollout $G --no-sp --rw 16384 --C 512 --maxd 0 --roll-out g8_full.jsonl > run_g8.log 2>&1
+python3 sp_qwen3.py rollout $G --rw 1024 --C 128 --maxd 384 --ckpt spQ.pt --roll-out g8_Q1024.jsonl >> run_g8.log 2>&1
+python3 sp_qwen3.py rollout $G --rw 1024 --C 128 --maxd 384 --ckpt spP_orig.pt --roll-out g8_P1024.jsonl >> run_g8.log 2>&1
+python3 sp_qwen3.py rollout $G --no-sp --rw 1056 --C 128 --maxd 0 --roll-out g8_raw1056.jsonl >> run_g8.log 2>&1
+grep -E "Error|Traceback|out of memory" run_g8.log | tail -2
+python3 sp_mathcheck.py g8_full.jsonl g8_Q1024.jsonl g8_P1024.jsonl g8_raw1056.jsonl | sed "s/^/[tp] /"
+for g in full Q1024 P1024 raw1056; do put g8_$g.jsonl ap32gen8_$g.jsonl; done
+put $LG spP.log; date -u > DONE_TG8; put DONE_TG8 DONE_TG8; echo "[tp] DONE_TG8 $(date -u)"
+JOB
+  setsid nohup bash -c 'bash /root/job6.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
+  sed -i 's/while \[ ! -e DONE_TQ \]/while [ ! -e DONE_TG8 ]/' /root/live5.sh 2>/dev/null
+  echo "[tp] s6: 8192-token generation check queued $(date -u)"
+fi
 # serial 5: the live log stopped at DONE_TP - restart it until stage Q is done, following the FFT run's log
 if [ ! -e /root/.live5 ]; then touch /root/.live5
   sed -e 's/while \[ ! -e DONE_TP \]/while [ ! -e DONE_TQ ]/' -e 's#tail -n 4 spP_orig.log; tail -n 4 spP_norm.log; tail -n 8 sp.log;#tail -n 12 sp.log;#' /root/live.sh > /root/live5.sh
