@@ -3,7 +3,7 @@
 # KL 3.32 held-out with the model frozen) + all-layer FFT from the original model, window-0 SP-next until it stops falling
 # (200-trace means, < 1% better), at most 600 traces, on traces neither F2's pooler nor the model has seen (stage E's pool
 # from 3851). Then held-out KL by window length (window 0 = the pooler's score; stage E = 3.02 with a 1-layer pooler).
-SER=4
+SER=5
 if [ -f /root/.boxty_serial ] && [ "$(cat /root/.boxty_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxty_serial
 echo "[ty] preflight GPU: $(nvidia-smi --query-gpu=name,memory.used,memory.total --format=csv,noheader)"
@@ -17,6 +17,35 @@ tail -n 1 /root/w/sp.log 2>/dev/null | cut -c1-220
 nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv,noheader
 ST
 chmod +x /root/status.sh
+# serial 5: the window-0 run is still falling at its 600 cap (3.9 -> 3.12 by 575) - continue window 0 from its weights until
+# it stops (200-trace means < 1%, up to 1500 more), score window 0 held-out, THEN the fine curriculum from those weights.
+if [ ! -e /root/.job5 ]; then touch /root/.job5
+  pkill -f job2.sh
+  cat > /root/job5.sh <<'JOB'
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); cd /root/w
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+R=baya1116/hypernet-sp-distill
+put() { python3 -c "import sys; from huggingface_hub import HfApi; HfApi().upload_file(path_or_fileobj=sys.argv[1], path_in_repo='archive/sp3/'+sys.argv[2], repo_id='$R')" "$1" "$2" > /dev/null 2>&1 && echo "[hub] $2" || echo "[hub] $2 FAILED"; }
+while [ ! -e DONE_TY ]; do sleep 30; done
+LG=/root/w/sp.log; F="--S 32 --rw 1024 --C 128 --maxd 384 --layers 3 --ffn 1024"
+NY=$(grep -o 'trace [0-9]*/600' sp.log | tail -1 | grep -o '[0-9]*/' | tr -d '/')
+echo "[ty] window-0 continued after $NY traces $(date -u)"
+python3 sp_qwen3.py train --traces trainY.jsonl --skip $NY --n 1500 --max-len 3072 $F --ckpt spY.pt --pe-rev --pe-norm --ft-layers 28 --opt8bit --ft-lr 1e-5 --lr 5e-4 --spnext --sn-win 1 --sn-win-plateau 0.01 --sn-win-block 8 --sn-win-max 1500 --sn-pos 256 --sn-batch 8 --sn-tokens 3000 --accum 1 --out spY2.pt --log $LG > run_trainY2.log 2>&1
+grep -E "^\[sp\] (trained|curriculum)|Error|Traceback|out of memory" run_trainY2.log | tail -3
+N2=$(grep -o 'trace [0-9]*/1500' sp.log | tail -1 | grep -o '[0-9]*/' | tr -d '/'); NS=$(( NY + N2 ))
+python3 sp_qwen3.py profile --traces kv_full_p.jsonl --n 16 --max-len 4096 $F --ckpt spY2.pt --log $LG 2>&1 | grep -E "^\[sp\] profile|Error|Traceback" | tail -7 | sed "s/^/[math] /"
+put spY2.pt spY2_L3_spnext_fft.pt; put $LG spY.log
+echo "[ty] curriculum launched after $NS window-0 traces $(date -u)"
+python3 sp_qwen3.py train --traces trainY.jsonl --skip $NS --n 3000 --max-len 3072 $F --ckpt spY2.pt --pe-rev --pe-norm --ft-layers 28 --opt8bit --ft-lr 1e-5 --lr 5e-4 --spnext --sn-win 2,4,8,16,32,64,128,256,512,1024 --sn-win-plateau 0.02 --sn-win-block 4 --sn-win-max 400 --sn-pos 256 --sn-batch 8 --sn-tokens 3000 --accum 1 --out spZ.pt --log $LG > run_trainZ.log 2>&1
+grep -E "^\[sp\] (trained|curriculum)|Error|Traceback|out of memory" run_trainZ.log | tail -3
+python3 sp_qwen3.py profile --traces kv_full_p.jsonl --n 16 --max-len 4096 $F --ckpt spZ.pt --log $LG 2>&1 | grep -E "^\[sp\] profile|Error|Traceback" | tail -7 | sed "s/^/[math] /"
+for e in kv_full_p.jsonl:math traces.jsonl:mix; do f=${e%%:*}; n=${e#*:}; x=""; [ $n = mix ] && x="--n 60"
+  python3 sp_qwen3.py eval --traces $f $x --max-len 4096 $F --ckpt spZ.pt --log $LG 2>&1 | grep -E "^\[sp\] eval|Error|Traceback|out of memory" | sed "s/^/[$n] /"; done
+put spZ.pt spZ_L3_wincurr_fft.pt; put $LG spZ.log; date -u > DONE_TZ; put DONE_TZ DONE_TZ; echo "[ty] DONE_Z $(date -u)"
+JOB
+  setsid nohup bash -c 'bash /root/job5.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
+  echo "[ty] s5: window-0 continuation + curriculum queued $(date -u)"
+fi
 # serial 4 (the user topped up the credit - fine steps are fine): cancel the serial-3 cut (the window-0 run goes on to its
 # plateau / 600) and restore a fine curriculum by plateau: w = 2, 4, 8, ... 1024, 100-trace means < 2%, min 200, max 400
 # per w, up to 3000 traces; MATH + mixed scoring.
