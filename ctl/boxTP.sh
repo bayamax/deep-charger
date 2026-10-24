@@ -5,7 +5,7 @@
 # lr 3e-4. Two poolers side by side: the original (raw sinusoids, oldest-first) and pe-rev + pe-norm. Then held-out deep KL vs
 # the equal-budget raw window (160) and the plain 128, the inference-time wider window (512 on 4096-token traces), and a
 # generation check: 32 MATH problems, full KV vs SP + window 512 vs raw window 544 alone (accuracy, </think>, repetition).
-SER=8
+SER=9
 if [ -f /root/.boxtp_serial ] && [ "$(cat /root/.boxtp_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxtp_serial
 echo "[tp] preflight GPU: $(nvidia-smi --query-gpu=name,memory.used,memory.total --format=csv,noheader)"
@@ -19,6 +19,12 @@ tail -n 1 /root/w/sp.log 2>/dev/null | cut -c1-220
 nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv,noheader
 ST
 chmod +x /root/status.sh
+# serial 9: two copies of the 8k generation job are running (the serial-6 one was not stopped before serial 7 relaunched it)
+# - stop the newer copy and its current rollout; the shared output files keep both copies' rows (extra samples)
+if [ ! -e /root/.dup9 ]; then touch /root/.dup9
+  J=$(pgrep -f "^bash /root/job6.sh" | sort -n); echo "[tp] s9: job6 copies: $(echo $J | tr '\n' ' ')"
+  if [ $(echo "$J" | wc -w) -ge 2 ]; then P=$(echo "$J" | tail -1); pkill -P $P; kill $P; echo "[tp] s9: stopped copy $P"; fi
+fi
 # serial 8: stage Q (FFT at rw 128) improved rw 128 slightly but HURT the deployment window (stage-A conditions 0.084 / 0.071
 # -> 0.096 / 0.088): the model specialised to the narrow window. Stage R = the frozen recipe pooler (spP_orig) + all-layer FFT
 # AT the deployment window, the way stage B did it (--par: every window 0..rw+C at 4 boundaries per trace, rw 1024, C 128,
