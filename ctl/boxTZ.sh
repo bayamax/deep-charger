@@ -4,7 +4,7 @@
 # stops falling (200-trace means < 1%, up to 1500), score window 0, then the fine window curriculum 2 .. 1024 by plateau,
 # then the held-out profile + deployment loop. Pool traces 1-850 are skipped (TY used up to ~800). A live log goes to the
 # hub every 10 min (Vast's log relay was unreliable).
-SER=1
+SER=2
 if [ -f /root/.boxtz_serial ] && [ "$(cat /root/.boxtz_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxtz_serial
 echo "[tz] preflight GPU: $(nvidia-smi --query-gpu=name,memory.used,memory.total --format=csv,noheader)"
@@ -18,6 +18,20 @@ tail -n 1 /root/w/sp.log 2>/dev/null | cut -c1-220
 nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv,noheader
 ST
 chmod +x /root/status.sh
+# serial 2: at the full peak lr the continuation climbs (3.46 -> 3.57 -> 3.93 by 150) - TY's 600-trace gains came late, at
+# the decayed lr. Restart it at the late-run lr (pooler 1e-4, FFT 2e-6), the curriculum at pooler 2e-4 / FFT 5e-6; the
+# traces this run used are skipped.
+if [ ! -e /root/.job2 ]; then touch /root/.job2
+  pkill -f job.sh; pkill -f sp_qwen3.py; sleep 5; cd /root/w
+  N1=$(grep -o 'trace [0-9]*/1500' sp.log | tail -1 | grep -o '[0-9]*/' | tr -d '/'); N1=${N1:-0}; SK=$(( 850 + N1 + 25 ))
+  { sed -n '1,5p' /root/job.sh; sed -n '/^LG=/,$p' /root/job.sh; } > /root/job2.sh
+  sed -i -e "s#^NY=850#NY=$SK#" \
+    -e 's#--ckpt spY.pt --pe-rev --pe-norm --ft-layers 28 --opt8bit --ft-lr 1e-5 --lr 5e-4#--ckpt spY.pt --pe-rev --pe-norm --ft-layers 28 --opt8bit --ft-lr 2e-6 --lr 1e-4#' \
+    -e 's#--ckpt spY2.pt --pe-rev --pe-norm --ft-layers 28 --opt8bit --ft-lr 1e-5 --lr 5e-4#--ckpt spY2.pt --pe-rev --pe-norm --ft-layers 28 --opt8bit --ft-lr 5e-6 --lr 2e-4#' /root/job2.sh
+  grep -q -- "--ft-lr 2e-6 --lr 1e-4" /root/job2.sh && grep -q -- "--ft-lr 5e-6 --lr 2e-4" /root/job2.sh && grep -q "^NY=$SK" /root/job2.sh && echo "[tz] s2: lower lr set, skip $SK" || echo "[tz] s2: WARNING job2 not as expected"
+  cd /root; setsid nohup bash -c 'bash /root/job2.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
+  echo "[tz] s2: relaunched $(date -u)"
+fi
 if [ ! -e /root/.job ]; then touch /root/.job
   cat > /root/live.sh <<'JOB'
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); cd /root/w
