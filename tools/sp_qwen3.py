@@ -21,7 +21,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 ap = argparse.ArgumentParser()
-ap.add_argument("mode", choices=["train", "eval", "profile"])
+ap.add_argument("mode", choices=["train", "eval", "profile", "rollout"])
 ap.add_argument("--model", default="Qwen/Qwen3-1.7B")
 ap.add_argument("--traces", required=True)
 ap.add_argument("--n", type=int, default=0); ap.add_argument("--skip", type=int, default=0)
@@ -66,6 +66,10 @@ ap.add_argument("--pe-rev", action="store_true", help="pooler positions counted 
 ap.add_argument("--pe-norm", action="store_true", help="scale the pooler's sinusoidal positions to the mean embedding norm "
                 "(raw sinusoids have norm sqrt(H/2) = 32 against token embeddings of ~1.5: the content was ~5%% of the key/value signal)")
 ap.add_argument("--fresh-pooler", action="store_true", help="train: take only the fine-tuned model weights from --ckpt, start a new pooler")
+ap.add_argument("--roll-out", default="", help="rollout: write the model's own SP-evict generations here (jsonl prompt/text) - "
+                "the original deep-charger's on-policy (DAgger) data: train on what the bounded model itself produces")
+ap.add_argument("--roll-batch", type=int, default=24, help="rollout: streams generated together")
+ap.add_argument("--temp", type=float, default=0.6); ap.add_argument("--top-p", type=float, default=0.95); ap.add_argument("--top-k", type=int, default=20)
 ap.add_argument("--seed", type=int, default=0)
 ap.add_argument("--device", default="cuda"); ap.add_argument("--dtype", default="bfloat16")
 a = ap.parse_args()
@@ -407,6 +411,65 @@ def profile_trace(ids, P, acc):
                 acc.setdefault(key, [0.0, 0]); acc[key][0] += v; acc[key][1] += 1
 
 
+@torch.no_grad()
+def rollout(prompts):
+    """the deployment SP-evict loop as a generator, N streams in one batch: every C tokens the distant tokens (older than the
+    last rw) are pooled (mass-evicted at maxd) into SP, the cache is cut back to the prompt and [SP | raw window] re-prefilled,
+    then C tokens are sampled. Returns the generated token lists."""
+    N = len(prompts); mqs = [len(x) for x in prompts]; MQ = max(mqs)
+    stop = {i for i in [tok.eos_token_id, tok.convert_tokens_to_ids("<|im_end|>"), tok.convert_tokens_to_ids("<|endoftext|>")] if i is not None and i >= 0}
+    inp = torch.zeros((N, MQ), device=dev, dtype=torch.long); pmask = torch.zeros((N, MQ), device=dev, dtype=torch.long)
+    ppos = torch.zeros((N, MQ), device=dev, dtype=torch.long)
+    for b, x in enumerate(prompts):
+        inp[b, MQ - len(x):] = torch.tensor(x, device=dev); pmask[b, MQ - len(x):] = 1; ppos[b, MQ - len(x):] = torch.arange(len(x), device=dev)
+    cache = DynamicCache(); llm(input_ids=inp, attention_mask=pmask, position_ids=ppos, past_key_values=cache, use_cache=True)
+    gen = [[] for _ in range(N)]; fin = [False] * N
+    kept = [torch.zeros(1, 0, dtype=torch.long, device=dev) for _ in range(N)]; absorbed = [0] * N
+
+    def sample(lg):
+        lg = lg.float() / a.temp
+        if a.top_k: lg = lg.masked_fill(lg < lg.topk(a.top_k, -1).values[:, -1:], float("-inf"))
+        pr = torch.softmax(lg, -1); sp_, si = pr.sort(-1, descending=True)
+        drop = sp_.cumsum(-1) - sp_ > a.top_p; sp_ = sp_.masked_fill(drop, 0)
+        return si.gather(-1, torch.multinomial(sp_ / sp_.sum(-1, keepdim=True), 1)).squeeze(-1)
+
+    while not all(fin):
+        blocks, Rs = [], []
+        for b in range(N):
+            c0 = len(gen[b]); R = min(c0, a.rw); nd = c0 - R
+            if nd > absorbed[b]:
+                g_ = torch.tensor([gen[b]], device=dev)
+                kept[b], absorbed[b] = update_buffer(kept[b], absorbed[b], g_, nd)
+            sp = pooler(embed(kept[b]).float()) if kept[b].size(1) > 0 else pooler(torch.zeros(1, 0, H, device=dev))
+            parts = [sp.to(dt)] + ([embed(torch.tensor([gen[b][c0 - R:c0]], device=dev)).to(dt)] if R > 0 else [])
+            blocks.append(torch.cat(parts, 1)); Rs.append(R)
+        lens = [x.size(1) for x in blocks]; Lmax = max(lens)
+        block = torch.zeros((N, Lmax, H), device=dev, dtype=dt); amask = torch.zeros((N, MQ + Lmax), device=dev, dtype=torch.long)
+        amask[:, :MQ] = pmask; pos = torch.zeros((N, Lmax), device=dev, dtype=torch.long)
+        for b in range(N):   # right-pad the shorter blocks; their next token goes right after their own last real position
+            block[b, :lens[b]] = blocks[b][0]; amask[b, MQ:MQ + lens[b]] = 1; pos[b] = mqs[b] + torch.arange(Lmax, device=dev)
+        L0 = cache.get_seq_length()
+        if L0 > MQ: cache.crop(MQ - L0) if hasattr(cache, "crop") else None
+        hs = llm.model(inputs_embeds=block, attention_mask=amask, position_ids=pos, past_key_values=cache,
+                       cache_position=torch.arange(MQ, MQ + Lmax, device=dev), use_cache=True).last_hidden_state
+        last = llm.lm_head(hs[torch.arange(N, device=dev), torch.tensor(lens, device=dev) - 1])   # each stream's own last row
+        cur = MQ + Lmax; nxtpos = [mqs[b] + lens[b] for b in range(N)]
+        for _ in range(a.C):
+            nx = sample(last).tolist()
+            for b in range(N):
+                if fin[b]: continue
+                if nx[b] in stop: fin[b] = True; continue
+                gen[b].append(nx[b])
+                if len(gen[b]) >= a.max_len: fin[b] = True
+            if all(fin): break
+            amask = torch.cat([amask, torch.ones((N, 1), device=dev, dtype=torch.long)], 1)
+            o = llm(input_ids=torch.tensor([[g[-1] if g else 0] for g in gen], device=dev), attention_mask=amask,
+                    position_ids=torch.tensor([[x] for x in nxtpos], device=dev), past_key_values=cache,
+                    cache_position=torch.tensor([cur], device=dev), use_cache=True)
+            last = o.logits[:, -1]; cur += 1; nxtpos = [x + 1 for x in nxtpos]
+    return gen
+
+
 rows = [json.loads(l) for f_ in a.traces.split(",") for l in open(f_)]
 if not all("prompt" in r for r in rows):
     from datasets import load_dataset
@@ -420,7 +483,7 @@ if a.n: rows = rows[:a.n]
 data = []
 for r in rows:
     pid = tok.encode(r["prompt"], add_special_tokens=False)
-    data.append((torch.tensor(pid + tok.encode(r["text"], add_special_tokens=False)), len(pid)))   # CPU; moved per trace
+    data.append((torch.tensor(pid + tok.encode(r.get("text", ""), add_special_tokens=False)), len(pid)))   # CPU; moved per trace
 
 tag = f"S{a.S} rw{a.rw} C{a.C} maxd{a.maxd} L{a.layers} ffn{a.ffn}" + (" par" if a.par and a.mode == "train" else "") + (" spnext" + (f" win{a.sn_win}/{a.sn_win_every}" if a.sn_win != "1" else "") if a.spnext and a.mode == "train" else "") + (" pe-rev" if a.pe_rev else "") + (" pe-norm" if a.pe_norm else "") + (f" FT{a.ft_layers}" if a.ft_layers else "") + (f" from{a.score_from}" if a.score_from else "")
 if a.mode == "profile":
@@ -430,6 +493,16 @@ if a.mode == "profile":
     log(f"[sp] profile {tag} {os.path.basename(a.ckpt) or 'untrained'}: mean KL over all windows {tot / max(n, 1):.4f}")
     for key in ["0", "1-7", "8-63", "64-511", "512+"]:
         if key in acc: log(f"[sp] profile   window {key:>7}: KL {acc[key][0] / acc[key][1]:.4f}  share of the summed KL {100 * acc[key][0] / max(tot, 1e-9):.1f}%  ({acc[key][1]} tokens)")
+elif a.mode == "rollout":
+    pooler.eval(); t0 = time.time(); n_tok = 0
+    with open(a.roll_out, "a") as fo:
+        for i in range(0, len(rows), a.roll_batch):
+            rb = rows[i:i + a.roll_batch]
+            gens = rollout([tok.encode(r["prompt"], add_special_tokens=False) for r in rb])
+            for r, g in zip(rb, gens):
+                fo.write(json.dumps({"src": r.get("src", ""), "prompt": r["prompt"], "text": tok.decode(g)}) + "\n"); n_tok += len(g)
+            fo.flush()
+            log(f"[sp] rollout {tag} {os.path.basename(a.ckpt) or 'untrained'}: {i + len(rb)}/{len(rows)} prompts, {n_tok} tokens ({time.time() - t0:.0f}s)")
 elif a.mode == "eval":
     pooler.eval(); t0 = time.time(); K = A_ = N = 0
     for ids, P in data:
