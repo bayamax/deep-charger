@@ -2,7 +2,7 @@
 # Box TX (3090 24 GB, pytorch image): the window curriculum continued from stage W (spW, w up to 256) to the deployment
 # window: w = 256, 512, 1024 (200 traces each) on the stage-W pool traces it has not used (lines 1201+).
 # Held-out profile + deployment loop at the end.
-SER=3
+SER=4
 if [ -f /root/.boxtx_serial ] && [ "$(cat /root/.boxtx_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxtx_serial
 echo "[tx] preflight GPU: $(nvidia-smi --query-gpu=name,memory.used,memory.total --format=csv,noheader)"
@@ -16,6 +16,10 @@ tail -n 1 /root/w/sp.log 2>/dev/null | cut -c1-220
 nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv,noheader
 ST
 chmod +x /root/status.sh
+# serial 4: the status line follows stage F2's log
+if [ ! -e /root/.st4 ]; then touch /root/.st4
+  sed -i 's#tail -n 1 /root/w/sp.log#tail -n 1 /root/w/spF2.log#' /root/status.sh; echo "[tx] s4: status follows spF2.log"
+fi
 # serial 3 (the user: window 0 IS the pooler's quality - secure it first): stop the window curriculum and continue stage F
 # instead - the 3-layer pooler (model frozen, pe-rev + pe-norm) from its 800-trace weights, window-0 SP-next until it stops
 # falling (200-trace means, < 1% better), at most 2000 traces, on traces F's pooler has not seen (stage E's pool from
