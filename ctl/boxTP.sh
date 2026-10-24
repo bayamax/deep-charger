@@ -5,7 +5,7 @@
 # lr 3e-4. Two poolers side by side: the original (raw sinusoids, oldest-first) and pe-rev + pe-norm. Then held-out deep KL vs
 # the equal-budget raw window (160) and the plain 128, the inference-time wider window (512 on 4096-token traces), and a
 # generation check: 32 MATH problems, full KV vs SP + window 512 vs raw window 544 alone (accuracy, </think>, repetition).
-SER=1
+SER=2
 if [ -f /root/.boxtp_serial ] && [ "$(cat /root/.boxtp_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxtp_serial
 echo "[tp] preflight GPU: $(nvidia-smi --query-gpu=name,memory.used,memory.total --format=csv,noheader)"
@@ -19,6 +19,13 @@ tail -n 1 /root/w/sp.log 2>/dev/null | cut -c1-220
 nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv,noheader
 ST
 chmod +x /root/status.sh
+# serial 2: the two trainers write their own logs - show both in the status line and the live log
+if [ ! -e /root/.st2 ]; then touch /root/.st2
+  sed -i 's#tail -n 1 /root/w/sp.log 2>/dev/null | cut -c1-220#for v in orig norm; do tail -n 1 /root/w/spP_$v.log 2>/dev/null | cut -c1-200; done; tail -n 1 /root/w/sp.log 2>/dev/null | cut -c1-200#' /root/status.sh
+  sed -i 's#tail -n 12 sp.log;#tail -n 4 spP_orig.log; tail -n 4 spP_norm.log; tail -n 8 sp.log;#' /root/live.sh
+  pkill -f live.sh; setsid nohup bash -c 'bash /root/live.sh' > /dev/null 2>&1 < /dev/null &
+  echo "[tp] s2: status/live follow both trainer logs"
+fi
 if [ ! -e /root/.job ]; then touch /root/.job
   cat > /root/live.sh <<'JOB'
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); cd /root/w
