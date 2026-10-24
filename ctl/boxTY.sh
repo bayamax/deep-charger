@@ -3,7 +3,7 @@
 # KL 3.32 held-out with the model frozen) + all-layer FFT from the original model, window-0 SP-next until it stops falling
 # (200-trace means, < 1% better), at most 600 traces, on traces neither F2's pooler nor the model has seen (stage E's pool
 # from 3851). Then held-out KL by window length (window 0 = the pooler's score; stage E = 3.02 with a 1-layer pooler).
-SER=6
+SER=7
 if [ -f /root/.boxty_serial ] && [ "$(cat /root/.boxty_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxty_serial
 echo "[ty] preflight GPU: $(nvidia-smi --query-gpu=name,memory.used,memory.total --format=csv,noheader)"
@@ -17,6 +17,29 @@ tail -n 1 /root/w/sp.log 2>/dev/null | cut -c1-220
 nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv,noheader
 ST
 chmod +x /root/status.sh
+# serial 7: the box went idle (GPU 0%, no log relay) during the window-0 continuation - after a reboot: put diagnostics on the
+# hub, then resume from the newest checkpoint (spY2.pt if the continuation saved one, else spY.pt), skipping every trace
+# already used, with the same plan (window 0 until it stops falling, then the fine curriculum), and restart the live log.
+if [ ! -e /root/.job7 ]; then touch /root/.job7
+  cd /root/w
+  { echo "== diag $(date -u)"; ls -la /root/w | head -40; df -h / | tail -1; free -g | head -2; nvidia-smi --query-gpu=memory.used --format=csv,noheader
+    echo "== w.log"; grep -v "hf_[A-Za-z0-9]\{20\}" w.log | tail -n 25; echo "== run_trainY2.log"; tail -n 25 run_trainY2.log 2>/dev/null
+    echo "== sp.log"; tail -n 6 sp.log; } > ty_diag.log 2>&1
+  python3 -c "from huggingface_hub import HfApi; HfApi().upload_file(path_or_fileobj='ty_diag.log', path_in_repo='archive/sp3/ty_diag.log', repo_id='baya1116/hypernet-sp-distill')" > /dev/null 2>&1 && echo "[ty] s7: diag uploaded"
+  pkill -f job5.sh; pkill -f sp_qwen3.py; pkill -f live.sh; sleep 3
+  N2=$(grep -o 'trace [0-9]*/1500' sp.log | tail -1 | grep -o '[0-9]*/' | tr -d '/'); N2=${N2:-0}
+  if [ -s spY2.pt ] && [ "$N2" -ge 200 ]; then CK=spY2.pt; else CK=spY.pt; fi
+  SK=$(( 600 + N2 + 25 )); echo "[ty] s7: resume from $CK, skip $SK traces (continuation logged $N2)"
+  sed -e "s#^NY=.*#NY=$SK#" -e 's#^echo "\[ty\] window-0 continued after $NY traces.*#echo "[ty] window-0 resumed at trace $NY from '"$CK"' $(date -u)"#' \
+      -e "s#--out spY2.pt#--out spY3.pt#; s#--ckpt spY2.pt#--ckpt spY3.pt#g; s#put spY2.pt spY2_L3_spnext_fft.pt#put spY3.pt spY3_L3_spnext_fft.pt#" \
+      -e "s#--ckpt spY.pt --pe-rev --pe-norm --ft-layers 28 --opt8bit --ft-lr 1e-5 --lr 5e-4 --spnext --sn-win 1 #--ckpt $CK --pe-rev --pe-norm --ft-layers 28 --opt8bit --ft-lr 1e-5 --lr 5e-4 --spnext --sn-win 1 #" \
+      -e "s#^while \[ ! -e DONE_TY \]; do sleep 30; done##" -e "s#run_trainY2.log#run_trainY3.log#g" /root/job5.sh > /root/job7.sh
+  grep -q -- "--ckpt $CK" /root/job7.sh && grep -q "spY3.pt" /root/job7.sh && echo "[ty] s7: job7 ready" || echo "[ty] s7: WARNING job7 not as expected"
+  cd /root; setsid nohup bash -c 'bash /root/job7.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
+  sed -i 's/tail -n 12 sp.log; date -u;/tail -n 12 sp.log; nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv,noheader; df -h \/ | tail -1; date -u;/' /root/live.sh
+  setsid nohup bash -c 'bash /root/live.sh' > /dev/null 2>&1 < /dev/null &
+  echo "[ty] s7: resumed + live log restarted $(date -u)"
+fi
 # serial 6: Vast's log relay stopped answering - push the training log to the hub every 10 min instead (archive/sp3/ty_live.log)
 if [ ! -e /root/.live6 ]; then touch /root/.live6
   cat > /root/live.sh <<'JOB'
