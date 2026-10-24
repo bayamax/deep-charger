@@ -70,6 +70,8 @@ ap.add_argument("--roll-out", default="", help="rollout: write the model's own S
                 "the original deep-charger's on-policy (DAgger) data: train on what the bounded model itself produces")
 ap.add_argument("--roll-batch", type=int, default=24, help="rollout: streams generated together")
 ap.add_argument("--temp", type=float, default=0.6); ap.add_argument("--top-p", type=float, default=0.95); ap.add_argument("--top-k", type=int, default=20)
+ap.add_argument("--no-sp", action="store_true", help="eval/rollout baseline without soft prompts: [raw window | chunk] only "
+                "(with a window as long as the trace it is the full-KV model)")
 ap.add_argument("--seed", type=int, default=0)
 ap.add_argument("--device", default="cuda"); ap.add_argument("--dtype", default="bfloat16")
 a = ap.parse_args()
@@ -263,8 +265,9 @@ def run_trace(ids, P, train, ref_h=None):
         kept, absorbed = update_buffer(kept, absorbed, a_ids, nd_end)
         if c0 not in pick: continue
         with torch.set_grad_enabled(train):
-            sp = pooler(embed(kept).float()) if kept.size(1) > 0 else pooler(torch.zeros(1, 0, H, device=dev))
-            block = torch.cat([sp.to(dt), embed(a_ids[:, c0 - R:c0]).to(dt), embed(a_ids[:, c0:c1]).to(dt)], 1)
+            if a.no_sp: parts = []
+            else: parts = [(pooler(embed(kept).float()) if kept.size(1) > 0 else pooler(torch.zeros(1, 0, H, device=dev))).to(dt)]
+            block = torch.cat(parts + [embed(a_ids[:, c0 - R:c0]).to(dt), embed(a_ids[:, c0:c1]).to(dt)], 1)
             nb = block.size(1)
             cache = DynamicCache()
             for li, (k_, v_) in enumerate(pkv): cache.update(k_, v_, li)
@@ -426,7 +429,8 @@ def rollout(prompts):
     ppos = torch.zeros((N, MQ), device=dev, dtype=torch.long)
     for b, x in enumerate(prompts):
         inp[b, MQ - len(x):] = torch.tensor(x, device=dev); pmask[b, MQ - len(x):] = 1; ppos[b, MQ - len(x):] = torch.arange(len(x), device=dev)
-    cache = DynamicCache(); llm(input_ids=inp, attention_mask=pmask, position_ids=ppos, past_key_values=cache, use_cache=True)
+    cache = DynamicCache()
+    plast = llm(input_ids=inp, attention_mask=pmask, position_ids=ppos, past_key_values=cache, use_cache=True, logits_to_keep=1).logits[:, -1]
     gen = [[] for _ in range(N)]; fin = [False] * N
     kept = [torch.zeros(1, 0, dtype=torch.long, device=dev) for _ in range(N)]; absorbed = [0] * N
 
@@ -444,8 +448,10 @@ def rollout(prompts):
             if nd > absorbed[b]:
                 g_ = torch.tensor([gen[b]], device=dev)
                 kept[b], absorbed[b] = update_buffer(kept[b], absorbed[b], g_, nd)
-            sp = pooler(embed(kept[b]).float()) if kept[b].size(1) > 0 else pooler(torch.zeros(1, 0, H, device=dev))
-            parts = [sp.to(dt)] + ([embed(torch.tensor([gen[b][c0 - R:c0]], device=dev)).to(dt)] if R > 0 else [])
+            if a.no_sp: parts = []
+            else: parts = [(pooler(embed(kept[b]).float()) if kept[b].size(1) > 0 else pooler(torch.zeros(1, 0, H, device=dev))).to(dt)]
+            parts += [embed(torch.tensor([gen[b][c0 - R:c0]], device=dev)).to(dt)] if R > 0 else []
+            if not parts: parts = [torch.zeros(1, 0, H, device=dev, dtype=dt)]   # no-SP, first chunk: nothing to re-prefill
             blocks.append(torch.cat(parts, 1)); Rs.append(R)
         lens = [x.size(1) for x in blocks]; Lmax = max(lens)
         block = torch.zeros((N, Lmax, H), device=dev, dtype=dt); amask = torch.zeros((N, MQ + Lmax), device=dev, dtype=torch.long)
@@ -454,10 +460,13 @@ def rollout(prompts):
             block[b, :lens[b]] = blocks[b][0]; amask[b, MQ:MQ + lens[b]] = 1; pos[b] = mqs[b] + torch.arange(Lmax, device=dev)
         L0 = cache.get_seq_length()
         if L0 > MQ: cache.crop(MQ - L0) if hasattr(cache, "crop") else None
-        hs = llm.model(inputs_embeds=block, attention_mask=amask, position_ids=pos, past_key_values=cache,
+        if Lmax == 0:   # no-SP first chunk: continue straight from the prompt
+            amask = pmask.clone(); last = plast; cur = MQ; nxtpos = list(mqs)
+        else:
+          hs = llm.model(inputs_embeds=block, attention_mask=amask, position_ids=pos, past_key_values=cache,
                        cache_position=torch.arange(MQ, MQ + Lmax, device=dev), use_cache=True).last_hidden_state
-        last = llm.lm_head(hs[torch.arange(N, device=dev), torch.tensor(lens, device=dev) - 1])   # each stream's own last row
-        cur = MQ + Lmax; nxtpos = [mqs[b] + lens[b] for b in range(N)]
+          last = llm.lm_head(hs[torch.arange(N, device=dev), torch.tensor(lens, device=dev) - 1])   # each stream's own last row
+          cur = MQ + Lmax; nxtpos = [mqs[b] + lens[b] for b in range(N)]
         for _ in range(a.C):
             nx = sample(last).tolist()
             for b in range(N):
@@ -489,7 +498,7 @@ for r in rows:
     pid = tok.encode(r["prompt"], add_special_tokens=False)
     data.append((torch.tensor(pid + tok.encode(r.get("text", ""), add_special_tokens=False)), len(pid)))   # CPU; moved per trace
 
-tag = f"S{a.S} rw{a.rw} C{a.C} maxd{a.maxd} L{a.layers} ffn{a.ffn}" + (" par" if a.par and a.mode == "train" else "") + (" spnext" + (f" win{a.sn_win}/{a.sn_win_every}" if a.sn_win != "1" else "") if a.spnext and a.mode == "train" else "") + (" pe-rev" if a.pe_rev else "") + (" pe-norm" if a.pe_norm else "") + (f" FT{a.ft_layers}" if a.ft_layers else "") + (f" from{a.score_from}" if a.score_from else "")
+tag = f"S{a.S} rw{a.rw} C{a.C} maxd{a.maxd} L{a.layers} ffn{a.ffn}" + (" par" if a.par and a.mode == "train" else "") + (" spnext" + (f" win{a.sn_win}/{a.sn_win_every}" if a.sn_win != "1" else "") if a.spnext and a.mode == "train" else "") + (" no-SP" if a.no_sp else "") + (" pe-rev" if a.pe_rev else "") + (" pe-norm" if a.pe_norm else "") + (f" FT{a.ft_layers}" if a.ft_layers else "") + (f" from{a.score_from}" if a.score_from else "")
 if a.mode == "profile":
     pooler.eval(); acc = {}
     for ids, P in data: profile_trace(ids, P, acc)
@@ -504,7 +513,8 @@ elif a.mode == "rollout":
             rb = rows[i:i + a.roll_batch]
             gens = rollout([tok.encode(r["prompt"], add_special_tokens=False) for r in rb])
             for r, g in zip(rb, gens):
-                fo.write(json.dumps({"src": r.get("src", ""), "prompt": r["prompt"], "text": tok.decode(g)}) + "\n"); n_tok += len(g)
+                fo.write(json.dumps({"src": r.get("src", ""), "id": r.get("id", ""), "gold": r.get("gold", ""), "prompt": r["prompt"],
+                                     "text": tok.decode(g)}) + "\n"); n_tok += len(g)
             fo.flush()
             log(f"[sp] rollout {tag} {os.path.basename(a.ckpt) or 'untrained'}: {i + len(rb)}/{len(rows)} prompts, {n_tok} tokens ({time.time() - t0:.0f}s)")
 elif a.mode == "eval":
