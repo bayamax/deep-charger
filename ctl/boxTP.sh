@@ -31,7 +31,7 @@ put() { for t in 1 2 3 4 5; do python3 -c "import sys; from huggingface_hub impo
 while [ ! -e DONE_TQ ]; do sleep 30; done
 LG=/root/w/sp.log; G="--traces kv_full_p.jsonl --n 32 --max-len 8192 --roll-batch 16 --S 32 --heads 8 --layers 3 --ffn 2048 --log $LG"
 echo "[tp] generation check at 8192 tokens $(date -u)"
-python3 sp_qwen3.py rollout $G --no-sp --rw 16384 --C 512 --maxd 0 --roll-out g8_full.jsonl > run_g8.log 2>&1
+python3 sp_qwen3.py rollout $G --roll-batch 8 --no-sp --rw 16384 --C 512 --maxd 0 --roll-out g8_full.jsonl > run_g8.log 2>&1
 python3 sp_qwen3.py rollout $G --rw 1024 --C 128 --maxd 384 --ckpt spQ.pt --roll-out g8_Q1024.jsonl >> run_g8.log 2>&1
 python3 sp_qwen3.py rollout $G --rw 1024 --C 128 --maxd 384 --ckpt spP_orig.pt --roll-out g8_P1024.jsonl >> run_g8.log 2>&1
 python3 sp_qwen3.py rollout $G --no-sp --rw 1056 --C 128 --maxd 0 --roll-out g8_raw1056.jsonl >> run_g8.log 2>&1
