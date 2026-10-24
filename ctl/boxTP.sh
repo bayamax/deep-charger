@@ -5,7 +5,7 @@
 # lr 3e-4. Two poolers side by side: the original (raw sinusoids, oldest-first) and pe-rev + pe-norm. Then held-out deep KL vs
 # the equal-budget raw window (160) and the plain 128, the inference-time wider window (512 on 4096-token traces), and a
 # generation check: 32 MATH problems, full KV vs SP + window 512 vs raw window 544 alone (accuracy, </think>, repetition).
-SER=11
+SER=12
 if [ -f /root/.boxtp_serial ] && [ "$(cat /root/.boxtp_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxtp_serial
 echo "[tp] preflight GPU: $(nvidia-smi --query-gpu=name,memory.used,memory.total --format=csv,noheader)"
@@ -19,6 +19,31 @@ tail -n 1 /root/w/sp.log 2>/dev/null | cut -c1-220
 nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv,noheader
 ST
 chmod +x /root/status.sh
+# serial 12: at 8192 tokens even full KV leaves 12/32 thoughts open (18/32 correct); the window alone "wins" (20/32) by
+# writing half as much (median 9.5k vs 16.7k chars) and SP loses mostly by finishing later (closed-answer accuracy 87% vs
+# 90%). After DAgger, the check at 16384 tokens: full KV, D1 (SP at the deployment setting) and the window alone.
+if [ ! -e /root/.job12 ]; then touch /root/.job12
+  cat > /root/job12.sh <<'JOB'
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); cd /root/w
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+R=baya1116/hypernet-sp-distill
+put() { for t in 1 2 3 4 5; do python3 -c "import sys; from huggingface_hub import HfApi; HfApi().upload_file(path_or_fileobj=sys.argv[1], path_in_repo='archive/sp3/'+sys.argv[2], repo_id='$R')" "$1" "$2" > put.err 2>&1 && { echo "[hub] $2"; return 0; }; sleep 90; done; echo "[hub] $2 FAILED"; }
+while [ ! -e DONE_TD1 ]; do sleep 60; done
+LG=/root/w/sp.log; G="--traces kv_full_p.jsonl --n 32 --max-len 16384 --S 32 --heads 8 --layers 3 --ffn 2048 --log $LG"
+echo "[tp] s12: generation check at 16384 tokens $(date -u)"
+python3 sp_qwen3.py rollout $G --roll-batch 16 --rw 1024 --C 128 --maxd 384 --ckpt spD1.pt --roll-out g16_D1.jsonl > run_g16.log 2>&1
+python3 sp_mathcheck.py g16_D1.jsonl | sed "s/^/[tp] /"; put g16_D1.jsonl ap32gen16_D1.jsonl
+python3 sp_qwen3.py rollout $G --roll-batch 16 --no-sp --rw 1056 --C 128 --maxd 0 --roll-out g16_raw1056.jsonl >> run_g16.log 2>&1
+python3 sp_mathcheck.py g16_raw1056.jsonl | sed "s/^/[tp] /"; put g16_raw1056.jsonl ap32gen16_raw1056.jsonl
+python3 sp_qwen3.py rollout $G --roll-batch 4 --no-sp --rw 20000 --C 512 --maxd 0 --roll-out g16_full.jsonl >> run_g16.log 2>&1
+grep -E "Error|Traceback|out of memory" run_g16.log | tail -3 | sed "s/^/[tp] /"
+python3 sp_mathcheck.py g16_full.jsonl g16_D1.jsonl g16_raw1056.jsonl | sed "s/^/[tp] /"
+put g16_full.jsonl ap32gen16_full.jsonl; put run_g16.log gen16_run.log; put $LG spP.log; date -u > DONE_TG16; put DONE_TG16 DONE_TG16; echo "[tp] DONE_TG16 $(date -u)"
+JOB
+  setsid nohup bash -c 'bash /root/job12.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
+  sed -e 's/DONE_TR /DONE_TG16 /' /root/live8.sh > /root/live12.sh; pkill -f live11.sh; setsid nohup bash -c 'bash /root/live12.sh' > /dev/null 2>&1 < /dev/null &
+  echo "[tp] s12: 16k generation check queued after DONE_TD1 $(date -u)"
+fi
 # serial 11: R2 beats every KL so far (0.0669 / 0.0585) yet generates worse than the raw window alone (13/32 vs 20/32, SP
 # answers ~2x longer, fewer closed thoughts) - the teacher-forced KL misses what happens on the student's own path. (a) KL on
 # the rollouts themselves: R2 and the window alone, each on its own and on the other's generations (all scored from 1184).
