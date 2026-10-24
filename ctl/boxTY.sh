@@ -3,7 +3,7 @@
 # KL 3.32 held-out with the model frozen) + all-layer FFT from the original model, window-0 SP-next until it stops falling
 # (200-trace means, < 1% better), at most 600 traces, on traces neither F2's pooler nor the model has seen (stage E's pool
 # from 3851). Then held-out KL by window length (window 0 = the pooler's score; stage E = 3.02 with a 1-layer pooler).
-SER=2
+SER=3
 if [ -f /root/.boxty_serial ] && [ "$(cat /root/.boxty_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxty_serial
 echo "[ty] preflight GPU: $(nvidia-smi --query-gpu=name,memory.used,memory.total --format=csv,noheader)"
@@ -17,6 +17,15 @@ tail -n 1 /root/w/sp.log 2>/dev/null | cut -c1-220
 nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv,noheader
 ST
 chmod +x /root/status.sh
+# serial 3: the credit (~$0.6 at $0.30/h) does not cover 600 window-0 traces at ~9 s each plus the curriculum: stop the
+# window-0 run at its 200-trace checkpoint (killed after the 225 log; job.sh then profiles and uploads it as usual), and run
+# the curriculum fixed at 75 traces per w (4, 32, 256, 1024 = 300 traces), scoring MATH only.
+if [ ! -e /root/.cut3 ]; then touch /root/.cut3
+  sed -i 's/--n 800/--n 300/; s/--sn-win-plateau 0.02 --sn-win-block 2 --sn-win-max 200/--sn-win-every 75/; s/for e in kv_full_p.jsonl:math traces.jsonl:mix; do/for e in kv_full_p.jsonl:math; do/' /root/job2.sh
+  grep -q -- "--n 300" /root/job2.sh && grep -q -- "--sn-win-every 75" /root/job2.sh && echo "[ty] s3: curriculum cut to 300 traces" || echo "[ty] s3: WARNING job2 not changed"
+  setsid nohup bash -c 'for i in $(seq 1 120); do grep -q "trace 225/600" /root/w/sp.log && break; sleep 20; done; pkill -f "sp_qwen3.py train"; echo "[ty] s3: window-0 run stopped at its 200-trace checkpoint $(date -u)" >> /root/w/w.log' > /dev/null 2>&1 < /dev/null &
+  echo "[ty] s3: cut armed $(date -u)"
+fi
 # serial 2 (the user: then the window, without a reset): after the window-0 run, from its weights on the same box, the
 # window curriculum w = 4, 32, 256, 1024 stepped when the KL stops falling (50-trace means, < 2%; min 100, max 200 per w -
 # the credit is short), on the next unseen traces; then held-out profile + the deployment loop vs stage A 0.079 / 0.066.
