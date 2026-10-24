@@ -5,7 +5,7 @@
 # lr 3e-4. Two poolers side by side: the original (raw sinusoids, oldest-first) and pe-rev + pe-norm. Then held-out deep KL vs
 # the equal-budget raw window (160) and the plain 128, the inference-time wider window (512 on 4096-token traces), and a
 # generation check: 32 MATH problems, full KV vs SP + window 512 vs raw window 544 alone (accuracy, </think>, repetition).
-SER=4
+SER=5
 if [ -f /root/.boxtp_serial ] && [ "$(cat /root/.boxtp_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxtp_serial
 echo "[tp] preflight GPU: $(nvidia-smi --query-gpu=name,memory.used,memory.total --format=csv,noheader)"
@@ -19,6 +19,12 @@ tail -n 1 /root/w/sp.log 2>/dev/null | cut -c1-220
 nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv,noheader
 ST
 chmod +x /root/status.sh
+# serial 5: the live log stopped at DONE_TP - restart it until stage Q is done, following the FFT run's log
+if [ ! -e /root/.live5 ]; then touch /root/.live5
+  sed -e 's/while \[ ! -e DONE_TP \]/while [ ! -e DONE_TQ ]/' -e 's#tail -n 4 spP_orig.log; tail -n 4 spP_norm.log; tail -n 8 sp.log;#tail -n 12 sp.log;#' /root/live.sh > /root/live5.sh
+  setsid nohup bash -c 'bash /root/live5.sh' > /dev/null 2>&1 < /dev/null &
+  echo "[tp] s5: live log restarted until DONE_TQ"
+fi
 # serial 4 (the user: if the loss does not get low enough with the model frozen, unfreeze it): after the frozen-model
 # results (DONE_TP2), stage Q = the better recipe pooler + all-layer FFT (fp32 master, 8-bit AdamW), the same rw 128 / C 64,
 # 3072-token contexts (distant up to ~2.9k, cap 4096 = no eviction in practice), 8 chunks per trace, 1500 traces nobody has
