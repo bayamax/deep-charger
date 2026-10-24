@@ -5,7 +5,7 @@
 # lr 3e-4. Two poolers side by side: the original (raw sinusoids, oldest-first) and pe-rev + pe-norm. Then held-out deep KL vs
 # the equal-budget raw window (160) and the plain 128, the inference-time wider window (512 on 4096-token traces), and a
 # generation check: 32 MATH problems, full KV vs SP + window 512 vs raw window 544 alone (accuracy, </think>, repetition).
-SER=10
+SER=11
 if [ -f /root/.boxtp_serial ] && [ "$(cat /root/.boxtp_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxtp_serial
 echo "[tp] preflight GPU: $(nvidia-smi --query-gpu=name,memory.used,memory.total --format=csv,noheader)"
@@ -19,6 +19,50 @@ tail -n 1 /root/w/sp.log 2>/dev/null | cut -c1-220
 nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv,noheader
 ST
 chmod +x /root/status.sh
+# serial 11: R2 beats every KL so far (0.0669 / 0.0585) yet generates worse than the raw window alone (13/32 vs 20/32, SP
+# answers ~2x longer, fewer closed thoughts) - the teacher-forced KL misses what happens on the student's own path. (a) KL on
+# the rollouts themselves: R2 and the window alone, each on its own and on the other's generations (all scored from 1184).
+# (b) DAgger, the step the ap32 path took next: R2 generates on unseen training prompts (4096 tokens), the frozen full-context
+# model labels those states, --par FFT on them; then the same 8192-token generation check.
+if [ ! -e /root/.job11 ]; then touch /root/.job11
+  cat > /root/job11.sh <<'JOB'
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); cd /root/w
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+R=baya1116/hypernet-sp-distill
+put() { for t in 1 2 3 4 5; do python3 -c "import sys; from huggingface_hub import HfApi; HfApi().upload_file(path_or_fileobj=sys.argv[1], path_in_repo='archive/sp3/'+sys.argv[2], repo_id='$R')" "$1" "$2" > put.err 2>&1 && { echo "[hub] $2"; return 0; }; sleep 90; done; echo "[hub] $2 FAILED"; }
+H=https://huggingface.co/baya1116/hypernet-sp-distill/resolve/main
+RAWB=https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/tools
+curl -sS -o sp_qwen3.py "$RAWB/sp_qwen3.py?nocache=$(date +%s)"
+[ -s g8_raw1056.jsonl ] || curl -sSfL -H "Authorization: Bearer $HF_TOKEN" -o g8_raw1056.jsonl "$H/archive/sp3/ap32gen8_raw1056.jsonl"
+LG=/root/w/sp.log; F="--S 32 --heads 8 --layers 3 --ffn 2048 --C 128 --maxd 384"; E="--max-len 8192 --score-from 1184"
+echo "[tp] s11: KL on the rollouts $(date -u)"
+for g in g8_R2.jsonl g8_raw1056.jsonl; do
+  python3 sp_qwen3.py eval --traces $g $E $F --rw 1024 --ckpt spR2.pt --log $LG 2>&1 | grep -E "^\[sp\] eval|Error|Traceback" | sed "s/^/[tp] own-KL on $g: R2: /"
+  python3 sp_qwen3.py eval --traces $g $E $F --rw 1056 --no-sp --log $LG 2>&1 | grep -E "^\[sp\] eval|Error|Traceback" | sed "s/^/[tp] own-KL on $g: raw1056: /"
+done
+put $LG spP.log
+echo "[tp] s11: DAgger rollouts $(date -u)"
+tail -n +2001 trainR.jsonl > dag_p.jsonl; n=$(wc -l < dag_p.jsonl); echo "[tp] s11: $n unseen trainR prompts"
+[ $n -lt 384 ] && head -n $((384 - n)) trainR.jsonl >> dag_p.jsonl
+python3 sp_qwen3.py rollout --traces dag_p.jsonl --n 384 --max-len 4096 --roll-batch 16 $F --rw 1024 --ckpt spR2.pt --roll-out dag1.jsonl --log $LG > run_dag.log 2>&1
+grep -E "Error|Traceback|out of memory" run_dag.log | tail -2 | sed "s/^/[tp] /"; echo "[tp] s11: $(wc -l < dag1.jsonl) DAgger traces"
+put dag1.jsonl dag1_R2rollouts.jsonl
+python3 sp_qwen3.py train --traces dag1.jsonl --max-len 4096 $F --rw 1024 --ckpt spR2.pt --ft-layers 28 --opt8bit --ft-lr 1e-5 --lr 1e-4 --par --chunks-per-trace 4 --accum 8 --out spD1.pt --log $LG > run_trainD1.log 2>&1
+grep -E "^\[sp\] (trained)|Error|Traceback|out of memory" run_trainD1.log | tail -3 | sed "s/^/[tp] D1: /"
+put spD1.pt spD1_dagger_fft1024.pt
+for e in kv_full_p.jsonl:math traces.jsonl:mix; do f=${e%%:*}; n=${e#*:}; x=""; [ $n = mix ] && x="--n 60"
+  python3 sp_qwen3.py eval --traces $f $x --max-len 4096 $F --rw 1024 --ckpt spD1.pt --log $LG 2>&1 | grep -E "^\[sp\] eval|Error|Traceback" | sed "s/^/[$n] D1 stageA-cond: /"; done
+python3 sp_qwen3.py eval --traces g8_R2.jsonl $E $F --rw 1024 --ckpt spD1.pt --log $LG 2>&1 | grep -E "^\[sp\] eval|Error|Traceback" | sed "s/^/[tp] own-KL on g8_R2.jsonl: D1: /"
+put $LG spP.log
+python3 sp_qwen3.py rollout --traces kv_full_p.jsonl --n 32 --max-len 8192 --roll-batch 16 $F --rw 1024 --ckpt spD1.pt --roll-out g8_D1.jsonl --log $LG > run_gD1.log 2>&1
+grep -E "Error|Traceback|out of memory" run_gD1.log | tail -2 | sed "s/^/[tp] /"
+python3 sp_mathcheck.py g8_D1.jsonl g8_R2.jsonl g8_raw1056.jsonl | sed "s/^/[tp] /"
+put g8_D1.jsonl ap32gen8_D1.jsonl; put $LG spP.log; date -u > DONE_TD1; put DONE_TD1 DONE_TD1; echo "[tp] DONE_TD1 $(date -u)"
+JOB
+  setsid nohup bash -c 'bash /root/job11.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
+  sed -e 's/DONE_TR /DONE_TD1 /' /root/live8.sh > /root/live11.sh; pkill -f live10.sh; setsid nohup bash -c 'bash /root/live11.sh' > /dev/null 2>&1 < /dev/null &
+  echo "[tp] s11: rollout KL + DAgger launched $(date -u)"
+fi
 # serial 10: stage R ran out of memory at ~850 traces (its 800-trace checkpoint already scores 0.0706 / 0.0621 under the stage-A
 # conditions - level with the best so far). The trainer now skips a trace that does not fit. R2 = continue from spR.pt on the
 # rest (trainR from 851, 1150 traces), then the same scores and the generation check (8192 tokens, rollout without the
