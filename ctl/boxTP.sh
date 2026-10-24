@@ -5,7 +5,7 @@
 # lr 3e-4. Two poolers side by side: the original (raw sinusoids, oldest-first) and pe-rev + pe-norm. Then held-out deep KL vs
 # the equal-budget raw window (160) and the plain 128, the inference-time wider window (512 on 4096-token traces), and a
 # generation check: 32 MATH problems, full KV vs SP + window 512 vs raw window 544 alone (accuracy, </think>, repetition).
-SER=2
+SER=3
 if [ -f /root/.boxtp_serial ] && [ "$(cat /root/.boxtp_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxtp_serial
 echo "[tp] preflight GPU: $(nvidia-smi --query-gpu=name,memory.used,memory.total --format=csv,noheader)"
@@ -19,6 +19,26 @@ tail -n 1 /root/w/sp.log 2>/dev/null | cut -c1-220
 nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv,noheader
 ST
 chmod +x /root/status.sh
+# serial 3 (the user: score them under the same conditions as the earlier 0.06-0.08 numbers): after the pipeline, the deployment
+# loop exactly as stages A / B / W3 were scored - rw 1024, C 128, maxD 384, 4096-token traces, MATH 64 / mixed 60 - for both
+# poolers, plus the no-SP equal-budget window (1056).
+if [ ! -e /root/.job3 ]; then touch /root/.job3
+  cat > /root/job3.sh <<'JOB'
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); cd /root/w
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+R=baya1116/hypernet-sp-distill
+put() { for t in 1 2 3 4 5; do python3 -c "import sys; from huggingface_hub import HfApi; HfApi().upload_file(path_or_fileobj=sys.argv[1], path_in_repo='archive/sp3/'+sys.argv[2], repo_id='$R')" "$1" "$2" > put.err 2>&1 && { echo "[hub] $2"; return 0; }; sleep 90; done; echo "[hub] $2 FAILED"; }
+while [ ! -e DONE_TP ]; do sleep 30; done
+LG=/root/w/sp.log; Q="--S 32 --heads 8 --layers 3 --ffn 2048 --C 128 --maxd 384 --max-len 4096"
+echo "[tp] same conditions as stage A (rw 1024, C 128, maxD 384, 4096 tokens) $(date -u)"
+for e in kv_full_p.jsonl:math traces.jsonl:mix; do f=${e%%:*}; n=${e#*:}; x=""; [ $n = mix ] && x="--n 60"
+  for c in spP_orig.pt spP_norm.pt; do python3 sp_qwen3.py eval --traces $f $x --rw 1024 $Q --ckpt $c --log $LG 2>&1 | grep -E "^\[sp\] eval|Error|Traceback" | sed "s/^/[$n] /"; done
+  python3 sp_qwen3.py eval --traces $f $x --rw 1056 $Q --no-sp --log $LG 2>&1 | grep -E "^\[sp\] eval|Error|Traceback" | sed "s/^/[$n] /"; done
+put $LG spP.log; date -u > DONE_TP2; put DONE_TP2 DONE_TP2; echo "[tp] DONE_TP2 $(date -u)"
+JOB
+  setsid nohup bash -c 'bash /root/job3.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
+  echo "[tp] s3: same-condition scoring queued $(date -u)"
+fi
 # serial 2: the two trainers write their own logs - show both in the status line and the live log
 if [ ! -e /root/.st2 ]; then touch /root/.st2
   sed -i 's#tail -n 1 /root/w/sp.log 2>/dev/null | cut -c1-220#for v in orig norm; do tail -n 1 /root/w/spP_$v.log 2>/dev/null | cut -c1-200; done; tail -n 1 /root/w/sp.log 2>/dev/null | cut -c1-200#' /root/status.sh
