@@ -5,7 +5,7 @@
 # lr 3e-4. Two poolers side by side: the original (raw sinusoids, oldest-first) and pe-rev + pe-norm. Then held-out deep KL vs
 # the equal-budget raw window (160) and the plain 128, the inference-time wider window (512 on 4096-token traces), and a
 # generation check: 32 MATH problems, full KV vs SP + window 512 vs raw window 544 alone (accuracy, </think>, repetition).
-SER=9
+SER=10
 if [ -f /root/.boxtp_serial ] && [ "$(cat /root/.boxtp_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxtp_serial
 echo "[tp] preflight GPU: $(nvidia-smi --query-gpu=name,memory.used,memory.total --format=csv,noheader)"
@@ -19,6 +19,37 @@ tail -n 1 /root/w/sp.log 2>/dev/null | cut -c1-220
 nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv,noheader
 ST
 chmod +x /root/status.sh
+# serial 10: stage R ran out of memory at ~850 traces (its 800-trace checkpoint already scores 0.0706 / 0.0621 under the stage-A
+# conditions - level with the best so far). The trainer now skips a trace that does not fit. R2 = continue from spR.pt on the
+# rest (trainR from 851, 1150 traces), then the same scores and the generation check (8192 tokens, rollout without the
+# empty-buffer SP) at rw 1024.
+if [ ! -e /root/.job10 ]; then touch /root/.job10
+  cat > /root/job10.sh <<'JOB'
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); cd /root/w
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+R=baya1116/hypernet-sp-distill
+put() { for t in 1 2 3 4 5; do python3 -c "import sys; from huggingface_hub import HfApi; HfApi().upload_file(path_or_fileobj=sys.argv[1], path_in_repo='archive/sp3/'+sys.argv[2], repo_id='$R')" "$1" "$2" > put.err 2>&1 && { echo "[hub] $2"; return 0; }; sleep 90; done; echo "[hub] $2 FAILED"; }
+RAWB=https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/tools
+curl -sS -o sp_qwen3.py "$RAWB/sp_qwen3.py?nocache=$(date +%s)"
+grep -q "out of memory, skipped" sp_qwen3.py && grep -q "sp_empty" sp_qwen3.py && echo "[tp] s10: trainer has the OOM skip + rollout fix" || echo "[tp] s10: WARNING old trainer"
+LG=/root/w/sp.log; F="--S 32 --heads 8 --layers 3 --ffn 2048 --rw 1024 --C 128 --maxd 384"
+echo "[tp] stage R2: continue from spR.pt $(date -u)"
+python3 sp_qwen3.py train --traces trainR.jsonl --skip 850 --n 1150 --max-len 3072 $F --ckpt spR.pt --ft-layers 28 --opt8bit --ft-lr 1e-5 --lr 1e-4 --par --chunks-per-trace 4 --accum 8 --out spR2.pt --log $LG > run_trainR2.log 2>&1
+grep -E "^\[sp\] (trained)|Error|Traceback|out of memory" run_trainR2.log | tail -3 | sed "s/^/[tp] R2: /"
+put spR2.pt spR2_ap32recipe_fft1024.pt
+for e in kv_full_p.jsonl:math traces.jsonl:mix; do f=${e%%:*}; n=${e#*:}; x=""; [ $n = mix ] && x="--n 60"
+  python3 sp_qwen3.py eval --traces $f $x --max-len 4096 $F --ckpt spR2.pt --log $LG 2>&1 | grep -E "^\[sp\] eval|Error|Traceback" | sed "s/^/[$n] R2 stageA-cond: /"; done
+put $LG spP.log
+G="--traces kv_full_p.jsonl --n 32 --max-len 8192 --roll-batch 16 --S 32 --heads 8 --layers 3 --ffn 2048 --log $LG"
+python3 sp_qwen3.py rollout $G --rw 1024 --C 128 --maxd 384 --ckpt spR2.pt --roll-out g8_R2.jsonl > run_gR2.log 2>&1
+grep -E "Error|Traceback|out of memory" run_gR2.log | tail -2 | sed "s/^/[tp] /"
+python3 sp_mathcheck.py g8_R2.jsonl | sed "s/^/[tp] /"
+put g8_R2.jsonl ap32gen8_R2.jsonl; put $LG spP.log; date -u > DONE_TR2; put DONE_TR2 DONE_TR2; echo "[tp] DONE_TR2 $(date -u)"
+JOB
+  setsid nohup bash -c 'bash /root/job10.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
+  sed -e 's/DONE_TR /DONE_TR2 /' /root/live8.sh > /root/live10.sh; setsid nohup bash -c 'bash /root/live10.sh' > /dev/null 2>&1 < /dev/null &
+  echo "[tp] s10: stage R2 launched $(date -u)"
+fi
 # serial 9: two copies of the 8k generation job are running (the serial-6 one was not stopped before serial 7 relaunched it)
 # - stop the newer copy and its current rollout; the shared output files keep both copies' rows (extra samples)
 if [ ! -e /root/.dup9 ]; then touch /root/.dup9

@@ -587,12 +587,18 @@ else:
                     lo_j = a.sn_t0 if a.spnext else (a.C if a.par else a.rw + a.C)
                     if T_j - P_j - lo_j >= (a.sn_batch // 4 if a.spnext else (a.rw + a.C if a.par else a.C)):
                         refs[j] = teacher_hidden(ids_j.to(dev), P_j + lo_j, T_j)
-        if a.spnext:
-            if a.sn_win_plateau: SNW["w"] = WINS[WI["i"]]
-            else: SNW["w"] = WINS[min(st // a.sn_win_every, len(WINS) - 1)]
-            k, g, n = run_trace_spnext(ids, P, ref_h=refs.pop(st, None))
-        elif a.par: k, g, n = run_trace_par(ids, P, ref_h=refs.pop(st, None))
-        else: k, g, n = run_trace(ids, P, True, ref_h=refs.pop(st, None))
+        try:
+            if a.spnext:
+                if a.sn_win_plateau: SNW["w"] = WINS[WI["i"]]
+                else: SNW["w"] = WINS[min(st // a.sn_win_every, len(WINS) - 1)]
+                k, g, n = run_trace_spnext(ids, P, ref_h=refs.pop(st, None))
+            elif a.par: k, g, n = run_trace_par(ids, P, ref_h=refs.pop(st, None))
+            else: k, g, n = run_trace(ids, P, True, ref_h=refs.pop(st, None))
+        except torch.cuda.OutOfMemoryError:   # a long-prompt trace: drop it (and its half-built grads), keep training
+            refs.pop(st, None); pooler.zero_grad(set_to_none=True)
+            for p_ in FTP: p_.grad = None
+            for m_ in MASTER: m_.grad = None
+            torch.cuda.empty_cache(); log(f"[sp] trace {st + 1}: out of memory, skipped"); k = g = n = 0
         K += k; A_ += g; N += n
         if (st + 1) % a.accum == 0 or st + 1 == steps:
             torch.nn.utils.clip_grad_norm_(list(pooler.parameters()) + MASTER, 1.0)
