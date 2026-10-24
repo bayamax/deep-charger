@@ -18,7 +18,7 @@ nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv,noheader
 ST
 chmod +x /root/status.sh
 # serial 2 (the user: then the window, without a reset): after the window-0 run, from its weights on the same box, the
-# window curriculum w = 4, 32, 256, 1024 stepped when the KL stops falling (100-trace means, < 2%; min 200, max 200 per w -
+# window curriculum w = 4, 32, 256, 1024 stepped when the KL stops falling (50-trace means, < 2%; min 100, max 200 per w -
 # the credit is short), on the next unseen traces; then held-out profile + the deployment loop vs stage A 0.079 / 0.066.
 if [ ! -e /root/.job2 ]; then touch /root/.job2
   cat > /root/job2.sh <<'JOB'
@@ -30,7 +30,7 @@ while [ ! -e DONE_TY ]; do sleep 30; done
 NY=$(grep -o 'trace [0-9]*/600' sp.log | tail -1 | grep -o '[0-9]*/' | tr -d '/')
 LG=/root/w/sp.log; F="--S 32 --rw 1024 --C 128 --maxd 384 --layers 3 --ffn 1024"
 echo "[ty] curriculum launched after window-0 run ($NY traces) $(date -u)"
-python3 sp_qwen3.py train --traces trainY.jsonl --skip $NY --n 800 --max-len 3072 $F --ckpt spY.pt --pe-rev --pe-norm --ft-layers 28 --opt8bit --ft-lr 1e-5 --lr 5e-4 --spnext --sn-win 4,32,256,1024 --sn-win-plateau 0.02 --sn-win-block 4 --sn-win-max 200 --sn-pos 256 --sn-batch 8 --sn-tokens 3000 --accum 1 --out spZ.pt --log $LG > run_trainZ.log 2>&1
+python3 sp_qwen3.py train --traces trainY.jsonl --skip $NY --n 800 --max-len 3072 $F --ckpt spY.pt --pe-rev --pe-norm --ft-layers 28 --opt8bit --ft-lr 1e-5 --lr 5e-4 --spnext --sn-win 4,32,256,1024 --sn-win-plateau 0.02 --sn-win-block 2 --sn-win-max 200 --sn-pos 256 --sn-batch 8 --sn-tokens 3000 --accum 1 --out spZ.pt --log $LG > run_trainZ.log 2>&1
 grep -E "^\[sp\] (train .*: [0-9]+ traces|trained|curriculum)|Error|Traceback|out of memory" run_trainZ.log | tail -3
 python3 sp_qwen3.py profile --traces kv_full_p.jsonl --n 16 --max-len 4096 $F --ckpt spZ.pt --log $LG 2>&1 | grep -E "^\[sp\] profile|Error|Traceback" | tail -7 | sed "s/^/[math] /"
 for e in kv_full_p.jsonl:math traces.jsonl:mix; do f=${e%%:*}; n=${e#*:}; x=""; [ $n = mix ] && x="--n 60"
