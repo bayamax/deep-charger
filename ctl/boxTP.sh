@@ -5,7 +5,7 @@
 # lr 3e-4. Two poolers side by side: the original (raw sinusoids, oldest-first) and pe-rev + pe-norm. Then held-out deep KL vs
 # the equal-budget raw window (160) and the plain 128, the inference-time wider window (512 on 4096-token traces), and a
 # generation check: 32 MATH problems, full KV vs SP + window 512 vs raw window 544 alone (accuracy, </think>, repetition).
-SER=6
+SER=7
 if [ -f /root/.boxtp_serial ] && [ "$(cat /root/.boxtp_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxtp_serial
 echo "[tp] preflight GPU: $(nvidia-smi --query-gpu=name,memory.used,memory.total --format=csv,noheader)"
@@ -19,6 +19,14 @@ tail -n 1 /root/w/sp.log 2>/dev/null | cut -c1-220
 nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv,noheader
 ST
 chmod +x /root/status.sh
+# serial 7: relaunch the (still waiting) 8k generation job with the full-KV run in batches of 8
+if [ ! -e /root/.job7 ]; then touch /root/.job7
+  pkill -f job6.sh; sleep 2
+  sed -i 's#python3 sp_qwen3.py rollout $G --no-sp --rw 16384#python3 sp_qwen3.py rollout $G --roll-batch 8 --no-sp --rw 16384#' /root/job6.sh
+  grep -q -- "--roll-batch 8 --no-sp --rw 16384" /root/job6.sh && echo "[tp] s7: job6 patched" || echo "[tp] s7: WARNING job6 not patched"
+  setsid nohup bash -c 'bash /root/job6.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
+  echo "[tp] s7: 8k generation job relaunched $(date -u)"
+fi
 # serial 6: the 4096-token generation check is not usable (full KV left 19/32 thoughts unfinished; the window-only path
 # stops early and "wins") - after stage Q, generate to 8192 tokens: full KV, SP (stage Q weights) at the deployment setting
 # (rw 1024, C 128, maxD 384), the frozen recipe pooler the same way, and the equal-budget window alone (1056).
