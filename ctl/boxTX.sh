@@ -2,7 +2,7 @@
 # Box TX (3090 24 GB, pytorch image): the window curriculum continued from stage W (spW, w up to 256) to the deployment
 # window: w = 256, 512, 1024 (200 traces each) on the stage-W pool traces it has not used (lines 1201+).
 # Held-out profile + deployment loop at the end.
-SER=1
+SER=2
 if [ -f /root/.boxtx_serial ] && [ "$(cat /root/.boxtx_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxtx_serial
 echo "[tx] preflight GPU: $(nvidia-smi --query-gpu=name,memory.used,memory.total --format=csv,noheader)"
@@ -16,6 +16,20 @@ tail -n 1 /root/w/sp.log 2>/dev/null | cut -c1-220
 nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv,noheader
 ST
 chmod +x /root/status.sh
+# serial 2 (the user: step w when the KL stops falling, not every 200): once the first job reaches training, restart it
+# with the plateau rule - the next w when the last 100 traces are not 2% below the 100 before (min 200, max 800 per w),
+# stop after 1024 plateaus; at most 1500 traces.
+if [ ! -e /root/.job2 ]; then touch /root/.job2
+  for i in $(seq 1 60); do grep -q "training launched" /root/w/w.log 2>/dev/null && break; sleep 30; done
+  pkill -f job.sh; pkill -f sp_qwen3.py; sleep 5; cd /root/w
+  curl -sS -o /root/w/sp_qwen3.py "$RAW/tools/sp_qwen3.py?nocache=$(date +%s)"
+  grep -q "sn_win_plateau" sp_qwen3.py && echo "[tx] s2: trainer has the plateau rule" || echo "[tx] s2: WARNING old trainer"
+  { sed -n '1,5p' /root/job.sh; sed -n '/^LG=/,$p' /root/job.sh; } > /root/job2.sh
+  sed -i 's/--skip 1200 --n 600/--skip 1200 --n 1500/; s/--sn-win 256,512,1024 --sn-win-every 200/--sn-win 256,512,1024 --sn-win-plateau 0.02 --sn-win-max 800/' /root/job2.sh
+  grep -q -- "--n 1500" /root/job2.sh && grep -q -- "--sn-win-plateau 0.02" /root/job2.sh && echo "[tx] s2: args set" || echo "[tx] s2: WARNING args not set"
+  cd /root; setsid nohup bash -c 'bash /root/job2.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
+  echo "[tx] s2: relaunched $(date -u)"
+fi
 if [ ! -e /root/.job ]; then touch /root/.job
   cat > /root/job.sh <<'JOB'
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); cd /root/w

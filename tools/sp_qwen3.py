@@ -55,6 +55,9 @@ ap.add_argument("--sn-pos", type=int, default=0, help="spnext: positions sampled
 ap.add_argument("--sn-win", default="1", help="spnext curriculum: tokens predicted after SP_t (1 = window 0 only; w = SP_t + the next "
                 "w-1 raw tokens, scoring windows 0..w-1), comma list stepped every --sn-win-every traces, e.g. 1,2,4,8,16")
 ap.add_argument("--sn-win-every", type=int, default=150, help="spnext curriculum: traces per --sn-win step")
+ap.add_argument("--sn-win-plateau", type=float, default=0.0, help="spnext curriculum: step to the next w when the last 100 traces' "
+                "KL is not this fraction below the 100 before (0 = fixed --sn-win-every); after the last w plateaus, training stops")
+ap.add_argument("--sn-win-max", type=int, default=800, help="spnext curriculum with --sn-win-plateau: most traces at one w")
 ap.add_argument("--sn-t0", type=int, default=16, help="spnext: first answer position trained")
 ap.add_argument("--score-from", type=int, default=0, help="count only answer tokens at index >= this (a common region when rw differs)")
 ap.add_argument("--pe-rev", action="store_true", help="pooler positions counted from the NEWEST buffer token (0 = the token "
@@ -472,6 +475,7 @@ else:
         names = [n_ for li in range(a.ft_layers) for n_, _ in llm.model.layers[li].named_parameters(prefix=f"model.layers.{li}")]
         SWAP["pairs"] = [(p_, FT_SD[n_].pin_memory() if dev == "cuda" else FT_SD[n_], m_) for p_, n_, m_ in zip(FTP, names, MASTER)]
     refs = {}; WINS = [int(x) for x in a.sn_win.split(",")]
+    WI = {"i": 0, "from": 0, "kl": []}; STOP = {"now": False}
     for st in range(steps):
         ids, P = data[st % len(data)]
         if FTP and st % a.accum == 0:   # the teacher pass for the next group of traces in ONE weight swap
@@ -484,7 +488,8 @@ else:
                     if T_j - P_j - lo_j >= (a.sn_batch // 4 if a.spnext else (a.rw + a.C if a.par else a.C)):
                         refs[j] = teacher_hidden(ids_j.to(dev), P_j + lo_j, T_j)
         if a.spnext:
-            SNW["w"] = WINS[min(st // a.sn_win_every, len(WINS) - 1)]
+            if a.sn_win_plateau: SNW["w"] = WINS[WI["i"]]
+            else: SNW["w"] = WINS[min(st // a.sn_win_every, len(WINS) - 1)]
             k, g, n = run_trace_spnext(ids, P, ref_h=refs.pop(st, None))
         elif a.par: k, g, n = run_trace_par(ids, P, ref_h=refs.pop(st, None))
         else: k, g, n = run_trace(ids, P, True, ref_h=refs.pop(st, None))
@@ -498,6 +503,15 @@ else:
         if (st + 1) % 25 == 0 or st + 1 == steps:
             x = f" | w{SNW['w']} window-0 KL {SNW['k0'] / max(SNW['n0'], 1):.4f}" if a.spnext and len(WINS) > 1 else ""
             log(f"[sp] train {tag} trace {st + 1}/{steps}: KL {K / max(N, 1):.4f} top1 {100 * A_ / max(N, 1):.2f}%{x} ({time.time() - t0:.0f}s)")
+            if a.spnext and a.sn_win_plateau and N:   # curriculum by plateau: 100-trace means at this w, last vs the one before
+                WI["kl"].append(K / N); n_at = st + 1 - WI["from"]; hist = WI["kl"]
+                flat = len(hist) >= 8 and sum(hist[-4:]) / 4 > (1 - a.sn_win_plateau) * sum(hist[-8:-4]) / 4
+                if flat or n_at >= a.sn_win_max:
+                    log(f"[sp] curriculum: w{WINS[WI['i']]} {'plateau' if flat else 'cap'} after {n_at} traces "
+                        f"(last 100 KL {sum(hist[-4:]) / 4:.4f})")
+                    if WI["i"] + 1 >= len(WINS): STOP["now"] = True
+                    else: WI["i"] += 1; WI["from"] = st + 1; WI["kl"] = []
             K = A_ = N = 0; SNW["k0"] = 0.0; SNW["n0"] = 0
         if (st + 1) % 200 == 0: save()
+        if STOP["now"]: break
     save(); log(f"[sp] trained {tag} -> {a.out}")
