@@ -508,7 +508,7 @@ else:
                 flat = len(hist) >= 8 and sum(hist[-4:]) / 4 > (1 - a.sn_win_plateau) * sum(hist[-8:-4]) / 4
                 if flat or n_at >= a.sn_win_max:
                     log(f"[sp] curriculum: w{WINS[WI['i']]} {'plateau' if flat else 'cap'} after {n_at} traces "
-                        f"(last 100 KL {sum(hist[-4:]) / 4:.4f})")
+                        f"(last 100 KL {sum(hist[-4:]) / len(hist[-4:]):.4f})")
                     if WI["i"] + 1 >= len(WINS): STOP["now"] = True
                     else: WI["i"] += 1; WI["from"] = st + 1; WI["kl"] = []
             K = A_ = N = 0; SNW["k0"] = 0.0; SNW["n0"] = 0
