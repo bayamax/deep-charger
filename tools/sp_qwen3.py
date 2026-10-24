@@ -57,6 +57,7 @@ ap.add_argument("--sn-win", default="1", help="spnext curriculum: tokens predict
 ap.add_argument("--sn-win-every", type=int, default=150, help="spnext curriculum: traces per --sn-win step")
 ap.add_argument("--sn-win-plateau", type=float, default=0.0, help="spnext curriculum: step to the next w when the last 100 traces' "
                 "KL is not this fraction below the 100 before (0 = fixed --sn-win-every); after the last w plateaus, training stops")
+ap.add_argument("--sn-win-block", type=int, default=4, help="spnext plateau rule: logs (25 traces each) per compared block")
 ap.add_argument("--sn-win-max", type=int, default=800, help="spnext curriculum with --sn-win-plateau: most traces at one w")
 ap.add_argument("--sn-t0", type=int, default=16, help="spnext: first answer position trained")
 ap.add_argument("--score-from", type=int, default=0, help="count only answer tokens at index >= this (a common region when rw differs)")
@@ -505,10 +506,11 @@ else:
             log(f"[sp] train {tag} trace {st + 1}/{steps}: KL {K / max(N, 1):.4f} top1 {100 * A_ / max(N, 1):.2f}%{x} ({time.time() - t0:.0f}s)")
             if a.spnext and a.sn_win_plateau and N:   # curriculum by plateau: 100-trace means at this w, last vs the one before
                 WI["kl"].append(K / N); n_at = st + 1 - WI["from"]; hist = WI["kl"]
-                flat = len(hist) >= 8 and sum(hist[-4:]) / 4 > (1 - a.sn_win_plateau) * sum(hist[-8:-4]) / 4
+                b_ = a.sn_win_block
+                flat = len(hist) >= 2 * b_ and sum(hist[-b_:]) / b_ > (1 - a.sn_win_plateau) * sum(hist[-2 * b_:-b_]) / b_
                 if flat or n_at >= a.sn_win_max:
                     log(f"[sp] curriculum: w{WINS[WI['i']]} {'plateau' if flat else 'cap'} after {n_at} traces "
-                        f"(last 100 KL {sum(hist[-4:]) / len(hist[-4:]):.4f})")
+                        f"(last {25 * len(hist[-a.sn_win_block:])} KL {sum(hist[-a.sn_win_block:]) / len(hist[-a.sn_win_block:]):.4f})")
                     if WI["i"] + 1 >= len(WINS): STOP["now"] = True
                     else: WI["i"] += 1; WI["from"] = st + 1; WI["kl"] = []
             K = A_ = N = 0; SNW["k0"] = 0.0; SNW["n0"] = 0

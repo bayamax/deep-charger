@@ -2,7 +2,7 @@
 # Box TX (3090 24 GB, pytorch image): the window curriculum continued from stage W (spW, w up to 256) to the deployment
 # window: w = 256, 512, 1024 (200 traces each) on the stage-W pool traces it has not used (lines 1201+).
 # Held-out profile + deployment loop at the end.
-SER=2
+SER=3
 if [ -f /root/.boxtx_serial ] && [ "$(cat /root/.boxtx_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxtx_serial
 echo "[tx] preflight GPU: $(nvidia-smi --query-gpu=name,memory.used,memory.total --format=csv,noheader)"
@@ -16,6 +16,29 @@ tail -n 1 /root/w/sp.log 2>/dev/null | cut -c1-220
 nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv,noheader
 ST
 chmod +x /root/status.sh
+# serial 3 (the user: window 0 IS the pooler's quality - secure it first): stop the window curriculum and continue stage F
+# instead - the 3-layer pooler (model frozen, pe-rev + pe-norm) from its 800-trace weights, window-0 SP-next until it stops
+# falling (200-trace means, < 1% better), at most 2000 traces, on traces F's pooler has not seen (stage E's pool from
+# 2801); then held-out KL by window length.
+if [ ! -e /root/.job3 ]; then touch /root/.job3
+  pkill -f job2.sh; pkill -f sp_qwen3.py; sleep 5; cd /root/w
+  curl -sS -o /root/w/sp_qwen3.py "$RAW/tools/sp_qwen3.py?nocache=$(date +%s)"
+  grep -q "sn_win_block" sp_qwen3.py && echo "[tx] s3: trainer has --sn-win-block" || echo "[tx] s3: WARNING old trainer"
+  tail -n +2801 trainE.jsonl > trainF2.jsonl; echo "[tx] s3: stage F2 pool $(wc -l < trainF2.jsonl) traces"
+  sed -n '1,5p' /root/job.sh > /root/job3.sh
+  cat >> /root/job3.sh <<'JOB'
+get archive/sp3/spF_L3_spnext.pt spF0.pt; echo "[tx] F start ckpt $(stat -c %s spF0.pt) bytes"
+LG=/root/w/spF2.log; F="--S 32 --rw 1024 --C 128 --maxd 384 --layers 3 --ffn 1024"
+echo "[tx] stage F2 launched $(date -u)"
+python3 sp_qwen3.py train --traces trainF2.jsonl --n 2000 --max-len 3072 $F --ckpt spF0.pt --pe-rev --pe-norm --lr 5e-4 --spnext --sn-win 1 --sn-win-plateau 0.01 --sn-win-block 8 --sn-win-max 2000 --sn-pos 256 --sn-batch 32 --sn-tokens 12000 --accum 1 --out spF2.pt --log $LG > run_trainF2.log 2>&1
+grep -E "^\[sp\] (train .*: [0-9]+ traces|trained|curriculum)|Error|Traceback|out of memory" run_trainF2.log | tail -3
+put spF2.pt spF2_L3_spnext.pt; put $LG spF2.log
+python3 sp_qwen3.py profile --traces kv_full_p.jsonl --n 16 --max-len 4096 $F --ckpt spF2.pt --log $LG 2>&1 | grep -E "^\[sp\] profile|Error|Traceback" | tail -7 | sed "s/^/[math] /"
+put $LG spF2.log; date -u > DONE_TF2; put DONE_TF2 DONE_TF2; echo "[tx] DONE_F2 $(date -u)"
+JOB
+  cd /root; setsid nohup bash -c 'bash /root/job3.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
+  echo "[tx] s3: launched $(date -u)"
+fi
 # serial 2 (the user: step w when the KL stops falling, not every 200): once the first job reaches training, restart it
 # with the plateau rule - the next w when the last 100 traces are not 2% below the 100 before (min 200, max 800 per w),
 # stop after 1024 plateaus; at most 1500 traces.
