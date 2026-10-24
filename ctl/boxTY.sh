@@ -3,7 +3,7 @@
 # KL 3.32 held-out with the model frozen) + all-layer FFT from the original model, window-0 SP-next until it stops falling
 # (200-trace means, < 1% better), at most 600 traces, on traces neither F2's pooler nor the model has seen (stage E's pool
 # from 3851). Then held-out KL by window length (window 0 = the pooler's score; stage E = 3.02 with a 1-layer pooler).
-SER=3
+SER=4
 if [ -f /root/.boxty_serial ] && [ "$(cat /root/.boxty_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxty_serial
 echo "[ty] preflight GPU: $(nvidia-smi --query-gpu=name,memory.used,memory.total --format=csv,noheader)"
@@ -17,6 +17,15 @@ tail -n 1 /root/w/sp.log 2>/dev/null | cut -c1-220
 nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv,noheader
 ST
 chmod +x /root/status.sh
+# serial 4 (the user topped up the credit - fine steps are fine): cancel the serial-3 cut (the window-0 run goes on to its
+# plateau / 600) and restore a fine curriculum by plateau: w = 2, 4, 8, ... 1024, 100-trace means < 2%, min 200, max 400
+# per w, up to 3000 traces; MATH + mixed scoring.
+if [ ! -e /root/.job4 ]; then touch /root/.job4
+  pkill -f "trace 225/600"; echo "[ty] s4: window-0 cut cancelled"
+  sed -i 's/--n 300/--n 3000/; s/--sn-win 4,32,256,1024 --sn-win-every 75/--sn-win 2,4,8,16,32,64,128,256,512,1024 --sn-win-plateau 0.02 --sn-win-block 4 --sn-win-max 400/; s/for e in kv_full_p.jsonl:math; do/for e in kv_full_p.jsonl:math traces.jsonl:mix; do/' /root/job2.sh
+  grep -q -- "--n 3000" /root/job2.sh && grep -q -- "--sn-win 2,4,8,16,32,64,128,256,512,1024 --sn-win-plateau 0.02" /root/job2.sh && echo "[ty] s4: fine curriculum set" || echo "[ty] s4: WARNING job2 not changed"
+  pgrep -f "sp_qwen3.py train" > /dev/null && echo "[ty] s4: window-0 run still training" || echo "[ty] s4: WARNING window-0 run not running"
+fi
 # serial 3: the credit (~$0.6 at $0.30/h) does not cover 600 window-0 traces at ~9 s each plus the curriculum: stop the
 # window-0 run at its 200-trace checkpoint (killed after the 225 log; job.sh then profiles and uploads it as usual), and run
 # the curriculum fixed at 75 traces per w (4, 32, 256, 1024 = 300 traces), scoring MATH only.
