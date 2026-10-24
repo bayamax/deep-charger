@@ -347,7 +347,7 @@ def run_trace_spnext(ids, P, ref_h=None):
     npos = max(16, a.sn_pos // w) if a.sn_pos else 0                  # about the same scored tokens per trace at every w
     if npos and len(pos) > npos: pos = sorted(random.sample(pos, npos))
     K = A_ = N = 0.0
-    bsz = max(1, min(a.sn_batch, a.sn_tokens // (P + a.S + w), max(1, 256 // w)))   # <= ~256 scored rows (B x w x vocab) per forward
+    bsz = max(1, min(a.sn_batch, a.sn_tokens // (P + a.S + w), max(1, 256 // min(w, 256))))   # <= ~256 scored rows (B x w x vocab) per forward
     for i in range(0, len(pos), bsz):
         ts = pos[i:i + bsz]; B = len(ts)
         bufs = []
@@ -371,11 +371,15 @@ def run_trace_spnext(ids, P, ref_h=None):
         h = llm.model(inputs_embeds=x_in, attention_mask=torch.ones(B, P + nb, device=dev), past_key_values=cache,
                       position_ids=pp, cache_position=pp[0], use_cache=True).last_hidden_state[:, a.S - 1:]   # (B, w, H)
         rows = (torch.tensor(ts, device=dev) - t0)[:, None] + torch.arange(w, device=dev)[None]          # (B, w)
-        tr = teacher_rows(ref_h[rows.reshape(-1)]).view(B, w, -1)
+        if w > 256:   # wide windows: score window 0 + 255 random windows (B x w x vocab logits would not fit)
+            sel = torch.tensor([0] + sorted(random.sample(range(1, w), 255)), device=dev)
+            h, rows = h[:, sel], rows[:, sel]
+        wk = rows.size(1)
+        tr = teacher_rows(ref_h[rows.reshape(-1)]).view(B, wk, -1)
         lp = F.log_softmax(llm.lm_head(h).float(), -1)
         kl = (tr.exp() * (tr - lp)).sum(-1)                                # (B, w)
         (kl.sum() / 1000.0).backward()
-        K += kl.sum().item(); A_ += (lp.argmax(-1) == tr.argmax(-1)).float().sum().item(); N += B * w
+        K += kl.sum().item(); A_ += (lp.argmax(-1) == tr.argmax(-1)).float().sum().item(); N += B * wk
         SNW["k0"] += kl[:, 0].sum().item(); SNW["n0"] += B
     return K, A_, N
 
