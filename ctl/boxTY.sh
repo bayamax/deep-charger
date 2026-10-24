@@ -3,7 +3,7 @@
 # KL 3.32 held-out with the model frozen) + all-layer FFT from the original model, window-0 SP-next until it stops falling
 # (200-trace means, < 1% better), at most 600 traces, on traces neither F2's pooler nor the model has seen (stage E's pool
 # from 3851). Then held-out KL by window length (window 0 = the pooler's score; stage E = 3.02 with a 1-layer pooler).
-SER=5
+SER=6
 if [ -f /root/.boxty_serial ] && [ "$(cat /root/.boxty_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxty_serial
 echo "[ty] preflight GPU: $(nvidia-smi --query-gpu=name,memory.used,memory.total --format=csv,noheader)"
@@ -17,6 +17,19 @@ tail -n 1 /root/w/sp.log 2>/dev/null | cut -c1-220
 nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv,noheader
 ST
 chmod +x /root/status.sh
+# serial 6: Vast's log relay stopped answering - push the training log to the hub every 10 min instead (archive/sp3/ty_live.log)
+if [ ! -e /root/.live6 ]; then touch /root/.live6
+  cat > /root/live.sh <<'JOB'
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); cd /root/w
+while [ ! -e DONE_TZ ]; do
+  { grep -E "^\[(ty|hub|math|mix)\]" w.log | tail -n 20; tail -n 12 sp.log; date -u; } > ty_live.log
+  python3 -c "from huggingface_hub import HfApi; HfApi().upload_file(path_or_fileobj='ty_live.log', path_in_repo='archive/sp3/ty_live.log', repo_id='baya1116/hypernet-sp-distill')" > /dev/null 2>&1
+  sleep 600
+done
+JOB
+  setsid nohup bash -c 'bash /root/live.sh' > /dev/null 2>&1 < /dev/null &
+  echo "[ty] s6: live log uploader started $(date -u)"
+fi
 # serial 5: the window-0 run is still falling at its 600 cap (3.9 -> 3.12 by 575) - continue window 0 from its weights until
 # it stops (200-trace means < 1%, up to 1500 more), score window 0 held-out, THEN the fine curriculum from those weights.
 if [ ! -e /root/.job5 ]; then touch /root/.job5
