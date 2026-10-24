@@ -5,7 +5,7 @@
 # lr 3e-4. Two poolers side by side: the original (raw sinusoids, oldest-first) and pe-rev + pe-norm. Then held-out deep KL vs
 # the equal-budget raw window (160) and the plain 128, the inference-time wider window (512 on 4096-token traces), and a
 # generation check: 32 MATH problems, full KV vs SP + window 512 vs raw window 544 alone (accuracy, </think>, repetition).
-SER=7
+SER=8
 if [ -f /root/.boxtp_serial ] && [ "$(cat /root/.boxtp_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxtp_serial
 echo "[tp] preflight GPU: $(nvidia-smi --query-gpu=name,memory.used,memory.total --format=csv,noheader)"
@@ -19,6 +19,40 @@ tail -n 1 /root/w/sp.log 2>/dev/null | cut -c1-220
 nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv,noheader
 ST
 chmod +x /root/status.sh
+# serial 8: stage Q (FFT at rw 128) improved rw 128 slightly but HURT the deployment window (stage-A conditions 0.084 / 0.071
+# -> 0.096 / 0.088): the model specialised to the narrow window. Stage R = the frozen recipe pooler (spP_orig) + all-layer FFT
+# AT the deployment window, the way stage B did it (--par: every window 0..rw+C at 4 boundaries per trace, rw 1024, C 128,
+# maxD 384, 8 traces per update), on traces nobody has seen (trainQ from line 1501), after the 8k generation check.
+if [ ! -e /root/.job8 ]; then touch /root/.job8
+  cat > /root/job8.sh <<'JOB'
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); cd /root/w
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+R=baya1116/hypernet-sp-distill
+put() { for t in 1 2 3 4 5; do python3 -c "import sys; from huggingface_hub import HfApi; HfApi().upload_file(path_or_fileobj=sys.argv[1], path_in_repo='archive/sp3/'+sys.argv[2], repo_id='$R')" "$1" "$2" > put.err 2>&1 && { echo "[hub] $2"; return 0; }; sleep 90; done; echo "[hub] $2 FAILED"; }
+while [ ! -e DONE_TG8 ]; do sleep 30; done
+LG=/root/w/sp.log; F="--S 32 --heads 8 --layers 3 --ffn 2048 --rw 1024 --C 128 --maxd 384"
+echo "[tp] stage R: recipe pooler + FFT at rw 1024 (--par) $(date -u)"
+tail -n +1501 trainQ.jsonl > trainR.jsonl
+python3 sp_qwen3.py train --traces trainR.jsonl --n 2000 --max-len 3072 $F --ckpt spP_orig.pt --ft-layers 28 --opt8bit --ft-lr 1e-5 --lr 1e-4 --par --chunks-per-trace 4 --accum 8 --out spR.pt --log $LG > run_trainR.log 2>&1
+grep -E "^\[sp\] (trained)|Error|Traceback|out of memory" run_trainR.log | tail -3 | sed "s/^/[tp] R: /"
+put spR.pt spR_ap32recipe_fft1024.pt
+for e in kv_full_p.jsonl:math traces.jsonl:mix; do f=${e%%:*}; n=${e#*:}; x=""; [ $n = mix ] && x="--n 60"
+  python3 sp_qwen3.py eval --traces $f $x --max-len 4096 $F --ckpt spR.pt --log $LG 2>&1 | grep -E "^\[sp\] eval|Error|Traceback" | sed "s/^/[$n] R stageA-cond: /"; done
+python3 sp_qwen3.py profile --traces kv_full_p.jsonl --n 16 --max-len 4096 $F --ckpt spR.pt --log $LG 2>&1 | grep -E "^\[sp\] profile|Error|Traceback" | tail -7 | sed "s/^/[math] R /"
+put $LG spP.log; date -u > DONE_TR; put DONE_TR DONE_TR; echo "[tp] DONE_TR $(date -u)"
+JOB
+  setsid nohup bash -c 'bash /root/job8.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
+  cat > /root/live8.sh <<'JOB'
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); cd /root/w
+while [ ! -e DONE_TR ]; do
+  { grep -E "^\[(tp|hub|math|mix)\]" w.log | tail -n 24; tail -n 8 sp.log; nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv,noheader; date -u; } > tp_live.log 2>&1
+  python3 -c "from huggingface_hub import HfApi; HfApi().upload_file(path_or_fileobj='tp_live.log', path_in_repo='archive/sp3/tp_live.log', repo_id='baya1116/hypernet-sp-distill')" > /dev/null 2>&1
+  sleep 600
+done
+JOB
+  pkill -f live5.sh; setsid nohup bash -c 'bash /root/live8.sh' > /dev/null 2>&1 < /dev/null &
+  echo "[tp] s8: stage R queued after the 8k generation check; live log until DONE_TR $(date -u)"
+fi
 # serial 7: relaunch the (still waiting) 8k generation job with the full-KV run in batches of 8
 if [ ! -e /root/.job7 ]; then touch /root/.job7
   pkill -f job6.sh; sleep 2
