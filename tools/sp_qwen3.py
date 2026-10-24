@@ -75,6 +75,8 @@ ap.add_argument("--no-sp", action="store_true", help="eval/rollout baseline with
 ap.add_argument("--ctx-hidden", type=int, default=0, help="pooler input = the frozen model's layer-N hidden states of the distant "
                 "tokens (full-context pass, rescaled to the embedding norm) instead of raw token embeddings - the lever the original "
                 "deep-charger INVESTIGATION found (overfit floor 0.16 -> 0.11); chunk mode (train/eval) only")
+ap.add_argument("--sp-empty", action="store_true", help="rollout: prepend the SP of an EMPTY buffer while nothing is distant yet "
+                "(the first rw tokens) - training never scores those states, so by default they get the plain window")
 ap.add_argument("--seed", type=int, default=0)
 ap.add_argument("--device", default="cuda"); ap.add_argument("--dtype", default="bfloat16")
 a = ap.parse_args()
@@ -458,7 +460,7 @@ def rollout(prompts):
             if nd > absorbed[b]:
                 g_ = torch.tensor([gen[b]], device=dev)
                 kept[b], absorbed[b] = update_buffer(kept[b], absorbed[b], g_, nd)
-            if a.no_sp: parts = []
+            if a.no_sp or (kept[b].size(1) == 0 and not a.sp_empty): parts = []   # nothing distant yet: the plain window (as trained)
             else: parts = [(pooler(embed(kept[b]).float()) if kept[b].size(1) > 0 else pooler(torch.zeros(1, 0, H, device=dev))).to(dt)]
             parts += [embed(torch.tensor([gen[b][c0 - R:c0]], device=dev)).to(dt)] if R > 0 else []
             if not parts: parts = [torch.zeros(1, 0, H, device=dev, dtype=dt)]   # no-SP, first chunk: nothing to re-prefill

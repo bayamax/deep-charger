@@ -4,7 +4,7 @@
 # Same recipe as box TP's frozen run (3-layer pooler, rw 128, C 64, 768-token contexts, 4000 once, lr 3e-4), layer 14 and the
 # last layer (28) side by side; the same scores as the raw-embedding pooler (rw 128: MATH 0.150 / mixed 0.221; rw 512 on 4096
 # tokens: 0.140 / 0.129; stage-A conditions: 0.084 / 0.071).
-SER=1
+SER=2
 if [ -f /root/.boxth_serial ] && [ "$(cat /root/.boxth_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxth_serial
 echo "[th] preflight GPU: $(nvidia-smi --query-gpu=name,memory.used,memory.total --format=csv,noheader)"
@@ -18,6 +18,35 @@ tail -n 1 /root/w/sp.log 2>/dev/null | cut -c1-220
 nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv,noheader
 ST
 chmod +x /root/status.sh
+# serial 2: generation check again after TH's scores - the 8k check on box TP gave the SP paths FEWER correct answers than the
+# plain window (P1024 15/32, raw1056 20/32) and much longer rambling; likely cause: generation prepended the SP of an EMPTY
+# buffer for the first ~1k tokens, a state training never scores. The rollout now uses the plain window until something is
+# distant. Re-run: full KV (batches of 4; TP's full run came back empty) and the frozen recipe pooler at rw 1024.
+if [ ! -e /root/.job2 ]; then touch /root/.job2
+  cat > /root/job2.sh <<'JOB'
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); cd /root/w
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+R=baya1116/hypernet-sp-distill; H=https://huggingface.co/$R/resolve/main
+put() { for t in 1 2 3 4 5; do python3 -c "import sys; from huggingface_hub import HfApi; HfApi().upload_file(path_or_fileobj=sys.argv[1], path_in_repo='archive/sp3/'+sys.argv[2], repo_id='$R')" "$1" "$2" > put.err 2>&1 && { echo "[hub] $2"; return 0; }; sleep 90; done; echo "[hub] $2 FAILED"; }
+while [ ! -e DONE_TH ]; do sleep 30; done
+RAWB=https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/tools
+curl -sS -o sp_qwen3.py "$RAWB/sp_qwen3.py?nocache=$(date +%s)"; curl -sS -o sp_mathcheck.py "$RAWB/sp_mathcheck.py?nocache=$(date +%s)"
+grep -q "sp_empty" sp_qwen3.py && echo "[th] s2: trainer has the empty-buffer rollout fix" || echo "[th] s2: WARNING old trainer"
+curl -sSfL -H "Authorization: Bearer $HF_TOKEN" -o spP_orig.pt "$H/archive/sp3/spP_orig_ap32recipe.pt"
+curl -sSfL -H "Authorization: Bearer $HF_TOKEN" -o g8_raw1056.jsonl "$H/archive/sp3/ap32gen8_raw1056.jsonl"
+LG=/root/w/gen.log; G="--traces kv_full_p.jsonl --n 32 --max-len 8192 --S 32 --heads 8 --layers 3 --ffn 2048 --log $LG"
+echo "[th] generation check v2 (8192 tokens) $(date -u)"
+python3 sp_qwen3.py rollout $G --roll-batch 4 --no-sp --rw 16384 --C 512 --maxd 0 --roll-out g8_full.jsonl > run_g8.log 2>&1
+python3 sp_qwen3.py rollout $G --roll-batch 16 --rw 1024 --C 128 --maxd 384 --ckpt spP_orig.pt --roll-out g8v2_P1024.jsonl >> run_g8.log 2>&1
+grep -E "Error|Traceback|out of memory" run_g8.log | tail -3 | sed "s/^/[th] /"
+python3 sp_mathcheck.py g8_full.jsonl g8v2_P1024.jsonl g8_raw1056.jsonl | sed "s/^/[th] /"
+put g8_full.jsonl ap32gen8_full.jsonl; put g8v2_P1024.jsonl ap32gen8v2_P1024.jsonl; put run_g8.log gen8v2_run.log
+put $LG gen8v2.log; date -u > DONE_TH2; put DONE_TH2 DONE_TH2; echo "[th] DONE_TH2 $(date -u)"
+JOB
+  setsid nohup bash -c 'bash /root/job2.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
+  sed -e 's/DONE_TH /DONE_TH2 /' /root/live.sh > /root/live2.sh
+  echo "[th] s2: generation check v2 queued $(date -u)"
+fi
 if [ ! -e /root/.job ]; then touch /root/.job
   cat > /root/live.sh <<'JOB'
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); cd /root/w
