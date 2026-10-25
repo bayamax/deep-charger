@@ -5,7 +5,7 @@
 # lr 3e-4. Two poolers side by side: the original (raw sinusoids, oldest-first) and pe-rev + pe-norm. Then held-out deep KL vs
 # the equal-budget raw window (160) and the plain 128, the inference-time wider window (512 on 4096-token traces), and a
 # generation check: 32 MATH problems, full KV vs SP + window 512 vs raw window 544 alone (accuracy, </think>, repetition).
-SER=17
+SER=18
 if [ -f /root/.boxtp_serial ] && [ "$(cat /root/.boxtp_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxtp_serial
 echo "[tp] preflight GPU: $(nvidia-smi --query-gpu=name,memory.used,memory.total --format=csv,noheader)"
@@ -19,6 +19,61 @@ tail -n 1 /root/w/sp.log 2>/dev/null | cut -c1-220
 nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv,noheader
 ST
 chmod +x /root/status.sh
+# serial 18: the --par data never showed an ending: traces under rw+C+C tokens were skipped, the rest cut at 3072, only whole
+# blocks scored, and the plain window from the start (the deployment's first 1152 tokens, FFT weights, no SP) never trained -
+# and the window alone with the FFT weights already writes ~1.5x longer than with the base weights. Stage E, after the
+# stop-drive numbers and the +1 end-bias run: from S on unseen teacher traces, whole traces (16384), --end-train (short
+# traces, tails, one block holding </think>, the plain block from the start) and --end-weight 4 around the end; then the
+# scores, the stop drive, and the generation check; the remaining knobs run on E.
+if [ ! -e /root/.job18 ]; then touch /root/.job18
+  cat > /root/job18.sh <<'JOB'
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); cd /root/w
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+R=baya1116/hypernet-sp-distill
+put() { for t in 1 2 3 4 5; do python3 -c "import sys; from huggingface_hub import HfApi; HfApi().upload_file(path_or_fileobj=sys.argv[1], path_in_repo='archive/sp3/'+sys.argv[2], repo_id='$R')" "$1" "$2" > put.err 2>&1 && { echo "[hub] $2"; return 0; }; sleep 90; done; echo "[hub] $2 FAILED"; }
+while [ ! -e run_g96_SP_eb2.log ] && [ ! -e DONE_TG16 ]; do sleep 5; done
+J=$(pgrep -f "^bash /root/job17.sh"); [ -n "$J" ] && { pkill -P $J; kill $J; }; sleep 3; pkill -f "roll-out g96_SP_eb2.jsonl"; sleep 5; rm -f g96_SP_eb2.jsonl
+echo "[tp] s18: job17 stopped after SP_eb1 $(date -u)"
+RAWB=https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/tools
+curl -sS -o sp_qwen3.py "$RAWB/sp_qwen3.py?nocache=$(date +%s)"; grep -q "end_train" sp_qwen3.py || echo "[tp] s18: WARNING trainer without --end-train"
+tail -n +2401 trainS.jsonl > trainE.jsonl
+python3 - <<'PY' | sed "s/^/[tp] s18: /"
+import json
+from transformers import AutoTokenizer
+tk = AutoTokenizer.from_pretrained("Qwen/Qwen3-1.7B"); rs = [json.loads(l) for l in open("trainE.jsonl")][:1200]
+L = sorted(len(tk.encode(r.get("text", ""), add_special_tokens=False)) for r in rs); e = sum("</think>" in r.get("text", "") for r in rs)
+print(f"trainE first 1200: {e} with </think>, tokens median {L[len(L)//2]} p90 {L[int(len(L)*.9)]} max {L[-1]}, under 1280: {sum(x < 1280 for x in L)}")
+PY
+LG=/root/w/sp.log; F="--S 32 --heads 8 --layers 3 --ffn 2048 --rw 1024 --C 128 --maxd 384"
+echo "[tp] stage E: end-aware FFT from S $(date -u)"
+python3 sp_qwen3.py train --traces trainE.jsonl --n 1200 --max-len 16384 $F --ckpt spS.pt --ft-layers 28 --opt8bit --ft-lr 1e-5 --lr 1e-4 --par --end-train --end-weight 4 --chunks-per-trace 4 --accum 8 --out spE.pt --log $LG > run_trainE.log 2>&1
+grep -E "^\[sp\] (trained)|Error|Traceback|out of memory" run_trainE.log | tail -3 | sed "s/^/[tp] E: /"
+put spE.pt spE_endaware_fft1024.pt
+for e in kv_full_p.jsonl:math traces.jsonl:mix; do f=${e%%:*}; n=${e#*:}; x=""; [ $n = mix ] && x="--n 60"
+  python3 sp_qwen3.py eval --traces $f $x --max-len 4096 $F --ckpt spE.pt --log $LG 2>&1 | grep -E "^\[sp\] eval|Error|Traceback" | sed "s/^/[$n] E stageA-cond: /"; done
+for m in "SP_E:$F --ckpt spE.pt" "rawFT_E:--no-sp --rw 1056 --C 128 --maxd 0 --S 32 --heads 8 --layers 3 --ffn 2048 --ckpt spE.pt"; do
+  python3 sp_qwen3.py eval --traces kv_full_p.jsonl --max-len 16384 --end-stat ${m#*:} --log $LG 2>&1 | grep -E "^\[sp\] (eval|end-stat)|Error|Traceback" | sed "s/^/[tp] stop-drive ${m%%:*}: /"; done
+put $LG spP.log
+G="--traces math96.jsonl --n 96 --max-len 12288 --S 32 --heads 8 --layers 3 --ffn 2048 --log $LG"; SP="--rw 1024 --C 128 --maxd 384 --ckpt spE.pt"
+run() { n=$1; shift; echo "[tp] s18 run $n: $* $(date -u)"
+  python3 sp_qwen3.py rollout $G "$@" --roll-out g96_$n.jsonl > run_g96_$n.log 2>&1
+  grep -E "Error|Traceback|out of memory" run_g96_$n.log | tail -2 | sed "s/^/[tp] $n: /"
+  python3 sp_mathcheck.py g96_$n.jsonl | sed "s/^/[tp] /"; put g96_$n.jsonl gen96_$n.jsonl; put $LG spP.log; }
+run E        --roll-batch 48 $SP
+run rawFT_E  --roll-batch 48 --no-sp --rw 1056 --C 128 --maxd 0 --ckpt spE.pt
+run full     --roll-batch 8 --no-sp --rw 20000 --C 12288 --maxd 0
+run E_eb1    --roll-batch 48 $SP --end-bias 1.0
+run E_C32    --roll-batch 48 --rw 1024 --C 32 --maxd 384 --ckpt spE.pt
+run E_all    --roll-batch 48 --rw 1024 --C 128 --maxd 0 --ckpt spE.pt
+run E_w2k    --roll-batch 32 --rw 2048 --C 128 --maxd 384 --ckpt spE.pt
+run E_pp1    --roll-batch 48 $SP --presence 1.0
+run E_t08    --roll-batch 48 $SP --temp 0.8
+python3 sp_mathcheck.py g96_*.jsonl | sed "s/^/[tp] final /"
+put $LG spP.log; date -u > DONE_TG16; put DONE_TG16 DONE_TG16; echo "[tp] DONE_TG16 $(date -u)"
+JOB
+  setsid nohup bash -c 'bash /root/job18.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
+  echo "[tp] s18: stage E queued after the SP_eb1 run $(date -u)"
+fi
 # serial 17: on 96 problems SP 65/96 vs the window alone 77/96 (paired 1 vs 13): SP thoughts do not end - 25 left open at
 # 12288, 19 of them closed by the window alone; the texts loop on re-verification ("all three roots are valid. But just to
 # make sure..."). Mean KL hides it: stopping is a handful of tokens. Re-order the search once the rawFT run is done: first

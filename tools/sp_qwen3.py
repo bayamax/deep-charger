@@ -71,6 +71,10 @@ ap.add_argument("--roll-out", default="", help="rollout: write the model's own S
 ap.add_argument("--roll-batch", type=int, default=24, help="rollout: streams generated together")
 ap.add_argument("--temp", type=float, default=0.6); ap.add_argument("--top-p", type=float, default=0.95); ap.add_argument("--top-k", type=int, default=20)
 ap.add_argument("--end-bias", type=float, default=0.0, help="rollout: added to the </think> logit while thinking")
+ap.add_argument("--end-train", action="store_true", help="--par: also train short traces and the trace tail (partial last "
+                "block), and always one block holding the end of the thought")
+ap.add_argument("--end-weight", type=float, default=1.0, help="--par: KL weight of the rows from 32 tokens before </think> "
+                "to 8 after")
 ap.add_argument("--end-stat", action="store_true", help="eval: how much the student and the teacher want to stop thinking")
 ap.add_argument("--presence", type=float, default=0.0, help="rollout: presence penalty on the logits of tokens already generated")
 ap.add_argument("--no-sp", action="store_true", help="eval/rollout baseline without soft prompts: [raw window | chunk] only "
@@ -311,10 +315,12 @@ def run_trace(ids, P, train, ref_h=None):
 from torch.utils.checkpoint import checkpoint
 
 
-def _kl_rows(h, tr):
-    """KL(teacher rows || student rows from hidden h) summed, plus top-1 agreements (logits rebuilt in backward)"""
+def _kl_rows(h, tr, w=None):
+    """KL(teacher rows || student rows from hidden h) summed (row weights w), plus top-1 agreements (logits rebuilt in
+    backward)"""
     lp = F.log_softmax(llm.lm_head(h).float(), -1)
-    return (tr.exp() * (tr - lp)).sum(), (lp.argmax(-1) == tr.argmax(-1)).float().sum().detach()
+    kl = (tr.exp() * (tr - lp)).sum(-1)
+    return (kl if w is None else kl * w).sum(), (lp.argmax(-1) == tr.argmax(-1)).float().sum().detach()
 
 
 def run_trace_par(ids, P, ref_h=None):
@@ -324,29 +330,44 @@ def run_trace_par(ids, P, ref_h=None):
     ids = ids.to(dev); a_ids = ids[None, P:T]; La = a_ids.size(1)
     L = a.rw + a.C
     bounds = [b for b in range(a.C, La - L + 1, a.C)]
+    ends = (a_ids[0] == END_ID).nonzero().flatten().tolist() if a.end_train or a.end_weight != 1 else []
+    if a.end_train:   # blocks may be cut by the trace's end: short traces and the tail are trained too
+        bounds = [b for b in range(a.C, La - 16, a.C)]
     if not bounds: return 0.0, 0.0, 0
     if ref_h is None: ref_h = teacher_hidden(ids, P + a.C, T)     # row j predicts answer token C + j
     pick = set(random.sample(bounds, min(len(bounds), a.chunks_per_trace or len(bounds))))
+    if a.end_train and ends:   # the block whose window holds the end of the thought (and what follows it)
+        e = ends[0]; cand = [b for b in bounds if e - L + 65 <= b <= e]; pick.add(cand[0] if cand else bounds[-1])
     with torch.no_grad():
         pc = DynamicCache(); llm(input_ids=ids[None, :P], past_key_values=pc, use_cache=True)
         pkv = [tuple(t for t in kv_of(pc, li)) for li in range(NL)]
     kept = torch.zeros(1, 0, dtype=torch.long, device=dev); absorbed = 0
     K = A_ = N = 0.0
+    if a.end_train and La > a.C + 16: bounds, pick = [0] + bounds, pick | {0}   # + the plain window from the start (the
+    # deployment's first chunks: nothing distant yet, no SP) - scored from token C, where the teacher rows begin
     for b in bounds:
         kept, absorbed = update_buffer(kept, absorbed, a_ids, b)
         if b not in pick: continue
-        sp = pooler(embed(kept).float()) if kept.size(1) > 0 else pooler(torch.zeros(1, 0, H, device=dev))
-        block = torch.cat([sp.to(dt), embed(a_ids[:, b:b + L - 1]).to(dt)], 1)       # predicts a[b .. b+L-1]
-        nb = block.size(1)
+        Lb = min(L, La - b)
+        if b == 0:
+            block = embed(a_ids[:, :Lb - 1]).to(dt); h0, t0 = a.C - 1, a.C        # row C-1 predicts a[C]
+        else:
+            sp = pooler(embed(kept).float()) if kept.size(1) > 0 else pooler(torch.zeros(1, 0, H, device=dev))
+            block = torch.cat([sp.to(dt), embed(a_ids[:, b:b + Lb - 1]).to(dt)], 1); h0, t0 = a.S - 1, b   # predicts a[b .. b+Lb-1]
+        nb = block.size(1); nr = b + Lb - t0
         cache = DynamicCache()
         for li, (k_, v_) in enumerate(pkv): cache.update(k_, v_, li)
         pos = torch.arange(P, P + nb, device=dev)[None]
         hs = llm.model(inputs_embeds=block, attention_mask=torch.ones(1, P + nb, device=dev), past_key_values=cache,
-                       position_ids=pos, cache_position=pos[0], use_cache=True).last_hidden_state[0, a.S - 1:]   # (L, H)
+                       position_ids=pos, cache_position=pos[0], use_cache=True).last_hidden_state[0, h0:]   # (nr, H)
         loss = 0.0
-        for i in range(0, L, 256):
-            tr = teacher_rows(ref_h[b - a.C + i:b - a.C + min(i + 256, L)])
-            kl, ag = checkpoint(_kl_rows, hs[i:i + 256], tr, use_reentrant=False)
+        wv = None
+        if ends and a.end_weight != 1:
+            tpos = torch.arange(t0, t0 + nr, device=dev); wv = torch.ones(nr, device=dev)
+            for e in ends: wv[(tpos >= e - 32) & (tpos <= e + 8)] = a.end_weight
+        for i in range(0, nr, 256):
+            tr = teacher_rows(ref_h[t0 - a.C + i:t0 - a.C + min(i + 256, nr)])
+            kl, ag = checkpoint(_kl_rows, hs[i:i + 256], tr, None if wv is None else wv[i:i + 256], use_reentrant=False)
             loss = loss + kl; K += kl.item(); A_ += ag.item(); N += tr.shape[0]
         (loss / 1000.0).backward()
     return K, A_, N
