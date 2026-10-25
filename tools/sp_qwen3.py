@@ -73,6 +73,8 @@ ap.add_argument("--temp", type=float, default=0.6); ap.add_argument("--top-p", t
 ap.add_argument("--end-bias", type=float, default=0.0, help="rollout: added to the </think> logit while thinking")
 ap.add_argument("--hes-bias", type=float, default=0.0, help="rollout: added to the logits of Wait/But/Alternatively/Hmm "
                 "while thinking (negative = less re-checking)")
+ap.add_argument("--kl-rows", type=int, default=256, help="--par: rows per KL piece (the vocab-wide fp32 logits of a piece are "
+                "the peak: 256 rows ~0.6 GB of temporaries, 64 ~0.15 GB)")
 ap.add_argument("--end-train", action="store_true", help="--par: also train short traces and the trace tail (partial last "
                 "block), and always one block holding the end of the thought")
 ap.add_argument("--end-weight", type=float, default=1.0, help="--par: KL weight of the rows from 32 tokens before </think> "
@@ -367,9 +369,10 @@ def run_trace_par(ids, P, ref_h=None):
         if ends and a.end_weight != 1:
             tpos = torch.arange(t0, t0 + nr, device=dev); wv = torch.ones(nr, device=dev)
             for e in ends: wv[(tpos >= e - 32) & (tpos <= e + 8)] = a.end_weight
-        for i in range(0, nr, 256):
-            tr = teacher_rows(ref_h[t0 - a.C + i:t0 - a.C + min(i + 256, nr)])
-            kl, ag = checkpoint(_kl_rows, hs[i:i + 256], tr, None if wv is None else wv[i:i + 256], use_reentrant=False)
+        KR = a.kl_rows
+        for i in range(0, nr, KR):
+            tr = teacher_rows(ref_h[t0 - a.C + i:t0 - a.C + min(i + KR, nr)])
+            kl, ag = checkpoint(_kl_rows, hs[i:i + KR], tr, None if wv is None else wv[i:i + KR], use_reentrant=False)
             loss = loss + kl; K += kl.item(); A_ += ag.item(); N += tr.shape[0]
         (loss / 1000.0).backward()
     return K, A_, N

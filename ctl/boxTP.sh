@@ -5,7 +5,7 @@
 # lr 3e-4. Two poolers side by side: the original (raw sinusoids, oldest-first) and pe-rev + pe-norm. Then held-out deep KL vs
 # the equal-budget raw window (160) and the plain 128, the inference-time wider window (512 on 4096-token traces), and a
 # generation check: 32 MATH problems, full KV vs SP + window 512 vs raw window 544 alone (accuracy, </think>, repetition).
-SER=28
+SER=29
 if [ -f /root/.boxtp_serial ] && [ "$(cat /root/.boxtp_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxtp_serial
 echo "[tp] preflight GPU: $(nvidia-smi --query-gpu=name,memory.used,memory.total --format=csv,noheader)"
@@ -19,6 +19,16 @@ tail -n 1 /root/w/sp.log 2>/dev/null | cut -c1-220
 nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv,noheader
 ST
 chmod +x /root/status.sh
+# serial 29: the skips are the FFT's memory edge, not the length: 17.0 GiB held (weights, fp32 masters, 8-bit Adam) and the
+# peak of a block - the vocab-wide fp32 KL pieces (256 rows x 152k: 150 MiB each, ~4 alive) - tips it over (the 150 MiB that
+# failed). --kl-rows 64 cuts that peak by ~0.5 GB. Restart stage G with it.
+if [ ! -e /root/.job29 ]; then touch /root/.job29
+  J=$(pgrep -f "^bash /root/job28.sh"); [ -n "$J" ] && { pkill -P $J; kill $J; }; sleep 3; pkill -f "sp_qwen3.py train --traces trainG"; sleep 10
+  echo "[tp] s29: stage G stopped ($(grep -c 'out of memory' /root/w/run_trainG.log 2>/dev/null) skips so far); restarting with --kl-rows 64 $(date -u)"
+  sed -e 's/--chunks-per-trace 8 --accum 8 --out spG.pt/--chunks-per-trace 8 --accum 8 --kl-rows 64 --out spG.pt/; s/grep -q "parked on the CPU"/grep -q "kl_rows"/' /root/job28.sh > /root/job29.sh
+  grep -q -- "--kl-rows 64" /root/job29.sh && { setsid nohup bash -c 'bash /root/job29.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
+    echo "[tp] s29: stage G restarted $(date -u)"; } || echo "[tp] s29: WARNING job29 not built"
+fi
 # serial 28: stage G was skipping traces for memory from trace 109 on (7 in ~30, long ones mostly - the regime it is for, some
 # 4k ones too: memory going bad over time). The trainer now parks the prefetched teacher rows on the CPU, empties the cache
 # after each teacher group, and logs size / allocated / reserved / the error on a skip. Restart stage G (trainG.jsonl as
