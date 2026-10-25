@@ -5,7 +5,7 @@
 # lr 3e-4. Two poolers side by side: the original (raw sinusoids, oldest-first) and pe-rev + pe-norm. Then held-out deep KL vs
 # the equal-budget raw window (160) and the plain 128, the inference-time wider window (512 on 4096-token traces), and a
 # generation check: 32 MATH problems, full KV vs SP + window 512 vs raw window 544 alone (accuracy, </think>, repetition).
-SER=20
+SER=21
 if [ -f /root/.boxtp_serial ] && [ "$(cat /root/.boxtp_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxtp_serial
 echo "[tp] preflight GPU: $(nvidia-smi --query-gpu=name,memory.used,memory.total --format=csv,noheader)"
@@ -19,6 +19,14 @@ tail -n 1 /root/w/sp.log 2>/dev/null | cut -c1-220
 nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv,noheader
 ST
 chmod +x /root/status.sh
+# serial 21: the </think> bias changes nothing (S: all 96 generations identical - </think> is outside top-20 while thinking)
+# - skip E_eb1: start serial 19's work (own-drive, hesitation bias, knobs) as soon as full KV is done.
+if [ ! -e /root/.job21 ]; then touch /root/.job21
+  sed -e 's/run_g96_E_C32.log/run_g96_E_eb1.log/; s/roll-out g96_E_C32.jsonl/roll-out g96_E_eb1.jsonl/; s/rm -f g96_E_C32.jsonl/rm -f g96_E_eb1.jsonl/; s/job18 stopped after E_eb1/job18 stopped after full/' /root/job19.sh > /root/job21.sh
+  grep -q "run_g96_E_eb1.log" /root/job21.sh && { J=$(pgrep -f "^bash /root/job19.sh"); [ -n "$J" ] && { pkill -P $J; kill $J; }
+    setsid nohup bash -c 'bash /root/job21.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
+    echo "[tp] s21: hesitation-bias runs moved before E_eb1 $(date -u)"; } || echo "[tp] s21: WARNING job19 not patched"
+fi
 # serial 20: stage E samples blocks (start, end, 4 random) - the accelerated version. Once the generation-setting search is
 # done (DONE_TG16): stage F = the full pass, every block of every trace (--chunks-per-trace 0), --end-train / --end-weight 4,
 # whole traces, from E on the rest of the unseen teacher traces (trainE from line 1201); scores, stop/hesitation drive, and
