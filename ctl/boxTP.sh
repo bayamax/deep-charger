@@ -5,7 +5,7 @@
 # lr 3e-4. Two poolers side by side: the original (raw sinusoids, oldest-first) and pe-rev + pe-norm. Then held-out deep KL vs
 # the equal-budget raw window (160) and the plain 128, the inference-time wider window (512 on 4096-token traces), and a
 # generation check: 32 MATH problems, full KV vs SP + window 512 vs raw window 544 alone (accuracy, </think>, repetition).
-SER=24
+SER=25
 if [ -f /root/.boxtp_serial ] && [ "$(cat /root/.boxtp_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxtp_serial
 echo "[tp] preflight GPU: $(nvidia-smi --query-gpu=name,memory.used,memory.total --format=csv,noheader)"
@@ -19,6 +19,12 @@ tail -n 1 /root/w/sp.log 2>/dev/null | cut -c1-220
 nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv,noheader
 ST
 chmod +x /root/status.sh
+# serial 25: watch vLLM's KV pressure on the long generation (preemption / throughput / errors), once
+if [ ! -e /root/.chk25 ]; then touch /root/.chk25
+  for f in /root/w/run_genlong.log /root/w/run_gendiv.log; do [ -s $f ] || continue
+    echo "[tp] s25 $(basename $f): $(tr '\r' '\n' < $f | grep -E 'KV cache|GPU KV|Maximum concurrency|preempt|Processed prompts|Error|it/s' | tail -4 | cut -c1-200 | tr '\n' ' ')"; done
+  echo "[tp] s25: $(nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv,noheader) $(date -u)"
+fi
 # serial 24: the long teacher traces must be diverse, not math only. When the math run ends, stop serial 22 before it trains;
 # run the same full-KV generation on 740 diverse prompts (ctl/divlong.jsonl: open-domain reasoning 260, MMLU-Pro 160,
 # programming 160, general instructions 160), then stage G on the finished traces of both, shuffled.
