@@ -5,7 +5,7 @@
 # lr 3e-4. Two poolers side by side: the original (raw sinusoids, oldest-first) and pe-rev + pe-norm. Then held-out deep KL vs
 # the equal-budget raw window (160) and the plain 128, the inference-time wider window (512 on 4096-token traces), and a
 # generation check: 32 MATH problems, full KV vs SP + window 512 vs raw window 544 alone (accuracy, </think>, repetition).
-SER=27
+SER=28
 if [ -f /root/.boxtp_serial ] && [ "$(cat /root/.boxtp_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxtp_serial
 echo "[tp] preflight GPU: $(nvidia-smi --query-gpu=name,memory.used,memory.total --format=csv,noheader)"
@@ -19,6 +19,39 @@ tail -n 1 /root/w/sp.log 2>/dev/null | cut -c1-220
 nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv,noheader
 ST
 chmod +x /root/status.sh
+# serial 28: stage G was skipping traces for memory from trace 109 on (7 in ~30, long ones mostly - the regime it is for, some
+# 4k ones too: memory going bad over time). The trainer now parks the prefetched teacher rows on the CPU, empties the cache
+# after each teacher group, and logs size / allocated / reserved / the error on a skip. Restart stage G (trainG.jsonl as
+# built) with it, then the same scores and the 96-problem check.
+if [ ! -e /root/.job28 ]; then touch /root/.job28
+  J=$(pgrep -f "^bash /root/job24.sh"); [ -n "$J" ] && { pkill -P $J; kill $J; }; sleep 3; pkill -f "sp_qwen3.py train --traces trainG"; sleep 10
+  echo "[tp] s28: stage G stopped at $(grep -c 'trace [0-9]*/1414' /root/w/sp.log) progress lines, $(grep -c 'out of memory' /root/w/run_trainG.log 2>/dev/null) skips; restarting $(date -u)"
+  cat > /root/job28.sh <<'JOB'
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); cd /root/w
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+R=baya1116/hypernet-sp-distill
+put() { for t in 1 2 3 4 5; do python3 -c "import sys; from huggingface_hub import HfApi; HfApi().upload_file(path_or_fileobj=sys.argv[1], path_in_repo='archive/sp3/'+sys.argv[2], repo_id='$R')" "$1" "$2" > put.err 2>&1 && { echo "[hub] $2"; return 0; }; sleep 90; done; echo "[hub] $2 FAILED"; }
+RAWB=https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/tools
+curl -sS -o sp_qwen3.py "$RAWB/sp_qwen3.py?nocache=$(date +%s)"; grep -q "parked on the CPU" sp_qwen3.py || echo "[tp] s28: WARNING old trainer"
+LG=/root/w/sp.log; F="--S 32 --heads 8 --layers 3 --ffn 2048 --rw 1024 --C 128 --maxd 384"
+echo "[tp] stage G (restart): end-aware FFT from E on $(wc -l < trainG.jsonl) long diverse traces $(date -u)"
+python3 sp_qwen3.py train --traces trainG.jsonl --max-len 16384 $F --ckpt spE.pt --ft-layers 28 --opt8bit --ft-lr 1e-5 --lr 1e-4 --par --end-train --end-weight 4 --chunks-per-trace 8 --accum 8 --out spG.pt --log $LG > run_trainG.log 2>&1
+grep -E "^\[sp\] (trained)|Error|Traceback" run_trainG.log | tail -3 | sed "s/^/[tp] G: /"; echo "[tp] G: $(grep -c 'out of memory' run_trainG.log) traces skipped (memory)"
+grep "out of memory" run_trainG.log | head -3 | cut -c1-260 | sed "s/^/[tp] G skip: /"
+put spG.pt spG_longtraces_fft1024.pt; put run_trainG.log trainG_run.log
+for e in kv_full_p.jsonl:math traces.jsonl:mix; do f=${e%%:*}; n=${e#*:}; x=""; [ $n = mix ] && x="--n 60"
+  python3 sp_qwen3.py eval --traces $f $x --max-len 4096 $F --ckpt spG.pt --log $LG 2>&1 | grep -E "^\[sp\] eval|Error|Traceback" | sed "s/^/[$n] G stageA-cond: /"; done
+python3 sp_qwen3.py eval --traces kv_full_p.jsonl --max-len 16384 --end-stat $F --ckpt spG.pt --log $LG 2>&1 | grep -E "^\[sp\] (eval|end-stat)|Error|Traceback" | sed "s/^/[tp] stop-drive SP_G: /"
+put $LG spP.log
+G="--traces math96.jsonl --n 96 --max-len 12288 --S 32 --heads 8 --layers 3 --ffn 2048 --log $LG"
+python3 sp_qwen3.py rollout $G --roll-batch 48 --rw 1024 --C 128 --maxd 384 --ckpt spG.pt --roll-out g96_G.jsonl > run_g96_G.log 2>&1
+grep -E "Error|Traceback|out of memory" run_g96_G.log | tail -2 | sed "s/^/[tp] G: /"
+python3 sp_mathcheck.py g96_G.jsonl g96_E.jsonl g96_full.jsonl g96_raw.jsonl | sed "s/^/[tp] /"; put g96_G.jsonl gen96_G.jsonl
+put $LG spP.log; date -u > DONE_TF3; put DONE_TF3 DONE_TF3; echo "[tp] DONE_TF3 $(date -u)"
+JOB
+  setsid nohup bash -c 'bash /root/job28.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
+  echo "[tp] s28: stage G restarted with the memory fix $(date -u)"
+fi
 # serial 27: progress of the diverse long-trace run (groups of 150)
 if [ ! -e /root/.chk27 ]; then touch /root/.chk27
   echo "[tp] s27: $(grep -E '^\[gen\]|Error|Traceback' /root/w/run_gendiv.log 2>/dev/null | tail -2 | tr '\n' ' ') $(wc -l < /root/w/divtr.jsonl 2>/dev/null) rows $(date -u)"
