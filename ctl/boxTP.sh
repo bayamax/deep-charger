@@ -5,7 +5,7 @@
 # lr 3e-4. Two poolers side by side: the original (raw sinusoids, oldest-first) and pe-rev + pe-norm. Then held-out deep KL vs
 # the equal-budget raw window (160) and the plain 128, the inference-time wider window (512 on 4096-token traces), and a
 # generation check: 32 MATH problems, full KV vs SP + window 512 vs raw window 544 alone (accuracy, </think>, repetition).
-SER=25
+SER=26
 if [ -f /root/.boxtp_serial ] && [ "$(cat /root/.boxtp_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxtp_serial
 echo "[tp] preflight GPU: $(nvidia-smi --query-gpu=name,memory.used,memory.total --format=csv,noheader)"
@@ -19,8 +19,13 @@ tail -n 1 /root/w/sp.log 2>/dev/null | cut -c1-220
 nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv,noheader
 ST
 chmod +x /root/status.sh
+# serial 26: the math run is at 493/900 after 1.6 h (~620 output tok/s: KV-bound concurrency) and vLLM returns only at the
+# end - the diverse run uses the grouped generator (each group of 150 appended as it finishes, a rerun resumes)
+if [ ! -e /root/.chk26 ]; then touch /root/.chk26
+  curl -sS -o /root/w/gen_long_vllm.py "$RAW/tools/gen_long_vllm.py?nocache=$(date +%s)"; grep -q "a rerun skips" /root/w/gen_long_vllm.py && echo "[tp] s26: grouped generator in place" || echo "[tp] s26: WARNING generator not updated"
+fi
 # serial 25: watch vLLM's KV pressure on the long generation (preemption / throughput / errors), once
-if [ ! -e /root/.chk25 ]; then touch /root/.chk25
+if [ ! -e /root/.chk25 ] || [ -s /root/w/run_gendiv.log ] && [ ! -e /root/.chk25b ]; then touch /root/.chk25; [ -s /root/w/run_gendiv.log ] && touch /root/.chk25b
   for f in /root/w/run_genlong.log /root/w/run_gendiv.log; do [ -s $f ] || continue
     echo "[tp] s25 $(basename $f): $(tr '\r' '\n' < $f | grep -E 'KV cache|GPU KV|Maximum concurrency|preempt|Processed prompts|Error|it/s' | tail -4 | cut -c1-200 | tr '\n' ' ')"; done
   echo "[tp] s25: $(nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv,noheader) $(date -u)"
