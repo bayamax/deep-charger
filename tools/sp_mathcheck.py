@@ -2,9 +2,14 @@
 
   python sp_mathcheck.py roll_full.jsonl roll_sp512.jsonl ...
 Prints, per file: accuracy, how many closed </think>, how many gave a boxed answer, median length, and a 4-gram repetition
-rate (a collapsed / looping generation shows up there, not in KL).
+rate (a collapsed / looping generation shows up there, not in KL). With math-verify installed, equivalent LaTeX answers count.
 """
 import json, re, sys
+
+try:   # equivalence of LaTeX answers (\\frac 34 = \\dfrac{3}{4}, (B) = \\text{(B)}, .35625 = 0.35625); string match as the fallback
+    from math_verify import parse as _mv_parse, verify as _mv_verify
+except ImportError:
+    _mv_parse = None
 
 
 def boxed(t):
@@ -32,9 +37,18 @@ def rep4(t):
     return 1 - len(set(g)) / max(len(g), 1)
 
 
+def correct(r):
+    b = boxed(r["text"])
+    if b is None: return False
+    if norm(b) == norm(r.get("gold")): return True
+    if _mv_parse is None: return False
+    try: return bool(_mv_verify(_mv_parse("$" + (r.get("gold") or "") + "$"), _mv_parse("$" + b + "$")))
+    except Exception: return False
+
+
 for f in sys.argv[1:]:
     rs = [json.loads(l) for l in open(f)]
-    ok = sum(norm(boxed(r["text"])) == norm(r.get("gold")) for r in rs)
+    ok = sum(correct(r) for r in rs)
     closed = sum("</think>" in r["text"] for r in rs); bx = sum(boxed(r["text"]) is not None for r in rs)
     L = sorted(len(r["text"]) for r in rs); rp = sum(rep4(r["text"]) for r in rs) / max(len(rs), 1)
     print(f"{f}: {ok}/{len(rs)} correct ({100 * ok / max(len(rs), 1):.0f}%) | closed think {closed} | boxed {bx} | "

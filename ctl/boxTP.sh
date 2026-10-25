@@ -5,7 +5,7 @@
 # lr 3e-4. Two poolers side by side: the original (raw sinusoids, oldest-first) and pe-rev + pe-norm. Then held-out deep KL vs
 # the equal-budget raw window (160) and the plain 128, the inference-time wider window (512 on 4096-token traces), and a
 # generation check: 32 MATH problems, full KV vs SP + window 512 vs raw window 544 alone (accuracy, </think>, repetition).
-SER=31
+SER=32
 if [ -f /root/.boxtp_serial ] && [ "$(cat /root/.boxtp_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxtp_serial
 echo "[tp] preflight GPU: $(nvidia-smi --query-gpu=name,memory.used,memory.total --format=csv,noheader)"
@@ -19,6 +19,12 @@ tail -n 1 /root/w/sp.log 2>/dev/null | cut -c1-220
 nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv,noheader
 ST
 chmod +x /root/status.sh
+# serial 32: the scorer missed equivalent answers ((B) vs \text{(B)}, \frac 34 vs \dfrac{3}{4}, .35625 vs 0.35625): sp_mathcheck
+# now uses math-verify - install it and take the new scorer (re-scored: full KV 87, window alone 84, G 80, E 77 of 96)
+if [ ! -e /root/.chk32 ]; then touch /root/.chk32
+  pip install -q "math-verify[antlr4_13_2]" > /dev/null 2>&1; curl -sS -o /root/w/sp_mathcheck.py "$RAW/tools/sp_mathcheck.py?nocache=$(date +%s)"
+  python3 -c "import math_verify" 2>/dev/null && echo "[tp] s32: math-verify scorer in place" || echo "[tp] s32: WARNING math-verify missing"
+fi
 # serial 31 (after DONE_TD2): new long teacher traces on 1421 unseen prompts (ctl/longtr2.jsonl: MATH-train 500, open-domain
 # reasoning 396, MMLU-Pro 215, instructions 214, programming 96) with vLLM to 16384, then the FULL PASS - every block of every
 # finished trace (--chunks-per-trace 0), end-aware, kl-rows 64 - from the better of G / D2 on the 96 problems, 900 traces
