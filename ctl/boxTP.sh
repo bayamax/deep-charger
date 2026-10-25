@@ -5,7 +5,7 @@
 # lr 3e-4. Two poolers side by side: the original (raw sinusoids, oldest-first) and pe-rev + pe-norm. Then held-out deep KL vs
 # the equal-budget raw window (160) and the plain 128, the inference-time wider window (512 on 4096-token traces), and a
 # generation check: 32 MATH problems, full KV vs SP + window 512 vs raw window 544 alone (accuracy, </think>, repetition).
-SER=29
+SER=30
 if [ -f /root/.boxtp_serial ] && [ "$(cat /root/.boxtp_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxtp_serial
 echo "[tp] preflight GPU: $(nvidia-smi --query-gpu=name,memory.used,memory.total --format=csv,noheader)"
@@ -19,6 +19,44 @@ tail -n 1 /root/w/sp.log 2>/dev/null | cut -c1-220
 nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv,noheader
 ST
 chmod +x /root/status.sh
+# serial 30: G 72/96 (73 with the \dfrac/\frac miss), closed 85, generation length now at full KV's; vs full KV 1 vs 9, and 7
+# of those 9 are G loops that never close (prealgebra/378: full KV 11k chars, G 41k) - states only its own generation makes.
+# DAgger from G: G generates on 192 unseen prompts (144 MATH-train levels 4-5, 48 diverse; ctl/dag2.jsonl) to 12288 tokens,
+# the frozen full-context model labels those states, --par end-aware FFT on them (kl-rows 64), then the scores and the
+# 96-problem check. Next (serial 31): new long teacher traces (ctl/longtr2.jsonl, 1421 prompts) and the full pass.
+if [ ! -e /root/.job30 ]; then touch /root/.job30
+  cat > /root/job30.sh <<'JOB'
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); cd /root/w
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+R=baya1116/hypernet-sp-distill
+put() { for t in 1 2 3 4 5; do python3 -c "import sys; from huggingface_hub import HfApi; HfApi().upload_file(path_or_fileobj=sys.argv[1], path_in_repo='archive/sp3/'+sys.argv[2], repo_id='$R')" "$1" "$2" > put.err 2>&1 && { echo "[hub] $2"; return 0; }; sleep 90; done; echo "[hub] $2 FAILED"; }
+RAW=https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i
+curl -sS -o dag2.jsonl "$RAW/ctl/dag2.jsonl?nocache=$(date +%s)"; curl -sS -o longtr2.jsonl "$RAW/ctl/longtr2.jsonl?nocache=$(date +%s)"
+while pgrep -f "^bash /root/job29.sh" > /dev/null; do sleep 10; done
+rm -f spS.pt spR2.pt; echo "[tp] s30: DAgger from G on $(wc -l < dag2.jsonl) prompts; disk $(df -h / | tail -1 | awk '{print $4}') free $(date -u)"
+LG=/root/w/sp.log; F="--S 32 --heads 8 --layers 3 --ffn 2048 --rw 1024 --C 128 --maxd 384"
+python3 sp_qwen3.py rollout --traces dag2.jsonl --n 192 --max-len 12288 --roll-batch 48 $F --ckpt spG.pt --roll-out dagG.jsonl --log $LG > run_dagG.log 2>&1
+grep -E "Error|Traceback|out of memory" run_dagG.log | tail -2 | sed "s/^/[tp] /"
+python3 -c "
+import json; rs=[json.loads(l) for l in open('dagG.jsonl')]
+print('[tp] s30: DAgger rollouts', len(rs), 'closed', sum('</think>' in r['text'] for r in rs))"
+put dagG.jsonl dagG_rollouts.jsonl
+python3 sp_qwen3.py train --traces dagG.jsonl --max-len 12288 $F --ckpt spG.pt --ft-layers 28 --opt8bit --ft-lr 1e-5 --lr 1e-4 --par --end-train --end-weight 4 --chunks-per-trace 8 --accum 8 --kl-rows 64 --out spD2.pt --log $LG > run_trainD2.log 2>&1
+grep -E "^\[sp\] (trained)|Error|Traceback" run_trainD2.log | tail -3 | sed "s/^/[tp] D2: /"; echo "[tp] D2: $(grep -c 'out of memory' run_trainD2.log) traces skipped (memory)"
+put spD2.pt spD2_dagger_fromG.pt
+for e in kv_full_p.jsonl:math traces.jsonl:mix; do f=${e%%:*}; n=${e#*:}; x=""; [ $n = mix ] && x="--n 60"
+  python3 sp_qwen3.py eval --traces $f $x --max-len 4096 $F --ckpt spD2.pt --log $LG 2>&1 | grep -E "^\[sp\] eval|Error|Traceback" | sed "s/^/[$n] D2 stageA-cond: /"; done
+python3 sp_qwen3.py eval --traces kv_full_p.jsonl --max-len 16384 --end-stat $F --ckpt spD2.pt --log $LG 2>&1 | grep -E "^\[sp\] (eval|end-stat)|Error|Traceback" | sed "s/^/[tp] stop-drive SP_D2: /"
+put $LG spP.log
+G="--traces math96.jsonl --n 96 --max-len 12288 --S 32 --heads 8 --layers 3 --ffn 2048 --log $LG"
+python3 sp_qwen3.py rollout $G --roll-batch 48 --rw 1024 --C 128 --maxd 384 --ckpt spD2.pt --roll-out g96_D2.jsonl > run_g96_D2.log 2>&1
+grep -E "Error|Traceback|out of memory" run_g96_D2.log | tail -2 | sed "s/^/[tp] D2: /"
+python3 sp_mathcheck.py g96_D2.jsonl g96_G.jsonl g96_full.jsonl | sed "s/^/[tp] /"; put g96_D2.jsonl gen96_D2.jsonl
+put $LG spP.log; date -u > DONE_TD2; put DONE_TD2 DONE_TD2; echo "[tp] DONE_TD2 $(date -u)"
+JOB
+  setsid nohup bash -c 'bash /root/job30.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
+  echo "[tp] s30: DAgger from G launched $(date -u)"
+fi
 # serial 29: the skips are the FFT's memory edge, not the length: 17.0 GiB held (weights, fp32 masters, 8-bit Adam) and the
 # peak of a block - the vocab-wide fp32 KL pieces (256 rows x 152k: 150 MiB each, ~4 alive) - tips it over (the 150 MiB that
 # failed). --kl-rows 64 cuts that peak by ~0.5 GB. Restart stage G with it.
