@@ -5,7 +5,7 @@
 # lr 3e-4. Two poolers side by side: the original (raw sinusoids, oldest-first) and pe-rev + pe-norm. Then held-out deep KL vs
 # the equal-budget raw window (160) and the plain 128, the inference-time wider window (512 on 4096-token traces), and a
 # generation check: 32 MATH problems, full KV vs SP + window 512 vs raw window 544 alone (accuracy, </think>, repetition).
-SER=21
+SER=22
 if [ -f /root/.boxtp_serial ] && [ "$(cat /root/.boxtp_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxtp_serial
 echo "[tp] preflight GPU: $(nvidia-smi --query-gpu=name,memory.used,memory.total --format=csv,noheader)"
@@ -19,6 +19,55 @@ tail -n 1 /root/w/sp.log 2>/dev/null | cut -c1-220
 nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv,noheader
 ST
 chmod +x /root/status.sh
+# serial 22: full KV 80/96 (E 70, the window alone 77): of the 11 full-only problems E leaves 8 unfinished - all long thoughts
+# (full KV needs 3k-11k tokens there), E loops in the tail. Every teacher trace in training was cut at 3200 tokens: long thinking
+# (many evictions, a full buffer, positions far out) was never trained. Stage G, after the two hesitation-bias runs: 900
+# MATH-train problems (levels 5/4/3: 500/300/100, ctl/mathlong.jsonl) through the full-KV model with vLLM to 16384 tokens,
+# then end-aware FFT from E on the finished ones (whole traces, 8 blocks + start + end each), scores, and the 96-problem check.
+# Replaces serial 20's stage F (same capped data).
+if [ ! -e /root/.job22 ]; then touch /root/.job22
+  J=$(pgrep -f "^bash /root/job20.sh"); [ -n "$J" ] && { pkill -P $J; kill $J; echo "[tp] s22: dropped the queued stage F"; }
+  cat > /root/job22.sh <<'JOB'
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); cd /root/w
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+R=baya1116/hypernet-sp-distill
+put() { for t in 1 2 3 4 5; do python3 -c "import sys; from huggingface_hub import HfApi; HfApi().upload_file(path_or_fileobj=sys.argv[1], path_in_repo='archive/sp3/'+sys.argv[2], repo_id='$R')" "$1" "$2" > put.err 2>&1 && { echo "[hub] $2"; return 0; }; sleep 90; done; echo "[hub] $2 FAILED"; }
+RAW=https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i
+curl -sS -o mathlong.jsonl "$RAW/ctl/mathlong.jsonl?nocache=$(date +%s)"; curl -sS -o gen_long_vllm.py "$RAW/tools/gen_long_vllm.py?nocache=$(date +%s)"
+rm -f cur.pt best.pt nxt.pt spR.pt spD1.pt spQ.pt spP_norm.pt; echo "[tp] s22: disk $(df -h / | tail -1 | awk '{print $4}') free"
+[ -x /root/vv/bin/python ] || { python3 -m venv /root/vv && /root/vv/bin/pip install -q vllm > vllm_install.log 2>&1; }
+/root/vv/bin/python -c "import vllm; print('[tp] s22: vllm', vllm.__version__)" 2>&1 | tail -1
+while [ ! -e run_g96_E_C32.log ] && pgrep -f "^bash /root/job21.sh" > /dev/null; do sleep 5; done
+J=$(pgrep -f "^bash /root/job21.sh"); [ -n "$J" ] && { pkill -P $J; kill $J; }; sleep 3; pkill -f "roll-out g96_E_C32.jsonl"; sleep 5; rm -f g96_E_C32.jsonl
+echo "[tp] s22: search stopped after the hesitation-bias runs; long teacher traces $(date -u)"
+/root/vv/bin/python gen_long_vllm.py mathlong.jsonl longtr.jsonl 16384 > run_genlong.log 2>&1
+grep -E "^\[gen\]|Error|Traceback" run_genlong.log | tail -3 | sed "s/^/[tp] /"
+[ -s longtr.jsonl ] || { echo "[tp] s22: no long traces, stop"; exit 1; }
+put longtr.jsonl longtr_math_train_16k.jsonl
+python3 -c "
+import json; rs=[json.loads(l) for l in open('longtr.jsonl')]; ok=[r for r in rs if r.get('finish')=='stop' and '</think>' in r['text']]
+open('trainG.jsonl','w').writelines(json.dumps(r)+'\n' for r in ok); print('[tp] s22: trainG', len(ok), 'finished traces')"
+LG=/root/w/sp.log; F="--S 32 --heads 8 --layers 3 --ffn 2048 --rw 1024 --C 128 --maxd 384"
+echo "[tp] stage G: end-aware FFT from E on long traces $(date -u)"
+python3 sp_qwen3.py train --traces trainG.jsonl --max-len 16384 $F --ckpt spE.pt --ft-layers 28 --opt8bit --ft-lr 1e-5 --lr 1e-4 --par --end-train --end-weight 4 --chunks-per-trace 8 --accum 8 --out spG.pt --log $LG > run_trainG.log 2>&1
+grep -E "^\[sp\] (trained)|Error|Traceback|out of memory" run_trainG.log | tail -4 | sed "s/^/[tp] G: /"
+put spG.pt spG_longtraces_fft1024.pt
+for e in kv_full_p.jsonl:math traces.jsonl:mix; do f=${e%%:*}; n=${e#*:}; x=""; [ $n = mix ] && x="--n 60"
+  python3 sp_qwen3.py eval --traces $f $x --max-len 4096 $F --ckpt spG.pt --log $LG 2>&1 | grep -E "^\[sp\] eval|Error|Traceback" | sed "s/^/[$n] G stageA-cond: /"; done
+python3 sp_qwen3.py eval --traces kv_full_p.jsonl --max-len 16384 --end-stat $F --ckpt spG.pt --log $LG 2>&1 | grep -E "^\[sp\] (eval|end-stat)|Error|Traceback" | sed "s/^/[tp] stop-drive SP_G: /"
+put $LG spP.log
+G="--traces math96.jsonl --n 96 --max-len 12288 --S 32 --heads 8 --layers 3 --ffn 2048 --log $LG"; SP="--rw 1024 --C 128 --maxd 384 --ckpt spG.pt"
+run() { n=$1; shift; echo "[tp] s22 run $n: $* $(date -u)"
+  python3 sp_qwen3.py rollout $G "$@" --roll-out g96_$n.jsonl > run_g96_$n.log 2>&1
+  grep -E "Error|Traceback|out of memory" run_g96_$n.log | tail -2 | sed "s/^/[tp] $n: /"
+  python3 sp_mathcheck.py g96_$n.jsonl | sed "s/^/[tp] /"; put g96_$n.jsonl gen96_$n.jsonl; put $LG spP.log; }
+run G       --roll-batch 48 $SP
+python3 sp_mathcheck.py g96_*.jsonl | sed "s/^/[tp] final /"
+put $LG spP.log; date -u > DONE_TF3; put DONE_TF3 DONE_TF3; echo "[tp] DONE_TF3 $(date -u)"
+JOB
+  setsid nohup bash -c 'bash /root/job22.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
+  echo "[tp] s22: stage G (long teacher traces) queued after the hesitation-bias runs $(date -u)"
+fi
 # serial 21: the </think> bias changes nothing (S: all 96 generations identical - </think> is outside top-20 while thinking)
 # - skip E_eb1: start serial 19's work (own-drive, hesitation bias, knobs) as soon as full KV is done.
 if [ ! -e /root/.job21 ]; then touch /root/.job21
