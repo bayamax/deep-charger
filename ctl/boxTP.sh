@@ -5,7 +5,7 @@
 # lr 3e-4. Two poolers side by side: the original (raw sinusoids, oldest-first) and pe-rev + pe-norm. Then held-out deep KL vs
 # the equal-budget raw window (160) and the plain 128, the inference-time wider window (512 on 4096-token traces), and a
 # generation check: 32 MATH problems, full KV vs SP + window 512 vs raw window 544 alone (accuracy, </think>, repetition).
-SER=16
+SER=17
 if [ -f /root/.boxtp_serial ] && [ "$(cat /root/.boxtp_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxtp_serial
 echo "[tp] preflight GPU: $(nvidia-smi --query-gpu=name,memory.used,memory.total --format=csv,noheader)"
@@ -19,6 +19,46 @@ tail -n 1 /root/w/sp.log 2>/dev/null | cut -c1-220
 nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv,noheader
 ST
 chmod +x /root/status.sh
+# serial 17: on 96 problems SP 65/96 vs the window alone 77/96 (paired 1 vs 13): SP thoughts do not end - 25 left open at
+# 12288, 19 of them closed by the window alone; the texts loop on re-verification ("all three roots are valid. But just to
+# make sure..."). Mean KL hides it: stopping is a handful of tokens. Re-order the search once the rawFT run is done: first
+# measure the stopping drive (--end-stat: mean p(</think>), log p at the real ends, mean p of Wait/But/Alternatively/Hmm,
+# student vs teacher, on the MATH teacher traces to 16384), then SP with a </think> logit bias (+1, +2), then full KV and the
+# remaining knobs.
+if [ ! -e /root/.job17 ]; then touch /root/.job17
+  cat > /root/job17.sh <<'JOB'
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); cd /root/w
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+R=baya1116/hypernet-sp-distill
+put() { for t in 1 2 3 4 5; do python3 -c "import sys; from huggingface_hub import HfApi; HfApi().upload_file(path_or_fileobj=sys.argv[1], path_in_repo='archive/sp3/'+sys.argv[2], repo_id='$R')" "$1" "$2" > put.err 2>&1 && { echo "[hub] $2"; return 0; }; sleep 90; done; echo "[hub] $2 FAILED"; }
+while [ ! -e run_g96_full.log ] && [ ! -e DONE_TG16 ]; do sleep 5; done
+J=$(pgrep -f "^bash /root/job16.sh"); [ -n "$J" ] && { pkill -P $J; kill $J; }; sleep 3; pkill -f "roll-out g96_full.jsonl"; sleep 5; rm -f g96_full.jsonl
+echo "[tp] s17: job16 stopped after rawFT $(date -u)"
+RAWB=https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/tools
+curl -sS -o sp_qwen3.py "$RAWB/sp_qwen3.py?nocache=$(date +%s)"; grep -q "end_stat" sp_qwen3.py || echo "[tp] s17: WARNING trainer without --end-stat"
+LG=/root/w/sp.log; F="--S 32 --heads 8 --layers 3 --ffn 2048"
+for m in "SP:--rw 1024 --C 128 --maxd 384 --ckpt spS.pt" "raw:--no-sp --rw 1056 --C 128 --maxd 0" "rawFT:--no-sp --rw 1056 --C 128 --maxd 0 --ckpt spS.pt"; do
+  python3 sp_qwen3.py eval --traces kv_full_p.jsonl --max-len 16384 --end-stat $F ${m#*:} --log $LG 2>&1 | grep -E "^\[sp\] (eval|end-stat)|Error|Traceback" | sed "s/^/[tp] stop-drive ${m%%:*}: /"; done
+put $LG spP.log
+G="--traces math96.jsonl --n 96 --max-len 12288 $F --log $LG"; SP="--rw 1024 --C 128 --maxd 384 --ckpt spS.pt"
+run() { n=$1; shift; echo "[tp] s17 run $n: $* $(date -u)"
+  python3 sp_qwen3.py rollout $G "$@" --roll-out g96_$n.jsonl > run_g96_$n.log 2>&1
+  grep -E "Error|Traceback|out of memory" run_g96_$n.log | tail -2 | sed "s/^/[tp] $n: /"
+  python3 sp_mathcheck.py g96_$n.jsonl | sed "s/^/[tp] /"; put g96_$n.jsonl gen96_$n.jsonl; put $LG spP.log; }
+run SP_eb1  --roll-batch 48 $SP --end-bias 1.0
+run SP_eb2  --roll-batch 48 $SP --end-bias 2.0
+run full    --roll-batch 8 --no-sp --rw 20000 --C 12288 --maxd 0
+run SP_C32  --roll-batch 48 --rw 1024 --C 32 --maxd 384 --ckpt spS.pt
+run SP_all  --roll-batch 48 --rw 1024 --C 128 --maxd 0 --ckpt spS.pt
+run SP_w2k  --roll-batch 32 --rw 2048 --C 128 --maxd 384 --ckpt spS.pt
+run SP_pp1  --roll-batch 48 $SP --presence 1.0
+run SP_t08  --roll-batch 48 $SP --temp 0.8
+python3 sp_mathcheck.py g96_*.jsonl | sed "s/^/[tp] final /"
+put $LG spP.log; date -u > DONE_TG16; put DONE_TG16 DONE_TG16; echo "[tp] DONE_TG16 $(date -u)"
+JOB
+  setsid nohup bash -c 'bash /root/job17.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
+  echo "[tp] s17: re-ordered search queued after the rawFT run $(date -u)"
+fi
 # serial 16: generation-setting search for the hypernet (replaces serial 15's check), after the FFT-to-plateau run: 96 MATH-500
 # problems (levels 2-4), 12288 tokens, one sample each, paired per problem. Core first: SP (best checkpoint, deployment setting),
 # the window alone (base weights), the window alone with the FFT weights (does the tuned model itself behave differently?),

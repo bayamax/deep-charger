@@ -70,6 +70,8 @@ ap.add_argument("--roll-out", default="", help="rollout: write the model's own S
                 "the original deep-charger's on-policy (DAgger) data: train on what the bounded model itself produces")
 ap.add_argument("--roll-batch", type=int, default=24, help="rollout: streams generated together")
 ap.add_argument("--temp", type=float, default=0.6); ap.add_argument("--top-p", type=float, default=0.95); ap.add_argument("--top-k", type=int, default=20)
+ap.add_argument("--end-bias", type=float, default=0.0, help="rollout: added to the </think> logit while thinking")
+ap.add_argument("--end-stat", action="store_true", help="eval: how much the student and the teacher want to stop thinking")
 ap.add_argument("--presence", type=float, default=0.0, help="rollout: presence penalty on the logits of tokens already generated")
 ap.add_argument("--no-sp", action="store_true", help="eval/rollout baseline without soft prompts: [raw window | chunk] only "
                 "(with a window as long as the trace it is the full-KV model)")
@@ -86,6 +88,10 @@ from transformers import AutoModelForCausalLM, AutoTokenizer, DynamicCache
 torch.manual_seed(a.seed); random.seed(a.seed)
 dev, dt = a.device, getattr(torch, a.dtype)
 tok = AutoTokenizer.from_pretrained(a.model)
+END_ID = tok.convert_tokens_to_ids("</think>")
+HES_IDS = sorted({x[0] for w in ("Wait", " Wait", "But", " But", "Alternatively", " Alternatively", "Hmm", " Hmm")
+                  for x in [tok.encode(w, add_special_tokens=False)] if len(x) == 1})   # "keep checking" openers
+ENDST = {"pt": 0.0, "ps": 0.0, "n": 0, "lt": 0.0, "ls": 0.0, "k": 0, "ht": 0.0, "hs": 0.0}   # --end-stat: mean p(</think>) all rows; log p at real ends
 llm = AutoModelForCausalLM.from_pretrained(a.model, dtype=dt, attn_implementation="sdpa").to(dev).eval()
 for p_ in llm.parameters(): p_.requires_grad_(False)
 embed = llm.get_input_embeddings(); H = llm.config.hidden_size; NL = llm.config.num_hidden_layers
@@ -294,6 +300,11 @@ def run_trace(ids, P, train, ref_h=None):
             if train: (kl.sum() / 1000.0).backward()
         if c0 >= a.score_from:
             K += kl.sum().item(); A_ += (sl.argmax(-1) == tr.argmax(-1)).float().sum().item(); N += kl.numel()
+            if a.end_stat:
+                ENDST["pt"] += tr[:, END_ID].exp().sum().item(); ENDST["ps"] += sl[:, END_ID].exp().sum().item(); ENDST["n"] += kl.numel()
+                ENDST["ht"] += tr[:, HES_IDS].exp().sum().item(); ENDST["hs"] += sl[:, HES_IDS].exp().sum().item()
+                hit = (a_ids[0, c0:c1] == END_ID).nonzero().flatten()
+                if hit.numel(): ENDST["lt"] += tr[hit, END_ID].sum().item(); ENDST["ls"] += sl[hit, END_ID].sum().item(); ENDST["k"] += hit.numel()
     return K, A_, N
 
 
@@ -448,10 +459,12 @@ def rollout(prompts):
     kept = [torch.zeros(1, 0, dtype=torch.long, device=dev) for _ in range(N)]; absorbed = [0] * N
 
     seen = torch.zeros((N, llm.config.vocab_size), device=dev, dtype=torch.bool) if a.presence else None
+    think = torch.ones(N, device=dev)   # 1 while the stream has not closed its thought (--end-bias applies only then)
 
     def sample(lg):
         lg = lg.float()
         if a.presence: lg = lg - a.presence * seen[:, :lg.size(-1)].float()
+        if a.end_bias: lg[:, END_ID] += a.end_bias * think
         lg = lg / a.temp
         if a.top_k: lg = lg.masked_fill(lg < lg.topk(a.top_k, -1).values[:, -1:], float("-inf"))
         pr = torch.softmax(lg, -1); sp_, si = pr.sort(-1, descending=True)
@@ -491,6 +504,7 @@ def rollout(prompts):
                 if nx[b] in stop: fin[b] = True; continue
                 gen[b].append(nx[b])
                 if a.presence: seen[b, nx[b]] = True
+                if nx[b] == END_ID: think[b] = 0.0
                 if len(gen[b]) >= a.max_len: fin[b] = True
             if all(fin): break
             amask = torch.cat([amask, torch.ones((N, 1), device=dev, dtype=torch.long)], 1)
@@ -541,6 +555,10 @@ elif a.mode == "eval":
         k, g, n = run_trace(ids, P, False); K += k; A_ += g; N += n
     log(f"[sp] eval {tag} {os.path.basename(a.ckpt) or 'untrained'}: {len(data)} traces {int(N)} tokens  KL {K / max(N, 1):.4f}  "
         f"top1 agree {100 * A_ / max(N, 1):.2f}%  ({time.time() - t0:.0f}s)")
+    if a.end_stat:
+        e = ENDST; log(f"[sp] end-stat {tag}: mean p(</think>) teacher {e['pt'] / max(e['n'], 1):.3e} student {e['ps'] / max(e['n'], 1):.3e} | "
+                       f"at the {e['k']} real ends: log p teacher {e['lt'] / max(e['k'], 1):.3f} student {e['ls'] / max(e['k'], 1):.3f} | "
+                       f"mean p(Wait/But/Alternatively/Hmm) teacher {e['ht'] / max(e['n'], 1):.4f} student {e['hs'] / max(e['n'], 1):.4f}")
 else:
     pooler.train()
     groups = [{"params": list(pooler.parameters()), "lr": a.lr}]
