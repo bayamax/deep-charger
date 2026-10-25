@@ -5,7 +5,7 @@
 # lr 3e-4. Two poolers side by side: the original (raw sinusoids, oldest-first) and pe-rev + pe-norm. Then held-out deep KL vs
 # the equal-budget raw window (160) and the plain 128, the inference-time wider window (512 on 4096-token traces), and a
 # generation check: 32 MATH problems, full KV vs SP + window 512 vs raw window 544 alone (accuracy, </think>, repetition).
-SER=19
+SER=20
 if [ -f /root/.boxtp_serial ] && [ "$(cat /root/.boxtp_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxtp_serial
 echo "[tp] preflight GPU: $(nvidia-smi --query-gpu=name,memory.used,memory.total --format=csv,noheader)"
@@ -19,6 +19,41 @@ tail -n 1 /root/w/sp.log 2>/dev/null | cut -c1-220
 nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv,noheader
 ST
 chmod +x /root/status.sh
+# serial 20: stage E samples blocks (start, end, 4 random) - the accelerated version. Once the generation-setting search is
+# done (DONE_TG16): stage F = the full pass, every block of every trace (--chunks-per-trace 0), --end-train / --end-weight 4,
+# whole traces, from E on the rest of the unseen teacher traces (trainE from line 1201); scores, stop/hesitation drive, and
+# the 96-problem check (default sampling and the -0.3 hesitation bias).
+if [ ! -e /root/.job20 ]; then touch /root/.job20
+  cat > /root/job20.sh <<'JOB'
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); cd /root/w
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+R=baya1116/hypernet-sp-distill
+put() { for t in 1 2 3 4 5; do python3 -c "import sys; from huggingface_hub import HfApi; HfApi().upload_file(path_or_fileobj=sys.argv[1], path_in_repo='archive/sp3/'+sys.argv[2], repo_id='$R')" "$1" "$2" > put.err 2>&1 && { echo "[hub] $2"; return 0; }; sleep 90; done; echo "[hub] $2 FAILED"; }
+while [ ! -e DONE_TG16 ] || pgrep -f "^bash /root/job1[89].sh" > /dev/null; do sleep 30; done
+RAWB=https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/tools
+curl -sS -o sp_qwen3.py "$RAWB/sp_qwen3.py?nocache=$(date +%s)"
+LG=/root/w/sp.log; F="--S 32 --heads 8 --layers 3 --ffn 2048 --rw 1024 --C 128 --maxd 384"
+tail -n +1201 trainE.jsonl > trainF.jsonl; echo "[tp] stage F: full-pass FFT from E on $(wc -l < trainF.jsonl) traces $(date -u)"
+python3 sp_qwen3.py train --traces trainF.jsonl --max-len 16384 $F --ckpt spE.pt --ft-layers 28 --opt8bit --ft-lr 1e-5 --lr 1e-4 --par --end-train --end-weight 4 --chunks-per-trace 0 --accum 8 --out spF.pt --log $LG > run_trainF.log 2>&1
+grep -E "^\[sp\] (trained)|Error|Traceback|out of memory" run_trainF.log | tail -3 | sed "s/^/[tp] F: /"
+put spF.pt spF_fullpass_fft1024.pt
+for e in kv_full_p.jsonl:math traces.jsonl:mix; do f=${e%%:*}; n=${e#*:}; x=""; [ $n = mix ] && x="--n 60"
+  python3 sp_qwen3.py eval --traces $f $x --max-len 4096 $F --ckpt spF.pt --log $LG 2>&1 | grep -E "^\[sp\] eval|Error|Traceback" | sed "s/^/[$n] F stageA-cond: /"; done
+python3 sp_qwen3.py eval --traces kv_full_p.jsonl --max-len 16384 --end-stat $F --ckpt spF.pt --log $LG 2>&1 | grep -E "^\[sp\] (eval|end-stat)|Error|Traceback" | sed "s/^/[tp] stop-drive SP_F: /"
+put $LG spP.log
+G="--traces math96.jsonl --n 96 --max-len 12288 --S 32 --heads 8 --layers 3 --ffn 2048 --log $LG"; SP="--rw 1024 --C 128 --maxd 384 --ckpt spF.pt"
+run() { n=$1; shift; echo "[tp] s20 run $n: $* $(date -u)"
+  python3 sp_qwen3.py rollout $G "$@" --roll-out g96_$n.jsonl > run_g96_$n.log 2>&1
+  grep -E "Error|Traceback|out of memory" run_g96_$n.log | tail -2 | sed "s/^/[tp] $n: /"
+  python3 sp_mathcheck.py g96_$n.jsonl | sed "s/^/[tp] /"; put g96_$n.jsonl gen96_$n.jsonl; put $LG spP.log; }
+run F       --roll-batch 48 $SP
+run F_hb03  --roll-batch 48 $SP --hes-bias -0.3
+python3 sp_mathcheck.py g96_*.jsonl | sed "s/^/[tp] final /"
+put $LG spP.log; date -u > DONE_TF3; put DONE_TF3 DONE_TF3; echo "[tp] DONE_TF3 $(date -u)"
+JOB
+  setsid nohup bash -c 'bash /root/job20.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
+  echo "[tp] s20: stage F (full pass) queued after the generation-setting search $(date -u)"
+fi
 # serial 19: the stop drive is not the gap - on the teacher traces p(</think>) matches (1.514e-4 both, ends certain) but the
 # "keep checking" openers (Wait/But/Alternatively/Hmm) do: teacher 0.0110, SP 0.0114 (+4%), window alone 0.0100 (-9%) - the
 # order of the generation lengths (SP 9.5k > window 5.9k chars). After E's core runs (E, rawFT_E, full, E_eb1): the same
