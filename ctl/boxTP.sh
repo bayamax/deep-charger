@@ -5,7 +5,7 @@
 # lr 3e-4. Two poolers side by side: the original (raw sinusoids, oldest-first) and pe-rev + pe-norm. Then held-out deep KL vs
 # the equal-budget raw window (160) and the plain 128, the inference-time wider window (512 on 4096-token traces), and a
 # generation check: 32 MATH problems, full KV vs SP + window 512 vs raw window 544 alone (accuracy, </think>, repetition).
-SER=15
+SER=16
 if [ -f /root/.boxtp_serial ] && [ "$(cat /root/.boxtp_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxtp_serial
 echo "[tp] preflight GPU: $(nvidia-smi --query-gpu=name,memory.used,memory.total --format=csv,noheader)"
@@ -19,11 +19,50 @@ tail -n 1 /root/w/sp.log 2>/dev/null | cut -c1-220
 nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv,noheader
 ST
 chmod +x /root/status.sh
+# serial 16: generation-setting search for the hypernet (replaces serial 15's check), after the FFT-to-plateau run: 96 MATH-500
+# problems (levels 2-4), 12288 tokens, one sample each, paired per problem. Core first: SP (best checkpoint, deployment setting),
+# the window alone (base weights), the window alone with the FFT weights (does the tuned model itself behave differently?),
+# full KV. Then one knob at a time on SP: refresh every 32 tokens, no eviction (the pooler reads everything, like ap32),
+# window 2048, presence penalty 1.0, temperature 0.8.
+if [ ! -e /root/.job16 ]; then touch /root/.job16
+  J=$(pgrep -f "^bash /root/job15.sh"); [ -n "$J" ] && { pkill -P $J; kill $J; echo "[tp] s16: replaced the queued serial-15 check"; }
+  curl -sS -o /root/w/math96.jsonl "$RAW/ctl/math96.jsonl?nocache=$(date +%s)"
+  cat > /root/job16.sh <<'JOB'
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); cd /root/w
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+R=baya1116/hypernet-sp-distill
+put() { for t in 1 2 3 4 5; do python3 -c "import sys; from huggingface_hub import HfApi; HfApi().upload_file(path_or_fileobj=sys.argv[1], path_in_repo='archive/sp3/'+sys.argv[2], repo_id='$R')" "$1" "$2" > put.err 2>&1 && { echo "[hub] $2"; return 0; }; sleep 90; done; echo "[hub] $2 FAILED"; }
+while [ ! -e DONE_TS ]; do sleep 2; done
+J=$(pgrep -f "^bash /root/job13.sh"); [ -n "$J" ] && { pkill -P $J; kill $J; }; sleep 3; pkill -f "roll-out g16_"; sleep 3
+RAWB=https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/tools
+curl -sS -o sp_qwen3.py "$RAWB/sp_qwen3.py?nocache=$(date +%s)"; grep -q "a.presence" sp_qwen3.py || echo "[tp] s16: WARNING trainer without --presence"
+echo "[tp] s16: spS.pt $(ls -la spS.pt | awk '{print $5}') bytes $(date -u)"; put spS.pt spS_fft_plateau.pt; put DONE_TS DONE_TS
+LG=/root/w/sp.log; G="--traces math96.jsonl --n 96 --max-len 12288 --S 32 --heads 8 --layers 3 --ffn 2048 --log $LG"
+SP="--rw 1024 --C 128 --maxd 384 --ckpt spS.pt"
+run() { n=$1; shift; echo "[tp] s16 run $n: $* $(date -u)"
+  python3 sp_qwen3.py rollout $G "$@" --roll-out g96_$n.jsonl > run_g96_$n.log 2>&1
+  grep -E "Error|Traceback|out of memory" run_g96_$n.log | tail -2 | sed "s/^/[tp] $n: /"
+  python3 sp_mathcheck.py g96_$n.jsonl | sed "s/^/[tp] /"; put g96_$n.jsonl gen96_$n.jsonl; put $LG spP.log; }
+run SP      --roll-batch 48 $SP
+run raw     --roll-batch 48 --no-sp --rw 1056 --C 128 --maxd 0
+run rawFT   --roll-batch 48 --no-sp --rw 1056 --C 128 --maxd 0 --ckpt spS.pt
+run full    --roll-batch 8 --no-sp --rw 20000 --C 12288 --maxd 0
+run SP_C32  --roll-batch 48 --rw 1024 --C 32 --maxd 384 --ckpt spS.pt
+run SP_all  --roll-batch 48 --rw 1024 --C 128 --maxd 0 --ckpt spS.pt
+run SP_w2k  --roll-batch 32 --rw 2048 --C 128 --maxd 384 --ckpt spS.pt
+run SP_pp1  --roll-batch 48 $SP --presence 1.0
+run SP_t08  --roll-batch 48 $SP --temp 0.8
+python3 sp_mathcheck.py g96_*.jsonl | sed "s/^/[tp] final /"
+put $LG spP.log; date -u > DONE_TG16; put DONE_TG16 DONE_TG16; echo "[tp] DONE_TG16 $(date -u)"
+JOB
+  setsid nohup bash -c 'bash /root/job16.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
+  echo "[tp] s16: generation-setting search queued after DONE_TS $(date -u)"
+fi
 # serial 15: 32 level-4/5 problems at one sample each cannot separate the methods (binomial spread ~3 problems, and even full
 # KV leaves a third open at 8192). The check after the FFT-to-plateau run is replaced: 96 MATH-500 problems, 32 each of levels
 # 2/3/4 (ctl/math96.jsonl), 16384 tokens, paired per problem: SP (best checkpoint), the window alone, full KV (plain
 # incremental decoding: one 16384-token chunk, no re-prefill).
-if [ ! -e /root/.job15 ]; then touch /root/.job15
+if [ ! -e /root/.job15 ] && [ ! -e /root/.job16 ]; then touch /root/.job15
   curl -sS -o /root/w/math96.jsonl "$RAW/ctl/math96.jsonl?nocache=$(date +%s)"; echo "[tp] s15: math96 $(wc -l < /root/w/math96.jsonl) rows"
   cat > /root/job15.sh <<'JOB'
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); cd /root/w

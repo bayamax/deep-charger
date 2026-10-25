@@ -70,6 +70,7 @@ ap.add_argument("--roll-out", default="", help="rollout: write the model's own S
                 "the original deep-charger's on-policy (DAgger) data: train on what the bounded model itself produces")
 ap.add_argument("--roll-batch", type=int, default=24, help="rollout: streams generated together")
 ap.add_argument("--temp", type=float, default=0.6); ap.add_argument("--top-p", type=float, default=0.95); ap.add_argument("--top-k", type=int, default=20)
+ap.add_argument("--presence", type=float, default=0.0, help="rollout: presence penalty on the logits of tokens already generated")
 ap.add_argument("--no-sp", action="store_true", help="eval/rollout baseline without soft prompts: [raw window | chunk] only "
                 "(with a window as long as the trace it is the full-KV model)")
 ap.add_argument("--ctx-hidden", type=int, default=0, help="pooler input = the frozen model's layer-N hidden states of the distant "
@@ -446,8 +447,12 @@ def rollout(prompts):
     gen = [[] for _ in range(N)]; fin = [False] * N
     kept = [torch.zeros(1, 0, dtype=torch.long, device=dev) for _ in range(N)]; absorbed = [0] * N
 
+    seen = torch.zeros((N, llm.config.vocab_size), device=dev, dtype=torch.bool) if a.presence else None
+
     def sample(lg):
-        lg = lg.float() / a.temp
+        lg = lg.float()
+        if a.presence: lg = lg - a.presence * seen[:, :lg.size(-1)].float()
+        lg = lg / a.temp
         if a.top_k: lg = lg.masked_fill(lg < lg.topk(a.top_k, -1).values[:, -1:], float("-inf"))
         pr = torch.softmax(lg, -1); sp_, si = pr.sort(-1, descending=True)
         drop = sp_.cumsum(-1) - sp_ > a.top_p; sp_ = sp_.masked_fill(drop, 0)
@@ -485,6 +490,7 @@ def rollout(prompts):
                 if fin[b]: continue
                 if nx[b] in stop: fin[b] = True; continue
                 gen[b].append(nx[b])
+                if a.presence: seen[b, nx[b]] = True
                 if len(gen[b]) >= a.max_len: fin[b] = True
             if all(fin): break
             amask = torch.cat([amask, torch.ones((N, 1), device=dev, dtype=torch.long)], 1)
