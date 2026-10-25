@@ -5,7 +5,7 @@
 # lr 3e-4. Two poolers side by side: the original (raw sinusoids, oldest-first) and pe-rev + pe-norm. Then held-out deep KL vs
 # the equal-budget raw window (160) and the plain 128, the inference-time wider window (512 on 4096-token traces), and a
 # generation check: 32 MATH problems, full KV vs SP + window 512 vs raw window 544 alone (accuracy, </think>, repetition).
-SER=22
+SER=23
 if [ -f /root/.boxtp_serial ] && [ "$(cat /root/.boxtp_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxtp_serial
 echo "[tp] preflight GPU: $(nvidia-smi --query-gpu=name,memory.used,memory.total --format=csv,noheader)"
@@ -19,6 +19,12 @@ tail -n 1 /root/w/sp.log 2>/dev/null | cut -c1-220
 nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv,noheader
 ST
 chmod +x /root/status.sh
+# serial 23: training first - stop the generation-setting search now (the -1.0 hesitation-bias run included); serial 22's
+# stage G starts as soon as job21 is gone.
+if [ ! -e /root/.job23 ]; then touch /root/.job23
+  J=$(pgrep -f "^bash /root/job21.sh"); [ -n "$J" ] && { pkill -P $J; kill $J; echo "[tp] s23: generation-setting search stopped ($J)"; }
+  sleep 3; pkill -f "roll-out g96_E_hb1.jsonl"; true
+fi
 # serial 22: full KV 80/96 (E 70, the window alone 77): of the 11 full-only problems E leaves 8 unfinished - all long thoughts
 # (full KV needs 3k-11k tokens there), E loops in the tail. Every teacher trace in training was cut at 3200 tokens: long thinking
 # (many evictions, a full buffer, positions far out) was never trained. Stage G, after the two hesitation-bias runs: 900
