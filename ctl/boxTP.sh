@@ -5,7 +5,7 @@
 # lr 3e-4. Two poolers side by side: the original (raw sinusoids, oldest-first) and pe-rev + pe-norm. Then held-out deep KL vs
 # the equal-budget raw window (160) and the plain 128, the inference-time wider window (512 on 4096-token traces), and a
 # generation check: 32 MATH problems, full KV vs SP + window 512 vs raw window 544 alone (accuracy, </think>, repetition).
-SER=18
+SER=19
 if [ -f /root/.boxtp_serial ] && [ "$(cat /root/.boxtp_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxtp_serial
 echo "[tp] preflight GPU: $(nvidia-smi --query-gpu=name,memory.used,memory.total --format=csv,noheader)"
@@ -19,6 +19,44 @@ tail -n 1 /root/w/sp.log 2>/dev/null | cut -c1-220
 nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv,noheader
 ST
 chmod +x /root/status.sh
+# serial 19: the stop drive is not the gap - on the teacher traces p(</think>) matches (1.514e-4 both, ends certain) but the
+# "keep checking" openers (Wait/But/Alternatively/Hmm) do: teacher 0.0110, SP 0.0114 (+4%), window alone 0.0100 (-9%) - the
+# order of the generation lengths (SP 9.5k > window 5.9k chars). After E's core runs (E, rawFT_E, full, E_eb1): the same
+# numbers on the models' own generations, then a hesitation bias while thinking (-0.3, -1.0), then the remaining knobs.
+if [ ! -e /root/.job19 ]; then touch /root/.job19
+  cat > /root/job19.sh <<'JOB'
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); cd /root/w
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+R=baya1116/hypernet-sp-distill
+put() { for t in 1 2 3 4 5; do python3 -c "import sys; from huggingface_hub import HfApi; HfApi().upload_file(path_or_fileobj=sys.argv[1], path_in_repo='archive/sp3/'+sys.argv[2], repo_id='$R')" "$1" "$2" > put.err 2>&1 && { echo "[hub] $2"; return 0; }; sleep 90; done; echo "[hub] $2 FAILED"; }
+while [ ! -e run_g96_E_C32.log ] && [ ! -e DONE_TG16 ]; do sleep 5; done
+J=$(pgrep -f "^bash /root/job18.sh"); [ -n "$J" ] && { pkill -P $J; kill $J; }; sleep 3; pkill -f "roll-out g96_E_C32.jsonl"; sleep 5; rm -f g96_E_C32.jsonl DONE_TG16
+echo "[tp] s19: job18 stopped after E_eb1 $(date -u)"
+RAWB=https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/tools
+curl -sS -o sp_qwen3.py "$RAWB/sp_qwen3.py?nocache=$(date +%s)"; grep -q "hes_bias" sp_qwen3.py || echo "[tp] s19: WARNING trainer without --hes-bias"
+LG=/root/w/sp.log; F="--S 32 --heads 8 --layers 3 --ffn 2048"
+for m in "SP@g96_SP.jsonl:--rw 1024 --C 128 --maxd 384 --ckpt spS.pt" "E@g96_E.jsonl:--rw 1024 --C 128 --maxd 384 --ckpt spE.pt" "raw@g96_raw.jsonl:--no-sp --rw 1056 --C 128 --maxd 0"; do
+  k=${m%%:*}; g=${k#*@}; [ -s $g ] || continue
+  python3 sp_qwen3.py eval --traces $g --max-len 12288 --end-stat $F ${m#*:} --log $LG 2>&1 | grep -E "^\[sp\] end-stat|Error|Traceback" | sed "s/^/[tp] own-drive ${k}: /"; done
+put $LG spP.log
+G="--traces math96.jsonl --n 96 --max-len 12288 $F --log $LG"; SP="--rw 1024 --C 128 --maxd 384 --ckpt spE.pt"
+run() { n=$1; shift; echo "[tp] s19 run $n: $* $(date -u)"
+  python3 sp_qwen3.py rollout $G "$@" --roll-out g96_$n.jsonl > run_g96_$n.log 2>&1
+  grep -E "Error|Traceback|out of memory" run_g96_$n.log | tail -2 | sed "s/^/[tp] $n: /"
+  python3 sp_mathcheck.py g96_$n.jsonl | sed "s/^/[tp] /"; put g96_$n.jsonl gen96_$n.jsonl; put $LG spP.log; }
+run E_hb03   --roll-batch 48 $SP --hes-bias -0.3
+run E_hb1    --roll-batch 48 $SP --hes-bias -1.0
+run E_C32    --roll-batch 48 --rw 1024 --C 32 --maxd 384 --ckpt spE.pt
+run E_all    --roll-batch 48 --rw 1024 --C 128 --maxd 0 --ckpt spE.pt
+run E_w2k    --roll-batch 32 --rw 2048 --C 128 --maxd 384 --ckpt spE.pt
+run E_pp1    --roll-batch 48 $SP --presence 1.0
+run E_t08    --roll-batch 48 $SP --temp 0.8
+python3 sp_mathcheck.py g96_*.jsonl | sed "s/^/[tp] final /"
+put $LG spP.log; date -u > DONE_TG16; put DONE_TG16 DONE_TG16; echo "[tp] DONE_TG16 $(date -u)"
+JOB
+  setsid nohup bash -c 'bash /root/job19.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
+  echo "[tp] s19: own-drive + hesitation bias queued after E's core runs $(date -u)"
+fi
 # serial 18: the --par data never showed an ending: traces under rw+C+C tokens were skipped, the rest cut at 3072, only whole
 # blocks scored, and the plain window from the start (the deployment's first 1152 tokens, FFT weights, no SP) never trained -
 # and the window alone with the FFT weights already writes ~1.5x longer than with the base weights. Stage E, after the

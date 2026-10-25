@@ -71,6 +71,8 @@ ap.add_argument("--roll-out", default="", help="rollout: write the model's own S
 ap.add_argument("--roll-batch", type=int, default=24, help="rollout: streams generated together")
 ap.add_argument("--temp", type=float, default=0.6); ap.add_argument("--top-p", type=float, default=0.95); ap.add_argument("--top-k", type=int, default=20)
 ap.add_argument("--end-bias", type=float, default=0.0, help="rollout: added to the </think> logit while thinking")
+ap.add_argument("--hes-bias", type=float, default=0.0, help="rollout: added to the logits of Wait/But/Alternatively/Hmm "
+                "while thinking (negative = less re-checking)")
 ap.add_argument("--end-train", action="store_true", help="--par: also train short traces and the trace tail (partial last "
                 "block), and always one block holding the end of the thought")
 ap.add_argument("--end-weight", type=float, default=1.0, help="--par: KL weight of the rows from 32 tokens before </think> "
@@ -486,6 +488,7 @@ def rollout(prompts):
         lg = lg.float()
         if a.presence: lg = lg - a.presence * seen[:, :lg.size(-1)].float()
         if a.end_bias: lg[:, END_ID] += a.end_bias * think
+        if a.hes_bias: lg[:, HES_IDS] += a.hes_bias * think[:, None]
         lg = lg / a.temp
         if a.top_k: lg = lg.masked_fill(lg < lg.topk(a.top_k, -1).values[:, -1:], float("-inf"))
         pr = torch.softmax(lg, -1); sp_, si = pr.sort(-1, descending=True)
