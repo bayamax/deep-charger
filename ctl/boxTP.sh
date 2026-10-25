@@ -5,7 +5,7 @@
 # lr 3e-4. Two poolers side by side: the original (raw sinusoids, oldest-first) and pe-rev + pe-norm. Then held-out deep KL vs
 # the equal-budget raw window (160) and the plain 128, the inference-time wider window (512 on 4096-token traces), and a
 # generation check: 32 MATH problems, full KV vs SP + window 512 vs raw window 544 alone (accuracy, </think>, repetition).
-SER=26
+SER=27
 if [ -f /root/.boxtp_serial ] && [ "$(cat /root/.boxtp_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxtp_serial
 echo "[tp] preflight GPU: $(nvidia-smi --query-gpu=name,memory.used,memory.total --format=csv,noheader)"
@@ -19,6 +19,10 @@ tail -n 1 /root/w/sp.log 2>/dev/null | cut -c1-220
 nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv,noheader
 ST
 chmod +x /root/status.sh
+# serial 27: progress of the diverse long-trace run (groups of 150)
+if [ ! -e /root/.chk27 ]; then touch /root/.chk27
+  echo "[tp] s27: $(grep -E '^\[gen\]|Error|Traceback' /root/w/run_gendiv.log 2>/dev/null | tail -2 | tr '\n' ' ') $(wc -l < /root/w/divtr.jsonl 2>/dev/null) rows $(date -u)"
+fi
 # serial 26: the math run is at 493/900 after 1.6 h (~620 output tok/s: KV-bound concurrency) and vLLM returns only at the
 # end - the diverse run uses the grouped generator (each group of 150 appended as it finishes, a rerun resumes)
 if [ ! -e /root/.chk26 ]; then touch /root/.chk26
