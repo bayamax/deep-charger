@@ -5,7 +5,7 @@
 # lr 3e-4. Two poolers side by side: the original (raw sinusoids, oldest-first) and pe-rev + pe-norm. Then held-out deep KL vs
 # the equal-budget raw window (160) and the plain 128, the inference-time wider window (512 on 4096-token traces), and a
 # generation check: 32 MATH problems, full KV vs SP + window 512 vs raw window 544 alone (accuracy, </think>, repetition).
-SER=14
+SER=15
 if [ -f /root/.boxtp_serial ] && [ "$(cat /root/.boxtp_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxtp_serial
 echo "[tp] preflight GPU: $(nvidia-smi --query-gpu=name,memory.used,memory.total --format=csv,noheader)"
@@ -19,6 +19,35 @@ tail -n 1 /root/w/sp.log 2>/dev/null | cut -c1-220
 nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv,noheader
 ST
 chmod +x /root/status.sh
+# serial 15: 32 level-4/5 problems at one sample each cannot separate the methods (binomial spread ~3 problems, and even full
+# KV leaves a third open at 8192). The check after the FFT-to-plateau run is replaced: 96 MATH-500 problems, 32 each of levels
+# 2/3/4 (ctl/math96.jsonl), 16384 tokens, paired per problem: SP (best checkpoint), the window alone, full KV (plain
+# incremental decoding: one 16384-token chunk, no re-prefill).
+if [ ! -e /root/.job15 ]; then touch /root/.job15
+  curl -sS -o /root/w/math96.jsonl "$RAW/ctl/math96.jsonl?nocache=$(date +%s)"; echo "[tp] s15: math96 $(wc -l < /root/w/math96.jsonl) rows"
+  cat > /root/job15.sh <<'JOB'
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); cd /root/w
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+R=baya1116/hypernet-sp-distill
+put() { for t in 1 2 3 4 5; do python3 -c "import sys; from huggingface_hub import HfApi; HfApi().upload_file(path_or_fileobj=sys.argv[1], path_in_repo='archive/sp3/'+sys.argv[2], repo_id='$R')" "$1" "$2" > put.err 2>&1 && { echo "[hub] $2"; return 0; }; sleep 90; done; echo "[hub] $2 FAILED"; }
+while [ ! -e DONE_TS ]; do sleep 2; done
+J=$(pgrep -f "^bash /root/job13.sh"); [ -n "$J" ] && { pkill -P $J; kill $J; }; sleep 3; pkill -f "roll-out g16_" ; sleep 3
+echo "[tp] s15: old 16k check stopped; spS.pt $(ls -la spS.pt | awk '{print $5}') bytes $(date -u)"
+put spS.pt spS_fft_plateau.pt; put DONE_TS DONE_TS
+LG=/root/w/sp.log; G="--traces math96.jsonl --n 96 --max-len 16384 --S 32 --heads 8 --layers 3 --ffn 2048 --log $LG"
+echo "[tp] s15: generation check, 96 problems, 16384 tokens $(date -u)"
+python3 sp_qwen3.py rollout $G --roll-batch 16 --rw 1024 --C 128 --maxd 384 --ckpt spS.pt --roll-out g96_S.jsonl > run_g96.log 2>&1
+python3 sp_mathcheck.py g96_S.jsonl | sed "s/^/[tp] /"; put g96_S.jsonl gen96_S.jsonl
+python3 sp_qwen3.py rollout $G --roll-batch 16 --no-sp --rw 1056 --C 128 --maxd 0 --roll-out g96_raw1056.jsonl >> run_g96.log 2>&1
+python3 sp_mathcheck.py g96_raw1056.jsonl | sed "s/^/[tp] /"; put g96_raw1056.jsonl gen96_raw1056.jsonl
+python3 sp_qwen3.py rollout $G --roll-batch 6 --no-sp --rw 20000 --C 16384 --maxd 0 --roll-out g96_full.jsonl >> run_g96.log 2>&1
+grep -E "Error|Traceback|out of memory" run_g96.log | tail -3 | sed "s/^/[tp] /"
+python3 sp_mathcheck.py g96_full.jsonl g96_S.jsonl g96_raw1056.jsonl | sed "s/^/[tp] /"
+put g96_full.jsonl gen96_full.jsonl; put run_g96.log gen96_run.log; put $LG spP.log; date -u > DONE_TG16; put DONE_TG16 DONE_TG16; echo "[tp] DONE_TG16 $(date -u)"
+JOB
+  setsid nohup bash -c 'bash /root/job15.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
+  echo "[tp] s15: 96-problem generation check queued after DONE_TS $(date -u)"
+fi
 # serial 14: serial 12's 16k rollout had started (01:26) before serial 13 stopped its shell - stop that rollout if it survived,
 # and list what runs on the GPU
 if [ ! -e /root/.chk14 ]; then touch /root/.chk14
