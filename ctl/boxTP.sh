@@ -5,7 +5,7 @@
 # lr 3e-4. Two poolers side by side: the original (raw sinusoids, oldest-first) and pe-rev + pe-norm. Then held-out deep KL vs
 # the equal-budget raw window (160) and the plain 128, the inference-time wider window (512 on 4096-token traces), and a
 # generation check: 32 MATH problems, full KV vs SP + window 512 vs raw window 544 alone (accuracy, </think>, repetition).
-SER=13
+SER=14
 if [ -f /root/.boxtp_serial ] && [ "$(cat /root/.boxtp_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxtp_serial
 echo "[tp] preflight GPU: $(nvidia-smi --query-gpu=name,memory.used,memory.total --format=csv,noheader)"
@@ -19,6 +19,12 @@ tail -n 1 /root/w/sp.log 2>/dev/null | cut -c1-220
 nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv,noheader
 ST
 chmod +x /root/status.sh
+# serial 14: serial 12's 16k rollout had started (01:26) before serial 13 stopped its shell - stop that rollout if it survived,
+# and list what runs on the GPU
+if [ ! -e /root/.chk14 ]; then touch /root/.chk14
+  pkill -f "roll-out g16_D1.jsonl" && echo "[tp] s14: stopped the stray serial-12 rollout"
+  sleep 5; ps -eo pid,etimes,args | grep "sp_qwen3.py" | grep -v grep | cut -c1-200 | sed "s/^/[tp] s14 proc: /"
+fi
 # serial 13: keep FFT going until the loss stops falling. From D1 (DAgger) on unseen teacher traces (trainR from line 2385,
 # ~4800), 800 per segment, held-out stage-A-condition KL (MATH 64 + mixed 60) after each; stop after two segments without a
 # 1% gain on the best (or when the traces run out). The 16k generation check (serial 12) then runs on the best checkpoint.
