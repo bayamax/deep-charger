@@ -5,7 +5,7 @@
 # lr 3e-4. Two poolers side by side: the original (raw sinusoids, oldest-first) and pe-rev + pe-norm. Then held-out deep KL vs
 # the equal-budget raw window (160) and the plain 128, the inference-time wider window (512 on 4096-token traces), and a
 # generation check: 32 MATH problems, full KV vs SP + window 512 vs raw window 544 alone (accuracy, </think>, repetition).
-SER=12
+SER=13
 if [ -f /root/.boxtp_serial ] && [ "$(cat /root/.boxtp_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxtp_serial
 echo "[tp] preflight GPU: $(nvidia-smi --query-gpu=name,memory.used,memory.total --format=csv,noheader)"
@@ -19,10 +19,56 @@ tail -n 1 /root/w/sp.log 2>/dev/null | cut -c1-220
 nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv,noheader
 ST
 chmod +x /root/status.sh
+# serial 13: keep FFT going until the loss stops falling. From D1 (DAgger) on unseen teacher traces (trainR from line 2385,
+# ~4800), 800 per segment, held-out stage-A-condition KL (MATH 64 + mixed 60) after each; stop after two segments without a
+# 1% gain on the best (or when the traces run out). The 16k generation check (serial 12) then runs on the best checkpoint.
+if [ ! -e /root/.job13 ]; then touch /root/.job13
+  J=$(pgrep -f "^bash /root/job12.sh"); [ -n "$J" ] && { pkill -P $J; kill $J; echo "[tp] s13: stopped the queued 16k check ($J)"; }
+  cat > /root/job13.sh <<'JOB'
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); cd /root/w
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+R=baya1116/hypernet-sp-distill
+put() { for t in 1 2 3 4 5; do python3 -c "import sys; from huggingface_hub import HfApi; HfApi().upload_file(path_or_fileobj=sys.argv[1], path_in_repo='archive/sp3/'+sys.argv[2], repo_id='$R')" "$1" "$2" > put.err 2>&1 && { echo "[hub] $2"; return 0; }; sleep 90; done; echo "[hub] $2 FAILED"; }
+while [ ! -e DONE_TD1 ]; do sleep 60; done
+LG=/root/w/sp.log; F="--S 32 --heads 8 --layers 3 --ffn 2048 --rw 1024 --C 128 --maxd 384"
+score() { m=$(python3 sp_qwen3.py eval --traces kv_full_p.jsonl --max-len 4096 $F --ckpt $1 --log $LG 2>&1 | grep -oP "KL \K[0-9.]+" | tail -1)
+  x=$(python3 sp_qwen3.py eval --traces traces.jsonl --n 60 --max-len 4096 $F --ckpt $1 --log $LG 2>&1 | grep -oP "KL \K[0-9.]+" | tail -1)
+  echo "$m $x"; }
+tail -n +2385 trainR.jsonl > trainS.jsonl; NT=$(wc -l < trainS.jsonl); echo "[tp] s13: $NT unseen teacher traces"
+cp spD1.pt cur.pt; best=$(python3 -c "print((0.0699+0.0613)/2)"); cp spD1.pt best.pt; bad=0; seg=0; off=0
+while [ $off -lt $NT ] && [ $bad -lt 2 ]; do seg=$((seg+1))
+  python3 sp_qwen3.py train --traces trainS.jsonl --skip $off --n 800 --max-len 3072 $F --ckpt cur.pt --ft-layers 28 --opt8bit --ft-lr 1e-5 --lr 1e-4 --par --chunks-per-trace 4 --accum 8 --out nxt.pt --log $LG > run_trainS$seg.log 2>&1
+  grep -E "Error|Traceback" run_trainS$seg.log | tail -2 | sed "s/^/[tp] S$seg: /"
+  [ -s nxt.pt ] || { echo "[tp] S$seg: no checkpoint, stop"; break; }
+  mv nxt.pt cur.pt; off=$((off+800)); read m x < <(score cur.pt); v=$(python3 -c "print(($m+$x)/2)")
+  echo "[tp] S$seg (traces $off): MATH $m mixed $x mean $v (best $best)"
+  if python3 -c "import sys; sys.exit(0 if $v < $best * 0.99 else 1)"; then best=$v; cp cur.pt best.pt; bad=0; echo "[tp] S$seg: new best"
+  else bad=$((bad+1)); python3 -c "import sys; sys.exit(0 if $v < $best else 1)" && { best=$v; cp cur.pt best.pt; }; fi
+  put $LG spP.log
+done
+echo "[tp] s13: stopped after $seg segments, best mean $best"
+cp best.pt spS.pt; put spS.pt spS_fft_plateau.pt
+python3 sp_qwen3.py profile --traces kv_full_p.jsonl --n 16 --max-len 4096 $F --ckpt spS.pt --log $LG 2>&1 | grep -E "^\[sp\] profile|Error|Traceback" | tail -7 | sed "s/^/[math] S /"
+python3 sp_qwen3.py eval --traces g8_R2.jsonl --max-len 8192 --score-from 1184 $F --ckpt spS.pt --log $LG 2>&1 | grep -E "^\[sp\] eval|Error|Traceback" | sed "s/^/[tp] own-KL on g8_R2.jsonl: S: /"
+put $LG spP.log; date -u > DONE_TS; put DONE_TS DONE_TS; echo "[tp] DONE_TS $(date -u)"
+G="--traces kv_full_p.jsonl --n 32 --max-len 16384 --S 32 --heads 8 --layers 3 --ffn 2048 --log $LG"
+echo "[tp] s13: generation check at 16384 tokens $(date -u)"
+python3 sp_qwen3.py rollout $G --roll-batch 16 --rw 1024 --C 128 --maxd 384 --ckpt spS.pt --roll-out g16_S.jsonl > run_g16.log 2>&1
+python3 sp_mathcheck.py g16_S.jsonl | sed "s/^/[tp] /"; put g16_S.jsonl ap32gen16_S.jsonl
+python3 sp_qwen3.py rollout $G --roll-batch 16 --no-sp --rw 1056 --C 128 --maxd 0 --roll-out g16_raw1056.jsonl >> run_g16.log 2>&1
+python3 sp_mathcheck.py g16_raw1056.jsonl | sed "s/^/[tp] /"; put g16_raw1056.jsonl ap32gen16_raw1056.jsonl
+python3 sp_qwen3.py rollout $G --roll-batch 4 --no-sp --rw 20000 --C 512 --maxd 0 --roll-out g16_full.jsonl >> run_g16.log 2>&1
+grep -E "Error|Traceback|out of memory" run_g16.log | tail -3 | sed "s/^/[tp] /"
+python3 sp_mathcheck.py g16_full.jsonl g16_S.jsonl g16_raw1056.jsonl | sed "s/^/[tp] /"
+put g16_full.jsonl ap32gen16_full.jsonl; put run_g16.log gen16_run.log; put $LG spP.log; date -u > DONE_TG16; put DONE_TG16 DONE_TG16; echo "[tp] DONE_TG16 $(date -u)"
+JOB
+  setsid nohup bash -c 'bash /root/job13.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
+  echo "[tp] s13: FFT-to-plateau launched (waits for DONE_TD1) $(date -u)"
+fi
 # serial 12: at 8192 tokens even full KV leaves 12/32 thoughts open (18/32 correct); the window alone "wins" (20/32) by
 # writing half as much (median 9.5k vs 16.7k chars) and SP loses mostly by finishing later (closed-answer accuracy 87% vs
 # 90%). After DAgger, the check at 16384 tokens: full KV, D1 (SP at the deployment setting) and the window alone.
-if [ ! -e /root/.job12 ]; then touch /root/.job12
+if [ ! -e /root/.job12 ] && [ ! -e /root/.job13 ]; then touch /root/.job12
   cat > /root/job12.sh <<'JOB'
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); cd /root/w
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
