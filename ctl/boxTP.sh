@@ -5,7 +5,7 @@
 # lr 3e-4. Two poolers side by side: the original (raw sinusoids, oldest-first) and pe-rev + pe-norm. Then held-out deep KL vs
 # the equal-budget raw window (160) and the plain 128, the inference-time wider window (512 on 4096-token traces), and a
 # generation check: 32 MATH problems, full KV vs SP + window 512 vs raw window 544 alone (accuracy, </think>, repetition).
-SER=43
+SER=44
 if [ -f /root/.boxtp_serial ] && [ "$(cat /root/.boxtp_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxtp_serial
 echo "[tp] preflight GPU: $(nvidia-smi --query-gpu=name,memory.used,memory.total --format=csv,noheader)"
@@ -19,6 +19,12 @@ tail -n 1 /root/w/sp.log 2>/dev/null | cut -c1-220
 nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv,noheader
 ST
 chmod +x /root/status.sh
+# serial 44: the user: no window profile. Drop serial 43's job; DONE_TH43 follows DONE_TH41 at once (the delete guard waits for it).
+if [ ! -e /root/.job44 ]; then touch /root/.job44
+  J=$(pgrep -f "^bash /root/job43.sh"); [ -n "$J" ] && { pkill -P $J; kill $J; }; pkill -f "sp_qwen3.py profile"
+  setsid nohup bash -c 'cd /root/w; export HF_TOKEN=$(tr -d "[:space:]" < /root/.hf_token); while [ ! -e DONE_TH41 ]; do sleep 60; done; date -u > DONE_TH43; python3 -c "from huggingface_hub import HfApi; HfApi().upload_file(path_or_fileobj=\"DONE_TH43\", path_in_repo=\"archive/sp3/DONE_TH43\", repo_id=\"baya1116/hypernet-sp-distill\")"; echo "[tp] DONE_TH43 (no profile) $(date -u)" >> /root/w/w.log' > /dev/null 2>&1 < /dev/null &
+  echo "[tp] s44: profile dropped $(date -u)"
+fi
 # serial 43: window profile (SP alone = window 0 ... 512+) of G and H2 after the multi-seed runs - the last profile was S
 # (window 0 5.05); then DONE_TH43 (the delete guard waits for it)
 if [ ! -e /root/.job43 ]; then touch /root/.job43
