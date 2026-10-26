@@ -5,7 +5,7 @@
 # lr 3e-4. Two poolers side by side: the original (raw sinusoids, oldest-first) and pe-rev + pe-norm. Then held-out deep KL vs
 # the equal-budget raw window (160) and the plain 128, the inference-time wider window (512 on 4096-token traces), and a
 # generation check: 32 MATH problems, full KV vs SP + window 512 vs raw window 544 alone (accuracy, </think>, repetition).
-SER=41
+SER=42
 if [ -f /root/.boxtp_serial ] && [ "$(cat /root/.boxtp_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxtp_serial
 echo "[tp] preflight GPU: $(nvidia-smi --query-gpu=name,memory.used,memory.total --format=csv,noheader)"
@@ -19,6 +19,12 @@ tail -n 1 /root/w/sp.log 2>/dev/null | cut -c1-220
 nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv,noheader
 ST
 chmod +x /root/status.sh
+# serial 42: the live log stopped updating (live40.sh keyed on DONE_TH, which the old box TH had already written) - restart it
+# keyed on DONE_TH41
+if [ ! -e /root/.live42 ]; then touch /root/.live42
+  pkill -f "live40.sh"; sed -e 's/DONE_TR /DONE_TH41 /' /root/live8.sh > /root/live42.sh; setsid nohup bash -c 'bash /root/live42.sh' > /dev/null 2>&1 < /dev/null &
+  echo "[tp] s42: live log restarted $(date -u)"
+fi
 # serial 41: H1 (KL 0.0618 / 0.0748, a hair under G) scored 75/96 - 85 closed vs G's 80 / 85. One sample per problem moves
 # +-4; the KL differences between these checkpoints are now below what one 96-problem run can resolve. After stage H: two
 # more seeds on the 96 for G and every H checkpoint, so the choice rests on 3 samples per problem (288 answers each).
