@@ -5,7 +5,7 @@
 # lr 3e-4. Two poolers side by side: the original (raw sinusoids, oldest-first) and pe-rev + pe-norm. Then held-out deep KL vs
 # the equal-budget raw window (160) and the plain 128, the inference-time wider window (512 on 4096-token traces), and a
 # generation check: 32 MATH problems, full KV vs SP + window 512 vs raw window 544 alone (accuracy, </think>, repetition).
-SER=38
+SER=39
 if [ -f /root/.boxtp_serial ] && [ "$(cat /root/.boxtp_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxtp_serial
 echo "[tp] preflight GPU: $(nvidia-smi --query-gpu=name,memory.used,memory.total --format=csv,noheader)"
@@ -19,6 +19,12 @@ tail -n 1 /root/w/sp.log 2>/dev/null | cut -c1-220
 nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv,noheader
 ST
 chmod +x /root/status.sh
+# serial 39: diagnostics stopped (eviction / kept tokens ruled out; the user: the long-thinking regime is simply under-trained -
+# one pass, 8 of ~40-120 blocks per trace). Box idle until the next stage is funded.
+if [ ! -e /root/.job39 ]; then touch /root/.job39
+  J=$(pgrep -f "^bash /root/job38.sh"); [ -n "$J" ] && { pkill -P $J; kill $J; }; sleep 3; pkill -f "sp_qwen3.py rollout"; sleep 3
+  echo "[tp] s39: diagnostics stopped; idle $(date -u)"
+fi
 # serial 38: no eviction: 79/96, closed 86 (G 80 / 85) - the same overall, yet 5 of G's 7 loop problems closed and were right,
 # while 4 other problems looped instead. Eviction is not the limiter; either loops are partly a matter of the sample, or the
 # 32-vector SP is the bottleneck (the pooler reads everything but still squeezes it into 32 vectors). Two more runs after
