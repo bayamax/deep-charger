@@ -5,7 +5,7 @@
 # lr 3e-4. Two poolers side by side: the original (raw sinusoids, oldest-first) and pe-rev + pe-norm. Then held-out deep KL vs
 # the equal-budget raw window (160) and the plain 128, the inference-time wider window (512 on 4096-token traces), and a
 # generation check: 32 MATH problems, full KV vs SP + window 512 vs raw window 544 alone (accuracy, </think>, repetition).
-SER=42
+SER=43
 if [ -f /root/.boxtp_serial ] && [ "$(cat /root/.boxtp_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxtp_serial
 echo "[tp] preflight GPU: $(nvidia-smi --query-gpu=name,memory.used,memory.total --format=csv,noheader)"
@@ -19,6 +19,23 @@ tail -n 1 /root/w/sp.log 2>/dev/null | cut -c1-220
 nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv,noheader
 ST
 chmod +x /root/status.sh
+# serial 43: window profile (SP alone = window 0 ... 512+) of G and H2 after the multi-seed runs - the last profile was S
+# (window 0 5.05); then DONE_TH43 (the delete guard waits for it)
+if [ ! -e /root/.job43 ]; then touch /root/.job43
+  cat > /root/job43.sh <<'JOB'
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); cd /root/w
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+R=baya1116/hypernet-sp-distill
+put() { for t in 1 2 3 4 5; do python3 -c "import sys; from huggingface_hub import HfApi; HfApi().upload_file(path_or_fileobj=sys.argv[1], path_in_repo='archive/sp3/'+sys.argv[2], repo_id='$R')" "$1" "$2" > put.err 2>&1 && { echo "[hub] $2"; return 0; }; sleep 90; done; echo "[hub] $2 FAILED"; }
+while [ ! -e DONE_TH41 ]; do sleep 60; done
+LG=/root/w/sp.log; F="--S 32 --heads 8 --layers 3 --ffn 2048 --rw 1024 --C 128 --maxd 384"
+for ck in spG.pt spH2.pt; do
+  python3 sp_qwen3.py profile --traces kv_full_p.jsonl --n 16 --max-len 4096 $F --ckpt $ck --log $LG 2>&1 | grep -E "^\[sp\] profile|Error|Traceback" | tail -7 | sed "s/^/[math] ${ck%.pt} /"; done
+put $LG spP.log; date -u > DONE_TH43; put DONE_TH43 DONE_TH43; echo "[tp] DONE_TH43 $(date -u)"
+JOB
+  setsid nohup bash -c 'bash /root/job43.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
+  echo "[tp] s43: window profiles queued after the multi-seed runs $(date -u)"
+fi
 # serial 42: the live log stopped updating (live40.sh keyed on DONE_TH, which the old box TH had already written) - restart it
 # keyed on DONE_TH41
 if [ ! -e /root/.live42 ]; then touch /root/.live42
