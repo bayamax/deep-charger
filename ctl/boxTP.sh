@@ -5,7 +5,7 @@
 # lr 3e-4. Two poolers side by side: the original (raw sinusoids, oldest-first) and pe-rev + pe-norm. Then held-out deep KL vs
 # the equal-budget raw window (160) and the plain 128, the inference-time wider window (512 on 4096-token traces), and a
 # generation check: 32 MATH problems, full KV vs SP + window 512 vs raw window 544 alone (accuracy, </think>, repetition).
-SER=35
+SER=36
 if [ -f /root/.boxtp_serial ] && [ "$(cat /root/.boxtp_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxtp_serial
 echo "[tp] preflight GPU: $(nvidia-smi --query-gpu=name,memory.used,memory.total --format=csv,noheader)"
@@ -19,6 +19,12 @@ tail -n 1 /root/w/sp.log 2>/dev/null | cut -c1-220
 nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv,noheader
 ST
 chmod +x /root/status.sh
+# serial 36: serial 35's job had a loop bug (pool used up with 16-47 kept pairs: endless empty generation) - relaunch the fixed
+# job (nothing trained yet)
+if [ ! -e /root/.job36 ]; then touch /root/.job36
+  J=$(pgrep -f "^bash /root/job35.sh"); [ -n "$J" ] && { pkill -P $J; kill $J; }; sleep 3; pkill -f "sp_qwen3.py rollout --traces pool_rev"; pkill -f "sp_qwen3.py train --spin"; sleep 5
+  rm -f /root/.job35; echo "[tp] s36: relaunching serial 35's job $(date -u)"
+fi
 # serial 35: the SPIN probe lost to G on the 96 (75 vs 80, paired 4 vs 9; closed 81 vs 85, longer): 128 of its 161 rejected
 # generations had closed fine, and DPO pushes down every rejected token - the endings included - so ending weakened. Rejected
 # must be bad: keep a pair only when G's generation did not close, or both boxed an answer and they differ (math-verify). With
@@ -68,10 +74,12 @@ while true; do
   python3 keep.py; K=$(python3 -c "import json; print(json.load(open('keep.json'))['kept'])")
   GNL=$(wc -l < neg.jsonl 2>/dev/null || echo 0); TPL=$(wc -l < tp_neg.jsonl)
   if [ "$K" -lt 48 ]; then
-    [ $((GNL + TPL)) -ge $N ] && { [ "$K" -lt 16 ] && { echo "[tp] s35: pool used up"; break; }; } || {
+    if [ $((GNL + TPL)) -lt $N ]; then
       echo "[tp] s35: $K kept pairs waiting - TP generates 48 negatives (pool from the end, offset $tpoff) $(date -u)"
       python3 sp_qwen3.py rollout --traces pool_rev.jsonl --skip $tpoff --n 48 --max-len 8192 --roll-batch 48 $F --ckpt spin_latest.pt --roll-out tp_part.jsonl --log $LG > run_tpneg.log 2>&1
-      cat tp_part.jsonl >> tp_neg.jsonl 2>/dev/null; rm -f tp_part.jsonl; tpoff=$((tpoff + 48)); continue; }
+      cat tp_part.jsonl >> tp_neg.jsonl 2>/dev/null; rm -f tp_part.jsonl; tpoff=$((tpoff + 48)); continue
+    fi
+    [ "$K" -lt 16 ] && { echo "[tp] s35: pool used up"; break; }
   fi
   rd=$((rd + 1)); head -n 48 kept.jsonl > round.jsonl; python3 -c "
 import json; [open('done_ids.txt', 'a').write(json.loads(l)['id'] + '\n') for l in open('round.jsonl')]"
