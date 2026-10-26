@@ -5,7 +5,7 @@
 # lr 3e-4. Two poolers side by side: the original (raw sinusoids, oldest-first) and pe-rev + pe-norm. Then held-out deep KL vs
 # the equal-budget raw window (160) and the plain 128, the inference-time wider window (512 on 4096-token traces), and a
 # generation check: 32 MATH problems, full KV vs SP + window 512 vs raw window 544 alone (accuracy, </think>, repetition).
-SER=36
+SER=37
 if [ -f /root/.boxtp_serial ] && [ "$(cat /root/.boxtp_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxtp_serial
 echo "[tp] preflight GPU: $(nvidia-smi --query-gpu=name,memory.used,memory.total --format=csv,noheader)"
@@ -19,6 +19,33 @@ tail -n 1 /root/w/sp.log 2>/dev/null | cut -c1-220
 nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv,noheader
 ST
 chmod +x /root/status.sh
+# serial 37: SPIN stopped (round 2: 76/96 vs G 80; closing 86 vs 85 but closed-and-wrong 5 -> 10: it learned to stop, not to
+# remember - a symptom fix). The loop hypothesis: the "did I already verify this?" decision needs what lies beyond the raw
+# window, and 32 SP vectors + 384 kept tokens do not carry it. Two diagnostics with G on the 96 problems: (a) no eviction (the
+# pooler reads every past token), (b) 1536 kept tokens. Loops gone -> memory capacity; still there -> how the SP is read.
+if [ ! -e /root/.job37 ]; then touch /root/.job37
+  for j in job35 job34; do J=$(pgrep -f "^bash /root/$j.sh"); [ -n "$J" ] && { pkill -P $J; kill $J; }; done; sleep 3
+  pkill -f "sp_qwen3.py train --spin"; pkill -f "sp_qwen3.py rollout --traces pool_rev"; pkill -f "roll-out g96_spin"; sleep 5
+  echo "[tp] s37: SPIN stopped $(date -u)"
+  cat > /root/job37.sh <<'JOB'
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); cd /root/w
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+R=baya1116/hypernet-sp-distill
+put() { for t in 1 2 3 4 5; do python3 -c "import sys; from huggingface_hub import HfApi; HfApi().upload_file(path_or_fileobj=sys.argv[1], path_in_repo='archive/sp3/'+sys.argv[2], repo_id='$R')" "$1" "$2" > put.err 2>&1 && { echo "[hub] $2"; return 0; }; sleep 90; done; echo "[hub] $2 FAILED"; }
+put tp_neg.jsonl spin2_neg_tp.jsonl
+LG=/root/w/sp.log; G="--traces math96.jsonl --n 96 --max-len 12288 --S 32 --heads 8 --layers 3 --ffn 2048 --log $LG"
+run() { n=$1; shift; echo "[tp] s37 run $n: $* $(date -u)"
+  python3 sp_qwen3.py rollout $G "$@" --roll-out g96_$n.jsonl > run_g96_$n.log 2>&1
+  grep -E "Error|Traceback|out of memory" run_g96_$n.log | tail -2 | sed "s/^/[tp] $n: /"
+  python3 sp_mathcheck.py g96_$n.jsonl | sed "s/^/[tp] /"; put g96_$n.jsonl gen96_$n.jsonl; put $LG spP.log; }
+run G_all   --roll-batch 24 --rw 1024 --C 128 --maxd 0 --ckpt spG.pt
+run G_k1536 --roll-batch 32 --rw 1024 --C 128 --maxd 1536 --ckpt spG.pt
+python3 sp_mathcheck.py g96_G_all.jsonl g96_G_k1536.jsonl g96_G.jsonl g96_full.jsonl | sed "s/^/[tp] final /"
+put $LG spP.log; date -u > DONE_TDG; put DONE_TDG DONE_TDG; echo "[tp] DONE_TDG $(date -u)"
+JOB
+  setsid nohup bash -c 'bash /root/job37.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
+  echo "[tp] s37: memory diagnostics launched $(date -u)"
+fi
 # serial 36: serial 35's job had a loop bug (pool used up with 16-47 kept pairs: endless empty generation) - relaunch the fixed
 # job (nothing trained yet)
 if [ ! -e /root/.job36 ]; then touch /root/.job36
