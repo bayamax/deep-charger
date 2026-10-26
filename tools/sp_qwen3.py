@@ -73,6 +73,10 @@ ap.add_argument("--temp", type=float, default=0.6); ap.add_argument("--top-p", t
 ap.add_argument("--end-bias", type=float, default=0.0, help="rollout: added to the </think> logit while thinking")
 ap.add_argument("--hes-bias", type=float, default=0.0, help="rollout: added to the logits of Wait/But/Alternatively/Hmm "
                 "while thinking (negative = less re-checking)")
+ap.add_argument("--spin", action="store_true", help="train: SPIN - rows {prompt, chosen, rejected}: chosen = the full-KV model's "
+                "generation, rejected = the bounded (SP-evict) model's own; DPO on the sequence log-probs under the deployment loop")
+ap.add_argument("--spin-beta", type=float, default=0.1); ap.add_argument("--spin-sft", type=float, default=0.0,
+                help="SPIN: + this x the per-token NLL of the chosen sequence")
 ap.add_argument("--kl-rows", type=int, default=256, help="--par: rows per KL piece (the vocab-wide fp32 logits of a piece are "
                 "the peak: 256 rows ~0.6 GB of temporaries, 64 ~0.15 GB)")
 ap.add_argument("--end-train", action="store_true", help="--par: also train short traces and the trace tail (partial last "
@@ -316,6 +320,52 @@ def run_trace(ids, P, train, ref_h=None):
     return K, A_, N
 
 
+def seq_logp(ids, P, coef=None):
+    """log-prob of the answer ids[P:] under the deployment loop (the rollout's): every C tokens the distant tokens are pooled
+    (mass-evicted at maxd) into SP - none while nothing is distant - and [prompt | SP | raw window] re-prefilled; the chunk's
+    tokens are scored. coef: backward of coef x each chunk's log-prob (the gradient of a loss linear in the sum). The first
+    answer token (predicted by the prompt alone) is left out. Returns (sum log p, tokens)."""
+    T = min(len(ids), P + a.max_len); ids = ids.to(dev); a_ids = ids[None, P:T]; La = a_ids.size(1)
+    with torch.no_grad():
+        pc = DynamicCache(); llm(input_ids=ids[None, :P], past_key_values=pc, use_cache=True)
+        pkv = [tuple(t for t in kv_of(pc, li)) for li in range(NL)]
+    kept = torch.zeros(1, 0, dtype=torch.long, device=dev); absorbed = 0; tot = 0.0; n = 0
+    for c0 in range(0, La, a.C):
+        c1 = min(c0 + a.C, La); R = min(c0, a.rw); lo = c0 - R
+        kept, absorbed = update_buffer(kept, absorbed, a_ids, lo)
+        use_sp = kept.size(1) > 0; nsp = a.S if use_sp else 0
+        t0 = c0 if (use_sp or c0 > lo) else 1
+        if c1 - t0 < 1: continue
+        with torch.set_grad_enabled(coef is not None):
+            parts = [pooler(embed(kept).float()).to(dt)] if use_sp else []
+            block = torch.cat(parts + [embed(a_ids[:, lo:c1 - 1]).to(dt)], 1); nb = block.size(1)
+            cache = DynamicCache()
+            for li, (k_, v_) in enumerate(pkv): cache.update(k_, v_, li)
+            pos = torch.arange(P, P + nb, device=dev)[None]
+            hs = llm.model(inputs_embeds=block, attention_mask=torch.ones(1, P + nb, device=dev), past_key_values=cache,
+                           position_ids=pos, cache_position=pos[0], use_cache=True).last_hidden_state[0]
+            h0 = nsp + (t0 - lo) - 1
+            lp = F.log_softmax(llm.lm_head(hs[h0:h0 + c1 - t0]).float(), -1).gather(1, a_ids[0, t0:c1, None]).sum()
+            if coef is not None: (coef * lp).backward()
+        tot += lp.item(); n += c1 - t0
+    return tot, n
+
+
+SPIN_REF = {}
+
+
+def run_pair_spin(st):
+    """one SPIN (DPO) pair: margins from a no-grad pass, then the backward with the pair's coefficients"""
+    ids_c, ids_r, P = SPIN[st % len(SPIN)]; rc, rr = SPIN_REF[st % len(SPIN)]
+    with torch.no_grad():
+        lc, nc = seq_logp(ids_c, P); lr_, nr = seq_logp(ids_r, P)
+    m = a.spin_beta * ((lc - rc) - (lr_ - rr)); sg = 1.0 / (1.0 + math.exp(m))      # sigmoid(-m)
+    cc = (-a.spin_beta * sg - a.spin_sft / max(nc, 1)) / a.accum; cr = a.spin_beta * sg / a.accum
+    seq_logp(ids_c, P, coef=cc); seq_logp(ids_r, P, coef=cr)
+    loss = math.log1p(math.exp(-m)) if m > -30 else -m
+    return loss, float(m > 0), 1
+
+
 from torch.utils.checkpoint import checkpoint
 
 
@@ -552,12 +602,14 @@ if not all("prompt" in r for r in rows):
                                               tokenize=False, enable_thinking=True)
 rows = rows[a.skip:]
 if a.n: rows = rows[:a.n]
-data = []
+data = []; SPIN = []
 for r in rows:
     pid = tok.encode(r["prompt"], add_special_tokens=False)
-    data.append((torch.tensor(pid + tok.encode(r.get("text", ""), add_special_tokens=False)), len(pid)))   # CPU; moved per trace
+    if a.spin:
+        SPIN.append(tuple(torch.tensor(pid + tok.encode(r[k], add_special_tokens=False)) for k in ("chosen", "rejected")) + (len(pid),))
+    data.append((torch.tensor(pid + tok.encode(r.get("text", r.get("chosen", "")), add_special_tokens=False)), len(pid)))   # CPU; moved per trace
 
-tag = f"S{a.S} rw{a.rw} C{a.C} maxd{a.maxd} L{a.layers} ffn{a.ffn}" + (" par" if a.par and a.mode == "train" else "") + (" spnext" + (f" win{a.sn_win}/{a.sn_win_every}" if a.sn_win != "1" else "") if a.spnext and a.mode == "train" else "") + (" no-SP" if a.no_sp else "") + (f" ctxL{a.ctx_hidden}" if a.ctx_hidden else "") + (" pe-rev" if a.pe_rev else "") + (" pe-norm" if a.pe_norm else "") + (f" FT{a.ft_layers}" if a.ft_layers else "") + (f" from{a.score_from}" if a.score_from else "")
+tag = f"S{a.S} rw{a.rw} C{a.C} maxd{a.maxd} L{a.layers} ffn{a.ffn}" + (" par" if a.par and a.mode == "train" else "") + (f" spin b{a.spin_beta}" if a.spin and a.mode == "train" else "") + (" spnext" + (f" win{a.sn_win}/{a.sn_win_every}" if a.sn_win != "1" else "") if a.spnext and a.mode == "train" else "") + (" no-SP" if a.no_sp else "") + (f" ctxL{a.ctx_hidden}" if a.ctx_hidden else "") + (" pe-rev" if a.pe_rev else "") + (" pe-norm" if a.pe_norm else "") + (f" FT{a.ft_layers}" if a.ft_layers else "") + (f" from{a.score_from}" if a.score_from else "")
 if a.mode == "profile":
     pooler.eval(); acc = {}
     for ids, P in data: profile_trace(ids, P, acc)
@@ -628,9 +680,13 @@ else:
     refs = {}; WINS = [int(x) for x in a.sn_win.split(",")]
     _on_dev = lambda r: None if r is None else r.to(dev, non_blocking=True)
     WI = {"i": 0, "from": 0, "kl": []}; STOP = {"now": False}
+    if a.spin:   # the reference: the starting weights, same loop
+        with torch.no_grad():
+            for i_, (ids_c, ids_r, P_) in enumerate(SPIN): SPIN_REF[i_] = (seq_logp(ids_c, P_)[0], seq_logp(ids_r, P_)[0])
+        log(f"[sp] spin: reference log-probs of {len(SPIN)} pairs ({time.time() - t0:.0f}s)")
     for st in range(steps):
         ids, P = data[st % len(data)]
-        if FTP and st % a.accum == 0:   # the teacher pass for the next group of traces in ONE weight swap
+        if FTP and st % a.accum == 0 and not a.spin:   # the teacher pass for the next group of traces in ONE weight swap
             refs = {}
             with _Frozen():
                 for j in range(st, min(st + a.accum, steps)):
@@ -645,6 +701,7 @@ else:
                 if a.sn_win_plateau: SNW["w"] = WINS[WI["i"]]
                 else: SNW["w"] = WINS[min(st // a.sn_win_every, len(WINS) - 1)]
                 k, g, n = run_trace_spnext(ids, P, ref_h=_on_dev(refs.pop(st, None)))
+            elif a.spin: k, g, n = run_pair_spin(st)
             elif a.par: k, g, n = run_trace_par(ids, P, ref_h=_on_dev(refs.pop(st, None)))
             else: k, g, n = run_trace(ids, P, True, ref_h=_on_dev(refs.pop(st, None)))
         except torch.cuda.OutOfMemoryError as e_:   # a long-prompt trace: drop it (and its half-built grads), keep training
@@ -663,7 +720,8 @@ else:
                     for p_, m_ in zip(FTP, MASTER): p_.copy_(m_.to(p_.dtype))
         if (st + 1) % 25 == 0 or st + 1 == steps:
             x = f" | w{SNW['w']} window-0 KL {SNW['k0'] / max(SNW['n0'], 1):.4f}" if a.spnext and len(WINS) > 1 else ""
-            log(f"[sp] train {tag} trace {st + 1}/{steps}: KL {K / max(N, 1):.4f} top1 {100 * A_ / max(N, 1):.2f}%{x} ({time.time() - t0:.0f}s)")
+            if a.spin: log(f"[sp] train {tag} pair {st + 1}/{steps}: DPO loss {K / max(N, 1):.4f} chosen ahead {100 * A_ / max(N, 1):.0f}% ({time.time() - t0:.0f}s)")
+            else: log(f"[sp] train {tag} trace {st + 1}/{steps}: KL {K / max(N, 1):.4f} top1 {100 * A_ / max(N, 1):.2f}%{x} ({time.time() - t0:.0f}s)")
             if a.spnext and a.sn_win_plateau and N:   # curriculum by plateau: 100-trace means at this w, last vs the one before
                 WI["kl"].append(K / N); n_at = st + 1 - WI["from"]; hist = WI["kl"]
                 b_ = a.sn_win_block

@@ -5,7 +5,7 @@
 # lr 3e-4. Two poolers side by side: the original (raw sinusoids, oldest-first) and pe-rev + pe-norm. Then held-out deep KL vs
 # the equal-budget raw window (160) and the plain 128, the inference-time wider window (512 on 4096-token traces), and a
 # generation check: 32 MATH problems, full KV vs SP + window 512 vs raw window 544 alone (accuracy, </think>, repetition).
-SER=32
+SER=33
 if [ -f /root/.boxtp_serial ] && [ "$(cat /root/.boxtp_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxtp_serial
 echo "[tp] preflight GPU: $(nvidia-smi --query-gpu=name,memory.used,memory.total --format=csv,noheader)"
@@ -19,6 +19,59 @@ tail -n 1 /root/w/sp.log 2>/dev/null | cut -c1-220
 nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv,noheader
 ST
 chmod +x /root/status.sh
+# serial 33: SPIN before the full pass. Pairs on the 192 DAgger prompts: chosen = the full-KV model's generation (vLLM, same
+# sampling, finished ones), rejected = G's own SP-evict generation (dagG.jsonl); DPO (beta 0.1, + 0.05 x NLL of the chosen) on
+# the sequence log-probs under the deployment loop (sp_qwen3 --spin), from the better of G / D2, then scores and the 96-problem
+# check. Serial 31 (long traces 2 + full pass) waits for this (DONE_TSP).
+if [ ! -e /root/.job33 ]; then touch /root/.job33
+  J=$(pgrep -f "^bash /root/job31.sh"); [ -n "$J" ] && { pkill -P $J; kill $J; }
+  sed -e 's/while \[ ! -e DONE_TD2 \]/while [ ! -e DONE_TSP ]/' /root/job31.sh > /root/job31b.sh
+  cat > /root/job33.sh <<'JOB'
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); cd /root/w
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+R=baya1116/hypernet-sp-distill
+put() { for t in 1 2 3 4 5; do python3 -c "import sys; from huggingface_hub import HfApi; HfApi().upload_file(path_or_fileobj=sys.argv[1], path_in_repo='archive/sp3/'+sys.argv[2], repo_id='$R')" "$1" "$2" > put.err 2>&1 && { echo "[hub] $2"; return 0; }; sleep 90; done; echo "[hub] $2 FAILED"; }
+while [ ! -e DONE_TD2 ]; do sleep 30; done
+RAWB=https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/tools
+curl -sS -o sp_qwen3.py "$RAWB/sp_qwen3.py?nocache=$(date +%s)"; grep -q "def run_pair_spin" sp_qwen3.py || echo "[tp] s33: WARNING trainer without --spin"
+echo "[tp] s33: full-KV generations for the 192 DAgger prompts $(date -u)"
+/root/vv/bin/python gen_long_vllm.py dag2.jsonl dag2_teacher.jsonl 12288 200 > run_gendag.log 2>&1
+grep -E "^\[gen\]|Error|Traceback" run_gendag.log | tail -1 | sed "s/^/[tp] chosen: /"
+put dag2_teacher.jsonl dag2_fullkv_teacher.jsonl
+python3 -c "
+import json
+t = {r['id']: r for r in map(json.loads, open('dag2_teacher.jsonl'))}; g = {r['id']: r for r in map(json.loads, open('dagG.jsonl'))}
+ps = [{'id': i, 'prompt': t[i]['prompt'], 'chosen': t[i]['text'], 'rejected': g[i]['text']} for i in t if i in g and t[i].get('finish') == 'stop']
+open('spin_pairs.jsonl', 'w').writelines(json.dumps(p) + '\n' for p in ps)
+print('[tp] s33: SPIN pairs', len(ps), '| rejected closed', sum('</think>' in p['rejected'] for p in ps))"
+B=$(python3 - <<'PY'
+import re, subprocess
+def acc(f):
+    o = subprocess.run(["python3", "sp_mathcheck.py", f], capture_output=True, text=True).stdout
+    m = re.search(r": (\d+)/", o); return int(m.group(1)) if m else -1
+print("spD2.pt" if acc("g96_D2.jsonl") >= acc("g96_G.jsonl") else "spG.pt")
+PY
+)
+LG=/root/w/sp.log; F="--S 32 --heads 8 --layers 3 --ffn 2048 --rw 1024 --C 128 --maxd 384"
+echo "[tp] stage SPIN from $B $(date -u)"
+python3 sp_qwen3.py train --spin --traces spin_pairs.jsonl --max-len 8192 $F --ckpt $B --ft-layers 28 --opt8bit --ft-lr 2e-6 --lr 2e-5 --spin-beta 0.1 --spin-sft 0.05 --accum 8 --out spSPIN.pt --log $LG > run_trainSPIN.log 2>&1
+grep -E "^\[sp\] (trained|spin)|Error|Traceback" run_trainSPIN.log | tail -3 | sed "s/^/[tp] SPIN: /"; grep -E "pair [0-9]+/" run_trainSPIN.log | tail -3 | sed "s/^/[tp] SPIN: /"
+echo "[tp] SPIN: $(grep -c 'out of memory' run_trainSPIN.log) pairs skipped (memory)"
+put spSPIN.pt spSPIN_fullkv_vs_sp.pt; put run_trainSPIN.log trainSPIN_run.log
+for e in kv_full_p.jsonl:math traces.jsonl:mix; do f=${e%%:*}; n=${e#*:}; x=""; [ $n = mix ] && x="--n 60"
+  python3 sp_qwen3.py eval --traces $f $x --max-len 4096 $F --ckpt spSPIN.pt --log $LG 2>&1 | grep -E "^\[sp\] eval|Error|Traceback" | sed "s/^/[$n] SPIN stageA-cond: /"; done
+python3 sp_qwen3.py eval --traces kv_full_p.jsonl --max-len 16384 --end-stat $F --ckpt spSPIN.pt --log $LG 2>&1 | grep -E "^\[sp\] (eval|end-stat)|Error|Traceback" | sed "s/^/[tp] stop-drive SP_SPIN: /"
+put $LG spP.log
+G="--traces math96.jsonl --n 96 --max-len 12288 --S 32 --heads 8 --layers 3 --ffn 2048 --log $LG"
+python3 sp_qwen3.py rollout $G --roll-batch 48 --rw 1024 --C 128 --maxd 384 --ckpt spSPIN.pt --roll-out g96_SPIN.jsonl > run_g96_SPIN.log 2>&1
+grep -E "Error|Traceback|out of memory" run_g96_SPIN.log | tail -2 | sed "s/^/[tp] SPIN: /"
+python3 sp_mathcheck.py g96_SPIN.jsonl g96_D2.jsonl g96_G.jsonl g96_full.jsonl | sed "s/^/[tp] /"; put g96_SPIN.jsonl gen96_SPIN.jsonl
+put $LG spP.log; date -u > DONE_TSP; put DONE_TSP DONE_TSP; echo "[tp] DONE_TSP $(date -u)"
+JOB
+  setsid nohup bash -c 'bash /root/job33.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
+  grep -q "DONE_TSP" /root/job31b.sh && setsid nohup bash -c 'bash /root/job31b.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
+  echo "[tp] s33: SPIN queued after DAgger; long traces 2 + full pass after SPIN $(date -u)"
+fi
 # serial 32: the scorer missed equivalent answers ((B) vs \text{(B)}, \frac 34 vs \dfrac{3}{4}, .35625 vs 0.35625): sp_mathcheck
 # now uses math-verify - install it and take the new scorer (re-scored: full KV 87, window alone 84, G 80, E 77 of 96)
 if [ ! -e /root/.chk32 ]; then touch /root/.chk32
