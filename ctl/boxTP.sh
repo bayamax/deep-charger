@@ -5,7 +5,7 @@
 # lr 3e-4. Two poolers side by side: the original (raw sinusoids, oldest-first) and pe-rev + pe-norm. Then held-out deep KL vs
 # the equal-budget raw window (160) and the plain 128, the inference-time wider window (512 on 4096-token traces), and a
 # generation check: 32 MATH problems, full KV vs SP + window 512 vs raw window 544 alone (accuracy, </think>, repetition).
-SER=40
+SER=41
 if [ -f /root/.boxtp_serial ] && [ "$(cat /root/.boxtp_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxtp_serial
 echo "[tp] preflight GPU: $(nvidia-smi --query-gpu=name,memory.used,memory.total --format=csv,noheader)"
@@ -19,6 +19,40 @@ tail -n 1 /root/w/sp.log 2>/dev/null | cut -c1-220
 nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv,noheader
 ST
 chmod +x /root/status.sh
+# serial 41: H1 (KL 0.0618 / 0.0748, a hair under G) scored 75/96 - 85 closed vs G's 80 / 85. One sample per problem moves
+# +-4; the KL differences between these checkpoints are now below what one 96-problem run can resolve. After stage H: two
+# more seeds on the 96 for G and every H checkpoint, so the choice rests on 3 samples per problem (288 answers each).
+if [ ! -e /root/.job41 ]; then touch /root/.job41
+  cat > /root/job41.sh <<'JOB'
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); cd /root/w
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+R=baya1116/hypernet-sp-distill
+put() { for t in 1 2 3 4 5; do python3 -c "import sys; from huggingface_hub import HfApi; HfApi().upload_file(path_or_fileobj=sys.argv[1], path_in_repo='archive/sp3/'+sys.argv[2], repo_id='$R')" "$1" "$2" > put.err 2>&1 && { echo "[hub] $2"; return 0; }; sleep 90; done; echo "[hub] $2 FAILED"; }
+while ! grep -q "s40: done" w.log 2>/dev/null; do sleep 120; done; sleep 60
+LG=/root/w/sp.log; G="--traces math96.jsonl --n 96 --max-len 12288 --S 32 --heads 8 --layers 3 --ffn 2048 --roll-batch 48 --rw 1024 --C 128 --maxd 384 --log $LG"
+for ck in spG.pt spH1.pt spH2.pt spH3.pt spH4.pt; do [ -s $ck ] || continue; n=${ck%.pt}; n=${n#sp}
+  for sd in 2 3; do
+    echo "[tp] s41 $n seed $sd $(date -u)"
+    python3 sp_qwen3.py rollout $G --ckpt $ck --seed $sd --roll-out g96_${n}_s$sd.jsonl > run_g96_${n}_s$sd.log 2>&1
+    python3 sp_mathcheck.py g96_${n}_s$sd.jsonl | sed "s/^/[tp] /"; put g96_${n}_s$sd.jsonl gen96_${n}_s$sd.jsonl
+  done
+done
+python3 - <<'PY' | sed "s/^/[tp] s41 /"
+import json, glob, sys, re
+sys.argv = ["x"]; exec(open("sp_mathcheck.py").read().split("for f in sys.argv")[0])
+for n in ("G", "H1", "H2", "H3", "H4"):
+    fs = [f for f in [f"g96_{n}.jsonl", f"g96_{n}_s2.jsonl", f"g96_{n}_s3.jsonl"] if glob.glob(f)]
+    if not fs: continue
+    c = cl = tot = 0
+    for f in fs:
+        for l in open(f): r = json.loads(l); tot += 1; c += correct(r); cl += "</think>" in r["text"]
+    print(f"{n}: {len(fs)} seeds, correct {c}/{tot} ({100 * c / tot:.1f}%), closed {cl}/{tot}")
+PY
+put $LG spP.log; date -u > DONE_TH41; put DONE_TH41 DONE_TH41; echo "[tp] DONE_TH41 $(date -u)"
+JOB
+  setsid nohup bash -c 'bash /root/job41.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
+  echo "[tp] s41: multi-seed checks queued after stage H $(date -u)"
+fi
 # serial 40: stage H - train the long-thinking regime until it stops improving. One pass with 8 random blocks per trace saw
 # ~10-20% of each long trace's blocks, so (H1) a second pass over the 1414 long traces from G, 16 blocks per trace, other
 # seed; (H2) a pass over the new long teacher traces box LT generates (archive/sp3/longtr2_mixed_16k.jsonl, 1421 prompts);
