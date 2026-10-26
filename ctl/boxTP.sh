@@ -5,7 +5,7 @@
 # lr 3e-4. Two poolers side by side: the original (raw sinusoids, oldest-first) and pe-rev + pe-norm. Then held-out deep KL vs
 # the equal-budget raw window (160) and the plain 128, the inference-time wider window (512 on 4096-token traces), and a
 # generation check: 32 MATH problems, full KV vs SP + window 512 vs raw window 544 alone (accuracy, </think>, repetition).
-SER=34
+SER=35
 if [ -f /root/.boxtp_serial ] && [ "$(cat /root/.boxtp_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxtp_serial
 echo "[tp] preflight GPU: $(nvidia-smi --query-gpu=name,memory.used,memory.total --format=csv,noheader)"
@@ -19,6 +19,82 @@ tail -n 1 /root/w/sp.log 2>/dev/null | cut -c1-220
 nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv,noheader
 ST
 chmod +x /root/status.sh
+# serial 35: the SPIN probe lost to G on the 96 (75 vs 80, paired 4 vs 9; closed 81 vs 85, longer): 128 of its 161 rejected
+# generations had closed fine, and DPO pushes down every rejected token - the endings included - so ending weakened. Rejected
+# must be bad: keep a pair only when G's generation did not close, or both boxed an answer and they differ (math-verify). With
+# ~30% kept, TP also generates negatives (from the far end of the pool; GN works from the front) whenever fewer than 48 kept
+# pairs wait; a round = 48 kept pairs, the 96-problem check every 2 rounds, best kept, stop after two checks without a gain.
+if [ ! -e /root/.job35 ]; then touch /root/.job35
+  J=$(pgrep -f "^bash /root/job34.sh"); [ -n "$J" ] && { pkill -P $J; kill $J; }; sleep 3; pkill -f "sp_qwen3.py train --spin"; sleep 5
+  echo "[tp] s35: unfiltered SPIN rounds stopped $(date -u)"
+  cat > /root/job35.sh <<'JOB'
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); cd /root/w
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+R=baya1116/hypernet-sp-distill; H=https://huggingface.co/$R/resolve/main
+RAW=https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i
+put() { for t in 1 2 3 4 5; do python3 -c "import sys; from huggingface_hub import HfApi; HfApi().upload_file(path_or_fileobj=sys.argv[1], path_in_repo='archive/sp3/'+sys.argv[2], repo_id='$R')" "$1" "$2" > put.err 2>&1 && { echo "[hub] $2"; return 0; }; sleep 90; done; echo "[hub] $2 FAILED"; }
+acc() { python3 sp_mathcheck.py "$1" 2>/dev/null | grep -oP ": \K[0-9]+(?=/)" | head -1; }
+curl -sS -o spin2_prompts.jsonl "$RAW/ctl/spin2_prompts.jsonl?nocache=$(date +%s)"
+python3 -c "
+import json; rs = [l for l in open('spin2_prompts.jsonl')]; open('pool_rev.jsonl', 'w').writelines(rs[::-1])"
+cp spG.pt spin_latest.pt; cp spG.pt spin_best.pt; best=$(acc g96_G.jsonl); put spin_latest.pt spin_latest.pt
+touch tp_neg.jsonl done_ids.txt
+LG=/root/w/sp.log; F="--S 32 --heads 8 --layers 3 --ffn 2048 --rw 1024 --C 128 --maxd 384"
+cat > keep.py <<'PY'
+"""kept SPIN pairs from GN's and TP's negatives not used yet: rejected must be bad (no </think>, or a different boxed answer)"""
+import json, sys
+sys.argv = ["x"]; exec(open("sp_mathcheck.py").read().split("for f in sys.argv")[0])
+pos = {r["id"]: r for f in ("longtr.jsonl", "divtr.jsonl") for r in map(json.loads, open(f))}
+done = set(open("done_ids.txt").read().split())
+neg = {}
+for f in ("neg.jsonl", "tp_neg.jsonl"):
+    try:
+        for l in open(f): r = json.loads(l); neg.setdefault(r["id"], r)
+    except FileNotFoundError: pass
+keep, seen = [], 0
+for i, r in neg.items():
+    if i in done or i not in pos: continue
+    seen += 1; c, j = pos[i]["text"], r["text"]
+    bc, bj = boxed(c), boxed(j); bad = "</think>" not in j
+    if not bad and bc is not None and bj is not None: bad = not correct({"text": j, "gold": bc})
+    if bad: keep.append({"id": i, "prompt": pos[i]["prompt"], "chosen": c, "rejected": j})
+    else: open("done_ids.txt", "a").write(i + "\n")       # judged fine: not a pair, never again
+json.dump({"kept": len(keep), "judged": seen, "negatives": len(neg)}, open("keep.json", "w"))
+open("kept.jsonl", "w").writelines(json.dumps(p) + "\n" for p in keep)
+PY
+rd=0; bad=0; tpoff=0; N=$(wc -l < spin2_prompts.jsonl)
+while true; do
+  curl -sSfL -o neg.jsonl "$H/archive/sp3/spin2_neg.jsonl?$(date +%s)" 2>/dev/null || true
+  python3 keep.py; K=$(python3 -c "import json; print(json.load(open('keep.json'))['kept'])")
+  GNL=$(wc -l < neg.jsonl 2>/dev/null || echo 0); TPL=$(wc -l < tp_neg.jsonl)
+  if [ "$K" -lt 48 ]; then
+    [ $((GNL + TPL)) -ge $N ] && { [ "$K" -lt 16 ] && { echo "[tp] s35: pool used up"; break; }; } || {
+      echo "[tp] s35: $K kept pairs waiting - TP generates 48 negatives (pool from the end, offset $tpoff) $(date -u)"
+      python3 sp_qwen3.py rollout --traces pool_rev.jsonl --skip $tpoff --n 48 --max-len 8192 --roll-batch 48 $F --ckpt spin_latest.pt --roll-out tp_part.jsonl --log $LG > run_tpneg.log 2>&1
+      cat tp_part.jsonl >> tp_neg.jsonl 2>/dev/null; rm -f tp_part.jsonl; tpoff=$((tpoff + 48)); continue; }
+  fi
+  rd=$((rd + 1)); head -n 48 kept.jsonl > round.jsonl; python3 -c "
+import json; [open('done_ids.txt', 'a').write(json.loads(l)['id'] + '\n') for l in open('round.jsonl')]"
+  echo "[tp] s35 round $rd: $(wc -l < round.jsonl) kept pairs ($(cat keep.json)) $(date -u)"
+  python3 sp_qwen3.py train --spin --traces round.jsonl --max-len 8192 $F --ckpt spin_latest.pt --ft-layers 28 --opt8bit --ft-lr 2e-6 --lr 2e-5 --spin-beta 0.1 --spin-sft 0.05 --accum 8 --out next.pt --log $LG > run_spin_r.log 2>&1
+  grep -E "pair [0-9]+/" run_spin_r.log | tail -1 | sed "s/^/[tp] round $rd: /"; grep -E "Error|Traceback" run_spin_r.log | tail -2 | sed "s/^/[tp] round $rd: /"
+  [ -s next.pt ] && mv next.pt spin_latest.pt && put spin_latest.pt spin_latest.pt
+  if [ $((rd % 2)) -eq 0 ]; then
+    python3 sp_qwen3.py rollout --traces math96.jsonl --n 96 --max-len 12288 --S 32 --heads 8 --layers 3 --ffn 2048 --roll-batch 48 --rw 1024 --C 128 --maxd 384 --ckpt spin_latest.pt --roll-out g96_spin_r$rd.jsonl --log $LG > run_g96_r.log 2>&1
+    python3 sp_mathcheck.py g96_spin_r$rd.jsonl | sed "s/^/[tp] round $rd: /"; put g96_spin_r$rd.jsonl gen96_spinf_r$rd.jsonl
+    a=$(acc g96_spin_r$rd.jsonl)
+    if [ "${a:-0}" -gt "$best" ]; then best=$a; bad=0; cp spin_latest.pt spin_best.pt; put spin_best.pt spin_best.pt; echo "[tp] round $rd: new best $best"
+    else bad=$((bad + 1)); echo "[tp] round $rd: no gain ($a vs best $best, $bad in a row)"; fi
+    put $LG spP.log
+    [ $bad -ge 2 ] && { echo "[tp] s35: two checks without a gain, stop"; break; }
+  fi
+done
+echo "[tp] s35: done after $rd rounds, best $best on the 96 $(date -u)"; put $LG spP.log
+date -u > DONE_TF4; put DONE_TF4 DONE_TF4; echo "[tp] DONE_TF4 $(date -u)"
+JOB
+  setsid nohup bash -c 'bash /root/job35.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
+  echo "[tp] s35: filtered streaming SPIN launched $(date -u)"
+fi
 # serial 34: streaming SPIN in place of serial 31 (long traces 2 + full pass: the credit). Box GN generates negatives with the
 # latest policy on the 1414 prompts whose full-KV generations stage G trained on (archive/sp3/spin2_neg.jsonl, 64 at a time).
 # After the SPIN probe (DONE_TSP): start from the better of SPIN-probe / G on the 96 problems, then rounds of 64 pairs (chosen
