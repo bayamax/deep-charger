@@ -5,7 +5,7 @@
 # lr 3e-4. Two poolers side by side: the original (raw sinusoids, oldest-first) and pe-rev + pe-norm. Then held-out deep KL vs
 # the equal-budget raw window (160) and the plain 128, the inference-time wider window (512 on 4096-token traces), and a
 # generation check: 32 MATH problems, full KV vs SP + window 512 vs raw window 544 alone (accuracy, </think>, repetition).
-SER=39
+SER=40
 if [ -f /root/.boxtp_serial ] && [ "$(cat /root/.boxtp_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxtp_serial
 echo "[tp] preflight GPU: $(nvidia-smi --query-gpu=name,memory.used,memory.total --format=csv,noheader)"
@@ -19,6 +19,55 @@ tail -n 1 /root/w/sp.log 2>/dev/null | cut -c1-220
 nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv,noheader
 ST
 chmod +x /root/status.sh
+# serial 40: stage H - train the long-thinking regime until it stops improving. One pass with 8 random blocks per trace saw
+# ~10-20% of each long trace's blocks, so (H1) a second pass over the 1414 long traces from G, 16 blocks per trace, other
+# seed; (H2) a pass over the new long teacher traces box LT generates (archive/sp3/longtr2_mixed_16k.jsonl, 1421 prompts);
+# (H3) a pass over both pools again. After each pass: MATH KL (4096 and 16384) and the 96-problem check; best kept by
+# correct (then closed); stop early after two passes without a gain.
+if [ ! -e /root/.job40 ]; then touch /root/.job40
+  cat > /root/job40.sh <<'JOB'
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); cd /root/w
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+R=baya1116/hypernet-sp-distill; H=https://huggingface.co/$R/resolve/main
+put() { for t in 1 2 3 4 5; do python3 -c "import sys; from huggingface_hub import HfApi; HfApi().upload_file(path_or_fileobj=sys.argv[1], path_in_repo='archive/sp3/'+sys.argv[2], repo_id='$R')" "$1" "$2" > put.err 2>&1 && { echo "[hub] $2"; return 0; }; sleep 90; done; echo "[hub] $2 FAILED"; }
+acc() { python3 sp_mathcheck.py "$1" 2>/dev/null | grep -oP ": \K[0-9]+(?=/)" | head -1; }
+closed() { python3 sp_mathcheck.py "$1" 2>/dev/null | grep -oP "closed think \K[0-9]+" | head -1; }
+rm -f spD2.pt spSPIN.pt spin_latest.pt spin_best.pt next.pt cur.pt best.pt spE.pt spF.pt; echo "[tp] s40: disk $(df -h / | tail -1 | awk '{print $4}') free"
+LG=/root/w/sp.log; F="--S 32 --heads 8 --layers 3 --ffn 2048 --rw 1024 --C 128 --maxd 384"
+cp spG.pt spH_best.pt; best=$(acc g96_G.jsonl); bestc=$(closed g96_G.jsonl); bad=0; echo "[tp] s40: start G: $best correct, $bestc closed"
+pass() { n=$1; data=$2; seed=$3
+  echo "[tp] stage $n: pass over $(wc -l < $data) long traces, 16 blocks each, seed $seed $(date -u)"
+  python3 sp_qwen3.py train --traces $data --max-len 16384 $F --ckpt spH_best.pt --ft-layers 28 --opt8bit --ft-lr 1e-5 --lr 1e-4 --par --end-train --end-weight 4 --chunks-per-trace 16 --accum 8 --kl-rows 64 --seed $seed --out sp$n.pt --log $LG > run_train$n.log 2>&1
+  grep -E "^\[sp\] (trained)|Error|Traceback" run_train$n.log | tail -2 | sed "s/^/[tp] $n: /"; echo "[tp] $n: $(grep -c 'out of memory' run_train$n.log) traces skipped (memory)"
+  [ -s sp$n.pt ] || { echo "[tp] $n: no checkpoint"; return 1; }
+  put sp$n.pt sp${n}_long_fft1024.pt
+  python3 sp_qwen3.py eval --traces kv_full_p.jsonl --max-len 4096 $F --ckpt sp$n.pt --log $LG 2>&1 | grep -E "^\[sp\] eval|Error|Traceback" | sed "s/^/[math] $n 4096: /"
+  python3 sp_qwen3.py eval --traces kv_full_p.jsonl --max-len 16384 $F --ckpt sp$n.pt --log $LG 2>&1 | grep -E "^\[sp\] eval|Error|Traceback" | sed "s/^/[math] $n 16384: /"
+  python3 sp_qwen3.py rollout --traces math96.jsonl --n 96 --max-len 12288 --S 32 --heads 8 --layers 3 --ffn 2048 --roll-batch 48 --rw 1024 --C 128 --maxd 384 --ckpt sp$n.pt --roll-out g96_$n.jsonl --log $LG > run_g96_$n.log 2>&1
+  python3 sp_mathcheck.py g96_$n.jsonl g96_G.jsonl g96_full.jsonl | sed "s/^/[tp] $n: /"; put g96_$n.jsonl gen96_$n.jsonl; put $LG spP.log
+  a=$(acc g96_$n.jsonl); c=$(closed g96_$n.jsonl)
+  if [ "${a:-0}" -gt "$best" ] || { [ "${a:-0}" -eq "$best" ] && [ "${c:-0}" -gt "$bestc" ]; }; then best=$a; bestc=$c; bad=0; cp sp$n.pt spH_best.pt; put spH_best.pt spH_best.pt; echo "[tp] $n: new best ($best correct, $bestc closed)"
+  else bad=$((bad + 1)); echo "[tp] $n: no gain ($a / $c vs best $best / $bestc, $bad in a row)"; fi; }
+pass H1 trainG.jsonl 1
+while [ "$(curl -s -o /dev/null -w '%{http_code}' -L $H/archive/sp3/DONE_LT)" != 200 ]; do sleep 120; done
+curl -sSfL -H "Authorization: Bearer $HF_TOKEN" -o lt2tr.jsonl "$H/archive/sp3/longtr2_mixed_16k.jsonl"
+python3 -c "
+import json, random, collections
+rs = [json.loads(l) for l in open('lt2tr.jsonl')]; ok = [r for r in rs if r.get('finish') == 'stop' and '</think>' in r['text']]
+random.seed(2); random.shuffle(ok); open('trainH2.jsonl', 'w').writelines(json.dumps(r) + '\n' for r in ok)
+print('[tp] s40: trainH2', len(ok), 'finished', dict(collections.Counter(r['src'].split('-')[0] + '-' + r['src'].split('-')[1] for r in ok)))"
+[ $bad -lt 2 ] && pass H2 trainH2.jsonl 2
+cat trainG.jsonl trainH2.jsonl | python3 -c "
+import sys, random; rs = sys.stdin.readlines(); random.seed(3); random.shuffle(rs); open('trainH3.jsonl', 'w').writelines(rs)"
+[ $bad -lt 2 ] && pass H3 trainH3.jsonl 3
+[ $bad -lt 2 ] && pass H4 trainH3.jsonl 4
+echo "[tp] s40: done, best $best correct / $bestc closed on the 96 (spH_best.pt) $(date -u)"; put $LG spP.log
+date -u > DONE_TH; put DONE_TH DONE_TH; echo "[tp] DONE_TH $(date -u)"
+JOB
+  setsid nohup bash -c 'bash /root/job40.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
+  sed -e 's/DONE_TR /DONE_TH /' /root/live8.sh > /root/live40.sh; pkill -f "live1[0-9].sh"; pkill -f live8.sh; setsid nohup bash -c 'bash /root/live40.sh' > /dev/null 2>&1 < /dev/null &
+  echo "[tp] s40: stage H launched $(date -u)"
+fi
 # serial 39: diagnostics stopped (eviction / kept tokens ruled out; the user: the long-thinking regime is simply under-trained -
 # one pass, 8 of ~40-120 blocks per trace). Box idle until the next stage is funded.
 if [ ! -e /root/.job39 ]; then touch /root/.job39
