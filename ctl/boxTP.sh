@@ -5,7 +5,7 @@
 # lr 3e-4. Two poolers side by side: the original (raw sinusoids, oldest-first) and pe-rev + pe-norm. Then held-out deep KL vs
 # the equal-budget raw window (160) and the plain 128, the inference-time wider window (512 on 4096-token traces), and a
 # generation check: 32 MATH problems, full KV vs SP + window 512 vs raw window 544 alone (accuracy, </think>, repetition).
-SER=33
+SER=34
 if [ -f /root/.boxtp_serial ] && [ "$(cat /root/.boxtp_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxtp_serial
 echo "[tp] preflight GPU: $(nvidia-smi --query-gpu=name,memory.used,memory.total --format=csv,noheader)"
@@ -19,6 +19,60 @@ tail -n 1 /root/w/sp.log 2>/dev/null | cut -c1-220
 nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv,noheader
 ST
 chmod +x /root/status.sh
+# serial 34: streaming SPIN in place of serial 31 (long traces 2 + full pass: the credit). Box GN generates negatives with the
+# latest policy on the 1414 prompts whose full-KV generations stage G trained on (archive/sp3/spin2_neg.jsonl, 64 at a time).
+# After the SPIN probe (DONE_TSP): start from the better of SPIN-probe / G on the 96 problems, then rounds of 64 pairs (chosen
+# = the full-KV generation, rejected = GN's), each round's reference = its starting weights (SPIN iterations), the result
+# uploaded as spin_latest.pt for GN. Every 4 rounds: MATH KL + the 96-problem check, best kept (spin_best.pt); stop after two
+# checks without a gain, or when the pool is used up.
+if [ ! -e /root/.job34 ]; then touch /root/.job34
+  J=$(pgrep -f "^bash /root/job31b.sh"); [ -n "$J" ] && { pkill -P $J; kill $J; echo "[tp] s34: dropped long traces 2 + full pass"; }
+  cat > /root/job34.sh <<'JOB'
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); cd /root/w
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+R=baya1116/hypernet-sp-distill; H=https://huggingface.co/$R/resolve/main
+put() { for t in 1 2 3 4 5; do python3 -c "import sys; from huggingface_hub import HfApi; HfApi().upload_file(path_or_fileobj=sys.argv[1], path_in_repo='archive/sp3/'+sys.argv[2], repo_id='$R')" "$1" "$2" > put.err 2>&1 && { echo "[hub] $2"; return 0; }; sleep 90; done; echo "[hub] $2 FAILED"; }
+acc() { python3 sp_mathcheck.py "$1" 2>/dev/null | grep -oP ": \K[0-9]+(?=/)" | head -1; }
+while [ ! -e DONE_TSP ]; do sleep 30; done
+a_s=$(acc g96_SPIN.jsonl); a_g=$(acc g96_G.jsonl); echo "[tp] s34: probe SPIN $a_s vs G $a_g on the 96"
+if [ "${a_s:-0}" -ge "${a_g:-0}" ]; then cp spSPIN.pt spin_latest.pt; best=$a_s; else cp spG.pt spin_latest.pt; best=$a_g; fi
+cp spin_latest.pt spin_best.pt; put spin_latest.pt spin_latest.pt
+LG=/root/w/sp.log; F="--S 32 --heads 8 --layers 3 --ffn 2048 --rw 1024 --C 128 --maxd 384"
+used=0; rd=0; bad=0
+while true; do
+  curl -sSfL -o neg.jsonl "$H/archive/sp3/spin2_neg.jsonl?$(date +%s)" 2>/dev/null || true; L=$(wc -l < neg.jsonl 2>/dev/null || echo 0)
+  if [ $((L - used)) -lt 64 ]; then
+    curl -s -o /dev/null -w '%{http_code}' -L "$H/archive/sp3/DONE_GN" | grep -q 200 && [ $((L - used)) -lt 16 ] && { echo "[tp] s34: pool used up"; break; }
+    [ $((L - used)) -lt 16 ] && { sleep 300; continue; }
+  fi
+  python3 -c "
+import json, sys
+used = int(sys.argv[1]); pos = {r['id']: r for f in ('longtr.jsonl', 'divtr.jsonl') for r in map(json.loads, open(f))}
+neg = [json.loads(l) for l in open('neg.jsonl')][used:used + 64]
+ps = [{'id': r['id'], 'prompt': pos[r['id']]['prompt'], 'chosen': pos[r['id']]['text'], 'rejected': r['text']} for r in neg if r['id'] in pos]
+open('round.jsonl', 'w').writelines(json.dumps(p) + '\n' for p in ps); print(len(neg), len(ps))" $used > round.n
+read nn np < round.n; used=$((used + nn)); rd=$((rd + 1))
+echo "[tp] s34 round $rd: $np pairs (negatives used $used/$L) $(date -u)"
+python3 sp_qwen3.py train --spin --traces round.jsonl --max-len 8192 $F --ckpt spin_latest.pt --ft-layers 28 --opt8bit --ft-lr 2e-6 --lr 2e-5 --spin-beta 0.1 --spin-sft 0.05 --accum 8 --out next.pt --log $LG > run_spin_r.log 2>&1
+grep -E "pair [0-9]+/" run_spin_r.log | tail -1 | sed "s/^/[tp] round $rd: /"; grep -E "Error|Traceback" run_spin_r.log | tail -2 | sed "s/^/[tp] round $rd: /"
+[ -s next.pt ] && mv next.pt spin_latest.pt && put spin_latest.pt spin_latest.pt
+if [ $((rd % 4)) -eq 0 ]; then
+  python3 sp_qwen3.py eval --traces kv_full_p.jsonl --max-len 4096 $F --ckpt spin_latest.pt --log $LG 2>&1 | grep -E "^\[sp\] eval|Error|Traceback" | sed "s/^/[math] round $rd: /"
+  python3 sp_qwen3.py rollout --traces math96.jsonl --n 96 --max-len 12288 --S 32 --heads 8 --layers 3 --ffn 2048 --roll-batch 48 --rw 1024 --C 128 --maxd 384 --ckpt spin_latest.pt --roll-out g96_spin_r$rd.jsonl --log $LG > run_g96_r.log 2>&1
+  python3 sp_mathcheck.py g96_spin_r$rd.jsonl | sed "s/^/[tp] round $rd: /"; put g96_spin_r$rd.jsonl gen96_spin_r$rd.jsonl
+  a=$(acc g96_spin_r$rd.jsonl)
+  if [ "${a:-0}" -gt "$best" ]; then best=$a; bad=0; cp spin_latest.pt spin_best.pt; put spin_best.pt spin_best.pt; echo "[tp] round $rd: new best $best"
+  else bad=$((bad + 1)); echo "[tp] round $rd: no gain ($a vs best $best, $bad in a row)"; fi
+  put $LG spP.log
+  [ $bad -ge 2 ] && { echo "[tp] s34: two checks without a gain, stop"; break; }
+fi
+done
+echo "[tp] s34: done after $rd rounds, best $best on the 96 $(date -u)"; put $LG spP.log
+date -u > DONE_TF4; put DONE_TF4 DONE_TF4; echo "[tp] DONE_TF4 $(date -u)"
+JOB
+  setsid nohup bash -c 'bash /root/job34.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
+  echo "[tp] s34: streaming SPIN queued after the probe $(date -u)"
+fi
 # serial 33: SPIN before the full pass. Pairs on the 192 DAgger prompts: chosen = the full-KV model's generation (vLLM, same
 # sampling, finished ones), rejected = G's own SP-evict generation (dagG.jsonl); DPO (beta 0.1, + 0.05 x NLL of the chosen) on
 # the sequence log-probs under the deployment loop (sp_qwen3 --spin), from the better of G / D2, then scores and the 96-problem
