@@ -2,7 +2,7 @@
 # Box VB (a 3090): the baselines with the same 3-seed treatment as G - the 96 problems (ctl/math96.jsonl, levels 2-4), 12288
 # tokens, Qwen3 thinking sampling. Full KV with vLLM (seeds 2, 3 - plus seed 1 to compare vLLM with the HF-path run), the
 # window alone (rw 1056, no SP) with sp_qwen3 (seeds 2, 3). Results to archive/sp3/gen96_*.jsonl, DONE_VB at the end.
-SER=3
+SER=4
 if [ -f /root/.boxvb_serial ] && [ "$(cat /root/.boxvb_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxvb_serial
 echo "[vb] preflight GPU: $(nvidia-smi --query-gpu=name,memory.used,memory.total --format=csv,noheader)"
@@ -41,20 +41,22 @@ export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 R=baya1116/hypernet-sp-distill
 RAW=https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i
 put() { for t in 1 2 3 4 5; do python3 -c "import sys; from huggingface_hub import HfApi; HfApi().upload_file(path_or_fileobj=sys.argv[1], path_in_repo='archive/sp3/'+sys.argv[2], repo_id='$R')" "$1" "$2" > put.err 2>&1 && { echo "[hub] $2"; return 0; }; sleep 60; done; echo "[hub] $2 FAILED"; }
-python3 -m pip install -q "huggingface_hub[hf_xet]" transformers "math-verify[antlr4_13_2]" 2>&1 | grep -v -i warn | tail -1
-python3 -m venv /root/vv && /root/vv/bin/pip install -q vllm > vllm_install.log 2>&1; /root/vv/bin/python -c "import vllm; print('[vb] vllm', vllm.__version__)" 2>&1 | tail -1
 for f in tools/sp_qwen3.py tools/sp_mathcheck.py tools/gen_long_vllm.py ctl/math96.jsonl; do curl -sS -o $(basename $f) "$RAW/$f?nocache=$(date +%s)"; done
-python3 -c "from huggingface_hub import snapshot_download; print(snapshot_download('Qwen/Qwen3-1.7B'))" > dl.log 2>&1; echo "[vb] model: $(tail -1 dl.log | cut -c1-100)"
-for sd in 2 3 1; do
-  echo "[vb] full KV (vLLM) seed $sd $(date -u)"
-  /root/vv/bin/python gen_long_vllm.py math96.jsonl g96_full_v$sd.jsonl 12288 96 $sd > run_full_v$sd.log 2>&1
-  grep -E "Error|Traceback" run_full_v$sd.log | tail -1 | sed "s/^/[vb] /"; python3 sp_mathcheck.py g96_full_v$sd.jsonl | sed "s/^/[vb] /"; put g96_full_v$sd.jsonl gen96_full_v$sd.jsonl
-done
+python3 -m pip install -q "huggingface_hub[hf_xet]" transformers "math-verify[antlr4_13_2]" 2>&1 | grep -v -i warn | tail -1
+( while ! grep -q "^\[vb\] model:" w.log 2>/dev/null; do sleep 120; echo "[vb] model cache $(du -sh /root/.cache/huggingface 2>/dev/null | cut -f1) $(date -u +%H:%M)"; done ) &
+t0=$(date +%s); python3 -c "from huggingface_hub import snapshot_download; print(snapshot_download('Qwen/Qwen3-1.7B'))" > dl.log 2>&1; echo "[vb] model: $(tail -1 dl.log | cut -c1-80) ($(( $(date +%s) - t0 )) s)"
 LG=/root/w/sp.log; G="--traces math96.jsonl --n 96 --max-len 12288 --S 32 --heads 8 --layers 3 --ffn 2048 --roll-batch 48 --no-sp --rw 1056 --C 128 --maxd 0 --log $LG"
 for sd in 2 3; do
   echo "[vb] window alone seed $sd $(date -u)"
   python3 sp_qwen3.py rollout $G --seed $sd --roll-out g96_raw_s$sd.jsonl > run_raw_s$sd.log 2>&1
   grep -E "Error|Traceback|out of memory" run_raw_s$sd.log | tail -1 | sed "s/^/[vb] /"; python3 sp_mathcheck.py g96_raw_s$sd.jsonl | sed "s/^/[vb] /"; put g96_raw_s$sd.jsonl gen96_raw_s$sd.jsonl
+done
+( while ! grep -q "^\[vb\] vllm" w.log 2>/dev/null; do sleep 120; echo "[vb] vllm venv $(du -sh /root/vv 2>/dev/null | cut -f1) $(date -u +%H:%M)"; done ) &
+t0=$(date +%s); python3 -m venv /root/vv && /root/vv/bin/pip install -q vllm > vllm_install.log 2>&1; echo "[vb] vllm $(/root/vv/bin/python -c 'import vllm; print(vllm.__version__)' 2>&1 | tail -1) ($(( $(date +%s) - t0 )) s)"
+for sd in 2 3 1; do
+  echo "[vb] full KV (vLLM) seed $sd $(date -u)"
+  /root/vv/bin/python gen_long_vllm.py math96.jsonl g96_full_v$sd.jsonl 12288 96 $sd > run_full_v$sd.log 2>&1
+  grep -E "Error|Traceback" run_full_v$sd.log | tail -1 | sed "s/^/[vb] /"; python3 sp_mathcheck.py g96_full_v$sd.jsonl | sed "s/^/[vb] /"; put g96_full_v$sd.jsonl gen96_full_v$sd.jsonl
 done
 date -u > DONE_VB; put DONE_VB DONE_VB; echo "[vb] DONE $(date -u)"
 JOB
