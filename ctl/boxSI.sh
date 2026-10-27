@@ -35,6 +35,8 @@ put() { for t in 1 2 3 4 5; do python3 -c "import sys; from huggingface_hub impo
 get() { for t in 1 2 3; do curl -sSfL -H "Authorization: Bearer $HF_TOKEN" -o "$2" "$H/$1" && return 0; echo "[si] get $1 attempt $t failed"; sleep 10; done; return 1; }
 acc() { python3 sp_mathcheck.py "$1" 2>/dev/null | grep -oP ": \K[0-9]+(?=/)" | head -1; }
 for f in tools/sp_qwen3.py tools/sp_mathcheck.py ctl/math96.jsonl; do curl -sS -o $(basename $f) "$RAW/$f?nocache=$(date +%s)"; done
+python3 -c "import torch; x = torch.randn(4096, 4096, device='cuda'); print('[si] GPU ok', torch.cuda.get_device_name(), float((x @ x).sum()) != 0)" 2>&1 | tail -1
+python3 -c "import torch; torch.zeros(1).cuda()" 2>/dev/null || { echo "[si] GPU FAIL - stop"; exit 1; }
 python3 -m pip install -q "huggingface_hub[hf_xet]" transformers bitsandbytes "math-verify[antlr4_13_2]" 2>&1 | grep -v -i warn | tail -1
 ( while [ ! -e dl.done ]; do sleep 120; echo "[si] downloads $(du -sh /root/.cache/huggingface 2>/dev/null | cut -f1) model, $(du -ch /root/w/*.pt /root/w/*.jsonl 2>/dev/null | tail -1 | cut -f1) files $(date -u +%H:%M)"; done ) &
 t0=$(date +%s); python3 -c "from huggingface_hub import snapshot_download; print(snapshot_download('Qwen/Qwen3-1.7B'))" > dl.log 2>&1
@@ -67,6 +69,7 @@ import random, sys; rs = open('pool.jsonl').readlines(); random.seed(int(sys.arg
     else bad=$((bad + 1)); python3 -c "import sys; sys.exit(0 if $k < $best else 1)" && { best=$k; cp $cur spS${S}_best.pt; }; fi
     put $LG spP_si.log
   done
+  [ -s spS${S}_best.pt ] || { echo "[si] stage S$S produced no checkpoint - stop"; break; }
   put spS${S}_best.pt spS${S}_best.pt
   G="--traces math96.jsonl --n 96 --max-len 12288 --S $S $base --roll-batch 48 --ckpt spS${S}_best.pt --log $LG"
   for sd in 1 2; do
