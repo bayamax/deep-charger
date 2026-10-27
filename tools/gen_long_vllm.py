@@ -2,18 +2,19 @@
 (the generated thought + answer), "finish" (stop / length) and "n_tok". Qwen3's recommended thinking sampling. Prompts go in
 groups and every group is appended at once, so a crash keeps what is done (a rerun skips the ids already written).
 
-  python gen_long_vllm.py prompts.jsonl out.jsonl [max_tokens] [group]
+  python gen_long_vllm.py prompts.jsonl out.jsonl [max_tokens] [group] [seed]
 """
 import json, os, sys, time
 from vllm import LLM, SamplingParams
 
 src, dst = sys.argv[1], sys.argv[2]; mx = int(sys.argv[3]) if len(sys.argv) > 3 else 16384
 grp = int(sys.argv[4]) if len(sys.argv) > 4 else 150
+seed = int(sys.argv[5]) if len(sys.argv) > 5 else 0
 rows = [json.loads(l) for l in open(src)]
 done = {json.loads(l)["id"] for l in open(dst)} if os.path.exists(dst) else set()
 todo = [r for r in rows if r["id"] not in done]
-llm = LLM("Qwen/Qwen3-1.7B", dtype="bfloat16", gpu_memory_utilization=0.88, max_model_len=mx + 1024, seed=0)
-sp = SamplingParams(temperature=0.6, top_p=0.95, top_k=20, max_tokens=mx, seed=0)
+llm = LLM("Qwen/Qwen3-1.7B", dtype="bfloat16", gpu_memory_utilization=0.88, max_model_len=mx + 1024, seed=seed)
+sp = SamplingParams(temperature=0.6, top_p=0.95, top_k=20, max_tokens=mx, seed=seed)
 t0 = time.time()
 for i in range(0, len(todo), grp):
     part = todo[i:i + grp]
