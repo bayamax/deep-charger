@@ -190,7 +190,14 @@ pooler = AttnPoolSP(H, a.S, a.heads, a.layers, a.ffn, target_norm).to(dev)
 FT_SD = None
 if a.ckpt:
     ck = torch.load(a.ckpt, map_location="cpu", weights_only=False)
-    if not (a.fresh_pooler and a.mode == "train"): pooler.load_state_dict(ck["pooler"])
+    if not (a.fresh_pooler and a.mode == "train"):
+        psd = dict(ck["pooler"]); q0 = psd["query"]
+        if q0.size(0) < a.S:   # growing S (as the character model grew depth): the new queries start as copies of the old
+            g = torch.Generator().manual_seed(a.seed)    # ones plus a little noise, so they split off from their originals
+            extra = q0[torch.arange(a.S - q0.size(0)) % q0.size(0)]
+            psd["query"] = torch.cat([q0, extra + 0.1 * q0.std() * torch.randn(extra.shape, generator=g)], 0)
+            print(f"[sp] S grown {q0.size(0)} -> {a.S} (new queries = copies + noise)", flush=True)
+        pooler.load_state_dict(psd)
     if a.mode != "train":   # eval follows the checkpoint
         if (ck.get("args") or {}).get("pe_rev"): a.pe_rev = True
         if (ck.get("args") or {}).get("pe_norm"): a.pe_norm = True
