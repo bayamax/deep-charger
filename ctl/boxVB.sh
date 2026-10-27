@@ -2,7 +2,7 @@
 # Box VB (a 3090): the baselines with the same 3-seed treatment as G - the 96 problems (ctl/math96.jsonl, levels 2-4), 12288
 # tokens, Qwen3 thinking sampling. Full KV with vLLM (seeds 2, 3 - plus seed 1 to compare vLLM with the HF-path run), the
 # window alone (rw 1056, no SP) with sp_qwen3 (seeds 2, 3). Results to archive/sp3/gen96_*.jsonl, DONE_VB at the end.
-SER=1
+SER=2
 if [ -f /root/.boxvb_serial ] && [ "$(cat /root/.boxvb_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxvb_serial
 echo "[vb] preflight GPU: $(nvidia-smi --query-gpu=name,memory.used,memory.total --format=csv,noheader)"
@@ -15,6 +15,12 @@ tail -n 1 /root/w/sp.log 2>/dev/null | cut -c1-200
 nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv,noheader
 ST
 chmod +x /root/status.sh
+# serial 2: 25 min after launch no vLLM yet - what is it doing?
+if [ ! -e /root/.chk2 ]; then touch /root/.chk2
+  echo "[vb] s2: $(tail -c 300 /root/w/vllm_install.log 2>/dev/null | tr '\n' ' ')"
+  echo "[vb] s2 procs: $(ps -eo etimes,args | grep -E 'pip|python|vllm' | grep -v grep | head -4 | cut -c1-120 | tr '\n' '|')"
+  echo "[vb] s2 disk: $(df -h /root | tail -1 | awk '{print $4}') free, net: $(curl -s -o /dev/null -w '%{speed_download}' https://huggingface.co/Qwen/Qwen3-1.7B/resolve/main/config.json) B/s"
+fi
 if [ ! -e /root/.job ]; then touch /root/.job
   cat > /root/live.sh <<'JOB'
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); cd /root/w
