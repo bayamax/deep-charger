@@ -14,14 +14,16 @@ Stage 1 trains the pooler with the model frozen; --ft-layers N also full-fine-tu
 
   python sp_qwen3.py train --traces traces.jsonl --skip 60 --n 400 --S 32 --rw 768 --C 128 --maxd 384 --out sp.pt
   python sp_qwen3.py eval  --traces q17_full.jsonl --ckpt sp.pt          (KL / top-1 agreement vs full KV)
+  python sp_qwen3.py grpo  --traces grpo_prompts.jsonl --ckpt spG.pt --ft-layers 28 --opt8bit --grpo-eval math96.jsonl
+                     (GRPO under the deployment loop: the reward is a correct final answer, see the --group/--grpo-* flags)
 """
-import argparse, json, math, os, random, time
+import argparse, json, math, os, random, subprocess, sys, time
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
 ap = argparse.ArgumentParser()
-ap.add_argument("mode", choices=["train", "eval", "profile", "rollout"])
+ap.add_argument("mode", choices=["train", "eval", "profile", "rollout", "grpo"])
 ap.add_argument("--model", default="Qwen/Qwen3-1.7B")
 ap.add_argument("--traces", required=True)
 ap.add_argument("--n", type=int, default=0); ap.add_argument("--skip", type=int, default=0)
@@ -69,6 +71,8 @@ ap.add_argument("--fresh-pooler", action="store_true", help="train: take only th
 ap.add_argument("--roll-out", default="", help="rollout: write the model's own SP-evict generations here (jsonl prompt/text) - "
                 "the original deep-charger's on-policy (DAgger) data: train on what the bounded model itself produces")
 ap.add_argument("--roll-batch", type=int, default=24, help="rollout: streams generated together")
+ap.add_argument("--roll-cb", action="store_true", help="rollout: the continuous-batching generator (rollout_cb) - all "
+                "prompts in one call, --roll-batch streams at a time, a finished stream's slot refilled at once")
 ap.add_argument("--temp", type=float, default=0.6); ap.add_argument("--top-p", type=float, default=0.95); ap.add_argument("--top-k", type=int, default=20)
 ap.add_argument("--end-bias", type=float, default=0.0, help="rollout: added to the </think> logit while thinking")
 ap.add_argument("--hes-bias", type=float, default=0.0, help="rollout: added to the logits of Wait/But/Alternatively/Hmm "
@@ -92,6 +96,21 @@ ap.add_argument("--ctx-hidden", type=int, default=0, help="pooler input = the fr
                 "deep-charger INVESTIGATION found (overfit floor 0.16 -> 0.11); chunk mode (train/eval) only")
 ap.add_argument("--sp-empty", action="store_true", help="rollout: prepend the SP of an EMPTY buffer while nothing is distant yet "
                 "(the first rw tokens) - training never scores those states, so by default they get the plain window")
+ap.add_argument("--group", type=int, default=8, help="grpo: samples per problem")
+ap.add_argument("--grpo-q", type=int, default=16, help="grpo: problems per update")
+ap.add_argument("--grpo-updates", type=int, default=200, help="grpo: most updates")
+ap.add_argument("--grpo-hours", type=float, default=0.0, help="grpo: stop after this many hours (0 = no limit)")
+ap.add_argument("--grpo-slots", type=int, default=32, help="grpo: streams generated together (continuous batching)")
+ap.add_argument("--grpo-lnorm", type=float, default=4096, help="grpo: the summed token log-probs are divided by this constant "
+                "(Dr. GRPO: no per-answer length normalisation, so long wrong answers are not pushed down less per token)")
+ap.add_argument("--grpo-warmup", type=int, default=3, help="grpo: updates of linear lr warm-up")
+ap.add_argument("--grpo-eval", default="", help="grpo: problems (jsonl with prompt/gold, e.g. math96) generated and scored "
+                "every --grpo-eval-every updates; the best total is kept at --out")
+ap.add_argument("--grpo-eval-every", type=int, default=10); ap.add_argument("--grpo-eval-seeds", type=int, default=1)
+ap.add_argument("--grpo-eval0", action="store_true", help="grpo: also score the starting weights")
+ap.add_argument("--grpo-patience", type=int, default=3, help="grpo: stop after this many evals without a new best")
+ap.add_argument("--grpo-hook", default="", help="grpo: shell command run (in the background) after each eval with the new "
+                "files as arguments - e.g. an upload")
 ap.add_argument("--seed", type=int, default=0)
 ap.add_argument("--device", default="cuda"); ap.add_argument("--dtype", default="bfloat16")
 a = ap.parse_args()
@@ -198,7 +217,7 @@ if a.ckpt:
             psd["query"] = torch.cat([q0, extra + 0.1 * q0.std() * torch.randn(extra.shape, generator=g)], 0)
             print(f"[sp] S grown {q0.size(0)} -> {a.S} (new queries = copies + noise)", flush=True)
         pooler.load_state_dict(psd)
-    if a.mode != "train":   # eval follows the checkpoint
+    if a.mode != "train":   # eval (and grpo) follows the checkpoint
         if (ck.get("args") or {}).get("pe_rev"): a.pe_rev = True
         if (ck.get("args") or {}).get("pe_norm"): a.pe_norm = True
         if (ck.get("args") or {}).get("ctx_hidden"): a.ctx_hidden = ck["args"]["ctx_hidden"]
@@ -327,11 +346,12 @@ def run_trace(ids, P, train, ref_h=None):
     return K, A_, N
 
 
-def seq_logp(ids, P, coef=None):
+def seq_logp(ids, P, coef=None, temp=1.0):
     """log-prob of the answer ids[P:] under the deployment loop (the rollout's): every C tokens the distant tokens are pooled
     (mass-evicted at maxd) into SP - none while nothing is distant - and [prompt | SP | raw window] re-prefilled; the chunk's
     tokens are scored. coef: backward of coef x each chunk's log-prob (the gradient of a loss linear in the sum). The first
-    answer token (predicted by the prompt alone) is left out. Returns (sum log p, tokens)."""
+    answer token (predicted by the prompt alone) is left out. temp: log-probs of softmax(logits / temp) - the sampling
+    temperature, so a policy gradient scores the distribution the samples came from. Returns (sum log p, tokens)."""
     T = min(len(ids), P + a.max_len); ids = ids.to(dev); a_ids = ids[None, P:T]; La = a_ids.size(1)
     with torch.no_grad():
         pc = DynamicCache(); llm(input_ids=ids[None, :P], past_key_values=pc, use_cache=True)
@@ -352,7 +372,7 @@ def seq_logp(ids, P, coef=None):
             hs = llm.model(inputs_embeds=block, attention_mask=torch.ones(1, P + nb, device=dev), past_key_values=cache,
                            position_ids=pos, cache_position=pos[0], use_cache=True).last_hidden_state[0]
             h0 = nsp + (t0 - lo) - 1
-            lp = F.log_softmax(llm.lm_head(hs[h0:h0 + c1 - t0]).float(), -1).gather(1, a_ids[0, t0:c1, None]).sum()
+            lp = F.log_softmax(llm.lm_head(hs[h0:h0 + c1 - t0]).float() / temp, -1).gather(1, a_ids[0, t0:c1, None]).sum()
             if coef is not None: (coef * lp).backward()
         tot += lp.item(); n += c1 - t0
     return tot, n
@@ -599,14 +619,185 @@ def rollout(prompts):
     return gen
 
 
+def sample_tok(lg):
+    """the deployment sampling (temperature, top-k, top-p) of a (N, vocab) logit batch"""
+    lg = lg.float() / a.temp
+    if a.top_k: lg = lg.masked_fill(lg < lg.topk(a.top_k, -1).values[:, -1:], float("-inf"))
+    pr = torch.softmax(lg, -1); sp_, si = pr.sort(-1, descending=True)
+    sp_ = sp_.masked_fill(sp_.cumsum(-1) - sp_ > a.top_p, 0)
+    return si.gather(-1, torch.multinomial(sp_ / sp_.sum(-1, keepdim=True), 1)).squeeze(-1)
+
+
+@torch.no_grad()
+def rollout_cb(prompts, nslot):
+    """the deployment SP-evict loop (as rollout()) with continuous batching: up to nslot streams; at every chunk boundary
+    each stream's [prompt | SP | raw window] is prefilled afresh (left-padded, positions from 0 per stream), so the slot
+    of a finished stream takes the next prompt at once instead of idling until the longest stream ends.
+    Returns (generated token lists, ended-by-stop-token flags), in the order of prompts."""
+    stop = {i for i in [tok.eos_token_id, tok.convert_tokens_to_ids("<|im_end|>"), tok.convert_tokens_to_ids("<|endoftext|>")] if i is not None and i >= 0}
+    todo = list(range(len(prompts)))[::-1]; act = []
+    gen = [[] for _ in prompts]; ended = [False] * len(prompts); kept = [None] * len(prompts); absorbed = [0] * len(prompts)
+    while todo or act:
+        while todo and len(act) < nslot:
+            j = todo.pop(); act.append(j); kept[j] = torch.zeros(1, 0, dtype=torch.long, device=dev)
+        blocks = []
+        for j in act:
+            c0 = len(gen[j]); R = min(c0, a.rw); nd = c0 - R
+            if nd > absorbed[j]: kept[j], absorbed[j] = update_buffer(kept[j], absorbed[j], torch.tensor([gen[j]], device=dev), nd)
+            parts = [embed(torch.tensor([prompts[j]], device=dev)).to(dt)]
+            if kept[j].size(1) > 0 and not a.no_sp: parts.append(pooler(embed(kept[j]).float()).to(dt))
+            if R > 0: parts.append(embed(torch.tensor([gen[j][c0 - R:]], device=dev)).to(dt))
+            blocks.append(torch.cat(parts, 1))
+        N = len(act); lens = [x.size(1) for x in blocks]; Lmax = max(lens)
+        block = torch.zeros((N, Lmax, H), device=dev, dtype=dt); amask = torch.zeros((N, Lmax), device=dev, dtype=torch.long)
+        pos = torch.zeros((N, Lmax), device=dev, dtype=torch.long)
+        for b in range(N):
+            block[b, Lmax - lens[b]:] = blocks[b][0]; amask[b, Lmax - lens[b]:] = 1; pos[b, Lmax - lens[b]:] = torch.arange(lens[b], device=dev)
+        del blocks
+        cache = DynamicCache()
+        hs = llm.model(inputs_embeds=block, attention_mask=amask, position_ids=pos, past_key_values=cache, use_cache=True).last_hidden_state
+        last = llm.lm_head(hs[:, -1]); del hs, block
+        nxt = torch.tensor(lens, device=dev)[:, None]; fin = [False] * N
+        for _ in range(a.C):
+            nx = sample_tok(last).tolist()
+            for b, j in enumerate(act):
+                if fin[b]: continue
+                if nx[b] in stop: fin[b] = True; ended[j] = True; continue
+                gen[j].append(nx[b])
+                if len(gen[j]) >= a.max_len: fin[b] = True
+            if all(fin): break
+            amask = torch.cat([amask, torch.ones((N, 1), device=dev, dtype=torch.long)], 1)
+            o = llm(input_ids=torch.tensor([[gen[j][-1] if gen[j] else 0] for j in act], device=dev), attention_mask=amask,
+                    position_ids=nxt, past_key_values=cache, use_cache=True, logits_to_keep=1)
+            last = o.logits[:, -1]; nxt = nxt + 1
+        del cache
+        act = [j for b, j in enumerate(act) if not fin[b]]
+    return gen, ended
+
+
+def run_grpo(opt, FTP, MASTER):
+    """GRPO under the deployment loop (Dr. GRPO form): per update, --grpo-q problems x --group samples from rollout_cb (the
+    deployment sampling); reward 1 for a correct final answer (sp_mathcheck: \\boxed after </think> vs gold, letters for
+    multiple choice), else 0 - an answer that never closes its thought scores 0 too. Advantage = reward - the group mean
+    (no std division); loss = -sum A x (summed token log-probs at the sampling temperature) / (group x q x lnorm), one
+    on-policy step per batch (no ratio clipping needed). Groups with one reward for all carry no signal and are skipped.
+    While generating, the fp32 masters and the optimizer state wait on the CPU so more streams fit."""
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from sp_mathcheck import correct
+    stops = {i for i in [tok.eos_token_id, tok.convert_tokens_to_ids("<|im_end|>"), tok.convert_tokens_to_ids("<|endoftext|>")] if i is not None and i >= 0}
+    im_end = tok.convert_tokens_to_ids("<|im_end|>")
+    base_lr = [g_["lr"] for g_ in opt.param_groups]
+
+    def offload(cpu):
+        tg = "cpu" if cpu else dev
+        for m_ in MASTER: m_.data = m_.data.to(tg)
+        for st_ in opt.state.values():
+            for k_, v_ in list(st_.items()):
+                if torch.is_tensor(v_): st_[k_] = v_.to(tg)
+        if dev == "cuda": torch.cuda.empty_cache()
+
+    def save_to(path):
+        ck = {"pooler": {k: v.detach().cpu() for k, v in pooler.state_dict().items()}, "args": vars(a)}
+        if a.ft_layers: ck["ft"] = {k: v.detach().cpu() for k, v in llm.state_dict().items() if k in FT_SD}
+        torch.save(ck, path)
+
+    def hook(*files):
+        if a.grpo_hook: subprocess.Popen(a.grpo_hook + " " + " ".join(files), shell=True)
+
+    EV = [json.loads(l) for l in open(a.grpo_eval)] if a.grpo_eval else []
+    stem = a.out[:-3] if a.out.endswith(".pt") else a.out
+
+    def evaluate(u):
+        tot = cl = 0; files = []
+        offload(True); pooler.eval()
+        for sd in range(1, a.grpo_eval_seeds + 1):
+            torch.manual_seed(1000 * sd); t0 = time.time()
+            gens, _ = rollout_cb([tok.encode(r["prompt"], add_special_tokens=False) for r in EV], a.grpo_slots)
+            rs = [{"src": r.get("src", ""), "id": r.get("id", ""), "gold": r.get("gold", ""), "prompt": r["prompt"],
+                   "text": tok.decode(g)} for r, g in zip(EV, gens)]
+            f_ = f"{stem}_eval_u{u}_s{sd}.jsonl"
+            with open(f_, "w") as fo: fo.writelines(json.dumps(r) + "\n" for r in rs)
+            ok = sum(correct(r) for r in rs); c_ = sum("</think>" in r["text"] for r in rs); tot += ok; cl += c_; files.append(f_)
+            log(f"[grpo] eval u{u} seed {sd}: {ok}/{len(rs)} correct | closed think {c_} | {sum(len(g) for g in gens)} tokens ({time.time() - t0:.0f}s)")
+        offload(False); torch.manual_seed(a.seed + 7919 * (u + 1))
+        return tot, cl, files
+
+    order = list(range(len(rows))); random.Random(a.seed).shuffle(order)
+    best, bad, t_start = -1, 0, time.time()
+    log(f"[grpo] {tag} {os.path.basename(a.ckpt)}: {len(rows)} problems, {a.grpo_q} x {a.group} samples per update, "
+        f"lr pooler {a.lr} / model {a.ft_lr}, temp {a.temp}, cap {a.max_len}, slots {a.grpo_slots}")
+    if EV and a.grpo_eval0:
+        best, _, files = evaluate(0); save_to(a.out); hook(*files, a.out)
+    trlog = open(stem + "_train.jsonl", "a")
+    for u in range(1, a.grpo_updates + 1):
+        batch = [rows[order[((u - 1) * a.grpo_q + k) % len(order)]] for k in range(a.grpo_q)]
+        pids = [tok.encode(r["prompt"], add_special_tokens=False) for r in batch]
+        t0 = time.time(); offload(True); pooler.eval()
+        gens, ended = rollout_cb([p_ for p_ in pids for _ in range(a.group)], a.grpo_slots)
+        offload(False); pooler.train(); t1 = time.time()
+        R = [float(correct({"text": tok.decode(gens[i * a.group + k]), "gold": batch[i]["gold"]}))
+             for i in range(a.grpo_q) for k in range(a.group)]
+        for i in range(a.grpo_q):
+            for k in range(a.group):
+                j = i * a.group + k
+                trlog.write(json.dumps({"u": u, "src": batch[i].get("src", ""), "id": batch[i].get("id", ""), "gold": batch[i]["gold"],
+                                        "reward": R[j], "ended": ended[j], "tokens": len(gens[j]), "text": tok.decode(gens[j])}) + "\n")
+        trlog.flush()
+        n_inf = n_bw = oom = 0
+        for i in range(a.grpo_q):
+            rs = R[i * a.group:(i + 1) * a.group]
+            if max(rs) == min(rs): continue
+            n_inf += 1; m_ = sum(rs) / a.group
+            for k in range(a.group):
+                j = i * a.group + k; A = rs[k] - m_
+                ids = torch.tensor(pids[i] + gens[j] + ([im_end] if ended[j] else []))
+                try: seq_logp(ids, len(pids[i]), coef=-A / (a.group * a.grpo_q * a.grpo_lnorm), temp=a.temp); n_bw += 1
+                except torch.cuda.OutOfMemoryError:
+                    oom += 1; torch.cuda.empty_cache()
+        if n_inf:
+            f_ = min(1.0, u / max(1, a.grpo_warmup))
+            for g_, lr_ in zip(opt.param_groups, base_lr): g_["lr"] = lr_ * f_
+            gn = torch.nn.utils.clip_grad_norm_(list(pooler.parameters()) + MASTER, 1.0).item()
+            opt.step()
+            if FTP:
+                with torch.no_grad():
+                    for p_, m_ in zip(FTP, MASTER): p_.copy_(m_.to(p_.dtype))
+        else: gn = 0.0
+        opt.zero_grad(set_to_none=True)
+        by = {}
+        for i in range(a.grpo_q):
+            s_ = batch[i].get("src", "").split("-")[0]; v_ = by.setdefault(s_, [0.0, 0])
+            v_[0] += sum(R[i * a.group:(i + 1) * a.group]); v_[1] += a.group
+        mem = torch.cuda.max_memory_allocated() / 2**30 if dev == "cuda" else 0.0
+        if dev == "cuda": torch.cuda.reset_peak_memory_stats()
+        log(f"[grpo] u{u}: reward {sum(R) / len(R):.3f} (" + " ".join(f"{k} {v[0] / v[1]:.2f}" for k, v in sorted(by.items()))
+            + f") | ended {sum(ended) / len(ended):.2f} | tokens {sum(len(g) for g in gens) / len(gens):.0f} | informative groups "
+            f"{n_inf}/{a.grpo_q} | grad norm {gn:.3f}{f' | {oom} OOM' if oom else ''} | gen {t1 - t0:.0f}s, update {time.time() - t1:.0f}s"
+            f" | peak {mem:.1f} GiB")
+        late = a.grpo_hours and time.time() - t_start > 3600 * a.grpo_hours
+        if EV and (u % a.grpo_eval_every == 0 or late or u == a.grpo_updates):
+            tot, cl, files = evaluate(u)
+            if tot > best:
+                best, bad = tot, 0; save_to(a.out); hook(*files, a.out, stem + "_train.jsonl"); log(f"[grpo] u{u}: new best {tot}")
+            else:
+                bad += 1; hook(*files, stem + "_train.jsonl"); log(f"[grpo] u{u}: no gain ({tot} vs best {best}, {bad} in a row)")
+            if bad >= a.grpo_patience: log(f"[grpo] stop: {bad} evals without a new best"); break
+        elif not EV and u % 10 == 0: save_to(a.out)
+        if late: log(f"[grpo] stop: {a.grpo_hours} h"); break
+    if not EV: save_to(a.out)
+    log(f"[grpo] done: best {best} ({time.time() - t_start:.0f}s)")
+
+
 rows = [json.loads(l) for f_ in a.traces.split(",") for l in open(f_)]
 if not all("prompt" in r for r in rows):
-    from datasets import load_dataset
-    PROB = {x["unique_id"]: x["problem"] for x in load_dataset("HuggingFaceH4/MATH-500", split="test")}
+    if not all("q" in r for r in rows if "prompt" not in r):
+        from datasets import load_dataset
+        PROB = {x["unique_id"]: x["problem"] for x in load_dataset("HuggingFaceH4/MATH-500", split="test")}
     SUF = "\nPlease reason step by step, and put your final answer within \\boxed{}."
     for r in rows:
-        r["prompt"] = tok.apply_chat_template([{"role": "user", "content": PROB[r["id"]] + SUF}], add_generation_prompt=True,
-                                              tokenize=False, enable_thinking=True)
+        if "prompt" in r: continue
+        r["prompt"] = tok.apply_chat_template([{"role": "user", "content": r["q"] if "q" in r else PROB[r["id"]] + SUF}],
+                                              add_generation_prompt=True, tokenize=False, enable_thinking=True)
 rows = rows[a.skip:]
 if a.n: rows = rows[:a.n]
 data = []; SPIN = []
@@ -627,9 +818,11 @@ if a.mode == "profile":
 elif a.mode == "rollout":
     pooler.eval(); t0 = time.time(); n_tok = 0
     with open(a.roll_out, "a") as fo:
-        for i in range(0, len(rows), a.roll_batch):
-            rb = rows[i:i + a.roll_batch]
-            gens = rollout([tok.encode(r["prompt"], add_special_tokens=False) for r in rb])
+        step_ = len(rows) if a.roll_cb else a.roll_batch
+        for i in range(0, len(rows), step_):
+            rb = rows[i:i + step_]
+            pr_ = [tok.encode(r["prompt"], add_special_tokens=False) for r in rb]
+            gens = rollout_cb(pr_, a.roll_batch)[0] if a.roll_cb else rollout(pr_)
             for r, g in zip(rb, gens):
                 fo.write(json.dumps({"src": r.get("src", ""), "id": r.get("id", ""), "gold": r.get("gold", ""), "prompt": r["prompt"],
                                      "text": tok.decode(g)}) + "\n"); n_tok += len(g)
@@ -670,7 +863,9 @@ else:
     else:
         opt = torch.optim.AdamW(groups, weight_decay=0.0)
     steps = int(len(data) * a.epochs); n_upd = max(1, steps // a.accum)
-    sched = torch.optim.lr_scheduler.LambdaLR(opt, lambda s: min(1.0, (s + 1) / max(2, n_upd // 15)) * max(0.1, 1 - s / n_upd))
+    if a.mode == "train":
+        sched = torch.optim.lr_scheduler.LambdaLR(opt, lambda s: min(1.0, (s + 1) / max(2, n_upd // 15)) * max(0.1, 1 - s / n_upd))
+    if a.mode == "grpo": run_grpo(opt, FTP, MASTER); sys.exit(0)
     log(f"[sp] train {tag}: {steps} traces, {a.accum} per update ({n_upd} updates), pooler lr {a.lr}"
         + (f", FT layers 0-{a.ft_layers - 1} lr {a.ft_lr} ({sum(p_.numel() for p_ in FTP) / 1e6:.0f}M)" if a.ft_layers else ""))
 

@@ -41,12 +41,15 @@ def correct(r):
     b = boxed(r["text"])
     if b is None: return False
     if norm(b) == norm(r.get("gold")): return True
+    if re.fullmatch(r"[A-J]", r.get("gold") or ""):   # multiple choice: the letter, however it is wrapped ((C), \\text{C}, C. ...)
+        m = re.match(r"\(?([A-J])\b", norm(b).lstrip("("))
+        return bool(m) and m.group(1) == r["gold"]
     if _mv_parse is None: return False
     try: return bool(_mv_verify(_mv_parse("$" + (r.get("gold") or "") + "$"), _mv_parse("$" + b + "$")))
     except Exception: return False
 
 
-for f in sys.argv[1:]:
+for f in (sys.argv[1:] if __name__ == "__main__" else []):
     rs = [json.loads(l) for l in open(f)]
     ok = sum(correct(r) for r in rs)
     closed = sum("</think>" in r["text"] for r in rs); bx = sum(boxed(r["text"]) is not None for r in rs)
