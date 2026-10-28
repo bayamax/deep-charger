@@ -101,6 +101,10 @@ ap.add_argument("--grpo-q", type=int, default=16, help="grpo: problems per updat
 ap.add_argument("--grpo-updates", type=int, default=200, help="grpo: most updates")
 ap.add_argument("--grpo-hours", type=float, default=0.0, help="grpo: stop after this many hours (0 = no limit)")
 ap.add_argument("--grpo-slots", type=int, default=32, help="grpo: streams generated together (continuous batching)")
+ap.add_argument("--grpo-tok-budget", type=int, default=0, help="grpo/rollout_cb: also cap streams x the longest stream's "
+                "re-prefill (prompt + S + rw + C) at this many tokens - long prompts get fewer streams (0 = no cap)")
+ap.add_argument("--grpo-best0", type=int, default=-1, help="grpo: the starting weights' check total, when it is known "
+                "(instead of --grpo-eval0)")
 ap.add_argument("--grpo-lnorm", type=float, default=4096, help="grpo: the summed token log-probs are divided by this constant "
                 "(Dr. GRPO: no per-answer length normalisation, so long wrong answers are not pushed down less per token)")
 ap.add_argument("--grpo-warmup", type=int, default=3, help="grpo: updates of linear lr warm-up")
@@ -638,7 +642,9 @@ def rollout_cb(prompts, nslot):
     todo = list(range(len(prompts)))[::-1]; act = []
     gen = [[] for _ in prompts]; ended = [False] * len(prompts); kept = [None] * len(prompts); absorbed = [0] * len(prompts)
     while todo or act:
-        while todo and len(act) < nslot:
+        full = lambda j: len(prompts[j]) + a.S + a.rw + a.C   # the stream's largest re-prefill + chunk
+        while todo and len(act) < nslot and (not act or not a.grpo_tok_budget
+                                             or (len(act) + 1) * max(full(x) for x in act + [todo[-1]]) <= a.grpo_tok_budget):
             j = todo.pop(); act.append(j); kept[j] = torch.zeros(1, 0, dtype=torch.long, device=dev)
         blocks = []
         for j in act:
@@ -712,7 +718,7 @@ def run_grpo(opt, FTP, MASTER):
         offload(True); pooler.eval()
         for sd in range(1, a.grpo_eval_seeds + 1):
             torch.manual_seed(1000 * sd); t0 = time.time()
-            gens, _ = rollout_cb([tok.encode(r["prompt"], add_special_tokens=False) for r in EV], a.grpo_slots)
+            gens, _ = gen_safe([tok.encode(r["prompt"], add_special_tokens=False) for r in EV])
             rs = [{"src": r.get("src", ""), "id": r.get("id", ""), "gold": r.get("gold", ""), "prompt": r["prompt"],
                    "text": tok.decode(g)} for r, g in zip(EV, gens)]
             f_ = f"{stem}_eval_u{u}_s{sd}.jsonl"
@@ -723,7 +729,15 @@ def run_grpo(opt, FTP, MASTER):
         return tot, cl, files
 
     order = list(range(len(rows))); random.Random(a.seed).shuffle(order)
-    best, bad, t_start = -1, 0, time.time()
+    best, bad, t_start = a.grpo_best0, 0, time.time()
+
+    def gen_safe(pr):   # out of memory while generating: fewer streams, generate the whole batch again
+        while True:
+            try: return rollout_cb(pr, a.grpo_slots)
+            except torch.cuda.OutOfMemoryError:
+                torch.cuda.empty_cache(); a.grpo_slots = max(4, a.grpo_slots * 3 // 4)
+                if a.grpo_tok_budget: a.grpo_tok_budget = a.grpo_tok_budget * 3 // 4
+                log(f"[grpo] out of memory while generating: now {a.grpo_slots} streams, budget {a.grpo_tok_budget} tokens")
     log(f"[grpo] {tag} {os.path.basename(a.ckpt)}: {len(rows)} problems, {a.grpo_q} x {a.group} samples per update, "
         f"lr pooler {a.lr} / model {a.ft_lr}, temp {a.temp}, cap {a.max_len}, slots {a.grpo_slots}")
     if EV and a.grpo_eval0:
@@ -733,7 +747,8 @@ def run_grpo(opt, FTP, MASTER):
         batch = [rows[order[((u - 1) * a.grpo_q + k) % len(order)]] for k in range(a.grpo_q)]
         pids = [tok.encode(r["prompt"], add_special_tokens=False) for r in batch]
         t0 = time.time(); offload(True); pooler.eval()
-        gens, ended = rollout_cb([p_ for p_ in pids for _ in range(a.group)], a.grpo_slots)
+        res = torch.cuda.memory_allocated() / 2**30 if dev == "cuda" else 0.0   # what stays on the GPU while generating
+        gens, ended = gen_safe([p_ for p_ in pids for _ in range(a.group)])
         offload(False); pooler.train(); t1 = time.time()
         R = [float(correct({"text": tok.decode(gens[i * a.group + k]), "gold": batch[i]["gold"]}))
              for i in range(a.grpo_q) for k in range(a.group)]
@@ -773,7 +788,7 @@ def run_grpo(opt, FTP, MASTER):
         log(f"[grpo] u{u}: reward {sum(R) / len(R):.3f} (" + " ".join(f"{k} {v[0] / v[1]:.2f}" for k, v in sorted(by.items()))
             + f") | ended {sum(ended) / len(ended):.2f} | tokens {sum(len(g) for g in gens) / len(gens):.0f} | informative groups "
             f"{n_inf}/{a.grpo_q} | grad norm {gn:.3f}{f' | {oom} OOM' if oom else ''} | gen {t1 - t0:.0f}s, update {time.time() - t1:.0f}s"
-            f" | peak {mem:.1f} GiB")
+            f" | peak {mem:.1f} GiB, resident while generating {res:.1f} GiB, {a.grpo_slots} streams")
         late = a.grpo_hours and time.time() - t_start > 3600 * a.grpo_hours
         if EV and (u % a.grpo_eval_every == 0 or late or u == a.grpo_updates):
             tot, cl, files = evaluate(u)
