@@ -111,6 +111,8 @@ ap.add_argument("--grpo-warmup", type=int, default=3, help="grpo: updates of lin
 ap.add_argument("--grpo-eval", default="", help="grpo: problems (jsonl with prompt/gold, e.g. math96) generated and scored "
                 "every --grpo-eval-every updates; the best total is kept at --out")
 ap.add_argument("--grpo-eval-every", type=int, default=10); ap.add_argument("--grpo-eval-seeds", type=int, default=1)
+ap.add_argument("--grpo-kl", default="", help="grpo: full-KV teacher traces (jsonl prompt/text); at every check the deployment "
+                "KL to the teacher over their first 4096 answer tokens (as eval mode) - how far GRPO has moved off the teacher")
 ap.add_argument("--grpo-eval0", action="store_true", help="grpo: also score the starting weights")
 ap.add_argument("--grpo-patience", type=int, default=3, help="grpo: stop after this many evals without a new best")
 ap.add_argument("--grpo-hook", default="", help="grpo: shell command run (in the background) after each eval with the new "
@@ -711,6 +713,17 @@ def run_grpo(opt, FTP, MASTER):
         if a.grpo_hook: subprocess.Popen(a.grpo_hook + " " + " ".join(files), shell=True)
 
     EV = [json.loads(l) for l in open(a.grpo_eval)] if a.grpo_eval else []
+    KLD = []
+    for l in (open(a.grpo_kl) if a.grpo_kl else []):
+        r = json.loads(l); pid = tok.encode(r["prompt"], add_special_tokens=False)
+        KLD.append((torch.tensor(pid + tok.encode(r["text"], add_special_tokens=False)), len(pid)))
+
+    def kl_check():
+        ml = a.max_len; a.max_len = 4096; K = N = 0.0; t0 = time.time()
+        with torch.no_grad():
+            for ids, P in KLD: k, _, n = run_trace(ids, P, False); K += k; N += n
+        a.max_len = ml
+        return K / max(N, 1), time.time() - t0
     stem = a.out[:-3] if a.out.endswith(".pt") else a.out
 
     def evaluate(u):
@@ -725,6 +738,7 @@ def run_grpo(opt, FTP, MASTER):
             with open(f_, "w") as fo: fo.writelines(json.dumps(r) + "\n" for r in rs)
             ok = sum(correct(r) for r in rs); c_ = sum("</think>" in r["text"] for r in rs); tot += ok; cl += c_; files.append(f_)
             log(f"[grpo] eval u{u} seed {sd}: {ok}/{len(rs)} correct | closed think {c_} | {sum(len(g) for g in gens)} tokens ({time.time() - t0:.0f}s)")
+        if KLD: kl, dt_ = kl_check(); log(f"[grpo] eval u{u}: deployment KL to the teacher {kl:.4f} ({len(KLD)} traces, 4096, {dt_:.0f}s)")
         offload(False); torch.manual_seed(a.seed + 7919 * (u + 1))
         return tot, cl, files
 
