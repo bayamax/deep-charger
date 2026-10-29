@@ -114,7 +114,9 @@ ap.add_argument("--grpo-eval-every", type=int, default=10); ap.add_argument("--g
 ap.add_argument("--grpo-kl", default="", help="grpo: full-KV teacher traces (jsonl prompt/text); at every check the deployment "
                 "KL to the teacher over their first 4096 answer tokens (as eval mode) - how far GRPO has moved off the teacher")
 ap.add_argument("--grpo-eval0", action="store_true", help="grpo: also score the starting weights")
-ap.add_argument("--grpo-patience", type=int, default=3, help="grpo: stop after this many evals without a new best")
+ap.add_argument("--grpo-patience", type=int, default=3, help="grpo: stop after this many evals without a new best (0 = never)")
+ap.add_argument("--grpo-latest", default="", help="grpo: at every check also save the whole training state here (weights, fp32 "
+                "masters, optimizer, update count) - and when --ckpt is such a file, carry on from it")
 ap.add_argument("--grpo-hook", default="", help="grpo: shell command run (in the background) after each eval with the new "
                 "files as arguments - e.g. an upload")
 ap.add_argument("--seed", type=int, default=0)
@@ -743,7 +745,22 @@ def run_grpo(opt, FTP, MASTER):
         return tot, cl, files
 
     order = list(range(len(rows))); random.Random(a.seed).shuffle(order)
-    best, bad, t_start = a.grpo_best0, 0, time.time()
+    best, bad, t_start, u0 = a.grpo_best0, 0, time.time(), 1
+    if a.ckpt and "master" in ck:   # resume: the exact fp32 masters and the optimizer state, then the next update
+        with torch.no_grad():
+            for m_, v_ in zip(MASTER, ck["master"]): m_.copy_(v_)
+        opt.load_state_dict(ck["opt"]); u0, best, bad = ck["u"] + 1, ck["best"], ck["bad"]
+        torch.manual_seed(a.seed + 7919 * u0)
+        log(f"[grpo] resumed from {os.path.basename(a.ckpt)} after update {ck['u']} (best {best}, {bad} checks since)")
+        ck["master"] = ck["opt"] = None
+
+    def save_latest(u):
+        if not a.grpo_latest: return
+        st_ = {"pooler": {k: v.detach().cpu() for k, v in pooler.state_dict().items()}, "args": vars(a),
+               "ft": {k: v.detach().cpu() for k, v in llm.state_dict().items() if k in FT_SD},
+               "master": [m_.detach().cpu() for m_ in MASTER], "opt": opt.state_dict(), "u": u, "best": best, "bad": bad}
+        if os.path.exists(a.grpo_latest): os.remove(a.grpo_latest)   # ~14 GB at 1.7B: no room on the box for two copies
+        torch.save(st_, a.grpo_latest); del st_
 
     def gen_safe(pr):   # out of memory while generating: fewer streams, generate the whole batch again
         while True:
@@ -757,7 +774,7 @@ def run_grpo(opt, FTP, MASTER):
     if EV and a.grpo_eval0:
         best, _, files = evaluate(0); save_to(a.out); hook(*files, a.out)
     trlog = open(stem + "_train.jsonl", "a")
-    for u in range(1, a.grpo_updates + 1):
+    for u in range(u0, a.grpo_updates + 1):
         batch = [rows[order[((u - 1) * a.grpo_q + k) % len(order)]] for k in range(a.grpo_q)]
         pids = [tok.encode(r["prompt"], add_special_tokens=False) for r in batch]
         t0 = time.time(); offload(True); pooler.eval()
@@ -810,7 +827,8 @@ def run_grpo(opt, FTP, MASTER):
                 best, bad = tot, 0; save_to(a.out); hook(*files, a.out, stem + "_train.jsonl"); log(f"[grpo] u{u}: new best {tot}")
             else:
                 bad += 1; hook(*files, stem + "_train.jsonl"); log(f"[grpo] u{u}: no gain ({tot} vs best {best}, {bad} in a row)")
-            if bad >= a.grpo_patience: log(f"[grpo] stop: {bad} evals without a new best"); break
+            save_latest(u); hook(a.grpo_latest) if a.grpo_latest else None
+            if a.grpo_patience and bad >= a.grpo_patience: log(f"[grpo] stop: {bad} evals without a new best"); break
         elif not EV and u % 10 == 0: save_to(a.out)
         if late: log(f"[grpo] stop: {a.grpo_hours} h"); break
     if not EV: save_to(a.out)
