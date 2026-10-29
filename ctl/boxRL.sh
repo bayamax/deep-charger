@@ -60,6 +60,9 @@ python3 -m pip install -q "huggingface_hub[hf_xet]" transformers bitsandbytes "m
 t0=$(date +%s); python3 -c "from huggingface_hub import snapshot_download; print(snapshot_download('Qwen/Qwen3-1.7B'))" > dl.log 2>&1
 [ -s spG.pt ] || get archive/sp3/spG_longtraces_fft1024.pt spG.pt
 [ -s kv_full_p.jsonl ] || get archive/kvwin/q17_full_p.jsonl kv_full_p.jsonl
+# a new box carries on from the hub's copy of the last saved training state, when there is one
+[ -s grpo3_latest.pt ] || { get archive/sp3/rl/grpo3_latest.pt grpo3_latest.pt && echo "[rl] resuming from the hub's grpo3_latest.pt"; } || rm -f grpo3_latest.pt
+[ -s grpo3_best.pt ] || get archive/sp3/rl/grpo3_best.pt grpo3_best.pt || rm -f grpo3_best.pt
 touch dl.done; echo "[rl] downloads done in $(( $(date +%s) - t0 )) s: spG $(stat -c %s spG.pt) bytes, $(wc -l < grpo_prompts.jsonl) problems $(date -u)"
 LG=/root/w/sp.log; rm -f grpo3_best_train.jsonl grpo_best.pt; df -h / | tail -1 | sed 's/^/[rl] disk /'
 for try in 1 2 3; do
