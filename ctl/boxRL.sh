@@ -55,6 +55,7 @@ get() { for t in 1 2 3; do curl -sSfL -H "Authorization: Bearer $HF_TOKEN" -o "$
 for f in tools/sp_qwen3.py tools/sp_mathcheck.py ctl/math96.jsonl ctl/grpo_prompts.jsonl; do curl -sS -o $(basename $f) "$RAW/$f?nocache=$(date +%s)"; done
 python3 -c "import torch; x = torch.randn(4096, 4096, device='cuda'); print('[rl] GPU ok', torch.cuda.get_device_name(), float((x @ x).sum()) != 0)" 2>&1 | tail -1
 python3 -c "import torch; torch.zeros(1).cuda()" 2>/dev/null || { echo "[rl] GPU FAIL - stop"; exit 1; }
+U=$(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits | head -1); [ "${U:-0}" -gt 2000 ] && { echo "[rl] GPU already holds $U MiB of someone else's - stop"; exit 1; }
 python3 -m pip install -q "huggingface_hub[hf_xet]" transformers bitsandbytes "math-verify[antlr4_13_2]" 2>&1 | grep -v -i warn | tail -1
 ( while [ ! -e dl.done ]; do sleep 120; echo "[rl] downloads $(du -sh /root/.cache/huggingface 2>/dev/null | cut -f1) model, $(du -ch /root/w/*.pt 2>/dev/null | tail -1 | cut -f1) ckpt $(date -u +%H:%M)"; done ) &
 t0=$(date +%s); python3 -c "from huggingface_hub import snapshot_download; print(snapshot_download('Qwen/Qwen3-1.7B'))" > dl.log 2>&1
