@@ -14,7 +14,10 @@
 # 96-problem total) without ever saving its weights (only a new best was saved): u12 closed 184 of 192 (G 173) at 157 correct
 # (G 160), teacher KL 0.0746 (G 0.0623). Again from G, no early stop, 60 updates; at every check the whole training state
 # (weights, fp32 masters, optimizer) goes to grpo3_latest.pt (also on the hub), and a crashed run carries on from it.
-SER=4
+# serial 5 (on the box running serial 4): no 96-problem check any more (the user: the model is not made for it, and it
+# costs ~45 min per check) - the trend to watch is the GRPO problems' own accuracy. A check is now the teacher KL and the
+# saved state, every 3 updates; up to 100 updates (earlier GRPO work needed ~100). Carries on from grpo3_latest.pt (u18).
+SER=5
 if [ -f /root/.boxrl_serial ] && [ "$(cat /root/.boxrl_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxrl_serial
 echo "[rl] preflight GPU: $(nvidia-smi --query-gpu=name,memory.used,memory.total --format=csv,noheader)"
@@ -27,7 +30,7 @@ tail -n 1 /root/w/sp.log 2>/dev/null | cut -c1-200
 nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv,noheader
 ST
 chmod +x /root/status.sh
-if [ ! -e /root/.job4 ]; then touch /root/.job4
+if [ ! -e /root/.job5 ]; then touch /root/.job5
   for J in $(pgrep -f "^bash /root/job.sh") $(pgrep -f "^bash /root/live.sh"); do pkill -P $J; kill $J; done; sleep 3
   pkill -f "sp_qwen3.py grpo"; sleep 10; rm -f /root/w/DONE_RL1
   cat > /root/live.sh <<'JOB'
@@ -65,13 +68,17 @@ t0=$(date +%s); python3 -c "from huggingface_hub import snapshot_download; print
 [ -s grpo3_latest.pt ] || { get archive/sp3/rl/grpo3_latest.pt grpo3_latest.pt && echo "[rl] resuming from the hub's grpo3_latest.pt"; } || rm -f grpo3_latest.pt
 [ -s grpo3_best.pt ] || get archive/sp3/rl/grpo3_best.pt grpo3_best.pt || rm -f grpo3_best.pt
 touch dl.done; echo "[rl] downloads done in $(( $(date +%s) - t0 )) s: spG $(stat -c %s spG.pt) bytes, $(wc -l < grpo_prompts.jsonl) problems $(date -u)"
-LG=/root/w/sp.log; rm -f grpo3_best_train.jsonl grpo_best.pt; df -h / | tail -1 | sed 's/^/[rl] disk /'
+LG=/root/w/sp.log; [ -s grpo3_latest.pt ] || rm -f grpo3_best_train.jsonl; rm -f grpo_best.pt; df -h / | tail -1 | sed 's/^/[rl] disk /'
+# the training-problem log from update 1 (a box start used to clear it: updates 1-6 came back from the hub's copy)
+if [ -s grpo3_latest.pt ] && ! head -1 grpo3_best_train.jsonl 2>/dev/null | grep -q '"u": 1,'; then
+  [ -s grpo3_best_train.jsonl ] || get archive/sp3/rl/grpo3_best_train.jsonl grpo3_best_train.jsonl
+  get archive/sp3/rl/grpo3_train_u1-6.jsonl u16.jsonl && cat u16.jsonl grpo3_best_train.jsonl > t.jsonl && mv t.jsonl grpo3_best_train.jsonl
+fi
 for try in 1 2 3; do
 CK=spG.pt; [ -s grpo3_latest.pt ] && CK=grpo3_latest.pt; echo "[rl] grpo run $try from $CK $(date -u)"
 python3 sp_qwen3.py grpo --traces grpo_prompts.jsonl --max-len 12288 --S 32 --heads 8 --layers 3 --ffn 2048 --rw 1024 --C 128 --maxd 384 \
   --ckpt $CK --ft-layers 28 --opt8bit --ft-lr 5e-6 --lr 5e-5 --group 8 --grpo-q 16 --grpo-slots 48 --grpo-tok-budget 60000 \
-  --grpo-updates 60 --grpo-hours 70 --grpo-eval math96.jsonl --grpo-kl kv_full_p.jsonl --grpo-eval-every 6 --grpo-eval-seeds 2 \
-  --grpo-best0 160 --grpo-patience 0 --grpo-latest grpo3_latest.pt \
+  --grpo-updates 100 --grpo-hours 80 --grpo-kl kv_full_p.jsonl --grpo-eval-every 3 --grpo-patience 0 --grpo-latest grpo3_latest.pt \
   --grpo-hook "bash /root/put_rl.sh" \
   --seed 3 --out grpo3_best.pt --log $LG > run_grpo_$try.log 2>&1
 e=$?; echo "[rl] grpo exit $e: $(grep -E '^\[grpo\] (done|stop)' run_grpo_$try.log | tail -2 | tr '\n' ' ')"; grep -E "Error|Traceback" run_grpo_$try.log | tail -3 | sed 's/^/[rl] /'

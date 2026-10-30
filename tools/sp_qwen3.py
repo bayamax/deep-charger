@@ -752,7 +752,7 @@ def run_grpo(opt, FTP, MASTER):
         opt.load_state_dict(ck["opt"]); u0, best, bad = ck["u"] + 1, ck["best"], ck["bad"]
         torch.manual_seed(a.seed + 7919 * u0)
         log(f"[grpo] resumed from {os.path.basename(a.ckpt)} after update {ck['u']} (best {best}, {bad} checks since)")
-        ck["master"] = ck["opt"] = None
+        ck["master"] = ck["opt"] = ck["ft"] = None   # (the weights are in the model already) - the RAM is needed for the next save
 
     def save_latest(u):
         if not a.grpo_latest: return
@@ -773,6 +773,13 @@ def run_grpo(opt, FTP, MASTER):
         f"lr pooler {a.lr} / model {a.ft_lr}, temp {a.temp}, cap {a.max_len}, slots {a.grpo_slots}")
     if EV and a.grpo_eval0:
         best, _, files = evaluate(0); save_to(a.out); hook(*files, a.out)
+    HIST = {}
+    if os.path.exists(stem + "_train.jsonl"):   # resumed: keep the updates before u0 (a killed run may have logged one more)
+        keep = [l for l in open(stem + "_train.jsonl") if json.loads(l)["u"] < u0]
+        with open(stem + "_train.jsonl", "w") as fo: fo.writelines(keep)
+        for l in keep:
+            r = json.loads(l); HIST.setdefault(r["u"], []).append(r["reward"])
+    HIST = {k: sum(v) / len(v) for k, v in HIST.items()}
     trlog = open(stem + "_train.jsonl", "a")
     for u in range(u0, a.grpo_updates + 1):
         batch = [rows[order[((u - 1) * a.grpo_q + k) % len(order)]] for k in range(a.grpo_q)]
@@ -816,20 +823,26 @@ def run_grpo(opt, FTP, MASTER):
             v_[0] += sum(R[i * a.group:(i + 1) * a.group]); v_[1] += a.group
         mem = torch.cuda.max_memory_allocated() / 2**30 if dev == "cuda" else 0.0
         if dev == "cuda": torch.cuda.reset_peak_memory_stats()
+        HIST[u] = sum(R) / len(R); ks = sorted(HIST)
+        tr_ = (f" | reward of the last 6 updates {sum(HIST[k] for k in ks[-6:]) / len(ks[-6:]):.3f}, first 6 known "
+               f"{sum(HIST[k] for k in ks[:6]) / len(ks[:6]):.3f}") if len(ks) >= 6 else ""
         log(f"[grpo] u{u}: reward {sum(R) / len(R):.3f} (" + " ".join(f"{k} {v[0] / v[1]:.2f}" for k, v in sorted(by.items()))
             + f") | ended {sum(ended) / len(ended):.2f} | tokens {sum(len(g) for g in gens) / len(gens):.0f} | informative groups "
             f"{n_inf}/{a.grpo_q} | grad norm {gn:.3f}{f' | {oom} OOM' if oom else ''} | gen {t1 - t0:.0f}s, update {time.time() - t1:.0f}s"
-            f" | peak {mem:.1f} GiB, resident while generating {res:.1f} GiB, {a.grpo_slots} streams")
+            f" | peak {mem:.1f} GiB, resident while generating {res:.1f} GiB, {a.grpo_slots} streams" + tr_)
         late = a.grpo_hours and time.time() - t_start > 3600 * a.grpo_hours
-        if EV and (u % a.grpo_eval_every == 0 or late or u == a.grpo_updates):
-            tot, cl, files = evaluate(u)
-            if tot > best:
-                best, bad = tot, 0; save_to(a.out); hook(*files, a.out, stem + "_train.jsonl"); log(f"[grpo] u{u}: new best {tot}")
-            else:
-                bad += 1; hook(*files, stem + "_train.jsonl"); log(f"[grpo] u{u}: no gain ({tot} vs best {best}, {bad} in a row)")
-            save_latest(u); hook(a.grpo_latest) if a.grpo_latest else None
-            if a.grpo_patience and bad >= a.grpo_patience: log(f"[grpo] stop: {bad} evals without a new best"); break
-        elif not EV and u % 10 == 0: save_to(a.out)
+        if u % a.grpo_eval_every == 0 or late or u == a.grpo_updates:   # a check: eval (if any), teacher KL, state saved
+            if EV:
+                tot, cl, files = evaluate(u)
+                if tot > best:
+                    best, bad = tot, 0; save_to(a.out); hook(*files, a.out); log(f"[grpo] u{u}: new best {tot}")
+                else:
+                    bad += 1; hook(*files); log(f"[grpo] u{u}: no gain ({tot} vs best {best}, {bad} in a row)")
+            elif KLD:
+                offload(True); pooler.eval(); kl, dt_ = kl_check(); offload(False)
+                log(f"[grpo] u{u}: deployment KL to the teacher {kl:.4f} ({len(KLD)} traces, 4096, {dt_:.0f}s)")
+            save_latest(u); hook(*([a.grpo_latest] if a.grpo_latest else []), stem + "_train.jsonl")
+            if EV and a.grpo_patience and bad >= a.grpo_patience: log(f"[grpo] stop: {bad} evals without a new best"); break
         if late: log(f"[grpo] stop: {a.grpo_hours} h"); break
     if not EV: save_to(a.out)
     log(f"[grpo] done: best {best} ({time.time() - t_start:.0f}s)")
