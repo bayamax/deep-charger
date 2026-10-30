@@ -745,11 +745,12 @@ def run_grpo(opt, FTP, MASTER):
         return tot, cl, files
 
     order = list(range(len(rows))); random.Random(a.seed).shuffle(order)
-    best, bad, t_start, u0 = a.grpo_best0, 0, time.time(), 1
+    best, bad, t_start, u0, POS = a.grpo_best0, 0, time.time(), 1, {"n": 0}   # n: problems used so far
     if a.ckpt and "master" in ck:   # resume: the exact fp32 masters and the optimizer state, then the next update
         with torch.no_grad():
             for m_, v_ in zip(MASTER, ck["master"]): m_.copy_(v_)
         opt.load_state_dict(ck["opt"]); u0, best, bad = ck["u"] + 1, ck["best"], ck["bad"]
+        POS["n"] = ck.get("pos", ck["u"] * ck["args"]["grpo_q"])   # the next unused problem, even when --grpo-q changed
         torch.manual_seed(a.seed + 7919 * u0)
         log(f"[grpo] resumed from {os.path.basename(a.ckpt)} after update {ck['u']} (best {best}, {bad} checks since)")
         ck["master"] = ck["opt"] = ck["ft"] = None   # (the weights are in the model already) - the RAM is needed for the next save
@@ -758,7 +759,7 @@ def run_grpo(opt, FTP, MASTER):
         if not a.grpo_latest: return
         st_ = {"pooler": {k: v.detach().cpu() for k, v in pooler.state_dict().items()}, "args": vars(a),
                "ft": {k: v.detach().cpu() for k, v in llm.state_dict().items() if k in FT_SD},
-               "master": [m_.detach().cpu() for m_ in MASTER], "opt": opt.state_dict(), "u": u, "best": best, "bad": bad}
+               "master": [m_.detach().cpu() for m_ in MASTER], "opt": opt.state_dict(), "u": u, "best": best, "bad": bad, "pos": POS["n"]}
         if os.path.exists(a.grpo_latest): os.remove(a.grpo_latest)   # ~14 GB at 1.7B: no room on the box for two copies
         torch.save(st_, a.grpo_latest); del st_
 
@@ -782,7 +783,7 @@ def run_grpo(opt, FTP, MASTER):
     HIST = {k: sum(v) / len(v) for k, v in HIST.items()}
     trlog = open(stem + "_train.jsonl", "a")
     for u in range(u0, a.grpo_updates + 1):
-        batch = [rows[order[((u - 1) * a.grpo_q + k) % len(order)]] for k in range(a.grpo_q)]
+        batch = [rows[order[(POS["n"] + k) % len(order)]] for k in range(a.grpo_q)]; POS["n"] += a.grpo_q
         pids = [tok.encode(r["prompt"], add_special_tokens=False) for r in batch]
         t0 = time.time(); offload(True); pooler.eval()
         res = torch.cuda.memory_allocated() / 2**30 if dev == "cuda" else 0.0   # what stays on the GPU while generating
