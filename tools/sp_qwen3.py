@@ -788,8 +788,8 @@ def run_grpo(opt, FTP, MASTER):
         res = torch.cuda.memory_allocated() / 2**30 if dev == "cuda" else 0.0   # what stays on the GPU while generating
         gens, ended = gen_safe([p_ for p_ in pids for _ in range(a.group)])
         offload(False); pooler.train(); t1 = time.time()
-        R = [float(correct({"text": tok.decode(gens[i * a.group + k]), "gold": batch[i]["gold"]}))
-             for i in range(a.grpo_q) for k in range(a.group)]
+        R = [float("</think>" in t_ and correct({"text": t_, "gold": batch[i]["gold"]}))   # a \\boxed inside an unclosed
+             for i in range(a.grpo_q) for k in range(a.group) for t_ in [tok.decode(gens[i * a.group + k])]]   # thought earns 0
         for i in range(a.grpo_q):
             for k in range(a.group):
                 j = i * a.group + k
