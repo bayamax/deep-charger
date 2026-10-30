@@ -19,7 +19,9 @@
 # saved state, every 3 updates; up to 100 updates (earlier GRPO work needed ~100). Carries on from grpo3_latest.pt (u18).
 # serial 6 (same box, right after the u21 save): 32 problems x 4 samples per update instead of 16 x 8 - more problems per
 # step for the same compute (the user); a stricter reward (an answer whose thought never closes earns 0).
-SER=6
+# serial 7 (replaces 6 before the box picked it up): the user wants at least 12 answers per problem - 12 problems x 12
+# per update (144 answers, ~ the time of 16 x 8); a problem the model nearly always (or never) solves still splits.
+SER=7
 if [ -f /root/.boxrl_serial ] && [ "$(cat /root/.boxrl_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxrl_serial
 echo "[rl] preflight GPU: $(nvidia-smi --query-gpu=name,memory.used,memory.total --format=csv,noheader)"
@@ -32,7 +34,7 @@ tail -n 1 /root/w/sp.log 2>/dev/null | cut -c1-200
 nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv,noheader
 ST
 chmod +x /root/status.sh
-if [ ! -e /root/.job6 ]; then touch /root/.job6
+if [ ! -e /root/.job7 ]; then touch /root/.job7
   for J in $(pgrep -f "^bash /root/job.sh") $(pgrep -f "^bash /root/live.sh"); do pkill -P $J; kill $J; done; sleep 3
   pkill -f "sp_qwen3.py grpo"; sleep 10; rm -f /root/w/DONE_RL1
   cat > /root/live.sh <<'JOB'
@@ -79,7 +81,7 @@ fi
 for try in 1 2 3; do
 CK=spG.pt; [ -s grpo3_latest.pt ] && CK=grpo3_latest.pt; echo "[rl] grpo run $try from $CK $(date -u)"
 python3 sp_qwen3.py grpo --traces grpo_prompts.jsonl --max-len 12288 --S 32 --heads 8 --layers 3 --ffn 2048 --rw 1024 --C 128 --maxd 384 \
-  --ckpt $CK --ft-layers 28 --opt8bit --ft-lr 5e-6 --lr 5e-5 --group 4 --grpo-q 32 --grpo-slots 48 --grpo-tok-budget 60000 \
+  --ckpt $CK --ft-layers 28 --opt8bit --ft-lr 5e-6 --lr 5e-5 --group 12 --grpo-q 12 --grpo-slots 48 --grpo-tok-budget 60000 \
   --grpo-updates 100 --grpo-hours 80 --grpo-kl kv_full_p.jsonl --grpo-eval-every 3 --grpo-patience 0 --grpo-latest grpo3_latest.pt \
   --grpo-hook "bash /root/put_rl.sh" \
   --seed 3 --out grpo3_best.pt --log $LG > run_grpo_$try.log 2>&1
