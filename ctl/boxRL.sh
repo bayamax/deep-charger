@@ -26,7 +26,8 @@
 # 120 held-out GRPO problems (ctl/rl_eval120.jsonl: 24 each MATH L3/L4/L5, competition, MMLU-Pro), 2 seeds, cap 12288,
 # Qwen3 thinking sampling, under: full KV (vLLM), the raw window alone (base weights, --no-sp --rw 1056), G (SP) and the
 # GRPO u45 state. Results to archive/sp3/rl/ev120_*.jsonl, live log archive/sp3/rl_live.log, marker DONE_EV1.
-SER=8
+# serial 9: the user wants it as a rough reference only - 60 of the problems (12 per type), 1 seed.
+SER=9
 if [ -f /root/.boxrl_serial ] && [ "$(cat /root/.boxrl_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxrl_serial
 [ -d /venv/main/bin ] && export PATH=/venv/main/bin:$PATH
@@ -38,9 +39,9 @@ tail -n 1 /root/w/sp.log 2>/dev/null | cut -c1-200
 nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv,noheader
 ST
 chmod +x /root/status.sh
-if [ ! -e /root/.job8 ]; then touch /root/.job8
+if [ ! -e /root/.job9 ]; then touch /root/.job9
   for J in $(pgrep -f "^bash /root/job.sh") $(pgrep -f "^bash /root/live.sh"); do pkill -P $J; kill $J; done; sleep 3
-  pkill -f "sp_qwen3.py grpo"; sleep 15
+  pkill -f "sp_qwen3.py grpo"; pkill -f "pip install"; pkill -f gen_long_vllm; sleep 15; rm -f /root/w/ev_*.jsonl
   echo "[ev] GRPO stopped $(date -u); GPU now $(nvidia-smi --query-gpu=memory.used --format=csv,noheader)"
   cat > /root/live.sh <<'JOB'
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); cd /root/w
@@ -58,7 +59,10 @@ RAW=https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sh
 put() { for t in 1 2 3 4 5; do python3 -c "import sys; from huggingface_hub import HfApi; HfApi().upload_file(path_or_fileobj=sys.argv[1], path_in_repo='archive/sp3/'+sys.argv[2], repo_id='$R')" "$1" "$2" > put.err 2>&1 && { echo "[hub] $2"; return 0; }; sleep 60; done; echo "[hub] $2 FAILED"; }
 for f in tools/sp_qwen3.py tools/sp_mathcheck.py tools/gen_long_vllm.py ctl/rl_eval120.jsonl; do curl -sS -o $(basename $f) "$RAW/$f?nocache=$(date +%s)"; done
 echo "[ev] $(wc -l < rl_eval120.jsonl) problems; ckpts: spG $(stat -c %s spG.pt 2>/dev/null) grpo3_latest $(stat -c %s grpo3_latest.pt 2>/dev/null)"
-[ -x /root/vv/bin/python ] || { python3 -m venv /root/vv && /root/vv/bin/pip install -q vllm > vllm_install.log 2>&1; }
+python3 -c "
+import json; rs = [l for l in open('rl_eval120.jsonl')]
+open('rl_eval60.jsonl', 'w').writelines(rs[i] for i in range(len(rs)) if i % 24 < 12)"; echo "[ev] using $(wc -l < rl_eval60.jsonl) problems, 1 seed"
+/root/vv/bin/python -c "import vllm" 2>/dev/null || { [ -x /root/vv/bin/python ] || python3 -m venv /root/vv; /root/vv/bin/pip install -q vllm > vllm_install.log 2>&1; }
 /root/vv/bin/python -c "import vllm; print('[ev] vllm', vllm.__version__)" 2>&1 | tail -1
 LG=/root/w/sp.log; base="--S 32 --heads 8 --layers 3 --ffn 2048 --max-len 12288 --roll-cb --roll-batch 48"
 score() { python3 sp_mathcheck.py "$1" | sed "s/^/[ev] $2: /"; python3 -c "
@@ -69,14 +73,14 @@ for r in rs:
     s = r['src'] if r['src'].startswith('math') else r['src'].split('-')[0]; v = by.setdefault(s, [0, 0, 0])
     v[0] += correct(r); v[1] += '</think>' in r['text']; v[2] += 1
 print('[ev] ' + sys.argv[2] + ' by type: ' + ' | '.join(f'{k} {v[0]}/{v[2]} closed {v[1]}' for k, v in sorted(by.items())))" "$1" "$2"; }
-for sd in 1 2; do
-  t0=$(date +%s); /root/vv/bin/python gen_long_vllm.py rl_eval120.jsonl ev_full_s$sd.jsonl 12288 120 $sd > run_vllm_$sd.log 2>&1
+for sd in 1; do
+  t0=$(date +%s); /root/vv/bin/python gen_long_vllm.py rl_eval60.jsonl ev_full_s$sd.jsonl 12288 60 $sd > run_vllm_$sd.log 2>&1
   echo "[ev] full KV seed $sd done in $(( $(date +%s) - t0 )) s"; score ev_full_s$sd.jsonl "full KV s$sd"; bash /root/put_rl.sh ev_full_s$sd.jsonl
 done
 for cfg in "raw:--no-sp --rw 1056 --C 128 --maxd 0" "G:--rw 1024 --C 128 --maxd 384 --ckpt spG.pt" "u45:--rw 1024 --C 128 --maxd 384 --ckpt grpo3_latest.pt"; do
   n=${cfg%%:*}; a=${cfg#*:}
-  for sd in 1 2; do
-    t0=$(date +%s); python3 sp_qwen3.py rollout --traces rl_eval120.jsonl $base $a --seed $sd --roll-out ev_${n}_s$sd.jsonl --log $LG > run_ev_${n}_$sd.log 2>&1
+  for sd in 1; do
+    t0=$(date +%s); python3 sp_qwen3.py rollout --traces rl_eval60.jsonl $base $a --seed $sd --roll-out ev_${n}_s$sd.jsonl --log $LG > run_ev_${n}_$sd.log 2>&1
     echo "[ev] $n seed $sd done in $(( $(date +%s) - t0 )) s"; grep -E "Error|Traceback" run_ev_${n}_$sd.log | tail -2 | sed 's/^/[ev] /'
     score ev_${n}_s$sd.jsonl "$n s$sd"; bash /root/put_rl.sh ev_${n}_s$sd.jsonl
   done
