@@ -51,10 +51,10 @@
 # problems at the end; the cap / the switch to mass eviction are decided from these.
 # serial 16: the cap as a curriculum (the user): 1024 -> 2048 -> 4096 over the three segments (the traces stay whole, so the
 # thought's end is still trained); deployment KL at all three caps after each segment.
-# serial 17: no curriculum - the cap at 4096 from the start (the user), and the deployment KL at caps 2048 / 4096 / 8192 after
+# serial 17/18: no curriculum - the cap at 4096 from the start (the user), and the deployment KL at caps 2048 / 4096 / 8192 after
 # each segment shows where compressing more context into the soft prompts stops paying - on the 64 MATH teacher traces at
 # 16384 tokens (at 4096 the distant part never passes ~2900, so caps above that would read the same).
-SER=17
+SER=18
 if [ -f /root/.boxrl_serial ] && [ "$(cat /root/.boxrl_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxrl_serial
 [ -d /venv/main/bin ] && export PATH=/venv/main/bin:$PATH
@@ -66,13 +66,13 @@ tail -n 1 /root/w/sp.log 2>/dev/null | cut -c1-200
 nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv,noheader
 ST
 chmod +x /root/status.sh
-if [ ! -e /root/.job17 ]; then touch /root/.job17
+if [ ! -e /root/.job18 ]; then touch /root/.job18
   for J in $(pgrep -f "^bash /root/job.sh") $(pgrep -f "^bash /root/live.sh"); do pkill -P $J; kill $J; done; sleep 3
   pkill -f "sp_qwen3.py"; pkill -f "pip install"; pkill -f gen_long_vllm; sleep 5
   pkill -9 -f "/root/vv/bin/python"; pkill -9 -f EngineCore; pkill -9 -f "multiprocessing.spawn"; pkill -9 -f "multiprocessing.resource_tracker"
   sleep 15; rm -f /root/w/DONE_SZ1
   U=$(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits | head -1)
-  if [ "${U:-0}" -gt 2000 ]; then echo "[ev] GPU still holds $U MiB after the kills: $(ps -eo pid,rss,cmd --sort=-rss | head -4 | tr '\n' ';' | cut -c1-300)"; rm -f /root/.job17; exit 0; fi
+  if [ "${U:-0}" -gt 2000 ]; then echo "[ev] GPU still holds $U MiB after the kills: $(ps -eo pid,rss,cmd --sort=-rss | head -4 | tr '\n' ';' | cut -c1-300)"; rm -f /root/.job18; exit 0; fi
   echo "[ev] GRPO stopped $(date -u); GPU now $(nvidia-smi --query-gpu=memory.used --format=csv,noheader)"
   cat > /root/live.sh <<'JOB'
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); cd /root/w
