@@ -35,7 +35,11 @@
 # then needs a container restart, after which this serial runs again).
 # serial 12: two at a time ran out of memory (vLLM took more than its share, and two SP rollouts of 30 streams did not fit
 # together) - full KV (50/60) and G (36/60) finished; the raw window and GRPO u45 now one after the other.
-SER=12
+# serial 13: on the 60 problems full KV 50, raw window 44, G 36, GRPO u45 36 - the SP model is worse than the untouched
+# model with only the raw window. Split the cause: G's fine-tuned weights WITHOUT SP, under full KV (exported to a HF
+# folder for vLLM) and under the raw window alone. Near 50 / 44: the weights are fine and the SP path hurts; far below:
+# the fine-tuning damaged the model.
+SER=13
 if [ -f /root/.boxrl_serial ] && [ "$(cat /root/.boxrl_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxrl_serial
 [ -d /venv/main/bin ] && export PATH=/venv/main/bin:$PATH
@@ -47,13 +51,13 @@ tail -n 1 /root/w/sp.log 2>/dev/null | cut -c1-200
 nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv,noheader
 ST
 chmod +x /root/status.sh
-if [ ! -e /root/.job12 ]; then touch /root/.job12
+if [ ! -e /root/.job13 ]; then touch /root/.job13
   for J in $(pgrep -f "^bash /root/job.sh") $(pgrep -f "^bash /root/live.sh"); do pkill -P $J; kill $J; done; sleep 3
   pkill -f "sp_qwen3.py"; pkill -f "pip install"; pkill -f gen_long_vllm; sleep 5
   pkill -9 -f "/root/vv/bin/python"; pkill -9 -f EngineCore; pkill -9 -f "multiprocessing.spawn"; pkill -9 -f "multiprocessing.resource_tracker"
-  sleep 15; rm -f /root/w/ev_raw_s1.jsonl /root/w/ev_u45_s1.jsonl /root/w/DONE_EV1
+  sleep 15; rm -f /root/w/ev_Gfull_s1.jsonl /root/w/ev_Graw_s1.jsonl /root/w/DONE_EV1
   U=$(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits | head -1)
-  if [ "${U:-0}" -gt 2000 ]; then echo "[ev] GPU still holds $U MiB after the kills: $(ps -eo pid,rss,cmd --sort=-rss | head -4 | tr '\n' ';' | cut -c1-300)"; rm -f /root/.job12; exit 0; fi
+  if [ "${U:-0}" -gt 2000 ]; then echo "[ev] GPU still holds $U MiB after the kills: $(ps -eo pid,rss,cmd --sort=-rss | head -4 | tr '\n' ';' | cut -c1-300)"; rm -f /root/.job13; exit 0; fi
   echo "[ev] GRPO stopped $(date -u); GPU now $(nvidia-smi --query-gpu=memory.used --format=csv,noheader)"
   cat > /root/live.sh <<'JOB'
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); cd /root/w
@@ -93,8 +97,17 @@ run() {   # run NAME ARGS...: one SP-loop rollout of the 60 problems, scored and
 full() { t0=$(date +%s); VLLM_UTIL=0.45 /root/vv/bin/python gen_long_vllm.py rl_eval60.jsonl ev_full_s1.jsonl 12288 60 1 > run_vllm.log 2>&1
   echo "[ev] full KV done in $(( $(date +%s) - t0 )) s"; grep -E "Error|Traceback" run_vllm.log | tail -2 | sed 's/^/[ev] /'
   score ev_full_s1.jsonl "full KV"; bash /root/put_rl.sh ev_full_s1.jsonl; }
-run raw --no-sp --rw 1056 --C 128 --maxd 0 --roll-batch 48 --grpo-tok-budget 60000
-run u45 --rw 1024 --C 128 --maxd 384 --ckpt grpo3_latest.pt --roll-batch 48 --grpo-tok-budget 60000
+python3 -c "
+import torch; from transformers import AutoModelForCausalLM, AutoTokenizer
+m = AutoModelForCausalLM.from_pretrained('Qwen/Qwen3-1.7B', dtype=torch.bfloat16)
+ck = torch.load('spG.pt', map_location='cpu', weights_only=False); r = m.load_state_dict(ck['ft'], strict=False)
+print('[ev] G weights exported:', len(ck['ft']), 'tensors replaced, unexpected', len(r.unexpected_keys))
+m.save_pretrained('gw'); AutoTokenizer.from_pretrained('Qwen/Qwen3-1.7B').save_pretrained('gw')" 2>&1 | grep -E "^\[ev\]|Error"
+t0=$(date +%s); VLLM_MODEL=/root/w/gw VLLM_UTIL=0.88 /root/vv/bin/python gen_long_vllm.py rl_eval60.jsonl ev_Gfull_s1.jsonl 12288 60 1 > run_vllm_G.log 2>&1
+echo "[ev] Gfull done in $(( $(date +%s) - t0 )) s"; grep -E "Error|Traceback" run_vllm_G.log | tail -2 | sed 's/^/[ev] /'
+pkill -9 -f "/root/vv/bin/python"; pkill -9 -f EngineCore; sleep 10
+score ev_Gfull_s1.jsonl "G weights, full KV"; bash /root/put_rl.sh ev_Gfull_s1.jsonl
+run Graw --no-sp --rw 1056 --C 128 --maxd 0 --ckpt spG.pt --roll-batch 48 --grpo-tok-budget 60000
 put $LG spP_ev.log; date -u > DONE_EV1; put DONE_EV1 DONE_EV1; echo "[ev] DONE $(date -u)"
 JOB
   setsid nohup bash -c 'bash /root/live.sh' > /dev/null 2>&1 < /dev/null &

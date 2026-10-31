@@ -13,7 +13,7 @@ seed = int(sys.argv[5]) if len(sys.argv) > 5 else 0
 rows = [json.loads(l) for l in open(src)]
 done = {json.loads(l)["id"] for l in open(dst)} if os.path.exists(dst) else set()
 todo = [r for r in rows if r["id"] not in done]
-llm = LLM("Qwen/Qwen3-1.7B", dtype="bfloat16", gpu_memory_utilization=float(os.environ.get("VLLM_UTIL", "0.88")),   # less to share the GPU
+llm = LLM(os.environ.get("VLLM_MODEL", "Qwen/Qwen3-1.7B"), dtype="bfloat16",   # VLLM_MODEL: e.g. a fine-tuned copy gpu_memory_utilization=float(os.environ.get("VLLM_UTIL", "0.88")),   # less to share the GPU
           max_model_len=mx + 1024, seed=seed)
 sp = SamplingParams(temperature=0.6, top_p=0.95, top_k=20, max_tokens=mx, seed=seed)
 t0 = time.time()
