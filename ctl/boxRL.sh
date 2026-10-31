@@ -73,7 +73,10 @@
 # more pass over 600 traces already seen. 64 blocks per trace (twice serial 21's - the traces are the scarce part). After
 # each segment the window-0 deployment KL (all / cap 2048) and the profile by chunk position. Marker DONE_W1 (none:
 # runs until stopped).
-SER=24
+# serial 25: one token at a time (the user): for 1024 positions t per trace, SP(a[:t]) alone -> token t (--spnext, window 0),
+# the past embedded and projected once per trace and each position attending to its prefix (Block.forward_prefix: the same
+# numbers as the padded path). Carries on from the serial-24 pooler; serial 24's loop is told to stop after its segment.
+SER=25
 if [ -f /root/.boxrl_serial ] && [ "$(cat /root/.boxrl_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxrl_serial
 [ -d /venv/main/bin ] && export PATH=/venv/main/bin:$PATH
@@ -216,5 +219,54 @@ date -u > DONE_W1; echo "[w0] DONE $(date -u)"
 JOB
   setsid nohup bash -c 'bash /root/job24.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
   echo "[w0] waiting for serial 21 to finish $(date -u)"
+fi
+if [ ! -e /root/.job25 ]; then touch /root/.job25
+  cat > /root/live25.sh <<'JOB'
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); cd /root/w
+while [ ! -e DONE_W2 ]; do
+  { grep -E "^\[(sz|w0|hub)\]|Error|Traceback" w.log | tail -n 30; grep "\[sp\] train .* trace" sp.log 2>/dev/null | tail -n 6; nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv,noheader; date -u; } > rl_live.log 2>&1
+  python3 -c "from huggingface_hub import HfApi; HfApi().upload_file(path_or_fileobj='rl_live.log', path_in_repo='archive/sp3/rl_live.log', repo_id='baya1116/hypernet-sp-distill')" > /dev/null 2>&1
+  sleep 600
+done
+JOB
+  cat > /root/job25.sh <<'JOB'
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); cd /root/w
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+R=baya1116/hypernet-sp-distill; H=https://huggingface.co/$R/resolve/main
+put() { for t in 1 2 3 4 5; do python3 -c "import sys; from huggingface_hub import HfApi; HfApi().upload_file(path_or_fileobj=sys.argv[1], path_in_repo='archive/sp3/'+sys.argv[2], repo_id='$R')" "$1" "$2" > put.err 2>&1 && { echo "[hub] $2"; return 0; }; sleep 60; done; echo "[hub] $2 FAILED"; }
+get() { for t in 1 2 3; do curl -sSfL -H "Authorization: Bearer $HF_TOKEN" -o "$2" "$H/$1" && return 0; sleep 10; done; return 1; }
+touch STOP_W1; while [ ! -e DONE_W1 ]; do sleep 60; done   # serial 24's loop ends after its current segment
+setsid nohup bash -c 'bash /root/live25.sh' > /dev/null 2>&1 < /dev/null &
+echo "[w0] one-token shift (spnext, window 0, 1024 positions per trace, the past projected once) continues from spW0.pt $(date -u)"
+LG=/root/w/sp.log; base="--S 32 --heads 8 --layers 3 --ffn 2048 --rw 0 --C 128 --maxd 0"
+klm() { python3 sp_qwen3.py eval --traces kv_full_p.jsonl --max-len 16384 $base "$@" --log $LG 2>&1 | grep -oP "KL \K[0-9.]+" | tail -1; }
+prof() { python3 sp_qwen3.py profile --traces kv_full_p.jsonl --n 16 --max-len 16384 $base --ckpt spW0.pt 2>&1 | grep -oP "window +\S+: KL \K[0-9.]+" | tr '\n' ' '; }
+cp poolZ.jsonl seen.jsonl; seg=0
+while [ ! -e STOP_W2 ]; do seg=$((seg + 1)); src=""
+  for n in $(python3 -c "
+from huggingface_hub import HfApi
+fs = sorted(f.rsplit('/', 1)[-1][3:5] for f in HfApi().list_repo_files('$R') if f.startswith('archive/sp3/more/gm_'))
+print(' '.join(fs))"); do [ -e trained25_$n ] && continue
+    get archive/sp3/more/gm_$n.jsonl gm_$n.jsonl && python3 -c "
+import json, sys
+rs = [json.loads(l) for l in open(sys.argv[1])]
+ok = [r for r in rs if r.get('finish') == 'stop' and '</think>' in r['text']]
+open('cur.jsonl', 'w').writelines(json.dumps(r) + '\n' for r in ok); open('seen.jsonl', 'a').writelines(json.dumps(r) + '\n' for r in ok)
+print(len(ok))" gm_$n.jsonl > cur_n.txt && { touch trained25_$n; src="new part $n ($(cat cur_n.txt) traces)"; break; }
+  done
+  if [ -z "$src" ]; then python3 -c "
+import random, sys; rs = open('seen.jsonl').readlines(); random.seed(int(sys.argv[1])); random.shuffle(rs); open('cur.jsonl', 'w').writelines(rs[:600])" $((1000 + seg)); src="another pass, 600 of $(wc -l < seen.jsonl) seen"; fi
+  t0=$(date +%s)
+  python3 sp_qwen3.py train --traces cur.jsonl --max-len 16384 $base --ckpt spW0.pt --spnext --sn-win 1 --sn-pos 1024 --sn-batch 32 --sn-tokens 16384 --accum 8 --lr 1e-4 --seed $((200 + seg)) --out spW_next.pt --log $LG > run_w0c_$seg.log 2>&1
+  grep -E "Error|Traceback" run_w0c_$seg.log | tail -2 | sed "s/^/[w0] $seg: /"
+  [ -s spW_next.pt ] || { echo "[w0] $seg: no checkpoint - stop"; break; }
+  mv spW_next.pt spW0.pt
+  echo "[w0] $seg ($src, $(( $(date +%s) - t0 )) s): train KL $(grep -oP 'KL \K[0-9.]+' run_w0c_$seg.log | tail -1), window-0 deployment KL all $(klm --ckpt spW0.pt) / cap 2048 $(klm --ckpt spW0.pt --fifo 2048) | by position (1st, 2-8, 9-64, 65+): $(prof)"
+  put spW0.pt spW0_window0.pt; put $LG spP_w0.log
+done
+date -u > DONE_W2; echo "[w0] DONE $(date -u)"
+JOB
+  setsid nohup bash -c 'bash /root/job25.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
+  echo "[w0] serial 25 armed: waits for serial 24's segment, then the one-token shift $(date -u)"
 fi
 # CTL-END

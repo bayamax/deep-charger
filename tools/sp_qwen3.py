@@ -174,6 +174,28 @@ class Block(nn.Module):
         q = q + self.ffn(self.lnq3(q))
         return (q, w) if return_w else q
 
+    def project_past(self, past):
+        """keys and values of ONE past (1, L, H), projected once (the cross-attention's own weights): (heads, L, d) each"""
+        H = past.size(-1); h = self.cross.num_heads; d = H // h; W, b = self.cross.in_proj_weight, self.cross.in_proj_bias
+        kn = self.lnk(past)[0]
+        K = F.linear(kn, W[H:2 * H], b[H:2 * H]).view(-1, h, d).permute(1, 0, 2)
+        V = F.linear(kn, W[2 * H:], b[2 * H:]).view(-1, h, d).permute(1, 0, 2)
+        return K, V
+
+    def forward_prefix(self, q, K, V, lens):
+        """forward() for B query sets over prefixes of one shared past: row b attends to the first lens[b] tokens of K / V
+        (projected by project_past), so the past is projected once per trace instead of once per position."""
+        B, S, H = q.shape; h = self.cross.num_heads; d = H // h; W, b = self.cross.in_proj_weight, self.cross.in_proj_bias
+        L = K.size(1)
+        qp = F.linear(self.lnq1(q), W[:H], b[:H]).view(B, S, h, d).permute(2, 0, 1, 3).reshape(h, B * S, d)
+        sc = torch.bmm(qp, K.transpose(1, 2)).view(h, B, S, L) / math.sqrt(d)
+        beyond = torch.arange(L, device=q.device)[None] >= lens[:, None]; beyond[:, 0] = False   # (B, L)
+        w = sc.masked_fill(beyond[None, :, None], float("-inf")).softmax(-1).view(h, B * S, L)
+        o = torch.bmm(w, V).view(h, B, S, d).permute(1, 2, 0, 3).reshape(B, S, H)
+        q = q + self.cross.out_proj(o)
+        s_, _ = self.selfa(self.lnq2(q), self.lnq2(q), self.lnq2(q), need_weights=False); q = q + s_
+        return q + self.ffn(self.lnq3(q))
+
 
 class AttnPoolSP(nn.Module):
     def __init__(self, Hd, n_sp, heads, layers, ffn, target_norm):
@@ -213,6 +235,18 @@ class AttnPoolSP(nn.Module):
         return (sp, mass) if want_mass else sp
 
     def forward(self, past_emb, kpm=None): return self._run(past_emb, False, kpm)   # kpm: (B, L) True = padding
+
+    def forward_prefix(self, past_emb, lens):
+        """SP for B prefixes (lengths lens) of ONE past (1, L, H) - the same result as forward() on the padded prefixes
+        (positions counted from the start, i.e. not pe_rev), with the past embedded and projected once."""
+        L = past_emb.size(1); B = lens.numel()
+        past = past_emb + self.pe(L, past_emb.device).unsqueeze(0)
+        q = self.query.unsqueeze(0).expand(B, -1, -1).contiguous()
+        for blk in self.blocks:
+            K, V = blk.project_past(past)
+            q = blk.forward_prefix(q, K, V, lens)
+        sp = self.ln_out(q)
+        return sp / sp.norm(dim=-1, keepdim=True).clamp(min=1e-6) * self.out_scale.abs()
     def forward_with_mass(self, past_emb): return self._run(past_emb, True)
 
 
@@ -493,8 +527,10 @@ def run_trace_spnext(ids, P, ref_h=None):
         pc = DynamicCache(); llm(input_ids=ids[None, :P], past_key_values=pc, use_cache=True)
         pkv = [tuple(t for t in kv_of(pc, li)) for li in range(NL)]
         snaps = {}; kept = torch.zeros(1, 0, dtype=torch.long, device=dev); absorbed = 0
-        for g in range(0, La, a.sn_step):
+        for g in ([] if (a.maxd == 0 and not a.fifo and not pooler.pe_rev) else range(0, La, a.sn_step)):
             kept, absorbed = update_buffer(kept, absorbed, a_ids, g); snaps[g] = kept[0]
+    shared = a.maxd == 0 and not a.fifo and not pooler.pe_rev        # the buffer before t is just a[:t]: project the past once
+    past_full = embed(a_ids).float() if shared else None               # (1, La, H)
     pos = list(range(t0, La - w + 1))
     npos = max(16, a.sn_pos // w) if a.sn_pos else 0                  # about the same scored tokens per trace at every w
     if npos and len(pos) > npos: pos = sorted(random.sample(pos, npos))
@@ -502,16 +538,19 @@ def run_trace_spnext(ids, P, ref_h=None):
     bsz = max(1, min(a.sn_batch, a.sn_tokens // (P + a.S + w), max(1, 256 // min(w, 256))))   # <= ~256 scored rows (B x w x vocab) per forward
     for i in range(0, len(pos), bsz):
         ts = pos[i:i + bsz]; B = len(ts)
-        bufs = []
-        for t in ts:
-            g = (t // a.sn_step) * a.sn_step
-            bufs.append(torch.cat([snaps[g], a_ids[0, g:t]]))             # snapshot + the raw tokens since it
-        Lb = max(1, max(len(x) for x in bufs))
-        pad = torch.zeros(B, Lb, dtype=torch.long, device=dev); kpm = torch.ones(B, Lb, dtype=torch.bool, device=dev)
-        for j, x in enumerate(bufs):
-            pad[j, :len(x)] = x; kpm[j, :len(x)] = False
-        kpm[:, 0] = False                                                  # an empty buffer still attends to one slot
-        sp = pooler(embed(pad).float(), kpm=kpm)                          # (B, S, H)
+        if shared:
+            sp = pooler.forward_prefix(past_full, torch.tensor(ts, device=dev))   # (B, S, H)
+        else:
+            bufs = []
+            for t in ts:
+                g = (t // a.sn_step) * a.sn_step
+                bufs.append(torch.cat([snaps[g], a_ids[0, g:t]]))             # snapshot + the raw tokens since it
+            Lb = max(1, max(len(x) for x in bufs))
+            pad = torch.zeros(B, Lb, dtype=torch.long, device=dev); kpm = torch.ones(B, Lb, dtype=torch.bool, device=dev)
+            for j, x in enumerate(bufs):
+                pad[j, :len(x)] = x; kpm[j, :len(x)] = False
+            kpm[:, 0] = False                                                  # an empty buffer still attends to one slot
+            sp = pooler(embed(pad).float(), kpm=kpm)                          # (B, S, H)
         x_in = sp.to(dt)
         if w > 1:                                                          # the raw window after SP_t: a[t : t+w-1]
             raw = torch.stack([a_ids[0, t:t + w - 1] for t in ts])
@@ -533,6 +572,8 @@ def run_trace_spnext(ids, P, ref_h=None):
         (kl.sum() / 1000.0).backward()
         K += kl.sum().item(); A_ += (lp.argmax(-1) == tr.argmax(-1)).float().sum().item(); N += B * wk
         SNW["k0"] += kl[:, 0].sum().item(); SNW["n0"] += B
+        for t, v in zip(ts, kl[:, 0].tolist()):   # window-0 KL by the length of the past (as --par logs it)
+            bk = sum(t >= e for e in DB_EDGES); d_ = DBK.setdefault(bk, [0.0, 0]); d_[0] += v; d_[1] += 1
     return K, A_, N
 
 
