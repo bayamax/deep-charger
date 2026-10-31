@@ -87,6 +87,9 @@ ap.add_argument("--end-train", action="store_true", help="--par: also train shor
                 "block), and always one block holding the end of the thought")
 ap.add_argument("--end-weight", type=float, default=1.0, help="--par: KL weight of the rows from 32 tokens before </think> "
                 "to 8 after")
+ap.add_argument("--par-deploy", action="store_true", help="--par: score only the rows the deployment loop scores - in the block "
+                "[SP(tokens before b) | a[b : b+rw+C]] the last C (raw window >= rw), i.e. the chunk after a full raw window; the "
+                "rows with a short window (SP alone, never seen in deployment) are left out")
 ap.add_argument("--end-stat", action="store_true", help="eval: how much the student and the teacher want to stop thinking")
 ap.add_argument("--presence", type=float, default=0.0, help="rollout: presence penalty on the logits of tokens already generated")
 ap.add_argument("--no-sp", action="store_true", help="eval/rollout baseline without soft prompts: [raw window | chunk] only "
@@ -432,7 +435,10 @@ def run_trace_par(ids, P, ref_h=None):
         pkv = [tuple(t for t in kv_of(pc, li)) for li in range(NL)]
     kept = torch.zeros(1, 0, dtype=torch.long, device=dev); absorbed = 0
     K = A_ = N = 0.0
-    if a.end_train and La > a.C + 16: bounds, pick = [0] + bounds, pick | {0}   # + the plain window from the start (the
+    if a.par_deploy:   # a block's scored chunk must exist: a[b+rw ...]
+        bounds = [b for b in bounds if b + a.rw < La]; pick = {b for b in pick if b + a.rw < La}
+        if not pick: return 0.0, 0.0, 0
+    if a.end_train and La > a.C + 16 and not a.par_deploy: bounds, pick = [0] + bounds, pick | {0}   # + the plain window from the start (the
     # deployment's first chunks: nothing distant yet, no SP) - scored from token C, where the teacher rows begin
     for b in bounds:
         kept, absorbed = update_buffer(kept, absorbed, a_ids, b)
@@ -443,6 +449,7 @@ def run_trace_par(ids, P, ref_h=None):
         else:
             sp = pooler(embed(kept).float()) if kept.size(1) > 0 else pooler(torch.zeros(1, 0, H, device=dev))
             block = torch.cat([sp.to(dt), embed(a_ids[:, b:b + Lb - 1]).to(dt)], 1); h0, t0 = a.S - 1, b   # predicts a[b .. b+Lb-1]
+            if a.par_deploy: h0, t0 = h0 + a.rw, b + a.rw   # only a[b+rw ..]: the chunk after a full raw window
         nb = block.size(1); nr = b + Lb - t0
         cache = DynamicCache()
         for li, (k_, v_) in enumerate(pkv): cache.update(k_, v_, li)
