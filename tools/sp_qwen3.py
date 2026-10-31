@@ -57,6 +57,8 @@ ap.add_argument("--sn-pos", type=int, default=0, help="spnext: positions sampled
 ap.add_argument("--sn-win", default="1", help="spnext curriculum: tokens predicted after SP_t (1 = window 0 only; w = SP_t + the next "
                 "w-1 raw tokens, scoring windows 0..w-1), comma list stepped every --sn-win-every traces, e.g. 1,2,4,8,16")
 ap.add_argument("--sn-win-every", type=int, default=150, help="spnext curriculum: traces per --sn-win step")
+ap.add_argument("--sn-win-mix", action="store_true", help="spnext: instead of a curriculum, draw w from the --sn-win list at random "
+                "for every trace - window 0 and the longer windows trained together")
 ap.add_argument("--sn-win-plateau", type=float, default=0.0, help="spnext curriculum: step to the next w when the last 100 traces' "
                 "KL is not this fraction below the 100 before (0 = fixed --sn-win-every); after the last w plateaus, training stops")
 ap.add_argument("--sn-win-block", type=int, default=4, help="spnext plateau rule: logs (25 traces each) per compared block")
@@ -1021,7 +1023,8 @@ else:
             if dev == "cuda": torch.cuda.empty_cache()   # long traces' teacher passes leave large odd-sized blocks behind
         try:
             if a.spnext:
-                if a.sn_win_plateau: SNW["w"] = WINS[WI["i"]]
+                if a.sn_win_mix: SNW["w"] = random.choice(WINS)
+                elif a.sn_win_plateau: SNW["w"] = WINS[WI["i"]]
                 else: SNW["w"] = WINS[min(st // a.sn_win_every, len(WINS) - 1)]
                 k, g, n = run_trace_spnext(ids, P, ref_h=_on_dev(refs.pop(st, None)))
             elif a.spin: k, g, n = run_pair_spin(st)
