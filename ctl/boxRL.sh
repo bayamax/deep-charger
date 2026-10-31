@@ -63,7 +63,10 @@
 # 1024 window most of what it needs is in the window and its signal is weak). Base frozen, a fresh pooler, the whole past
 # (no cap); a block is [SP | 128] (8x lighter), 32 blocks per trace. Training KL by past length every 25 traces; after each
 # 600 the window-0 deployment KL with all / cap 4096 / cap 2048. No generation in this stage.
-SER=21
+# serial 22: serial 21 keeps running (its job is not touched); a side task profiles every new window-0 checkpoint by
+# position in the chunk (the first token = predicted from the soft prompts alone; old pooler G: ~5.0, E: 3.0) on 16
+# MATH teacher traces at 16384, into the live log.
+SER=22
 if [ -f /root/.boxrl_serial ] && [ "$(cat /root/.boxrl_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxrl_serial
 [ -d /venv/main/bin ] && export PATH=/venv/main/bin:$PATH
@@ -136,5 +139,19 @@ JOB
   setsid nohup bash -c 'bash /root/live.sh' > /dev/null 2>&1 < /dev/null &
   setsid nohup bash -c 'bash /root/job.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
   echo "[ev] job launched $(date -u)"
+fi
+if [ ! -e /root/.side22 ]; then touch /root/.side22
+  cat > /root/side22.sh <<'JOB'
+cd /root/w; last=0
+while [ ! -e DONE_SZ1 ]; do
+  if [ -s spW0.pt ] && [ $(stat -c %Y spW0.pt) -gt $last ]; then last=$(stat -c %Y spW0.pt); sleep 30
+    python3 sp_qwen3.py profile --traces kv_full_p.jsonl --n 16 --max-len 16384 --S 32 --heads 8 --layers 3 --ffn 2048 --rw 0 --C 128 --maxd 0 \
+      --ckpt spW0.pt 2>&1 | grep -E "profile" | sed "s/^/[sz] W0 profile ($(date -u +%H:%M)): /" | cut -c1-200 >> w.log
+  fi
+  sleep 120
+done
+JOB
+  setsid nohup bash -c 'bash /root/side22.sh' > /dev/null 2>&1 < /dev/null &
+  echo "[sz] side profiler launched $(date -u)"
 fi
 # CTL-END
