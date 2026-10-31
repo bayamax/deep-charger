@@ -39,30 +39,36 @@
 # model with only the raw window. Split the cause: G's fine-tuned weights WITHOUT SP, under full KV (exported to a HF
 # folder for vLLM) and under the raw window alone. Near 50 / 44: the weights are fine and the SP path hurts; far below:
 # the fine-tuning damaged the model.
-SER=13
+# serial 14: SP rebuilt from zero (the user): the base model untouched (no fine-tuned layers), a fresh pooler, trained only
+# on the rows the deployment loop scores (--par-deploy: the chunk after a full raw window of 1024), on the 2678 long
+# teacher traces, 600 per segment. Stage 1 without eviction (maxd 0: everything that left the window goes into the pooler -
+# an untrained pooler's attention mass would throw away what it has not yet learned to need; first learn to compress a
+# finite text into the soft prompts, the hypernet's own ability), 3 segments; stage 2 with eviction (maxd 384), the rest.
+# Deployment KL after each segment with and without eviction; the 60 GRPO problems after each stage.
+SER=14
 if [ -f /root/.boxrl_serial ] && [ "$(cat /root/.boxrl_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxrl_serial
 [ -d /venv/main/bin ] && export PATH=/venv/main/bin:$PATH
 [ -s /root/.hf_token ] || { [ -n "$HF_TOKEN" ] && printf '%s' "$HF_TOKEN" > /root/.hf_token && chmod 600 /root/.hf_token; }
 mkdir -p /root/w
 cat > /root/status.sh <<'ST'
-grep -E "^\[(ev|hub)\]|Error|Traceback" /root/w/w.log 2>/dev/null | tail -n 3 | cut -c1-300
+grep -E "^\[(sz|ev|hub)\]|Error|Traceback" /root/w/w.log 2>/dev/null | tail -n 3 | cut -c1-300
 tail -n 1 /root/w/sp.log 2>/dev/null | cut -c1-200
 nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv,noheader
 ST
 chmod +x /root/status.sh
-if [ ! -e /root/.job13 ]; then touch /root/.job13
+if [ ! -e /root/.job14 ]; then touch /root/.job14
   for J in $(pgrep -f "^bash /root/job.sh") $(pgrep -f "^bash /root/live.sh"); do pkill -P $J; kill $J; done; sleep 3
   pkill -f "sp_qwen3.py"; pkill -f "pip install"; pkill -f gen_long_vllm; sleep 5
   pkill -9 -f "/root/vv/bin/python"; pkill -9 -f EngineCore; pkill -9 -f "multiprocessing.spawn"; pkill -9 -f "multiprocessing.resource_tracker"
-  sleep 15; rm -f /root/w/ev_Gfull_s1.jsonl /root/w/ev_Graw_s1.jsonl /root/w/DONE_EV1
+  sleep 15; rm -f /root/w/DONE_SZ1
   U=$(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits | head -1)
-  if [ "${U:-0}" -gt 2000 ]; then echo "[ev] GPU still holds $U MiB after the kills: $(ps -eo pid,rss,cmd --sort=-rss | head -4 | tr '\n' ';' | cut -c1-300)"; rm -f /root/.job13; exit 0; fi
+  if [ "${U:-0}" -gt 2000 ]; then echo "[ev] GPU still holds $U MiB after the kills: $(ps -eo pid,rss,cmd --sort=-rss | head -4 | tr '\n' ';' | cut -c1-300)"; rm -f /root/.job14; exit 0; fi
   echo "[ev] GRPO stopped $(date -u); GPU now $(nvidia-smi --query-gpu=memory.used --format=csv,noheader)"
   cat > /root/live.sh <<'JOB'
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); cd /root/w
-while [ ! -e DONE_EV1 ]; do
-  { grep -E "^\[(ev|hub)\]|Error|Traceback" w.log | tail -n 30; tail -n 2 sp.log 2>/dev/null; nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv,noheader; date -u; } > rl_live.log 2>&1
+while [ ! -e DONE_SZ1 ]; do
+  { grep -E "^\[(sz|ev|hub)\]|Error|Traceback" w.log | tail -n 30; tail -n 2 sp.log 2>/dev/null; nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv,noheader; date -u; } > rl_live.log 2>&1
   python3 -c "from huggingface_hub import HfApi; HfApi().upload_file(path_or_fileobj='rl_live.log', path_in_repo='archive/sp3/rl_live.log', repo_id='baya1116/hypernet-sp-distill')" > /dev/null 2>&1
   sleep 600
 done
@@ -70,45 +76,48 @@ JOB
   cat > /root/job.sh <<'JOB'
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); cd /root/w
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
-R=baya1116/hypernet-sp-distill
+R=baya1116/hypernet-sp-distill; H=https://huggingface.co/$R/resolve/main
 RAW=https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i
 put() { for t in 1 2 3 4 5; do python3 -c "import sys; from huggingface_hub import HfApi; HfApi().upload_file(path_or_fileobj=sys.argv[1], path_in_repo='archive/sp3/'+sys.argv[2], repo_id='$R')" "$1" "$2" > put.err 2>&1 && { echo "[hub] $2"; return 0; }; sleep 60; done; echo "[hub] $2 FAILED"; }
-for f in tools/sp_qwen3.py tools/sp_mathcheck.py tools/gen_long_vllm.py ctl/rl_eval120.jsonl; do curl -sS -o $(basename $f) "$RAW/$f?nocache=$(date +%s)"; done
-echo "[ev] $(wc -l < rl_eval120.jsonl) problems; ckpts: spG $(stat -c %s spG.pt 2>/dev/null) grpo3_latest $(stat -c %s grpo3_latest.pt 2>/dev/null)"
+get() { for t in 1 2 3; do curl -sSfL -H "Authorization: Bearer $HF_TOKEN" -o "$2" "$H/$1" && return 0; sleep 10; done; return 1; }
+for f in tools/sp_qwen3.py tools/sp_mathcheck.py ctl/rl_eval120.jsonl; do curl -sS -o $(basename $f) "$RAW/$f?nocache=$(date +%s)"; done
 python3 -c "
-import json; rs = [l for l in open('rl_eval120.jsonl')]
-open('rl_eval60.jsonl', 'w').writelines(rs[i] for i in range(len(rs)) if i % 24 < 12)"; echo "[ev] using $(wc -l < rl_eval60.jsonl) problems, 1 seed"
-/root/vv/bin/python -c "import vllm" 2>/dev/null || { [ -x /root/vv/bin/python ] || python3 -m venv /root/vv; /root/vv/bin/pip install -q vllm > vllm_install.log 2>&1; }
-/root/vv/bin/python -c "import vllm; print('[ev] vllm', vllm.__version__)" 2>&1 | tail -1
-LG=/root/w/sp.log; base="--S 32 --heads 8 --layers 3 --ffn 2048 --max-len 12288 --roll-cb"
-score() { python3 sp_mathcheck.py "$1" | sed "s/^/[ev] $2: /"; python3 -c "
+rs = open('rl_eval120.jsonl').readlines(); open('rl_eval60.jsonl', 'w').writelines(rs[i] for i in range(len(rs)) if i % 24 < 12)"
+for f in longtr_math_train_16k:lt_math longtr_diverse_16k:lt_div longtr2_mixed_16k:lt2; do [ -s ${f#*:}.jsonl ] || get archive/sp3/${f%%:*}.jsonl ${f#*:}.jsonl; done
+python3 -c "
+import json, random
+rs = [json.loads(l) for f in ('lt_math.jsonl', 'lt_div.jsonl', 'lt2.jsonl') for l in open(f)]
+ok = [r for r in rs if r.get('finish') == 'stop' and '</think>' in r['text']]; random.seed(0); random.shuffle(ok)
+open('poolZ.jsonl', 'w').writelines(json.dumps(r) + '\n' for r in ok); print('[sz] pool', len(ok), 'finished long teacher traces')"
+LG=/root/w/sp.log; base="--S 32 --heads 8 --layers 3 --ffn 2048 --rw 1024 --C 128"
+klm() { python3 sp_qwen3.py eval --traces kv_full_p.jsonl --max-len 4096 $base "$@" --log $LG 2>&1 | grep -oP "KL \K[0-9.]+" | tail -1; }
+echo "[sz] reference deployment KL (64 MATH traces, 4096): raw window alone $(klm --no-sp --rw 1056 --maxd 0), G $(klm --ckpt spG.pt --maxd 384)"
+gen() {   # gen NAME CKPT: the 60 GRPO problems, 1 seed, scored by type
+  python3 sp_qwen3.py rollout --traces rl_eval60.jsonl $base --maxd $3 --max-len 12288 --roll-cb --roll-batch 48 --grpo-tok-budget 60000 --ckpt $2 --seed 1 --roll-out ev_$1_s1.jsonl --log $LG > run_ev_$1.log 2>&1
+  python3 -c "
 import json, sys; sys.path.insert(0, '.')
 from sp_mathcheck import correct
 rs = [json.loads(l) for l in open(sys.argv[1])]; by = {}
 for r in rs:
-    s = r['src'] if r['src'].startswith('math') else r['src'].split('-')[0]; v = by.setdefault(s, [0, 0, 0])
-    v[0] += correct(r); v[1] += '</think>' in r['text']; v[2] += 1
-print('[ev] ' + sys.argv[2] + ' by type: ' + ' | '.join(f'{k} {v[0]}/{v[2]} closed {v[1]}' for k, v in sorted(by.items())))" "$1" "$2"; }
-run() {   # run NAME ARGS...: one SP-loop rollout of the 60 problems, scored and uploaded
-  n=$1; shift; t0=$(date +%s)
-  python3 sp_qwen3.py rollout --traces rl_eval60.jsonl $base --roll-batch 30 "$@" --seed 1 --roll-out ev_${n}_s1.jsonl --log $LG > run_ev_$n.log 2>&1
-  echo "[ev] $n done in $(( $(date +%s) - t0 )) s"; grep -E "Error|Traceback" run_ev_$n.log | tail -2 | sed 's/^/[ev] /'
-  score ev_${n}_s1.jsonl "$n"; bash /root/put_rl.sh ev_${n}_s1.jsonl; }
-full() { t0=$(date +%s); VLLM_UTIL=0.45 /root/vv/bin/python gen_long_vllm.py rl_eval60.jsonl ev_full_s1.jsonl 12288 60 1 > run_vllm.log 2>&1
-  echo "[ev] full KV done in $(( $(date +%s) - t0 )) s"; grep -E "Error|Traceback" run_vllm.log | tail -2 | sed 's/^/[ev] /'
-  score ev_full_s1.jsonl "full KV"; bash /root/put_rl.sh ev_full_s1.jsonl; }
-python3 -c "
-import torch; from transformers import AutoModelForCausalLM, AutoTokenizer
-m = AutoModelForCausalLM.from_pretrained('Qwen/Qwen3-1.7B', dtype=torch.bfloat16)
-ck = torch.load('spG.pt', map_location='cpu', weights_only=False); r = m.load_state_dict(ck['ft'], strict=False)
-print('[ev] G weights exported:', len(ck['ft']), 'tensors replaced, unexpected', len(r.unexpected_keys))
-m.save_pretrained('gw'); AutoTokenizer.from_pretrained('Qwen/Qwen3-1.7B').save_pretrained('gw')" 2>&1 | grep -E "^\[ev\]|Error"
-t0=$(date +%s); VLLM_MODEL=/root/w/gw VLLM_UTIL=0.88 /root/vv/bin/python gen_long_vllm.py rl_eval60.jsonl ev_Gfull_s1.jsonl 12288 60 1 > run_vllm_G.log 2>&1
-echo "[ev] Gfull done in $(( $(date +%s) - t0 )) s"; grep -E "Error|Traceback" run_vllm_G.log | tail -2 | sed 's/^/[ev] /'
-pkill -9 -f "/root/vv/bin/python"; pkill -9 -f EngineCore; sleep 10
-score ev_Gfull_s1.jsonl "G weights, full KV"; bash /root/put_rl.sh ev_Gfull_s1.jsonl
-run Graw --no-sp --rw 1056 --C 128 --maxd 0 --ckpt spG.pt --roll-batch 48 --grpo-tok-budget 60000
-put $LG spP_ev.log; date -u > DONE_EV1; put DONE_EV1 DONE_EV1; echo "[ev] DONE $(date -u)"
+    s = r['src'] if r['src'].startswith('math') else r['src'].split('-')[0]; v = by.setdefault(s, [0, 0])
+    v[0] += correct(r); v[1] += 1
+print('[sz] ' + sys.argv[2] + f': {sum(correct(r) for r in rs)}/{len(rs)} correct, closed {sum(\"</think>\" in r[\"text\"] for r in rs)} | ' + ' | '.join(f'{k} {v[0]}/{v[1]}' for k, v in sorted(by.items())))" ev_$1_s1.jsonl "$1 (60 GRPO problems; full KV 50, raw window 44, G 36)"
+  bash /root/put_rl.sh ev_$1_s1.jsonl; }
+N=$(wc -l < poolZ.jsonl); off=0; seg=0; cur=""
+while [ $off -lt $N ]; do seg=$((seg + 1))
+  t0=$(date +%s); MD=0; [ $seg -gt 3 ] && MD=384
+  [ $seg = 4 ] && { gen Z1 spZ.pt 0; cp spZ.pt spZ_stage1.pt; put spZ_stage1.pt spZ_stage1_noevict.pt; }
+  python3 sp_qwen3.py train --traces poolZ.jsonl --skip $off --n 600 --max-len 16384 $base --maxd $MD ${cur:+--ckpt $cur} --par --par-deploy --end-train --end-weight 4 \
+    --chunks-per-trace 8 --accum 8 --kl-rows 64 --lr 1e-4 --seed $seg --out spZ_next.pt --log $LG > run_sz_$seg.log 2>&1
+  grep -E "Error|Traceback" run_sz_$seg.log | tail -2 | sed "s/^/[sz] Z.$seg: /"
+  [ -s spZ_next.pt ] || { echo "[sz] Z.$seg: no checkpoint - stop"; break; }
+  mv spZ_next.pt spZ.pt; cur=spZ.pt; off=$((off + 600))
+  echo "[sz] Z.$seg (maxd $MD, traces $off, $(( $(date +%s) - t0 )) s): train KL $(grep -oP 'KL \K[0-9.]+' run_sz_$seg.log | tail -1), deployment KL no eviction $(klm --ckpt spZ.pt --maxd 0), evict 384 $(klm --ckpt spZ.pt --maxd 384)"
+  put spZ.pt spZ_frozen_deploy.pt; put $LG spP_sz.log
+done
+[ $seg -le 3 ] && gen Z1 spZ.pt 0
+gen Z2 spZ.pt 384
+date -u > DONE_SZ1; put DONE_SZ1 DONE_SZ1; echo "[sz] DONE $(date -u)"
 JOB
   setsid nohup bash -c 'bash /root/live.sh' > /dev/null 2>&1 < /dev/null &
   setsid nohup bash -c 'bash /root/job.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
