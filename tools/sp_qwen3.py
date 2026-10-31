@@ -87,6 +87,8 @@ ap.add_argument("--end-train", action="store_true", help="--par: also train shor
                 "block), and always one block holding the end of the thought")
 ap.add_argument("--end-weight", type=float, default=1.0, help="--par: KL weight of the rows from 32 tokens before </think> "
                 "to 8 after")
+ap.add_argument("--fifo", type=int, default=0, help="distant buffer: keep only the newest N tokens (oldest dropped first) - "
+                "caps the compression ratio without a learned selection; mass eviction (--maxd) still applies on top if set")
 ap.add_argument("--par-deploy", action="store_true", help="--par: score only the rows the deployment loop scores - in the block "
                 "[SP(tokens before b) | a[b : b+rw+C]] the last C (raw window >= rw), i.e. the chunk after a full raw window; the "
                 "rows with a short window (SP alone, never seen in deployment) are left out")
@@ -254,6 +256,7 @@ def evict_topk(ids, mass, maxD):
 def update_buffer(kept, absorbed, src, nd_end, feat=None):
     if nd_end > absorbed:
         kept = torch.cat([kept, src[:, absorbed:nd_end]], 1); absorbed = nd_end
+        if a.fifo and kept.size(1) > a.fifo: kept = kept[:, -a.fifo:]
         if a.maxd and kept.size(1) > a.maxd:
             _, mass = pooler.forward_with_mass(feat(kept) if feat else embed(kept).float())
             kept = evict_topk(kept, mass, a.maxd)

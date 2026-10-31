@@ -45,7 +45,11 @@
 # an untrained pooler's attention mass would throw away what it has not yet learned to need; first learn to compress a
 # finite text into the soft prompts, the hypernet's own ability), 3 segments; stage 2 with eviction (maxd 384), the rest.
 # Deployment KL after each segment with and without eviction; the 60 GRPO problems after each stage.
-SER=14
+# serial 15 (replaces 14 right after it started): no eviction on 16k traces would squeeze up to ~15k tokens into 32 soft
+# prompts, far past what attention pooling holds (the user found ~4096 the limit). Step 1 of a probe: the distant buffer
+# keeps the newest 2048 tokens (--fifo 2048, no learned selection), 3 segments of 600, deployment KL after each, the 60
+# problems at the end; the cap / the switch to mass eviction are decided from these.
+SER=15
 if [ -f /root/.boxrl_serial ] && [ "$(cat /root/.boxrl_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxrl_serial
 [ -d /venv/main/bin ] && export PATH=/venv/main/bin:$PATH
@@ -57,13 +61,13 @@ tail -n 1 /root/w/sp.log 2>/dev/null | cut -c1-200
 nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv,noheader
 ST
 chmod +x /root/status.sh
-if [ ! -e /root/.job14 ]; then touch /root/.job14
+if [ ! -e /root/.job15 ]; then touch /root/.job15
   for J in $(pgrep -f "^bash /root/job.sh") $(pgrep -f "^bash /root/live.sh"); do pkill -P $J; kill $J; done; sleep 3
   pkill -f "sp_qwen3.py"; pkill -f "pip install"; pkill -f gen_long_vllm; sleep 5
   pkill -9 -f "/root/vv/bin/python"; pkill -9 -f EngineCore; pkill -9 -f "multiprocessing.spawn"; pkill -9 -f "multiprocessing.resource_tracker"
   sleep 15; rm -f /root/w/DONE_SZ1
   U=$(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits | head -1)
-  if [ "${U:-0}" -gt 2000 ]; then echo "[ev] GPU still holds $U MiB after the kills: $(ps -eo pid,rss,cmd --sort=-rss | head -4 | tr '\n' ';' | cut -c1-300)"; rm -f /root/.job14; exit 0; fi
+  if [ "${U:-0}" -gt 2000 ]; then echo "[ev] GPU still holds $U MiB after the kills: $(ps -eo pid,rss,cmd --sort=-rss | head -4 | tr '\n' ';' | cut -c1-300)"; rm -f /root/.job15; exit 0; fi
   echo "[ev] GRPO stopped $(date -u); GPU now $(nvidia-smi --query-gpu=memory.used --format=csv,noheader)"
   cat > /root/live.sh <<'JOB'
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); cd /root/w
@@ -103,20 +107,17 @@ for r in rs:
     v[0] += correct(r); v[1] += 1
 print('[sz] ' + sys.argv[2] + f': {sum(correct(r) for r in rs)}/{len(rs)} correct, closed {sum(\"</think>\" in r[\"text\"] for r in rs)} | ' + ' | '.join(f'{k} {v[0]}/{v[1]}' for k, v in sorted(by.items())))" ev_$1_s1.jsonl "$1 (60 GRPO problems; full KV 50, raw window 44, G 36)"
   bash /root/put_rl.sh ev_$1_s1.jsonl; }
-N=$(wc -l < poolZ.jsonl); off=0; seg=0; cur=""
-while [ $off -lt $N ]; do seg=$((seg + 1))
-  t0=$(date +%s); MD=0; [ $seg -gt 3 ] && MD=384
-  [ $seg = 4 ] && { gen Z1 spZ.pt 0; cp spZ.pt spZ_stage1.pt; put spZ_stage1.pt spZ_stage1_noevict.pt; }
-  python3 sp_qwen3.py train --traces poolZ.jsonl --skip $off --n 600 --max-len 16384 $base --maxd $MD ${cur:+--ckpt $cur} --par --par-deploy --end-train --end-weight 4 \
+N=$(wc -l < poolZ.jsonl); off=0; seg=0; cur=""; F="--maxd 0 --fifo 2048"
+while [ $off -lt $N ] && [ $seg -lt 3 ]; do seg=$((seg + 1)); t0=$(date +%s)
+  python3 sp_qwen3.py train --traces poolZ.jsonl --skip $off --n 600 --max-len 16384 $base $F ${cur:+--ckpt $cur} --par --par-deploy --end-train --end-weight 4 \
     --chunks-per-trace 8 --accum 8 --kl-rows 64 --lr 1e-4 --seed $seg --out spZ_next.pt --log $LG > run_sz_$seg.log 2>&1
   grep -E "Error|Traceback" run_sz_$seg.log | tail -2 | sed "s/^/[sz] Z.$seg: /"
   [ -s spZ_next.pt ] || { echo "[sz] Z.$seg: no checkpoint - stop"; break; }
   mv spZ_next.pt spZ.pt; cur=spZ.pt; off=$((off + 600))
-  echo "[sz] Z.$seg (maxd $MD, traces $off, $(( $(date +%s) - t0 )) s): train KL $(grep -oP 'KL \K[0-9.]+' run_sz_$seg.log | tail -1), deployment KL no eviction $(klm --ckpt spZ.pt --maxd 0), evict 384 $(klm --ckpt spZ.pt --maxd 384)"
-  put spZ.pt spZ_frozen_deploy.pt; put $LG spP_sz.log
+  echo "[sz] Z.$seg (fifo 2048, traces $off, $(( $(date +%s) - t0 )) s): train KL $(grep -oP 'KL \K[0-9.]+' run_sz_$seg.log | tail -1), deployment KL $(klm --ckpt spZ.pt $F)"
+  put spZ.pt spZ_fifo2048.pt; put $LG spP_sz.log
 done
-[ $seg -le 3 ] && gen Z1 spZ.pt 0
-gen Z2 spZ.pt 384
+gen Z spZ.pt "0 --fifo 2048"
 date -u > DONE_SZ1; put DONE_SZ1 DONE_SZ1; echo "[sz] DONE $(date -u)"
 JOB
   setsid nohup bash -c 'bash /root/live.sh' > /dev/null 2>&1 < /dev/null &
