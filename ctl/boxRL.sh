@@ -51,7 +51,9 @@
 # problems at the end; the cap / the switch to mass eviction are decided from these.
 # serial 16: the cap as a curriculum (the user): 1024 -> 2048 -> 4096 over the three segments (the traces stay whole, so the
 # thought's end is still trained); deployment KL at all three caps after each segment.
-SER=16
+# serial 17: no curriculum - the cap at 4096 from the start (the user), and the deployment KL at caps 2048 / 4096 / 8192 after
+# each segment shows where compressing more context into the soft prompts stops paying.
+SER=17
 if [ -f /root/.boxrl_serial ] && [ "$(cat /root/.boxrl_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxrl_serial
 [ -d /venv/main/bin ] && export PATH=/venv/main/bin:$PATH
@@ -63,13 +65,13 @@ tail -n 1 /root/w/sp.log 2>/dev/null | cut -c1-200
 nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv,noheader
 ST
 chmod +x /root/status.sh
-if [ ! -e /root/.job16 ]; then touch /root/.job16
+if [ ! -e /root/.job17 ]; then touch /root/.job17
   for J in $(pgrep -f "^bash /root/job.sh") $(pgrep -f "^bash /root/live.sh"); do pkill -P $J; kill $J; done; sleep 3
   pkill -f "sp_qwen3.py"; pkill -f "pip install"; pkill -f gen_long_vllm; sleep 5
   pkill -9 -f "/root/vv/bin/python"; pkill -9 -f EngineCore; pkill -9 -f "multiprocessing.spawn"; pkill -9 -f "multiprocessing.resource_tracker"
   sleep 15; rm -f /root/w/DONE_SZ1
   U=$(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits | head -1)
-  if [ "${U:-0}" -gt 2000 ]; then echo "[ev] GPU still holds $U MiB after the kills: $(ps -eo pid,rss,cmd --sort=-rss | head -4 | tr '\n' ';' | cut -c1-300)"; rm -f /root/.job16; exit 0; fi
+  if [ "${U:-0}" -gt 2000 ]; then echo "[ev] GPU still holds $U MiB after the kills: $(ps -eo pid,rss,cmd --sort=-rss | head -4 | tr '\n' ';' | cut -c1-300)"; rm -f /root/.job17; exit 0; fi
   echo "[ev] GRPO stopped $(date -u); GPU now $(nvidia-smi --query-gpu=memory.used --format=csv,noheader)"
   cat > /root/live.sh <<'JOB'
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); cd /root/w
@@ -110,13 +112,13 @@ for r in rs:
 print('[sz] ' + sys.argv[2] + f': {sum(correct(r) for r in rs)}/{len(rs)} correct, closed {sum(\"</think>\" in r[\"text\"] for r in rs)} | ' + ' | '.join(f'{k} {v[0]}/{v[1]}' for k, v in sorted(by.items())))" ev_$1_s1.jsonl "$1 (60 GRPO problems; full KV 50, raw window 44, G 36)"
   bash /root/put_rl.sh ev_$1_s1.jsonl; }
 N=$(wc -l < poolZ.jsonl); off=0; seg=0; cur=""
-while [ $off -lt $N ] && [ $seg -lt 3 ]; do seg=$((seg + 1)); t0=$(date +%s); CAP=$((512 << seg)); F="--maxd 0 --fifo $CAP"
+while [ $off -lt $N ] && [ $seg -lt 3 ]; do seg=$((seg + 1)); t0=$(date +%s); CAP=4096; F="--maxd 0 --fifo $CAP"
   python3 sp_qwen3.py train --traces poolZ.jsonl --skip $off --n 600 --max-len 16384 $base $F ${cur:+--ckpt $cur} --par --par-deploy --end-train --end-weight 4 \
     --chunks-per-trace 8 --accum 8 --kl-rows 64 --lr 1e-4 --seed $seg --out spZ_next.pt --log $LG > run_sz_$seg.log 2>&1
   grep -E "Error|Traceback" run_sz_$seg.log | tail -2 | sed "s/^/[sz] Z.$seg: /"
   [ -s spZ_next.pt ] || { echo "[sz] Z.$seg: no checkpoint - stop"; break; }
   mv spZ_next.pt spZ.pt; cur=spZ.pt; off=$((off + 600))
-  echo "[sz] Z.$seg (fifo $CAP, traces $off, $(( $(date +%s) - t0 )) s): train KL $(grep -oP 'KL \K[0-9.]+' run_sz_$seg.log | tail -1), deployment KL at cap 1024 $(klm --ckpt spZ.pt --maxd 0 --fifo 1024) / 2048 $(klm --ckpt spZ.pt --maxd 0 --fifo 2048) / 4096 $(klm --ckpt spZ.pt --maxd 0 --fifo 4096)"
+  echo "[sz] Z.$seg (fifo $CAP, traces $off, $(( $(date +%s) - t0 )) s): train KL $(grep -oP 'KL \K[0-9.]+' run_sz_$seg.log | tail -1), deployment KL at cap 2048 $(klm --ckpt spZ.pt --maxd 0 --fifo 2048) / 4096 $(klm --ckpt spZ.pt --maxd 0 --fifo 4096) / 8192 $(klm --ckpt spZ.pt --maxd 0 --fifo 8192)"
   put spZ.pt spZ_fifo$CAP.pt; put $LG spP_sz.log
 done
 gen Z spZ.pt "0 --fifo $CAP"
