@@ -27,7 +27,10 @@
 # Qwen3 thinking sampling, under: full KV (vLLM), the raw window alone (base weights, --no-sp --rw 1056), G (SP) and the
 # GRPO u45 state. Results to archive/sp3/rl/ev120_*.jsonl, live log archive/sp3/rl_live.log, marker DONE_EV1.
 # serial 9: the user wants it as a rough reference only - 60 of the problems (12 per type), 1 seed.
-SER=9
+# serial 10: serial 9's restart left serial 8's vLLM engine on the GPU (its engine process outlived the killed parent), so
+# serial 9's vLLM died; now every GPU process is killed first, and the four runs go two at a time (the user wants it quick):
+# full KV (vLLM, half the GPU) with the raw window, then G with GRPO u45 (30 streams each).
+SER=10
 if [ -f /root/.boxrl_serial ] && [ "$(cat /root/.boxrl_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxrl_serial
 [ -d /venv/main/bin ] && export PATH=/venv/main/bin:$PATH
@@ -39,9 +42,10 @@ tail -n 1 /root/w/sp.log 2>/dev/null | cut -c1-200
 nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv,noheader
 ST
 chmod +x /root/status.sh
-if [ ! -e /root/.job9 ]; then touch /root/.job9
+if [ ! -e /root/.job10 ]; then touch /root/.job10
   for J in $(pgrep -f "^bash /root/job.sh") $(pgrep -f "^bash /root/live.sh"); do pkill -P $J; kill $J; done; sleep 3
-  pkill -f "sp_qwen3.py grpo"; pkill -f "pip install"; pkill -f gen_long_vllm; sleep 15; rm -f /root/w/ev_*.jsonl
+  pkill -f "sp_qwen3.py"; pkill -f "pip install"; pkill -f gen_long_vllm; sleep 5
+  nvidia-smi --query-compute-apps=pid --format=csv,noheader | xargs -r kill -9; sleep 10; rm -f /root/w/ev_*.jsonl
   echo "[ev] GRPO stopped $(date -u); GPU now $(nvidia-smi --query-gpu=memory.used --format=csv,noheader)"
   cat > /root/live.sh <<'JOB'
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); cd /root/w
@@ -64,7 +68,7 @@ import json; rs = [l for l in open('rl_eval120.jsonl')]
 open('rl_eval60.jsonl', 'w').writelines(rs[i] for i in range(len(rs)) if i % 24 < 12)"; echo "[ev] using $(wc -l < rl_eval60.jsonl) problems, 1 seed"
 /root/vv/bin/python -c "import vllm" 2>/dev/null || { [ -x /root/vv/bin/python ] || python3 -m venv /root/vv; /root/vv/bin/pip install -q vllm > vllm_install.log 2>&1; }
 /root/vv/bin/python -c "import vllm; print('[ev] vllm', vllm.__version__)" 2>&1 | tail -1
-LG=/root/w/sp.log; base="--S 32 --heads 8 --layers 3 --ffn 2048 --max-len 12288 --roll-cb --roll-batch 48"
+LG=/root/w/sp.log; base="--S 32 --heads 8 --layers 3 --ffn 2048 --max-len 12288 --roll-cb"
 score() { python3 sp_mathcheck.py "$1" | sed "s/^/[ev] $2: /"; python3 -c "
 import json, sys; sys.path.insert(0, '.')
 from sp_mathcheck import correct
@@ -73,18 +77,16 @@ for r in rs:
     s = r['src'] if r['src'].startswith('math') else r['src'].split('-')[0]; v = by.setdefault(s, [0, 0, 0])
     v[0] += correct(r); v[1] += '</think>' in r['text']; v[2] += 1
 print('[ev] ' + sys.argv[2] + ' by type: ' + ' | '.join(f'{k} {v[0]}/{v[2]} closed {v[1]}' for k, v in sorted(by.items())))" "$1" "$2"; }
-for sd in 1; do
-  t0=$(date +%s); /root/vv/bin/python gen_long_vllm.py rl_eval60.jsonl ev_full_s$sd.jsonl 12288 60 $sd > run_vllm_$sd.log 2>&1
-  echo "[ev] full KV seed $sd done in $(( $(date +%s) - t0 )) s"; score ev_full_s$sd.jsonl "full KV s$sd"; bash /root/put_rl.sh ev_full_s$sd.jsonl
-done
-for cfg in "raw:--no-sp --rw 1056 --C 128 --maxd 0" "G:--rw 1024 --C 128 --maxd 384 --ckpt spG.pt" "u45:--rw 1024 --C 128 --maxd 384 --ckpt grpo3_latest.pt"; do
-  n=${cfg%%:*}; a=${cfg#*:}
-  for sd in 1; do
-    t0=$(date +%s); python3 sp_qwen3.py rollout --traces rl_eval60.jsonl $base $a --seed $sd --roll-out ev_${n}_s$sd.jsonl --log $LG > run_ev_${n}_$sd.log 2>&1
-    echo "[ev] $n seed $sd done in $(( $(date +%s) - t0 )) s"; grep -E "Error|Traceback" run_ev_${n}_$sd.log | tail -2 | sed 's/^/[ev] /'
-    score ev_${n}_s$sd.jsonl "$n s$sd"; bash /root/put_rl.sh ev_${n}_s$sd.jsonl
-  done
-done
+run() {   # run NAME ARGS...: one SP-loop rollout of the 60 problems, scored and uploaded
+  n=$1; shift; t0=$(date +%s)
+  python3 sp_qwen3.py rollout --traces rl_eval60.jsonl $base --roll-batch 30 "$@" --seed 1 --roll-out ev_${n}_s1.jsonl --log $LG > run_ev_$n.log 2>&1
+  echo "[ev] $n done in $(( $(date +%s) - t0 )) s"; grep -E "Error|Traceback" run_ev_$n.log | tail -2 | sed 's/^/[ev] /'
+  score ev_${n}_s1.jsonl "$n"; bash /root/put_rl.sh ev_${n}_s1.jsonl; }
+full() { t0=$(date +%s); VLLM_UTIL=0.45 /root/vv/bin/python gen_long_vllm.py rl_eval60.jsonl ev_full_s1.jsonl 12288 60 1 > run_vllm.log 2>&1
+  echo "[ev] full KV done in $(( $(date +%s) - t0 )) s"; grep -E "Error|Traceback" run_vllm.log | tail -2 | sed 's/^/[ev] /'
+  score ev_full_s1.jsonl "full KV"; bash /root/put_rl.sh ev_full_s1.jsonl; }
+full & sleep 90; run raw --no-sp --rw 1056 --C 128 --maxd 0 & wait
+run G --rw 1024 --C 128 --maxd 384 --ckpt spG.pt & sleep 30; run u45 --rw 1024 --C 128 --maxd 384 --ckpt grpo3_latest.pt & wait
 put $LG spP_ev.log; date -u > DONE_EV1; put DONE_EV1 DONE_EV1; echo "[ev] DONE $(date -u)"
 JOB
   setsid nohup bash -c 'bash /root/live.sh' > /dev/null 2>&1 < /dev/null &
