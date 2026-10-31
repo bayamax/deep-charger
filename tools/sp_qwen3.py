@@ -545,18 +545,23 @@ def profile_trace(ids, P, acc):
     bounds = list(range(a.C, La - L + 1, a.C))
     if not bounds: return
     ref_h = teacher_hidden(ids, P + a.C, T)
-    pc = DynamicCache(); llm(input_ids=ids[None, :P], past_key_values=pc, use_cache=True)
+    P0 = P - 1 if a.no_sp else P   # --no-sp: the block starts with the prompt's last token, whose row predicts a[b]
+    pc = DynamicCache(); llm(input_ids=ids[None, :P0], past_key_values=pc, use_cache=True)
     pkv = [tuple(t for t in kv_of(pc, li)) for li in range(NL)]
     kept = torch.zeros(1, 0, dtype=torch.long, device=dev); absorbed = 0
     for b in bounds:
         kept, absorbed = update_buffer(kept, absorbed, a_ids, b)
-        sp = pooler(embed(kept).float()) if kept.size(1) > 0 else pooler(torch.zeros(1, 0, H, device=dev))
-        block = torch.cat([sp.to(dt), embed(a_ids[:, b:b + L - 1]).to(dt)], 1); nb = block.size(1)
+        if a.no_sp:   # the same window, nothing for the past: prompt + the chunk so far
+            block = torch.cat([embed(ids[None, P - 1:P]).to(dt), embed(a_ids[:, b:b + L - 1]).to(dt)], 1); h0 = 0
+        else:
+            sp = pooler(embed(kept).float()) if kept.size(1) > 0 else pooler(torch.zeros(1, 0, H, device=dev))
+            block = torch.cat([sp.to(dt), embed(a_ids[:, b:b + L - 1]).to(dt)], 1); h0 = a.S - 1
+        nb = block.size(1)
         cache = DynamicCache()
         for li, (k_, v_) in enumerate(pkv): cache.update(k_, v_, li)
-        pos = torch.arange(P, P + nb, device=dev)[None]
-        hs = llm.model(inputs_embeds=block, attention_mask=torch.ones(1, P + nb, device=dev), past_key_values=cache,
-                       position_ids=pos, cache_position=pos[0], use_cache=True).last_hidden_state[0, a.S - 1:]
+        pos = torch.arange(P0, P0 + nb, device=dev)[None]
+        hs = llm.model(inputs_embeds=block, attention_mask=torch.ones(1, P0 + nb, device=dev), past_key_values=cache,
+                       position_ids=pos, cache_position=pos[0], use_cache=True).last_hidden_state[0, h0:]
         for i in range(0, L, 256):
             tr = teacher_rows(ref_h[b - a.C + i:b - a.C + min(i + 256, L)])
             lp = F.log_softmax(llm.lm_head(hs[i:i + 256]).float(), -1)
