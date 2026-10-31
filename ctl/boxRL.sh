@@ -52,7 +52,8 @@
 # serial 16: the cap as a curriculum (the user): 1024 -> 2048 -> 4096 over the three segments (the traces stay whole, so the
 # thought's end is still trained); deployment KL at all three caps after each segment.
 # serial 17: no curriculum - the cap at 4096 from the start (the user), and the deployment KL at caps 2048 / 4096 / 8192 after
-# each segment shows where compressing more context into the soft prompts stops paying.
+# each segment shows where compressing more context into the soft prompts stops paying - on the 64 MATH teacher traces at
+# 16384 tokens (at 4096 the distant part never passes ~2900, so caps above that would read the same).
 SER=17
 if [ -f /root/.boxrl_serial ] && [ "$(cat /root/.boxrl_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxrl_serial
@@ -98,8 +99,8 @@ rs = [json.loads(l) for f in ('lt_math.jsonl', 'lt_div.jsonl', 'lt2.jsonl') for 
 ok = [r for r in rs if r.get('finish') == 'stop' and '</think>' in r['text']]; random.seed(0); random.shuffle(ok)
 open('poolZ.jsonl', 'w').writelines(json.dumps(r) + '\n' for r in ok); print('[sz] pool', len(ok), 'finished long teacher traces')"
 LG=/root/w/sp.log; base="--S 32 --heads 8 --layers 3 --ffn 2048 --rw 1024 --C 128"
-klm() { python3 sp_qwen3.py eval --traces kv_full_p.jsonl --max-len 4096 $base "$@" --log $LG 2>&1 | grep -oP "KL \K[0-9.]+" | tail -1; }
-echo "[sz] reference deployment KL (64 MATH traces, 4096): raw window alone $(klm --no-sp --rw 1056 --maxd 0), G $(klm --ckpt spG.pt --maxd 384)"
+klm() { python3 sp_qwen3.py eval --traces kv_full_p.jsonl --max-len 16384 $base "$@" --log $LG 2>&1 | grep -oP "KL \K[0-9.]+" | tail -1; }
+echo "[sz] reference deployment KL (64 MATH traces, 16384): raw window alone $(klm --no-sp --rw 1056 --maxd 0), G $(klm --ckpt spG.pt --maxd 384)"
 gen() {   # gen NAME CKPT: the 60 GRPO problems, 1 seed, scored by type
   python3 sp_qwen3.py rollout --traces rl_eval60.jsonl $base --maxd $3 --max-len 12288 --roll-cb --roll-batch 48 --grpo-tok-budget 60000 --ckpt $2 --seed 1 --roll-out ev_$1_s1.jsonl --log $LG > run_ev_$1.log 2>&1
   python3 -c "
