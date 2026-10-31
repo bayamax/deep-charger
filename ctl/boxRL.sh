@@ -66,7 +66,9 @@
 # serial 22: serial 21 keeps running (its job is not touched); a side task profiles every new window-0 checkpoint by
 # position in the chunk (the first token = predicted from the soft prompts alone; old pooler G: ~5.0, E: 3.0) on 16
 # MATH teacher traces at 16384, into the live log.
-SER=22
+# serial 23: one more side task - the same window-0 profile with no soft prompts (prompt + the chunk so far), the floor
+# the pooler has to beat; run once with a separate copy of the trainer (sp_prof.py) so the running training is untouched.
+SER=23
 if [ -f /root/.boxrl_serial ] && [ "$(cat /root/.boxrl_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxrl_serial
 [ -d /venv/main/bin ] && export PATH=/venv/main/bin:$PATH
@@ -153,5 +155,11 @@ done
 JOB
   setsid nohup bash -c 'bash /root/side22.sh' > /dev/null 2>&1 < /dev/null &
   echo "[sz] side profiler launched $(date -u)"
+fi
+if [ ! -e /root/.side23 ]; then touch /root/.side23
+  ( cd /root/w; curl -sS -o sp_prof.py "https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/tools/sp_qwen3.py?nocache=$(date +%s)"
+    python3 sp_prof.py profile --traces kv_full_p.jsonl --n 16 --max-len 16384 --S 32 --heads 8 --layers 3 --ffn 2048 --rw 0 --C 128 --maxd 0 --no-sp 2>&1 \
+      | grep -E "profile" | sed "s/^/[sz] W0 profile no SP: /" | cut -c1-200 >> w.log ) > /dev/null 2>&1 < /dev/null &
+  echo "[sz] no-SP profile launched $(date -u)"
 fi
 # CTL-END
