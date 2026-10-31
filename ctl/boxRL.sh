@@ -30,7 +30,10 @@
 # serial 10: serial 9's restart left serial 8's vLLM engine on the GPU (its engine process outlived the killed parent), so
 # serial 9's vLLM died; now every GPU process is killed first, and the four runs go two at a time (the user wants it quick):
 # full KV (vLLM, half the GPU) with the raw window, then G with GRPO u45 (30 streams each).
-SER=10
+# serial 11: nvidia-smi lists no PIDs inside the container, so serial 10 killed nothing - the orphaned vLLM engine still held
+# 21 GB and every run died. Kill the vLLM venv's processes by name; if the GPU is still not free, stop and say so (the box
+# then needs a container restart, after which this serial runs again).
+SER=11
 if [ -f /root/.boxrl_serial ] && [ "$(cat /root/.boxrl_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxrl_serial
 [ -d /venv/main/bin ] && export PATH=/venv/main/bin:$PATH
@@ -42,10 +45,13 @@ tail -n 1 /root/w/sp.log 2>/dev/null | cut -c1-200
 nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv,noheader
 ST
 chmod +x /root/status.sh
-if [ ! -e /root/.job10 ]; then touch /root/.job10
+if [ ! -e /root/.job11 ]; then touch /root/.job11
   for J in $(pgrep -f "^bash /root/job.sh") $(pgrep -f "^bash /root/live.sh"); do pkill -P $J; kill $J; done; sleep 3
   pkill -f "sp_qwen3.py"; pkill -f "pip install"; pkill -f gen_long_vllm; sleep 5
-  nvidia-smi --query-compute-apps=pid --format=csv,noheader | xargs -r kill -9; sleep 10; rm -f /root/w/ev_*.jsonl
+  pkill -9 -f "/root/vv/bin/python"; pkill -9 -f EngineCore; pkill -9 -f "multiprocessing.spawn"; pkill -9 -f "multiprocessing.resource_tracker"
+  sleep 15; rm -f /root/w/ev_*.jsonl /root/w/DONE_EV1
+  U=$(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits | head -1)
+  if [ "${U:-0}" -gt 2000 ]; then echo "[ev] GPU still holds $U MiB after the kills: $(ps -eo pid,rss,cmd --sort=-rss | head -4 | tr '\n' ';' | cut -c1-300)"; rm -f /root/.job11; exit 0; fi
   echo "[ev] GRPO stopped $(date -u); GPU now $(nvidia-smi --query-gpu=memory.used --format=csv,noheader)"
   cat > /root/live.sh <<'JOB'
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); cd /root/w
