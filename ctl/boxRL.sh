@@ -33,7 +33,9 @@
 # serial 11: nvidia-smi lists no PIDs inside the container, so serial 10 killed nothing - the orphaned vLLM engine still held
 # 21 GB and every run died. Kill the vLLM venv's processes by name; if the GPU is still not free, stop and say so (the box
 # then needs a container restart, after which this serial runs again).
-SER=11
+# serial 12: two at a time ran out of memory (vLLM took more than its share, and two SP rollouts of 30 streams did not fit
+# together) - full KV (50/60) and G (36/60) finished; the raw window and GRPO u45 now one after the other.
+SER=12
 if [ -f /root/.boxrl_serial ] && [ "$(cat /root/.boxrl_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxrl_serial
 [ -d /venv/main/bin ] && export PATH=/venv/main/bin:$PATH
@@ -45,13 +47,13 @@ tail -n 1 /root/w/sp.log 2>/dev/null | cut -c1-200
 nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv,noheader
 ST
 chmod +x /root/status.sh
-if [ ! -e /root/.job11 ]; then touch /root/.job11
+if [ ! -e /root/.job12 ]; then touch /root/.job12
   for J in $(pgrep -f "^bash /root/job.sh") $(pgrep -f "^bash /root/live.sh"); do pkill -P $J; kill $J; done; sleep 3
   pkill -f "sp_qwen3.py"; pkill -f "pip install"; pkill -f gen_long_vllm; sleep 5
   pkill -9 -f "/root/vv/bin/python"; pkill -9 -f EngineCore; pkill -9 -f "multiprocessing.spawn"; pkill -9 -f "multiprocessing.resource_tracker"
-  sleep 15; rm -f /root/w/ev_*.jsonl /root/w/DONE_EV1
+  sleep 15; rm -f /root/w/ev_raw_s1.jsonl /root/w/ev_u45_s1.jsonl /root/w/DONE_EV1
   U=$(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits | head -1)
-  if [ "${U:-0}" -gt 2000 ]; then echo "[ev] GPU still holds $U MiB after the kills: $(ps -eo pid,rss,cmd --sort=-rss | head -4 | tr '\n' ';' | cut -c1-300)"; rm -f /root/.job11; exit 0; fi
+  if [ "${U:-0}" -gt 2000 ]; then echo "[ev] GPU still holds $U MiB after the kills: $(ps -eo pid,rss,cmd --sort=-rss | head -4 | tr '\n' ';' | cut -c1-300)"; rm -f /root/.job12; exit 0; fi
   echo "[ev] GRPO stopped $(date -u); GPU now $(nvidia-smi --query-gpu=memory.used --format=csv,noheader)"
   cat > /root/live.sh <<'JOB'
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); cd /root/w
@@ -91,8 +93,8 @@ run() {   # run NAME ARGS...: one SP-loop rollout of the 60 problems, scored and
 full() { t0=$(date +%s); VLLM_UTIL=0.45 /root/vv/bin/python gen_long_vllm.py rl_eval60.jsonl ev_full_s1.jsonl 12288 60 1 > run_vllm.log 2>&1
   echo "[ev] full KV done in $(( $(date +%s) - t0 )) s"; grep -E "Error|Traceback" run_vllm.log | tail -2 | sed 's/^/[ev] /'
   score ev_full_s1.jsonl "full KV"; bash /root/put_rl.sh ev_full_s1.jsonl; }
-full & sleep 90; run raw --no-sp --rw 1056 --C 128 --maxd 0 & wait
-run G --rw 1024 --C 128 --maxd 384 --ckpt spG.pt & sleep 30; run u45 --rw 1024 --C 128 --maxd 384 --ckpt grpo3_latest.pt & wait
+run raw --no-sp --rw 1056 --C 128 --maxd 0 --roll-batch 48 --grpo-tok-budget 60000
+run u45 --rw 1024 --C 128 --maxd 384 --ckpt grpo3_latest.pt --roll-batch 48 --grpo-tok-budget 60000
 put $LG spP_ev.log; date -u > DONE_EV1; put DONE_EV1 DONE_EV1; echo "[ev] DONE $(date -u)"
 JOB
   setsid nohup bash -c 'bash /root/live.sh' > /dev/null 2>&1 < /dev/null &
