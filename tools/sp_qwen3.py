@@ -464,16 +464,20 @@ def run_trace_par(ids, P, ref_h=None):
         if ends and a.end_weight != 1:
             tpos = torch.arange(t0, t0 + nr, device=dev); wv = torch.ones(nr, device=dev)
             for e in ends: wv[(tpos >= e - 32) & (tpos <= e + 8)] = a.end_weight
-        KR = a.kl_rows
+        KR = a.kl_rows; kb = 0.0
         for i in range(0, nr, KR):
             tr = teacher_rows(ref_h[t0 - a.C + i:t0 - a.C + min(i + KR, nr)])
             kl, ag = checkpoint(_kl_rows, hs[i:i + KR], tr, None if wv is None else wv[i:i + KR], use_reentrant=False)
-            loss = loss + kl; K += kl.item(); A_ += ag.item(); N += tr.shape[0]
+            loss = loss + kl; K += kl.item(); A_ += ag.item(); N += tr.shape[0]; kb += kl.item()
+        if b > 0:   # the past outside the window = tokens before b
+            bk = sum(b >= e for e in DB_EDGES); v = DBK.setdefault(bk, [0.0, 0]); v[0] += kb; v[1] += nr
         (loss / 1000.0).backward()
     return K, A_, N
 
 
-SNW = {"w": 1, "k0": 0.0, "n0": 0}   # spnext: the current curriculum window and the window-0 KL since the last log
+SNW = {"w": 1, "k0": 0.0, "n0": 0}
+DBK = {}   # --par: training KL by how much past lies outside the window (bucket -> [sum KL, rows]), logged and reset
+DB_EDGES = [1024, 2048, 4096, 8192]   # spnext: the current curriculum window and the window-0 KL since the last log
 
 
 def run_trace_spnext(ids, P, ref_h=None):
@@ -994,7 +998,11 @@ else:
         if (st + 1) % 25 == 0 or st + 1 == steps:
             x = f" | w{SNW['w']} window-0 KL {SNW['k0'] / max(SNW['n0'], 1):.4f}" if a.spnext and len(WINS) > 1 else ""
             if a.spin: log(f"[sp] train {tag} pair {st + 1}/{steps}: DPO loss {K / max(N, 1):.4f} chosen ahead {100 * A_ / max(N, 1):.0f}% ({time.time() - t0:.0f}s)")
-            else: log(f"[sp] train {tag} trace {st + 1}/{steps}: KL {K / max(N, 1):.4f} top1 {100 * A_ / max(N, 1):.2f}%{x} ({time.time() - t0:.0f}s)")
+            else:
+                lab = ["<1k", "1-2k", "2-4k", "4-8k", "8k+"]
+                x += (" | KL by past outside the window: " + " ".join(f"{lab[k]} {v[0] / max(v[1], 1):.4f}" for k, v in sorted(DBK.items()))) if DBK else ""
+                DBK.clear()
+                log(f"[sp] train {tag} trace {st + 1}/{steps}: KL {K / max(N, 1):.4f} top1 {100 * A_ / max(N, 1):.2f}%{x} ({time.time() - t0:.0f}s)")
             if a.spnext and a.sn_win_plateau and N:   # curriculum by plateau: 100-trace means at this w, last vs the one before
                 WI["kl"].append(K / N); n_at = st + 1 - WI["from"]; hist = WI["kl"]
                 b_ = a.sn_win_block

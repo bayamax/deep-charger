@@ -56,7 +56,9 @@
 # 16384 tokens (at 4096 the distant part never passes ~2900, so caps above that would read the same).
 # serial 19: nothing thrown away (the user) - the whole past outside the window goes into the 32 soft prompts (no cap, no
 # eviction); the deployment KL with everything, and with caps 2048 / 4096 for comparison.
-SER=19
+# serial 20: the training log now gives the KL by how much past lies outside the window (<1k ... 8k+) every 25 traces -
+# where it starts to climb with length is the compression limit (the user); the live log carries those lines.
+SER=20
 if [ -f /root/.boxrl_serial ] && [ "$(cat /root/.boxrl_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxrl_serial
 [ -d /venv/main/bin ] && export PATH=/venv/main/bin:$PATH
@@ -68,18 +70,18 @@ tail -n 1 /root/w/sp.log 2>/dev/null | cut -c1-200
 nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv,noheader
 ST
 chmod +x /root/status.sh
-if [ ! -e /root/.job19 ]; then touch /root/.job19
+if [ ! -e /root/.job20 ]; then touch /root/.job20
   for J in $(pgrep -f "^bash /root/job.sh") $(pgrep -f "^bash /root/live.sh"); do pkill -P $J; kill $J; done; sleep 3
   pkill -f "sp_qwen3.py"; pkill -f "pip install"; pkill -f gen_long_vllm; sleep 5
   pkill -9 -f "/root/vv/bin/python"; pkill -9 -f EngineCore; pkill -9 -f "multiprocessing.spawn"; pkill -9 -f "multiprocessing.resource_tracker"
   sleep 15; rm -f /root/w/DONE_SZ1
   U=$(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits | head -1)
-  if [ "${U:-0}" -gt 2000 ]; then echo "[ev] GPU still holds $U MiB after the kills: $(ps -eo pid,rss,cmd --sort=-rss | head -4 | tr '\n' ';' | cut -c1-300)"; rm -f /root/.job19; exit 0; fi
+  if [ "${U:-0}" -gt 2000 ]; then echo "[ev] GPU still holds $U MiB after the kills: $(ps -eo pid,rss,cmd --sort=-rss | head -4 | tr '\n' ';' | cut -c1-300)"; rm -f /root/.job20; exit 0; fi
   echo "[ev] GRPO stopped $(date -u); GPU now $(nvidia-smi --query-gpu=memory.used --format=csv,noheader)"
   cat > /root/live.sh <<'JOB'
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); cd /root/w
 while [ ! -e DONE_SZ1 ]; do
-  { grep -E "^\[(sz|ev|hub)\]|Error|Traceback" w.log | tail -n 30; tail -n 2 sp.log 2>/dev/null; nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv,noheader; date -u; } > rl_live.log 2>&1
+  { grep -E "^\[(sz|ev|hub)\]|Error|Traceback" w.log | tail -n 30; grep "\[sp\] train .* trace" sp.log 2>/dev/null | tail -n 8; nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv,noheader; date -u; } > rl_live.log 2>&1
   python3 -c "from huggingface_hub import HfApi; HfApi().upload_file(path_or_fileobj='rl_live.log', path_in_repo='archive/sp3/rl_live.log', repo_id='baya1116/hypernet-sp-distill')" > /dev/null 2>&1
   sleep 600
 done
