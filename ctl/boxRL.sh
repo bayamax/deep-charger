@@ -89,7 +89,10 @@
 # frozen original as the teacher, mixed windows as serial 28, from the serial-28 pooler. The window-0 pooler alone had
 # levelled off (0.6356 / 1st token 5.11). Every 6 segments the 60 problems: raw window alone (base 44 - damage gauge) and
 # SP at window 1024 without eviction (raw 44, G 36).
-SER=29
+# serial 30: a side task, training untouched - the teacher KL on the model's OWN generations (the seg-408 60-problem runs, SP
+# at window 1024 and the raw window alone), each scored in both setups: does the SP that helps on teacher text still help on
+# the text the model writes itself?
+SER=30
 if [ -f /root/.boxrl_serial ] && [ "$(cat /root/.boxrl_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxrl_serial
 [ -d /venv/main/bin ] && export PATH=/venv/main/bin:$PATH
@@ -498,5 +501,15 @@ date -u > DONE_W6; echo "[w0] DONE $(date -u)"
 JOB
   setsid nohup bash -c 'bash /root/job29.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
   echo "[w0] serial 29 launched: first 6 layers unfrozen $(date -u)"
+fi
+if [ ! -e /root/.side30 ]; then touch /root/.side30
+  ( cd /root/w; cp spW0.pt spW0_408.pt
+    for t in sp1024 rawonly; do f=ev_${t}_408.jsonl
+      for cfg in "SP:--rw 1024 --C 128 --maxd 0" "raw:--no-sp --rw 1056 --C 128 --maxd 0"; do n=${cfg%%:*}; a=${cfg#*:}
+        k=$(python3 sp_qwen3.py eval --traces $f --max-len 12288 --S 32 --heads 8 --layers 3 --ffn 2048 $a --ckpt spW0_408.pt 2>&1 | grep -oP "KL \K[0-9.]+ .*top1 agree [0-9.]+" | tail -1)
+        echo "[w0] on-policy KL: text from the $t run, scored with $n: $k" >> w.log
+      done
+    done ) > /dev/null 2>&1 < /dev/null &
+  echo "[w0] on-policy KL side task launched $(date -u)"
 fi
 # CTL-END
