@@ -85,7 +85,11 @@
 # serial 28: serial 27 died at once - the trainer file on the box dated from serial 21 (no --sn-win-mix, no shared-prefix
 # path: serial 25 ran the padded path at 19 s/trace and skipped many traces for memory). The trainer is downloaded again
 # first; otherwise as serial 27.
-SER=28
+# serial 29: the base partly unfrozen (the user): the first 6 decoder layers trained at lr 1e-5 with the pooler (1e-4), the
+# frozen original as the teacher, mixed windows as serial 28, from the serial-28 pooler. The window-0 pooler alone had
+# levelled off (0.6356 / 1st token 5.11). Every 6 segments the 60 problems: raw window alone (base 44 - damage gauge) and
+# SP at window 1024 without eviction (raw 44, G 36).
+SER=29
 if [ -f /root/.boxrl_serial ] && [ "$(cat /root/.boxrl_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxrl_serial
 [ -d /venv/main/bin ] && export PATH=/venv/main/bin:$PATH
@@ -429,5 +433,70 @@ date -u > DONE_W5; echo "[w0] DONE $(date -u)"
 JOB
   setsid nohup bash -c 'bash /root/job28.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
   echo "[w0] serial 28 launched: trainer refreshed, mixed windows $(date -u)"
+fi
+if [ ! -e /root/.job29 ]; then touch /root/.job29
+  cat > /root/live29.sh <<'JOB'
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); cd /root/w
+while [ ! -e DONE_W6 ]; do
+  { grep -E "^\[(sz|w0|hub)\]|Error|Traceback" w.log | tail -n 30; grep "\[sp\] train .* trace" sp.log 2>/dev/null | tail -n 6; nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv,noheader; date -u; } > rl_live.log 2>&1
+  python3 -c "from huggingface_hub import HfApi; HfApi().upload_file(path_or_fileobj='rl_live.log', path_in_repo='archive/sp3/rl_live.log', repo_id='baya1116/hypernet-sp-distill')" > /dev/null 2>&1
+  sleep 600
+done
+JOB
+  cat > /root/job29.sh <<'JOB'
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); cd /root/w
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+R=baya1116/hypernet-sp-distill; H=https://huggingface.co/$R/resolve/main
+put() { for t in 1 2 3 4 5; do python3 -c "import sys; from huggingface_hub import HfApi; HfApi().upload_file(path_or_fileobj=sys.argv[1], path_in_repo='archive/sp3/'+sys.argv[2], repo_id='$R')" "$1" "$2" > put.err 2>&1 && { echo "[hub] $2"; return 0; }; sleep 60; done; echo "[hub] $2 FAILED"; }
+get() { for t in 1 2 3; do curl -sSfL -H "Authorization: Bearer $HF_TOKEN" -o "$2" "$H/$1" && return 0; sleep 10; done; return 1; }
+for J in $(pgrep -f "^bash /root/job2[678].sh") $(pgrep -f "^bash /root/live2[678].sh"); do pkill -P $J; kill $J; done; sleep 2
+pkill -f "sp_qwen3.py train"; sleep 10
+RAW=https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i
+for f in tools/sp_qwen3.py tools/sp_mathcheck.py; do curl -sS -o $(basename $f) "$RAW/$f?nocache=$(date +%s)"; done   # the trainer on the box dated from serial 21
+python3 sp_qwen3.py --help 2>&1 | grep -q "sn-win-mix" && echo "[w0] trainer updated (shared-prefix path, --sn-win-mix)" || echo "[w0] trainer NOT updated"
+setsid nohup bash -c 'bash /root/live29.sh' > /dev/null 2>&1 < /dev/null &
+echo "[w0] base partly unfrozen: the first 6 layers trained (lr 1e-5) with the pooler (1e-4), mixed windows as before; every 6 segments the 60 problems with the raw window alone (damage gauge, base 44) and with SP at window 1024 (raw 44, G 36) $(date -u)"
+gen60() { n=$1; shift   # gen60 NAME ARGS...: the 60 GRPO problems, 1 seed, with the current weights
+  python3 sp_qwen3.py rollout --traces rl_eval60.jsonl --S 32 --heads 8 --layers 3 --ffn 2048 --max-len 12288 --roll-cb --roll-batch 48 --grpo-tok-budget 60000 --ckpt spW0.pt "$@" --seed 1 --roll-out ev_${n}_$seg.jsonl --log $LG > run_ev_${n}_$seg.log 2>&1
+  grep -E "Error|Traceback" run_ev_${n}_$seg.log | tail -1 | sed "s/^/[w0] gen60 $n: /"
+  python3 -c "
+import json, sys; sys.path.insert(0, '.')
+from sp_mathcheck import correct
+rs = [json.loads(l) for l in open(sys.argv[1])]; by = {}
+for r in rs:
+    s = r['src'] if r['src'].startswith('math') else r['src'].split('-')[0]; by[s] = by.get(s, 0) + correct(r)
+print('[w0] gen60 ' + sys.argv[2] + f': {sum(correct(r) for r in rs)}/{len(rs)} correct, closed {sum(\"</think>\" in r[\"text\"] for r in rs)} | ' + ' '.join(f'{k} {v}' for k, v in sorted(by.items())))" ev_${n}_$seg.jsonl "$n seg $seg"
+  bash /root/put_rl.sh ev_${n}_$seg.jsonl; }
+LG=/root/w/sp.log; base="--S 32 --heads 8 --layers 3 --ffn 2048 --rw 0 --C 128 --maxd 0"
+klm() { python3 sp_qwen3.py eval --traces kv_full_p.jsonl --max-len 16384 $base "$@" --log $LG 2>&1 | grep -oP "KL \K[0-9.]+" | tail -1; }
+prof() { python3 sp_qwen3.py profile --traces kv_full_p.jsonl --n 16 --max-len 16384 $base --ckpt spW0.pt 2>&1 | grep -oP "window +\S+: KL \K[0-9.]+" | tr '\n' ' '; }
+seg=400   # seen.jsonl and the trained25_ markers carry over: untrained parts first
+while [ ! -e STOP_W6 ]; do seg=$((seg + 1)); src=""
+  for n in $(python3 -c "
+from huggingface_hub import HfApi
+fs = sorted(f.rsplit('/', 1)[-1][3:5] for f in HfApi().list_repo_files('$R') if f.startswith('archive/sp3/more/gm_'))
+print(' '.join(fs))"); do [ -e trained25_$n ] && continue
+    get archive/sp3/more/gm_$n.jsonl gm_$n.jsonl && python3 -c "
+import json, sys
+rs = [json.loads(l) for l in open(sys.argv[1])]
+ok = [r for r in rs if r.get('finish') == 'stop' and '</think>' in r['text']]
+open('cur.jsonl', 'w').writelines(json.dumps(r) + '\n' for r in ok); open('seen.jsonl', 'a').writelines(json.dumps(r) + '\n' for r in ok)
+print(len(ok))" gm_$n.jsonl > cur_n.txt && { touch trained25_$n; src="new part $n ($(cat cur_n.txt) traces)"; break; }
+  done
+  if [ -z "$src" ]; then python3 -c "
+import random, sys; rs = open('seen.jsonl').readlines(); random.seed(int(sys.argv[1])); random.shuffle(rs); open('cur.jsonl', 'w').writelines(rs[:600])" $((1000 + seg)); src="another pass, 600 of $(wc -l < seen.jsonl) seen"; fi
+  t0=$(date +%s)
+  python3 sp_qwen3.py train --traces cur.jsonl --max-len 16384 $base --ckpt spW0.pt --ft-layers 6 --opt8bit --ft-lr 1e-5 --spnext --sn-win 1,8,64,128 --sn-win-mix --sn-pos 512 --sn-batch 32 --sn-tokens 16384 --accum 8 --lr 1e-4 --seed $((200 + seg)) --out spW_next.pt --log $LG > run_w0g_$seg.log 2>&1
+  grep -E "Error|Traceback" run_w0g_$seg.log | tail -2 | sed "s/^/[w0] $seg: /"; echo "[w0] $seg: $(grep -c 'out of memory' run_w0g_$seg.log) traces skipped (memory)"
+  [ -s spW_next.pt ] || { echo "[w0] $seg: no checkpoint - stop"; break; }
+  mv spW_next.pt spW0.pt
+  echo "[w0] $seg ($src, $(( $(date +%s) - t0 )) s): train KL $(grep -oP 'KL \K[0-9.]+' run_w0g_$seg.log | tail -1), window-0 deployment KL all $(klm --ckpt spW0.pt) / cap 2048 $(klm --ckpt spW0.pt --fifo 2048) | by position (1st, 2-8, 9-64, 65+): $(prof)"
+  put spW0.pt spW0_window0.pt; put $LG spP_w0.log
+  if [ $((seg % 6)) = 0 ]; then gen60 rawonly --no-sp --rw 1056 --C 128 --maxd 0; gen60 sp1024 --rw 1024 --C 128 --maxd 0; fi
+done
+date -u > DONE_W6; echo "[w0] DONE $(date -u)"
+JOB
+  setsid nohup bash -c 'bash /root/job29.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
+  echo "[w0] serial 29 launched: first 6 layers unfrozen $(date -u)"
 fi
 # CTL-END
