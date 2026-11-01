@@ -46,7 +46,10 @@
 # newline 0.2195 / 41, raw 1024 0.2203 / 36, null 0.2261 / 35, SP 0.2274 / 35): a newline slot does no harm, a soft one does -
 # the model learned under the forward KL to hedge whenever soft prompts are present. The on-policy reverse-KL loop starts after
 # serial 8 (DONE_DG8); each check also scores the fixed SP-run text (forward and reverse KL).
-SER=9
+# serial 10: every round's training died at once - bitsandbytes (8-bit AdamW) was never installed on this box. The three
+# rounds' generations (288, all from the starting weights, so on-policy for them) are trained now in one run; then the
+# loop carries on from round 4.
+SER=10
 if [ -f /root/.boxdg_serial ] && [ "$(cat /root/.boxdg_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxdg_serial
 echo "[dg] preflight GPU: $(nvidia-smi --query-gpu=name,memory.used,memory.total --format=csv,noheader)"
@@ -146,6 +149,24 @@ date -u > DONE_DG4; put DONE_DG4 dg/DONE_DG4; echo "[dg] JOB4_DONE $(date -u)"
 JOB
   setsid nohup bash -c 'bash /root/job4.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
   echo "[dg] s4: JOB4_LAUNCHED (waits for DONE_DG3) $(date -u)"
+fi
+if [ ! -e /root/.s10 ]; then touch /root/.s10
+  for J in $(pgrep -f "^bash /root/job2.sh"); do pkill -P $J; kill $J; done; sleep 5; pkill -f "sp_qwen3.py"; sleep 5
+  cat > /root/job10.sh <<'JOB'
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); cd /root/w
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+python3 -m pip install -q bitsandbytes 2>&1 | grep -v -i warn | tail -1
+python3 -c "import bitsandbytes; print('[op] s10: bitsandbytes', bitsandbytes.__version__)"
+M="--S 32 --heads 8 --layers 3 --ffn 2048 --C 128 --maxd 0 --max-len 12288"; LG=/root/w/sp.log
+python3 sp_qwen3.py train --traces op_gen_1.jsonl,op_gen_2.jsonl,op_gen_3.jsonl $M --ckpt op.pt --rw 1024 --rkl-weight 1 --chunks-per-trace 16 --accum 8 --lr 1e-4 --ft-layers 28 --opt8bit --ft-lr 1e-5 --const-lr --seed 3 --out op_next.pt --log $LG > run_tr.log 2>&1
+if [ -s op_next.pt ] && grep -q "^\[sp\] trained" run_tr.log; then mv op_next.pt op.pt; echo 3 > op_round; echo "[op] s10: rounds 1-3 trained: $(grep -oP 'KL [0-9.]+ top1 [0-9.]+%.*reverse KL [0-9.]+' run_tr.log | awk 'NR==1{f=$0} {l=$0} END{print "first 25: " f " | last 25: " l}') | OOM skips $(grep -c 'out of memory' run_tr.log)"
+else echo "[op] s10: training FAILED: $(grep -E 'Error' run_tr.log | tail -1 | cut -c1-200)"; exit 1; fi
+python3 sp_qwen3.py eval --traces gen_sp.jsonl $M --ckpt op.pt --rw 1024 --log $LG > run_kl.log 2>&1
+echo "[op] s10: fixed SP-run text after rounds 1-3: $(grep -oP 'KL [0-9.]+ .*reverse KL [0-9.]+' run_kl.log | tail -1) (start: KL 0.1583 reverse 0.2263)"
+exec bash /root/job2.sh
+JOB
+  setsid nohup bash -c 'bash /root/job10.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
+  echo "[op] s10: JOB10_LAUNCHED $(date -u)"
 fi
 if [ ! -e /root/.s8 ]; then touch /root/.s8
   cat > /root/job8.sh <<'JOB'
