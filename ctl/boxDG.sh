@@ -41,7 +41,12 @@
 # (probe) - SP is simply ignored at window 1024. Is 32 raw tokens really worth ~6 problems, or is it an artefact of the
 # window being a multiple of the chunk (1024 = 8 x 128)? Raw window 1088 (not a multiple) and 1152 (a multiple), seed 2;
 # 1024 and 1056 again at seed 3; 1024 with the <think> tag kept. Marker DONE_DG8.
-SER=8
+# serial 9: across all runs the forward KL on the SP run's text ranks the setups in nearly the REVERSE order of the 60-problem
+# results (SP 0.1591 best / 35, newline slot 0.1771 worst / 41) while the reverse KL ranks them in order (raw 1056 0.2175 / 41,
+# newline 0.2195 / 41, raw 1024 0.2203 / 36, null 0.2261 / 35, SP 0.2274 / 35): a newline slot does no harm, a soft one does -
+# the model learned under the forward KL to hedge whenever soft prompts are present. The on-policy reverse-KL loop starts after
+# serial 8 (DONE_DG8); each check also scores the fixed SP-run text (forward and reverse KL).
+SER=9
 if [ -f /root/.boxdg_serial ] && [ "$(cat /root/.boxdg_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxdg_serial
 echo "[dg] preflight GPU: $(nvidia-smi --query-gpu=name,memory.used,memory.total --format=csv,noheader)"
@@ -191,6 +196,7 @@ JOB
   setsid nohup bash -c 'bash /root/job7.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
   echo "[dg] s7: JOB7_LAUNCHED (waits for DONE_DG5); the on-policy loop waits for GO_OP $(date -u)"
 fi
+if [ ! -e /root/.s9 ]; then touch /root/.s9; for J in $(pgrep -f "^bash /root/job2.sh"); do pkill -P $J; kill $J; done; rm -f /root/.job2; fi
 [ -e /root/.s6 ] || { touch /root/.s6; rm -f /root/.job2; }   # serial 6: the held loop is launched (it waits for DONE_DG5)
 if [ ! -e /root/.job3 ]; then touch /root/.job3
   for J in $(pgrep -f "^bash /root/job2.sh"); do pkill -P $J; kill $J; done
@@ -228,7 +234,7 @@ export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 R=baya1116/hypernet-sp-distill; H=https://huggingface.co/$R/resolve/main
 RAW=https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i
 put() { for t in 1 2 3 4 5; do python3 -c "import sys; from huggingface_hub import HfApi; HfApi().upload_file(path_or_fileobj=sys.argv[1], path_in_repo='archive/sp3/'+sys.argv[2], repo_id='$R')" "$1" "$2" > put.err 2>&1 && { echo "[hub] $2"; return 0; }; sleep 60; done; echo "[hub] $2 FAILED"; }
-while [ ! -e GO_OP ]; do sleep 60; done
+while [ ! -e DONE_DG8 ]; do sleep 60; done
 for f in tools/sp_qwen3.py ctl/gen_more.jsonl; do curl -sS -o $(basename $f) "$RAW/$f?nocache=$(date +%s)"; done
 python3 -c "
 import random; rs = open('gen_more.jsonl').readlines(); random.Random(0).shuffle(rs); open('op_prompts.jsonl', 'w').writelines(rs)"
@@ -254,13 +260,16 @@ print(f'{len(rs)} generations, closed {sum(\"</think>\" in r[\"text\"] for r in 
   if [ -s op_next.pt ] && grep -q "^\[sp\] trained" run_tr.log; then mv op_next.pt op.pt; echo $it > op_round; else echo "[op] round $it training FAILED: $(grep -E 'Error' run_tr.log | tail -1 | cut -c1-200)"; fi
   k=$(grep -oP "KL [0-9.]+ top1 [0-9.]+%.*reverse KL [0-9.]+" run_tr.log | awk 'NR==1{f=$0} {l=$0} END{print "first 25: " f " | last 25: " l}')
   echo "[op] round $it: $g | train $k | gen $((t1 - t0)) s, train $(( $(date +%s) - t1 )) s"
-  if [ $((it % 3)) = 0 ]; then gen60 sp 1 --rw 1024; gen60 sp 2 --rw 1024
+  if [ $((it % 3)) = 0 ]; then
+    python3 sp_qwen3.py eval --traces gen_sp.jsonl $M --ckpt op.pt --rw 1024 --log $LG > run_kl.log 2>&1
+    echo "[op] round $it fixed SP-run text: $(grep -oP 'KL [0-9.]+ .*reverse KL [0-9.]+' run_kl.log | tail -1) (start: KL 0.1583 reverse 0.2263)"
+    gen60 sp 1 --rw 1024; gen60 sp 2 --rw 1024
     [ $((it % 6)) = 0 ] && gen60 raw 1 --no-sp --rw 1056
     put op.pt spOP_latest.pt; put $LG op/op.log; fi
 done
 echo "[op] stopped $(date -u)"
 JOB
   setsid nohup bash -c 'bash /root/job2.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
-  echo "[op] JOB2_LAUNCHED (waits for GO_OP) $(date -u)"
+  echo "[op] JOB2_LAUNCHED (waits for DONE_DG8) $(date -u)"
 fi
 # CTL-END
