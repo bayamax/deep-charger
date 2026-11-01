@@ -70,6 +70,7 @@ JOB
   setsid nohup bash -c 'bash /root/job.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
   echo "[dg] JOB_LAUNCHED $(date -u)"
 fi
+touch /root/.job2   # serial 3: the on-policy loop is not launched (held)
 if [ ! -e /root/.job3 ]; then touch /root/.job3
   for J in $(pgrep -f "^bash /root/job2.sh"); do pkill -P $J; kill $J; done
   echo "[dg] s3: job2 (on-policy loop) stopped before its start"
