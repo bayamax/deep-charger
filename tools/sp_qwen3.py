@@ -98,6 +98,8 @@ ap.add_argument("--rkl-weight", type=float, default=0.0, help="train (chunk mode
                 "per token. Reverse KL is mode-seeking: on the model's OWN generations (on-policy distillation) it punishes tokens the "
                 "full-KV teacher would not write at that state - e.g. a guessed value the soft prompts only blur - where the forward KL "
                 "(mode-covering) rewards hedging over every value the lossy past allows, which sampling then turns into confident errors")
+ap.add_argument("--const-lr", action="store_true", help="train: constant lr (no warm-up / decay) - for short repeated runs such as the "
+                "rounds of an on-policy loop, where a schedule per run would restart every round")
 ap.add_argument("--end-stat", action="store_true", help="eval: how much the student and the teacher want to stop thinking")
 ap.add_argument("--dump", default="", help="eval: per-token records to this .pt file - per trace the answer positions, the token, "
                 "log p of the token under the student and the teacher, forward KL(teacher||student) and reverse KL(student||teacher)")
@@ -1020,7 +1022,8 @@ else:
         opt = torch.optim.AdamW(groups, weight_decay=0.0)
     steps = int(len(data) * a.epochs); n_upd = max(1, steps // a.accum)
     if a.mode == "train":
-        sched = torch.optim.lr_scheduler.LambdaLR(opt, lambda s: min(1.0, (s + 1) / max(2, n_upd // 15)) * max(0.1, 1 - s / n_upd))
+        sched = torch.optim.lr_scheduler.LambdaLR(opt, (lambda s: 1.0) if a.const_lr else
+                                                  (lambda s: min(1.0, (s + 1) / max(2, n_upd // 15)) * max(0.1, 1 - s / n_upd)))
     if a.mode == "grpo": run_grpo(opt, FTP, MASTER); sys.exit(0)
     log(f"[sp] train {tag}: {steps} traces, {a.accum} per update ({n_upd} updates), pooler lr {a.lr}"
         + (f", FT layers 0-{a.ft_layers - 1} lr {a.ft_lr} ({sum(p_.numel() for p_ in FTP) / 1e6:.0f}M)" if a.ft_layers else ""))
