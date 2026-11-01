@@ -92,7 +92,11 @@
 # serial 30: a side task, training untouched - the teacher KL on the model's OWN generations (the seg-408 60-problem runs, SP
 # at window 1024 and the raw window alone), each scored in both setups: does the SP that helps on teacher text still help on
 # the text the model writes itself?
-SER=30
+# serial 31: a side task - SP lowers the teacher KL on the model's own text too (raw-run text 0.1334 -> 0.1128, SP-run text
+# 0.1508 -> 0.1323) yet loses 6 problems by not closing. Where the stopping decision sits: --end-stat (mean p(</think>),
+# log p at the real ends, p(Wait/But/Alternatively/Hmm)) for the teacher vs the student, with SP and with the raw window,
+# on both runs' text and on the 64 MATH teacher traces.
+SER=31
 if [ -f /root/.boxrl_serial ] && [ "$(cat /root/.boxrl_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxrl_serial
 [ -d /venv/main/bin ] && export PATH=/venv/main/bin:$PATH
@@ -511,5 +515,15 @@ if [ ! -e /root/.side30 ]; then touch /root/.side30
       done
     done ) > /dev/null 2>&1 < /dev/null &
   echo "[w0] on-policy KL side task launched $(date -u)"
+fi
+if [ ! -e /root/.side31 ]; then touch /root/.side31
+  ( cd /root/w
+    for f in ev_sp1024_408.jsonl ev_rawonly_408.jsonl kv_full_p.jsonl; do
+      for cfg in "SP:--rw 1024 --C 128 --maxd 0" "raw:--no-sp --rw 1056 --C 128 --maxd 0"; do n=${cfg%%:*}; a=${cfg#*:}
+        k=$(python3 sp_qwen3.py eval --traces $f --max-len 12288 --S 32 --heads 8 --layers 3 --ffn 2048 $a --ckpt spW0_408.pt --end-stat 2>&1 | grep -oP "end-stat .*?: \K.*" | tail -1)
+        echo "[w0] end-stat $f with $n: $k" >> w.log
+      done
+    done ) > /dev/null 2>&1 < /dev/null &
+  echo "[w0] end-stat side task launched $(date -u)"
 fi
 # CTL-END
