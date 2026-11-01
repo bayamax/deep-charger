@@ -15,7 +15,11 @@
 # those generations at the deployment state (chunk after a full window) to minimise KL(student || full-KV teacher) per
 # token, the teacher = the original Qwen3 reading the whole generation. Every 3 rounds the 60 problems with SP (seeds 1
 # and 2), every 6 also the raw window alone (damage gauge); spOP_latest.pt to the hub after each check. Runs until STOP_OP.
-SER=2
+# serial 3: the on-policy loop is held (job2 stopped before it starts). The user: "ignoring SP" is always available, so a working
+# setup can never end below the raw window - yet every SP did, GRPO included. First split content from slot: the 60
+# problems (seed 2, as the serial-1 runs) with the SP of an EMPTY buffer (a fixed set of 32 vectors) and with ANOTHER
+# problem's SP; plus the teacher-forced KL of the null SP on the SP run's text. Marker DONE_DG3.
+SER=3
 if [ -f /root/.boxdg_serial ] && [ "$(cat /root/.boxdg_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxdg_serial
 echo "[dg] preflight GPU: $(nvidia-smi --query-gpu=name,memory.used,memory.total --format=csv,noheader)"
@@ -65,6 +69,35 @@ put $LG dg/dg.log; date -u > DONE_DG1; put DONE_DG1 dg/DONE_DG1; echo "[dg] JOB_
 JOB
   setsid nohup bash -c 'bash /root/job.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
   echo "[dg] JOB_LAUNCHED $(date -u)"
+fi
+if [ ! -e /root/.job3 ]; then touch /root/.job3
+  for J in $(pgrep -f "^bash /root/job2.sh"); do pkill -P $J; kill $J; done
+  echo "[dg] s3: job2 (on-policy loop) stopped before its start"
+  cat > /root/job3.sh <<'JOB'
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); cd /root/w
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+R=baya1116/hypernet-sp-distill; RAW=https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i
+put() { for t in 1 2 3 4 5; do python3 -c "import sys; from huggingface_hub import HfApi; HfApi().upload_file(path_or_fileobj=sys.argv[1], path_in_repo='archive/sp3/'+sys.argv[2], repo_id='$R')" "$1" "$2" > put.err 2>&1 && { echo "[hub] $2"; return 0; }; sleep 60; done; echo "[hub] $2 FAILED"; }
+while [ ! -e DONE_DG1 ]; do sleep 60; done
+curl -sS -o sp_qwen3.py "$RAW/tools/sp_qwen3.py?nocache=$(date +%s)"
+LG=/root/w/sp.log; M="--S 32 --heads 8 --layers 3 --ffn 2048 --C 128 --maxd 0 --max-len 12288 --ckpt spW0.pt"
+score() { python3 -c "
+import json, sys; sys.path.insert(0, '.')
+from sp_mathcheck import correct
+rs = [json.loads(l) for l in open(sys.argv[1])]
+print('[dg] ' + sys.argv[2] + f': {sum(correct(r) for r in rs)}/{len(rs)} correct, closed {sum(\"</think>\" in r[\"text\"] for r in rs)}')" "$1" "$2"; }
+for c in null swap; do
+  python3 sp_qwen3.py rollout --traces rl_eval60.jsonl $M --rw 1024 --sp-$c --roll-cb --roll-batch 48 --grpo-tok-budget 60000 --roll-lp --seed 2 --roll-out gen_$c.jsonl --log $LG > run_gen_$c.log 2>&1
+  grep -E "Error|Traceback" run_gen_$c.log | tail -1 | sed "s/^/[dg] gen $c: /"
+  score gen_$c.jsonl "gen SP-$c seed 2"; put gen_$c.jsonl dg/gen_$c.jsonl
+done
+python3 sp_qwen3.py eval --traces gen_sp.jsonl $M --rw 1024 --sp-null --dump dump_sptext_null.pt --log $LG > run_ev_null.log 2>&1
+echo "[dg] text of the sp run scored with SP-null: $(grep -oP 'KL [0-9.]+ .*reverse KL [0-9.]+' run_ev_null.log | tail -1) $(grep -E 'Error|Traceback' run_ev_null.log | tail -1)"
+put dump_sptext_null.pt dg/dump_sptext_null.pt
+date -u > DONE_DG3; put DONE_DG3 dg/DONE_DG3; echo "[dg] JOB3_DONE $(date -u)"
+JOB
+  setsid nohup bash -c 'bash /root/job3.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
+  echo "[dg] s3: JOB3_LAUNCHED (waits for DONE_DG1) $(date -u)"
 fi
 if [ ! -e /root/.job2 ]; then touch /root/.job2
   cat > /root/job2.sh <<'JOB'

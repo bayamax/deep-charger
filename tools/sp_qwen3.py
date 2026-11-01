@@ -98,6 +98,10 @@ ap.add_argument("--rkl-weight", type=float, default=0.0, help="train (chunk mode
                 "per token. Reverse KL is mode-seeking: on the model's OWN generations (on-policy distillation) it punishes tokens the "
                 "full-KV teacher would not write at that state - e.g. a guessed value the soft prompts only blur - where the forward KL "
                 "(mode-covering) rewards hedging over every value the lossy past allows, which sampling then turns into confident errors")
+ap.add_argument("--sp-null", action="store_true", help="eval/rollout sanity: wherever SP would go, the SP of an EMPTY buffer (a fixed "
+                "set of 32 vectors, no content) - does the slot itself hurt, apart from what the soft prompts say?")
+ap.add_argument("--sp-swap", action="store_true", help="rollout (--roll-cb) sanity: the SP of ANOTHER stream's distant buffer (a different "
+                "problem) - content that is real soft-prompt material but unrelated to this answer")
 ap.add_argument("--const-lr", action="store_true", help="train: constant lr (no warm-up / decay) - for short repeated runs such as the "
                 "rounds of an on-policy loop, where a schedule per run would restart every round")
 ap.add_argument("--end-stat", action="store_true", help="eval: how much the student and the teacher want to stop thinking")
@@ -388,6 +392,7 @@ def run_trace(ids, P, train, ref_h=None):
         if c0 not in pick: continue
         with torch.set_grad_enabled(train):
             if a.no_sp: parts = []
+            elif a.sp_null: parts = [pooler(torch.zeros(1, 0, H, device=dev)).to(dt)]
             else: parts = [(pooler(feat(kept) if feat else embed(kept).float()) if kept.size(1) > 0 else pooler(torch.zeros(1, 0, H, device=dev))).to(dt)]
             block = torch.cat(parts + [embed(a_ids[:, c0 - R:c0]).to(dt), embed(a_ids[:, c0:c1]).to(dt)], 1)
             nb = block.size(1)
@@ -742,7 +747,13 @@ def rollout_cb(prompts, nslot):
             c0 = len(gen[j]); R = min(c0, a.rw); nd = c0 - R
             if nd > absorbed[j]: kept[j], absorbed[j] = update_buffer(kept[j], absorbed[j], torch.tensor([gen[j]], device=dev), nd)
             parts = [embed(torch.tensor([prompts[j]], device=dev)).to(dt)]
-            if kept[j].size(1) > 0 and not a.no_sp: parts.append(pooler(embed(kept[j]).float()).to(dt))
+            if kept[j].size(1) > 0 and not a.no_sp:
+                if a.sp_null: parts.append(pooler(torch.zeros(1, 0, H, device=dev)).to(dt))
+                elif a.sp_swap:
+                    oth = [x for x in act if x != j and kept[x] is not None and kept[x].size(1) > 0]
+                    src_ = kept[oth[0]] if oth else torch.zeros(1, 0, dtype=torch.long, device=dev)
+                    parts.append((pooler(embed(src_).float()) if src_.size(1) else pooler(torch.zeros(1, 0, H, device=dev))).to(dt))
+                else: parts.append(pooler(embed(kept[j]).float()).to(dt))
             if R > 0: parts.append(embed(torch.tensor([gen[j][c0 - R:]], device=dev)).to(dt))
             blocks.append(torch.cat(parts, 1))
         N = len(act); lens = [x.size(1) for x in blocks]; Lmax = max(lens)
@@ -958,7 +969,7 @@ for r in rows:
     ans = r["ids"] if "ids" in r else tok.encode(r.get("text", r.get("chosen", "")), add_special_tokens=False)
     data.append((torch.tensor(pid + ans), len(pid)))   # CPU; moved per trace
 
-tag = f"S{a.S} rw{a.rw} C{a.C} maxd{a.maxd} L{a.layers} ffn{a.ffn}" + (" par" if a.par and a.mode == "train" else "") + (f" spin b{a.spin_beta}" if a.spin and a.mode == "train" else "") + (" spnext" + (f" win{a.sn_win}/{a.sn_win_every}" if a.sn_win != "1" else "") if a.spnext and a.mode == "train" else "") + (" no-SP" if a.no_sp else "") + (f" ctxL{a.ctx_hidden}" if a.ctx_hidden else "") + (" pe-rev" if a.pe_rev else "") + (" pe-norm" if a.pe_norm else "") + (f" FT{a.ft_layers}" if a.ft_layers else "") + (f" from{a.score_from}" if a.score_from else "") + (f" rkl{a.rkl_weight}" if a.rkl_weight and a.mode == "train" else "")
+tag = f"S{a.S} rw{a.rw} C{a.C} maxd{a.maxd} L{a.layers} ffn{a.ffn}" + (" par" if a.par and a.mode == "train" else "") + (f" spin b{a.spin_beta}" if a.spin and a.mode == "train" else "") + (" spnext" + (f" win{a.sn_win}/{a.sn_win_every}" if a.sn_win != "1" else "") if a.spnext and a.mode == "train" else "") + (" no-SP" if a.no_sp else "") + (" SP-null" if a.sp_null else "") + (" SP-swap" if a.sp_swap else "") + (f" ctxL{a.ctx_hidden}" if a.ctx_hidden else "") + (" pe-rev" if a.pe_rev else "") + (" pe-norm" if a.pe_norm else "") + (f" FT{a.ft_layers}" if a.ft_layers else "") + (f" from{a.score_from}" if a.score_from else "") + (f" rkl{a.rkl_weight}" if a.rkl_weight and a.mode == "train" else "")
 if a.mode == "profile":
     pooler.eval(); acc = {}
     for ids, P in data: profile_trace(ids, P, acc)
