@@ -36,7 +36,12 @@
 # exactly where the tag belongs (which would explain why a content-free slot hurts as much as the real SP). The 60 problems
 # (seed 2) with the tag kept after the prompt (--pin-think): raw window, SP, null SP. The on-policy loop is held again (it
 # now waits for a GO_OP marker, set by a later serial with the layout these runs pick). Marker DONE_DG7.
-SER=7
+# serial 8: the raw window cut to 1024 (no slot at all) scored 36/60 - like every SP run (35-38) - while the raw window of 1056
+# scored 41-44: the "SP hurts" comparison was SP+1024 against a raw window 32 tokens longer, and the slot is attended ~0.5%
+# (probe) - SP is simply ignored at window 1024. Is 32 raw tokens really worth ~6 problems, or is it an artefact of the
+# window being a multiple of the chunk (1024 = 8 x 128)? Raw window 1088 (not a multiple) and 1152 (a multiple), seed 2;
+# 1024 and 1056 again at seed 3; 1024 with the <think> tag kept. Marker DONE_DG8.
+SER=8
 if [ -f /root/.boxdg_serial ] && [ "$(cat /root/.boxdg_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxdg_serial
 echo "[dg] preflight GPU: $(nvidia-smi --query-gpu=name,memory.used,memory.total --format=csv,noheader)"
@@ -136,6 +141,30 @@ date -u > DONE_DG4; put DONE_DG4 dg/DONE_DG4; echo "[dg] JOB4_DONE $(date -u)"
 JOB
   setsid nohup bash -c 'bash /root/job4.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
   echo "[dg] s4: JOB4_LAUNCHED (waits for DONE_DG3) $(date -u)"
+fi
+if [ ! -e /root/.s8 ]; then touch /root/.s8
+  cat > /root/job8.sh <<'JOB'
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); cd /root/w
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+R=baya1116/hypernet-sp-distill
+put() { for _i in 1 2 3 4 5; do python3 -c "import sys; from huggingface_hub import HfApi; HfApi().upload_file(path_or_fileobj=sys.argv[1], path_in_repo='archive/sp3/'+sys.argv[2], repo_id='$R')" "$1" "$2" > put.err 2>&1 && { echo "[hub] $2"; return 0; }; sleep 60; done; echo "[hub] $2 FAILED"; }
+while [ ! -e DONE_DG7 ]; do sleep 60; done
+LG=/root/w/sp.log; M="--S 32 --heads 8 --layers 3 --ffn 2048 --C 128 --maxd 0 --max-len 12288 --ckpt spW0.pt"
+score() { python3 -c "
+import json, sys; sys.path.insert(0, '.')
+from sp_mathcheck import correct
+rs = [json.loads(l) for l in open(sys.argv[1])]
+print('[dg] ' + sys.argv[2] + f': {sum(correct(r) for r in rs)}/{len(rs)} correct, closed {sum(\"</think>\" in r[\"text\"] for r in rs)}')" "$1" "$2"; }
+for cfg in "raw1088:2:--no-sp --rw 1088" "raw1152:2:--no-sp --rw 1152" "raw1024:3:--no-sp --rw 1024" "raw1056:3:--no-sp --rw 1056" "raw1024pin:2:--no-sp --rw 1024 --pin-think"; do
+  n=${cfg%%:*}; r_=${cfg#*:}; sd=${r_%%:*}; x=${r_#*:}
+  python3 sp_qwen3.py rollout --traces rl_eval60.jsonl $M $x --roll-cb --roll-batch 48 --grpo-tok-budget 60000 --seed $sd --roll-out gen_${n}_s$sd.jsonl --log $LG > run_gen_$n.log 2>&1
+  grep -E "Error|Traceback" run_gen_$n.log | tail -1 | sed "s/^/[dg] gen $n: /"
+  score gen_${n}_s$sd.jsonl "gen $n seed $sd"; put gen_${n}_s$sd.jsonl dg/gen_${n}_s$sd.jsonl
+done
+date -u > DONE_DG8; put DONE_DG8 dg/DONE_DG8; echo "[dg] JOB8_DONE $(date -u)"
+JOB
+  setsid nohup bash -c 'bash /root/job8.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
+  echo "[dg] s8: JOB8_LAUNCHED (waits for DONE_DG7) $(date -u)"
 fi
 if [ ! -e /root/.s7 ]; then touch /root/.s7
   for J in $(pgrep -f "^bash /root/job2.sh"); do pkill -P $J; kill $J; done; rm -f /root/.job2
