@@ -94,6 +94,10 @@ ap.add_argument("--fifo", type=int, default=0, help="distant buffer: keep only t
 ap.add_argument("--par-deploy", action="store_true", help="--par: score only the rows the deployment loop scores - in the block "
                 "[SP(tokens before b) | a[b : b+rw+C]] the last C (raw window >= rw), i.e. the chunk after a full raw window; the "
                 "rows with a short window (SP alone, never seen in deployment) are left out")
+ap.add_argument("--rkl-weight", type=float, default=0.0, help="train (chunk mode): loss = (1-w) KL(teacher||student) + w KL(student||teacher) "
+                "per token. Reverse KL is mode-seeking: on the model's OWN generations (on-policy distillation) it punishes tokens the "
+                "full-KV teacher would not write at that state - e.g. a guessed value the soft prompts only blur - where the forward KL "
+                "(mode-covering) rewards hedging over every value the lossy past allows, which sampling then turns into confident errors")
 ap.add_argument("--end-stat", action="store_true", help="eval: how much the student and the teacher want to stop thinking")
 ap.add_argument("--dump", default="", help="eval: per-token records to this .pt file - per trace the answer positions, the token, "
                 "log p of the token under the student and the teacher, forward KL(teacher||student) and reverse KL(student||teacher)")
@@ -347,6 +351,7 @@ def teacher_rows(h):
     return F.log_softmax(llm.lm_head(h).float(), -1)
 
 
+RKL = [0.0, 0]   # chunk mode: summed reverse KL(student||teacher) and rows since the last log
 DUMP = [] if a.dump else None   # eval --dump: per trace a list of (rows, 7) tensors
 
 
@@ -393,7 +398,9 @@ def run_trace(ids, P, train, ref_h=None):
             sl = F.log_softmax(o.logits[0, :cur].float(), -1)
             tr = teacher_rows(ref_h[c0 - first:c1 - first])     # teacher row j predicts answer token first + j
             kl = (tr.exp() * (tr - sl)).sum(-1)
-            if train: (kl.sum() / 1000.0).backward()
+            rk = (sl.exp() * (sl - tr)).sum(-1)
+            RKL[0] += rk.sum().item(); RKL[1] += rk.numel()
+            if train: (((1 - a.rkl_weight) * kl + a.rkl_weight * rk).sum() / 1000.0).backward()
         if c0 >= a.score_from:
             K += kl.sum().item(); A_ += (sl.argmax(-1) == tr.argmax(-1)).float().sum().item(); N += kl.numel()
             if DUMP is not None and not train:
@@ -949,7 +956,7 @@ for r in rows:
     ans = r["ids"] if "ids" in r else tok.encode(r.get("text", r.get("chosen", "")), add_special_tokens=False)
     data.append((torch.tensor(pid + ans), len(pid)))   # CPU; moved per trace
 
-tag = f"S{a.S} rw{a.rw} C{a.C} maxd{a.maxd} L{a.layers} ffn{a.ffn}" + (" par" if a.par and a.mode == "train" else "") + (f" spin b{a.spin_beta}" if a.spin and a.mode == "train" else "") + (" spnext" + (f" win{a.sn_win}/{a.sn_win_every}" if a.sn_win != "1" else "") if a.spnext and a.mode == "train" else "") + (" no-SP" if a.no_sp else "") + (f" ctxL{a.ctx_hidden}" if a.ctx_hidden else "") + (" pe-rev" if a.pe_rev else "") + (" pe-norm" if a.pe_norm else "") + (f" FT{a.ft_layers}" if a.ft_layers else "") + (f" from{a.score_from}" if a.score_from else "")
+tag = f"S{a.S} rw{a.rw} C{a.C} maxd{a.maxd} L{a.layers} ffn{a.ffn}" + (" par" if a.par and a.mode == "train" else "") + (f" spin b{a.spin_beta}" if a.spin and a.mode == "train" else "") + (" spnext" + (f" win{a.sn_win}/{a.sn_win_every}" if a.sn_win != "1" else "") if a.spnext and a.mode == "train" else "") + (" no-SP" if a.no_sp else "") + (f" ctxL{a.ctx_hidden}" if a.ctx_hidden else "") + (" pe-rev" if a.pe_rev else "") + (" pe-norm" if a.pe_norm else "") + (f" FT{a.ft_layers}" if a.ft_layers else "") + (f" from{a.score_from}" if a.score_from else "") + (f" rkl{a.rkl_weight}" if a.rkl_weight and a.mode == "train" else "")
 if a.mode == "profile":
     pooler.eval(); acc = {}
     for ids, P in data: profile_trace(ids, P, acc)
@@ -980,7 +987,7 @@ elif a.mode == "eval":
     if DUMP is not None:
         torch.save([torch.cat(x) if x else torch.zeros(0, 7) for x in DUMP], a.dump)
     log(f"[sp] eval {tag} {os.path.basename(a.ckpt) or 'untrained'}: {len(data)} traces {int(N)} tokens  KL {K / max(N, 1):.4f}  "
-        f"top1 agree {100 * A_ / max(N, 1):.2f}%  ({time.time() - t0:.0f}s)")
+        f"top1 agree {100 * A_ / max(N, 1):.2f}%  reverse KL {RKL[0] / max(RKL[1], 1):.4f}  ({time.time() - t0:.0f}s)")
     if a.end_stat:
         e = ENDST; log(f"[sp] end-stat {tag}: mean p(</think>) teacher {e['pt'] / max(e['n'], 1):.3e} student {e['ps'] / max(e['n'], 1):.3e} | "
                        f"at the {e['k']} real ends: log p teacher {e['lt'] / max(e['k'], 1):.3f} student {e['ls'] / max(e['k'], 1):.3f} | "
@@ -1077,6 +1084,7 @@ else:
                 lab = ["<1k", "1-2k", "2-4k", "4-8k", "8k+"]
                 x += (" | KL by past outside the window: " + " ".join(f"{lab[k]} {v[0] / max(v[1], 1):.4f}" for k, v in sorted(DBK.items()))) if DBK else ""
                 DBK.clear()
+                if RKL[1]: x += f" | reverse KL {RKL[0] / RKL[1]:.4f}"; RKL[0] = 0.0; RKL[1] = 0
                 log(f"[sp] train {tag} trace {st + 1}/{steps}: KL {K / max(N, 1):.4f} top1 {100 * A_ / max(N, 1):.2f}%{x} ({time.time() - t0:.0f}s)")
             if a.spnext and a.sn_win_plateau and N:   # curriculum by plateau: 100-trace means at this w, last vs the one before
                 WI["kl"].append(K / N); n_at = st + 1 - WI["from"]; hist = WI["kl"]
