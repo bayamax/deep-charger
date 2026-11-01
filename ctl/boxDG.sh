@@ -19,7 +19,9 @@
 # setup can never end below the raw window - yet every SP did, GRPO included. First split content from slot: the 60
 # problems (seed 2, as the serial-1 runs) with the SP of an EMPTY buffer (a fixed set of 32 vectors) and with ANOTHER
 # problem's SP; plus the teacher-forced KL of the null SP on the SP run's text. Marker DONE_DG3.
-SER=3
+# serial 4: serial 1's dump loop reused $t inside put() (its retry loop), so after the first upload the text name became "1" -
+# the raw-window scorings (SP-run text and raw-run text scored with the raw window) never ran. They run after job3.
+SER=4
 if [ -f /root/.boxdg_serial ] && [ "$(cat /root/.boxdg_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxdg_serial
 echo "[dg] preflight GPU: $(nvidia-smi --query-gpu=name,memory.used,memory.total --format=csv,noheader)"
@@ -69,6 +71,24 @@ put $LG dg/dg.log; date -u > DONE_DG1; put DONE_DG1 dg/DONE_DG1; echo "[dg] JOB_
 JOB
   setsid nohup bash -c 'bash /root/job.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
   echo "[dg] JOB_LAUNCHED $(date -u)"
+fi
+if [ ! -e /root/.job4 ]; then touch /root/.job4
+  cat > /root/job4.sh <<'JOB'
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); cd /root/w
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+R=baya1116/hypernet-sp-distill
+put() { for _i in 1 2 3 4 5; do python3 -c "import sys; from huggingface_hub import HfApi; HfApi().upload_file(path_or_fileobj=sys.argv[1], path_in_repo='archive/sp3/'+sys.argv[2], repo_id='$R')" "$1" "$2" > put.err 2>&1 && { echo "[hub] $2"; return 0; }; sleep 60; done; echo "[hub] $2 FAILED"; }
+while [ ! -e DONE_DG3 ]; do sleep 60; done
+LG=/root/w/sp.log; M="--S 32 --heads 8 --layers 3 --ffn 2048 --C 128 --maxd 0 --max-len 12288 --ckpt spW0.pt"
+for txt in sp raw; do
+  python3 sp_qwen3.py eval --traces gen_$txt.jsonl $M --no-sp --rw 1056 --dump dump_${txt}text_raw.pt --log $LG > run_ev_${txt}_raw.log 2>&1
+  echo "[dg] text of the $txt run scored with raw: $(grep -oP 'KL [0-9.]+ .*top1 agree [0-9.]+%.*' run_ev_${txt}_raw.log | tail -1 | cut -c1-120) $(grep -E 'Error|Traceback' run_ev_${txt}_raw.log | tail -1)"
+  put dump_${txt}text_raw.pt dg/dump_${txt}text_raw.pt
+done
+date -u > DONE_DG4; put DONE_DG4 dg/DONE_DG4; echo "[dg] JOB4_DONE $(date -u)"
+JOB
+  setsid nohup bash -c 'bash /root/job4.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
+  echo "[dg] s4: JOB4_LAUNCHED (waits for DONE_DG3) $(date -u)"
 fi
 touch /root/.job2   # serial 3: the on-policy loop is not launched (held)
 if [ ! -e /root/.job3 ]; then touch /root/.job3
