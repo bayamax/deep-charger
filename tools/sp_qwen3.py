@@ -105,6 +105,9 @@ ap.add_argument("--sp-swap", action="store_true", help="rollout (--roll-cb) sani
 ap.add_argument("--sp-filler", default="", help="eval/rollout sanity: wherever SP would go, S copies of this REAL token (e.g. a newline) "
                 "instead of soft prompts - do soft vectors hurt where ordinary tokens would not?")
 ap.add_argument("--probe-n", type=int, default=12, help="probe: traces; 4 chunk states each, after the window has filled")
+ap.add_argument("--pin-think", action="store_true", help="eval/rollout/probe: keep the answer's opening '<think>\\n' right after the prompt "
+                "once the raw window has moved past it ([prompt | <think> | SP | window]) - otherwise the model writes on mid-thought "
+                "without the tag that says it is thinking, and the slot sits exactly where the tag belongs")
 ap.add_argument("--const-lr", action="store_true", help="train: constant lr (no warm-up / decay) - for short repeated runs such as the "
                 "rounds of an on-policy loop, where a schedule per run would restart every round")
 ap.add_argument("--end-stat", action="store_true", help="eval: how much the student and the teacher want to stop thinking")
@@ -153,6 +156,7 @@ torch.manual_seed(a.seed); random.seed(a.seed)
 dev, dt = a.device, getattr(torch, a.dtype)
 tok = AutoTokenizer.from_pretrained(a.model)
 END_ID = tok.convert_tokens_to_ids("</think>")
+THINK_ID = tok.convert_tokens_to_ids("<think>")
 FILL = tok.encode(a.sp_filler.encode().decode("unicode_escape"), add_special_tokens=False)[0] if a.sp_filler else None
 HES_IDS = sorted({x[0] for w in ("Wait", " Wait", "But", " But", "Alternatively", " Alternatively", "Hmm", " Hmm")
                   for x in [tok.encode(w, add_special_tokens=False)] if len(x) == 1})   # "keep checking" openers
@@ -361,6 +365,13 @@ def teacher_rows(h):
     return F.log_softmax(llm.lm_head(h).float(), -1)
 
 
+def pin_of(ans, lo):
+    """--pin-think: the answer's opening '<think>' (+ its newline) as a list of ids, when the raw window starts after it"""
+    if not a.pin_think or not len(ans) or int(ans[0]) != THINK_ID: return []
+    k = 2 if len(ans) > 1 and tok.decode([int(ans[1])]).strip() == "" else 1
+    return [int(x) for x in ans[:k]] if lo >= k else []
+
+
 def slot(kept_ids, feat=None):
     """what goes between the prompt and the raw window once something is distant: the soft prompts, or a sanity stand-in"""
     if a.sp_filler: return embed(torch.tensor([FILL] * a.S, device=dev))[None].to(dt)
@@ -402,8 +413,9 @@ def run_trace(ids, P, train, ref_h=None):
         kept, absorbed = update_buffer(kept, absorbed, src, nd_end, feat)
         if c0 not in pick: continue
         with torch.set_grad_enabled(train):
-            if a.no_sp: parts = []
-            else: parts = [slot(kept, feat)]
+            pn = pin_of(a_ids[0], c0 - R)
+            parts = [embed(torch.tensor([pn], device=dev)).to(dt)] if pn else []
+            if not a.no_sp: parts.append(slot(kept, feat))
             block = torch.cat(parts + [embed(a_ids[:, c0 - R:c0]).to(dt), embed(a_ids[:, c0:c1]).to(dt)], 1)
             nb = block.size(1)
             cache = DynamicCache()
@@ -756,7 +768,7 @@ def rollout_cb(prompts, nslot):
         for j in act:
             c0 = len(gen[j]); R = min(c0, a.rw); nd = c0 - R
             if nd > absorbed[j]: kept[j], absorbed[j] = update_buffer(kept[j], absorbed[j], torch.tensor([gen[j]], device=dev), nd)
-            parts = [embed(torch.tensor([prompts[j]], device=dev)).to(dt)]
+            parts = [embed(torch.tensor([prompts[j] + pin_of(gen[j], c0 - R)], device=dev)).to(dt)]
             if kept[j].size(1) > 0 and not a.no_sp:
                 if a.sp_null or a.sp_filler: parts.append(slot(kept[j]))
                 elif a.sp_swap:
@@ -979,7 +991,7 @@ for r in rows:
     ans = r["ids"] if "ids" in r else tok.encode(r.get("text", r.get("chosen", "")), add_special_tokens=False)
     data.append((torch.tensor(pid + ans), len(pid)))   # CPU; moved per trace
 
-tag = f"S{a.S} rw{a.rw} C{a.C} maxd{a.maxd} L{a.layers} ffn{a.ffn}" + (" par" if a.par and a.mode == "train" else "") + (f" spin b{a.spin_beta}" if a.spin and a.mode == "train" else "") + (" spnext" + (f" win{a.sn_win}/{a.sn_win_every}" if a.sn_win != "1" else "") if a.spnext and a.mode == "train" else "") + (" no-SP" if a.no_sp else "") + (" SP-null" if a.sp_null else "") + (" SP-swap" if a.sp_swap else "") + (f" filler{FILL}" if a.sp_filler else "") + (f" ctxL{a.ctx_hidden}" if a.ctx_hidden else "") + (" pe-rev" if a.pe_rev else "") + (" pe-norm" if a.pe_norm else "") + (f" FT{a.ft_layers}" if a.ft_layers else "") + (f" from{a.score_from}" if a.score_from else "") + (f" rkl{a.rkl_weight}" if a.rkl_weight and a.mode == "train" else "")
+tag = f"S{a.S} rw{a.rw} C{a.C} maxd{a.maxd} L{a.layers} ffn{a.ffn}" + (" par" if a.par and a.mode == "train" else "") + (f" spin b{a.spin_beta}" if a.spin and a.mode == "train" else "") + (" spnext" + (f" win{a.sn_win}/{a.sn_win_every}" if a.sn_win != "1" else "") if a.spnext and a.mode == "train" else "") + (" no-SP" if a.no_sp else "") + (" SP-null" if a.sp_null else "") + (" SP-swap" if a.sp_swap else "") + (f" filler{FILL}" if a.sp_filler else "") + (" pin-think" if a.pin_think else "") + (f" ctxL{a.ctx_hidden}" if a.ctx_hidden else "") + (" pe-rev" if a.pe_rev else "") + (" pe-norm" if a.pe_norm else "") + (f" FT{a.ft_layers}" if a.ft_layers else "") + (f" from{a.score_from}" if a.score_from else "") + (f" rkl{a.rkl_weight}" if a.rkl_weight and a.mode == "train" else "")
 if a.mode == "profile":
     pooler.eval(); acc = {}
     for ids, P in data: profile_trace(ids, P, acc)
@@ -997,18 +1009,19 @@ elif a.mode == "probe":   # where the window's attention goes with a slot betwee
             if not c0s: continue
             for c0 in [c0s[int(i * (len(c0s) - 1) / 3)] for i in range(4)]:
                 R = a.rw; kept = a_ids[:, :c0 - R]
-                parts = [embed(ids[None, :P]).to(dt)] + ([] if a.no_sp else [slot(kept)]) + [embed(a_ids[:, c0 - R:c0 + 64]).to(dt)]
-                x = torch.cat(parts, 1); ns_ = 0 if a.no_sp else a.S
+                pn = pin_of(a_ids[0], c0 - R)
+                parts = [embed(torch.cat([ids[:P], torch.tensor(pn, dtype=ids.dtype, device=dev)])[None]).to(dt)] + ([] if a.no_sp else [slot(kept)]) + [embed(a_ids[:, c0 - R:c0 + 64]).to(dt)]
+                x = torch.cat(parts, 1); ns_ = 0 if a.no_sp else a.S; Pq = P + len(pn)
                 o = llm.model(inputs_embeds=x, position_ids=torch.arange(x.size(1), device=dev)[None], output_attentions=True, output_hidden_states=True)
                 for li, att in enumerate(o.attentions):
                     q = att[0, :, -64:].float()                                    # (heads, 64 queries, keys)
                     v = acc.setdefault(li, [0.0] * 6)
-                    v[0] += q[:, :, P:P + ns_].sum(-1).mean().item() if ns_ else 0.0     # mass on the slot
+                    v[0] += q[:, :, Pq:Pq + ns_].sum(-1).mean().item() if ns_ else 0.0     # mass on the slot
                     v[1] += q[:, :, 0].mean().item()                                       # mass on the first prompt token
-                    v[2] += q[:, :, P + ns_:P + ns_ + 32].sum(-1).mean().item()           # mass on the window's first 32 tokens
+                    v[2] += q[:, :, Pq + ns_:Pq + ns_ + 32].sum(-1).mean().item()           # mass on the window's first 32 tokens
                     v[3] += q[:, :, -96:].sum(-1).mean().item()                            # mass on the newest 96 positions
                     hs = o.hidden_states[li + 1][0].float().norm(dim=-1)
-                    v[4] += hs[P:P + ns_].mean().item() if ns_ else 0.0; v[5] += hs[P + ns_:].median().item()
+                    v[4] += hs[Pq:Pq + ns_].mean().item() if ns_ else 0.0; v[5] += hs[Pq + ns_:].median().item()
                 ns += 1
     log(f"[sp] probe {tag} {os.path.basename(a.ckpt) or 'untrained'}: {ns} states; per layer: attention mass of the last 64 window queries "
         f"on the slot / first prompt token / first 32 window tokens / newest 96, hidden norm slot / window median")

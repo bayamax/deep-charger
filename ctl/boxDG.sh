@@ -31,7 +31,12 @@
 # LOWERS the forward KL to the full-KV teacher (raw 0.1642, null 0.1617, SP 0.1591) but RAISES the reverse KL (raw 0.2175,
 # null 0.2261, SP 0.2274), and sampling follows the reverse side: every training so far minimised the forward KL. The held
 # on-policy reverse-KL loop (serial 2's job2) now starts after serial 5 (DONE_DG5).
-SER=6
+# serial 7: a possible oversight in the loop itself - once the raw window passes the answer's opening "<think>\n" the tag is
+# gone (raw window and SP alike): the model writes on mid-thought without the tag that says it is thinking, and the slot sits
+# exactly where the tag belongs (which would explain why a content-free slot hurts as much as the real SP). The 60 problems
+# (seed 2) with the tag kept after the prompt (--pin-think): raw window, SP, null SP. The on-policy loop is held again (it
+# now waits for a GO_OP marker, set by a later serial with the layout these runs pick). Marker DONE_DG7.
+SER=7
 if [ -f /root/.boxdg_serial ] && [ "$(cat /root/.boxdg_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxdg_serial
 echo "[dg] preflight GPU: $(nvidia-smi --query-gpu=name,memory.used,memory.total --format=csv,noheader)"
@@ -132,6 +137,31 @@ JOB
   setsid nohup bash -c 'bash /root/job4.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
   echo "[dg] s4: JOB4_LAUNCHED (waits for DONE_DG3) $(date -u)"
 fi
+if [ ! -e /root/.s7 ]; then touch /root/.s7
+  for J in $(pgrep -f "^bash /root/job2.sh"); do pkill -P $J; kill $J; done; rm -f /root/.job2
+  cat > /root/job7.sh <<'JOB'
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); cd /root/w
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+R=baya1116/hypernet-sp-distill; RAW=https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i
+put() { for _i in 1 2 3 4 5; do python3 -c "import sys; from huggingface_hub import HfApi; HfApi().upload_file(path_or_fileobj=sys.argv[1], path_in_repo='archive/sp3/'+sys.argv[2], repo_id='$R')" "$1" "$2" > put.err 2>&1 && { echo "[hub] $2"; return 0; }; sleep 60; done; echo "[hub] $2 FAILED"; }
+while [ ! -e DONE_DG5 ]; do sleep 60; done
+curl -sS -o sp_qwen3.py "$RAW/tools/sp_qwen3.py?nocache=$(date +%s)"
+LG=/root/w/sp.log; M="--S 32 --heads 8 --layers 3 --ffn 2048 --C 128 --maxd 0 --max-len 12288 --ckpt spW0.pt"
+score() { python3 -c "
+import json, sys; sys.path.insert(0, '.')
+from sp_mathcheck import correct
+rs = [json.loads(l) for l in open(sys.argv[1])]
+print('[dg] ' + sys.argv[2] + f': {sum(correct(r) for r in rs)}/{len(rs)} correct, closed {sum(\"</think>\" in r[\"text\"] for r in rs)}')" "$1" "$2"; }
+for cfg in "rawpin:--no-sp --rw 1056" "sppin:--rw 1024" "nullpin:--rw 1024 --sp-null"; do n=${cfg%%:*}; x=${cfg#*:}
+  python3 sp_qwen3.py rollout --traces rl_eval60.jsonl $M $x --pin-think --roll-cb --roll-batch 48 --grpo-tok-budget 60000 --roll-lp --seed 2 --roll-out gen_$n.jsonl --log $LG > run_gen_$n.log 2>&1
+  grep -E "Error|Traceback" run_gen_$n.log | tail -1 | sed "s/^/[dg] gen $n: /"
+  score gen_$n.jsonl "gen $n seed 2"; put gen_$n.jsonl dg/gen_$n.jsonl
+done
+date -u > DONE_DG7; put DONE_DG7 dg/DONE_DG7; echo "[dg] JOB7_DONE $(date -u)"
+JOB
+  setsid nohup bash -c 'bash /root/job7.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
+  echo "[dg] s7: JOB7_LAUNCHED (waits for DONE_DG5); the on-policy loop waits for GO_OP $(date -u)"
+fi
 [ -e /root/.s6 ] || { touch /root/.s6; rm -f /root/.job2; }   # serial 6: the held loop is launched (it waits for DONE_DG5)
 if [ ! -e /root/.job3 ]; then touch /root/.job3
   for J in $(pgrep -f "^bash /root/job2.sh"); do pkill -P $J; kill $J; done
@@ -169,7 +199,7 @@ export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 R=baya1116/hypernet-sp-distill; H=https://huggingface.co/$R/resolve/main
 RAW=https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i
 put() { for t in 1 2 3 4 5; do python3 -c "import sys; from huggingface_hub import HfApi; HfApi().upload_file(path_or_fileobj=sys.argv[1], path_in_repo='archive/sp3/'+sys.argv[2], repo_id='$R')" "$1" "$2" > put.err 2>&1 && { echo "[hub] $2"; return 0; }; sleep 60; done; echo "[hub] $2 FAILED"; }
-while [ ! -e DONE_DG5 ]; do sleep 60; done
+while [ ! -e GO_OP ]; do sleep 60; done
 for f in tools/sp_qwen3.py ctl/gen_more.jsonl; do curl -sS -o $(basename $f) "$RAW/$f?nocache=$(date +%s)"; done
 python3 -c "
 import random; rs = open('gen_more.jsonl').readlines(); random.Random(0).shuffle(rs); open('op_prompts.jsonl', 'w').writelines(rs)"
@@ -202,6 +232,6 @@ done
 echo "[op] stopped $(date -u)"
 JOB
   setsid nohup bash -c 'bash /root/job2.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
-  echo "[op] JOB2_LAUNCHED (waits for DONE_DG5) $(date -u)"
+  echo "[op] JOB2_LAUNCHED (waits for GO_OP) $(date -u)"
 fi
 # CTL-END
