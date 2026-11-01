@@ -95,6 +95,11 @@ ap.add_argument("--par-deploy", action="store_true", help="--par: score only the
                 "[SP(tokens before b) | a[b : b+rw+C]] the last C (raw window >= rw), i.e. the chunk after a full raw window; the "
                 "rows with a short window (SP alone, never seen in deployment) are left out")
 ap.add_argument("--end-stat", action="store_true", help="eval: how much the student and the teacher want to stop thinking")
+ap.add_argument("--dump", default="", help="eval: per-token records to this .pt file - per trace the answer positions, the token, "
+                "log p of the token under the student and the teacher, forward KL(teacher||student) and reverse KL(student||teacher)")
+ap.add_argument("--roll-lp", action="store_true", help="rollout (--roll-cb): also store the generated token ids and each sampled "
+                "token's log p under the generator's own (untempered) logits - eval on such a file scores exactly those ids, so "
+                "the generation path can be checked against the teacher-forced path token by token")
 ap.add_argument("--presence", type=float, default=0.0, help="rollout: presence penalty on the logits of tokens already generated")
 ap.add_argument("--no-sp", action="store_true", help="eval/rollout baseline without soft prompts: [raw window | chunk] only "
                 "(with a window as long as the trace it is the full-KV model)")
@@ -342,6 +347,9 @@ def teacher_rows(h):
     return F.log_softmax(llm.lm_head(h).float(), -1)
 
 
+DUMP = [] if a.dump else None   # eval --dump: per trace a list of (rows, 7) tensors
+
+
 def run_trace(ids, P, train, ref_h=None):
     """teacher-forced SP-evict over one trace: returns (sum KL, sum top-1 agree, n tokens) on tokens past the window."""
     T = min(len(ids), P + a.max_len)
@@ -388,6 +396,11 @@ def run_trace(ids, P, train, ref_h=None):
             if train: (kl.sum() / 1000.0).backward()
         if c0 >= a.score_from:
             K += kl.sum().item(); A_ += (sl.argmax(-1) == tr.argmax(-1)).float().sum().item(); N += kl.numel()
+            if DUMP is not None and not train:
+                tk = a_ids[0, c0:c1]
+                DUMP[-1].append(torch.stack([torch.arange(c0, c1, device=dev).float(), tk.float(), sl.gather(1, tk[:, None])[:, 0],
+                                             tr.gather(1, tk[:, None])[:, 0], kl, (sl.exp() * (sl - tr)).sum(-1),
+                                             (sl.argmax(-1) == tr.argmax(-1)).float()], 1).cpu())
             if a.end_stat:
                 ENDST["pt"] += tr[:, END_ID].exp().sum().item(); ENDST["ps"] += sl[:, END_ID].exp().sum().item(); ENDST["n"] += kl.numel()
                 ENDST["ht"] += tr[:, HES_IDS].exp().sum().item(); ENDST["hs"] += sl[:, HES_IDS].exp().sum().item()
@@ -698,6 +711,9 @@ def sample_tok(lg):
     return si.gather(-1, torch.multinomial(sp_ / sp_.sum(-1, keepdim=True), 1)).squeeze(-1)
 
 
+LPG = {}   # rollout_cb --roll-lp: prompt index -> log p of each sampled token under the generator's logits
+
+
 @torch.no_grad()
 def rollout_cb(prompts, nslot):
     """the deployment SP-evict loop (as rollout()) with continuous batching: up to nslot streams; at every chunk boundary
@@ -731,11 +747,13 @@ def rollout_cb(prompts, nslot):
         last = llm.lm_head(hs[:, -1]); del hs, block
         nxt = torch.tensor(lens, device=dev)[:, None]; fin = [False] * N
         for _ in range(a.C):
-            nx = sample_tok(last).tolist()
+            nx_t = sample_tok(last); nx = nx_t.tolist()
+            if a.roll_lp: lpn = F.log_softmax(last.float(), -1).gather(1, nx_t[:, None])[:, 0].tolist()
             for b, j in enumerate(act):
                 if fin[b]: continue
                 if nx[b] in stop: fin[b] = True; ended[j] = True; continue
                 gen[j].append(nx[b])
+                if a.roll_lp: LPG.setdefault(j, []).append(lpn[b])
                 if len(gen[j]) >= a.max_len: fin[b] = True
             if all(fin): break
             amask = torch.cat([amask, torch.ones((N, 1), device=dev, dtype=torch.long)], 1)
@@ -928,7 +946,8 @@ for r in rows:
     pid = tok.encode(r["prompt"], add_special_tokens=False)
     if a.spin:
         SPIN.append(tuple(torch.tensor(pid + tok.encode(r[k], add_special_tokens=False)) for k in ("chosen", "rejected")) + (len(pid),))
-    data.append((torch.tensor(pid + tok.encode(r.get("text", r.get("chosen", "")), add_special_tokens=False)), len(pid)))   # CPU; moved per trace
+    ans = r["ids"] if "ids" in r else tok.encode(r.get("text", r.get("chosen", "")), add_special_tokens=False)
+    data.append((torch.tensor(pid + ans), len(pid)))   # CPU; moved per trace
 
 tag = f"S{a.S} rw{a.rw} C{a.C} maxd{a.maxd} L{a.layers} ffn{a.ffn}" + (" par" if a.par and a.mode == "train" else "") + (f" spin b{a.spin_beta}" if a.spin and a.mode == "train" else "") + (" spnext" + (f" win{a.sn_win}/{a.sn_win_every}" if a.sn_win != "1" else "") if a.spnext and a.mode == "train" else "") + (" no-SP" if a.no_sp else "") + (f" ctxL{a.ctx_hidden}" if a.ctx_hidden else "") + (" pe-rev" if a.pe_rev else "") + (" pe-norm" if a.pe_norm else "") + (f" FT{a.ft_layers}" if a.ft_layers else "") + (f" from{a.score_from}" if a.score_from else "")
 if a.mode == "profile":
@@ -945,16 +964,21 @@ elif a.mode == "rollout":
         for i in range(0, len(rows), step_):
             rb = rows[i:i + step_]
             pr_ = [tok.encode(r["prompt"], add_special_tokens=False) for r in rb]
+            LPG.clear()
             gens = rollout_cb(pr_, a.roll_batch)[0] if a.roll_cb else rollout(pr_)
-            for r, g in zip(rb, gens):
-                fo.write(json.dumps({"src": r.get("src", ""), "id": r.get("id", ""), "gold": r.get("gold", ""), "prompt": r["prompt"],
-                                     "text": tok.decode(g)}) + "\n"); n_tok += len(g)
+            for k_, (r, g) in enumerate(zip(rb, gens)):
+                rec = {"src": r.get("src", ""), "id": r.get("id", ""), "gold": r.get("gold", ""), "prompt": r["prompt"], "text": tok.decode(g)}
+                if a.roll_lp: rec["ids"] = g; rec["lp"] = [round(x, 5) for x in LPG.get(k_, [])]
+                fo.write(json.dumps(rec) + "\n"); n_tok += len(g)
             fo.flush()
             log(f"[sp] rollout {tag} {os.path.basename(a.ckpt) or 'untrained'}: {i + len(rb)}/{len(rows)} prompts, {n_tok} tokens ({time.time() - t0:.0f}s)")
 elif a.mode == "eval":
     pooler.eval(); t0 = time.time(); K = A_ = N = 0
     for ids, P in data:
+        if DUMP is not None: DUMP.append([])
         k, g, n = run_trace(ids, P, False); K += k; A_ += g; N += n
+    if DUMP is not None:
+        torch.save([torch.cat(x) if x else torch.zeros(0, 7) for x in DUMP], a.dump)
     log(f"[sp] eval {tag} {os.path.basename(a.ckpt) or 'untrained'}: {len(data)} traces {int(N)} tokens  KL {K / max(N, 1):.4f}  "
         f"top1 agree {100 * A_ / max(N, 1):.2f}%  ({time.time() - t0:.0f}s)")
     if a.end_stat:
