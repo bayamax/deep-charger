@@ -21,7 +21,13 @@
 # problem's SP; plus the teacher-forced KL of the null SP on the SP run's text. Marker DONE_DG3.
 # serial 4: serial 1's dump loop reused $t inside put() (its retry loop), so after the first upload the text name became "1" -
 # the raw-window scorings (SP-run text and raw-run text scored with the raw window) never ran. They run after job3.
-SER=4
+# serial 5: the null SP (a fixed set of 32 vectors, no content) scored 35/60 like the real SP (raw window 41): the slot itself
+# costs the answers, not what the soft prompts say. Where it bites: (a) attention probe - per layer, how much attention the
+# window's queries give the slot / the first prompt token / the window, and the hidden-state norms at the slot (real SP, null
+# SP, 32 newlines, no slot); (b) the 60 problems (seed 2) with the raw window cut to 1024 (no slot - is it the 32 fewer
+# window tokens?) and with 32 real newline tokens in the slot (soft vectors vs ordinary tokens); (c) the teacher-forced KL of
+# both on the SP run's text. Marker DONE_DG5.
+SER=5
 if [ -f /root/.boxdg_serial ] && [ "$(cat /root/.boxdg_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxdg_serial
 echo "[dg] preflight GPU: $(nvidia-smi --query-gpu=name,memory.used,memory.total --format=csv,noheader)"
@@ -71,6 +77,38 @@ put $LG dg/dg.log; date -u > DONE_DG1; put DONE_DG1 dg/DONE_DG1; echo "[dg] JOB_
 JOB
   setsid nohup bash -c 'bash /root/job.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
   echo "[dg] JOB_LAUNCHED $(date -u)"
+fi
+if [ ! -e /root/.job5 ]; then touch /root/.job5
+  cat > /root/job5.sh <<'JOB'
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); cd /root/w
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+R=baya1116/hypernet-sp-distill; RAW=https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i
+put() { for _i in 1 2 3 4 5; do python3 -c "import sys; from huggingface_hub import HfApi; HfApi().upload_file(path_or_fileobj=sys.argv[1], path_in_repo='archive/sp3/'+sys.argv[2], repo_id='$R')" "$1" "$2" > put.err 2>&1 && { echo "[hub] $2"; return 0; }; sleep 60; done; echo "[hub] $2 FAILED"; }
+while [ ! -e DONE_DG4 ]; do sleep 60; done
+curl -sS -o sp_qwen3.py "$RAW/tools/sp_qwen3.py?nocache=$(date +%s)"
+LG=/root/w/sp.log; M="--S 32 --heads 8 --layers 3 --ffn 2048 --C 128 --maxd 0 --max-len 12288 --ckpt spW0.pt"
+score() { python3 -c "
+import json, sys; sys.path.insert(0, '.')
+from sp_mathcheck import correct
+rs = [json.loads(l) for l in open(sys.argv[1])]
+print('[dg] ' + sys.argv[2] + f': {sum(correct(r) for r in rs)}/{len(rs)} correct, closed {sum(\"</think>\" in r[\"text\"] for r in rs)}')" "$1" "$2"; }
+for cfg in "real:--rw 1024" "null:--rw 1024 --sp-null" "newline:--rw 1024 --sp-filler \\n" "none:--rw 1024 --no-sp"; do n=${cfg%%:*}; x=${cfg#*:}
+  python3 sp_qwen3.py probe --traces gen_sp.jsonl $M $x --probe-n 16 --log probe_$n.log > run_probe_$n.log 2>&1
+  echo "[dg] probe $n: $(grep -E 'Error|Traceback' run_probe_$n.log | tail -1)"; grep "probe L" probe_$n.log | sed "s/^/[dg] $n /" | awk 'NR % 3 == 1'
+  put probe_$n.log dg/probe_$n.log
+done
+for cfg in "raw1024:--rw 1024 --no-sp" "newline:--rw 1024 --sp-filler \\n"; do n=${cfg%%:*}; x=${cfg#*:}
+  python3 sp_qwen3.py rollout --traces rl_eval60.jsonl $M $x --roll-cb --roll-batch 48 --grpo-tok-budget 60000 --roll-lp --seed 2 --roll-out gen_$n.jsonl --log $LG > run_gen_$n.log 2>&1
+  grep -E "Error|Traceback" run_gen_$n.log | tail -1 | sed "s/^/[dg] gen $n: /"
+  score gen_$n.jsonl "gen $n seed 2"; put gen_$n.jsonl dg/gen_$n.jsonl
+  python3 sp_qwen3.py eval --traces gen_sp.jsonl $M $x --dump dump_sptext_$n.pt --log $LG > run_ev_$n.log 2>&1
+  echo "[dg] text of the sp run scored with $n: $(grep -oP 'KL [0-9.]+ .*reverse KL [0-9.]+' run_ev_$n.log | tail -1) $(grep -E 'Error|Traceback' run_ev_$n.log | tail -1)"
+  put dump_sptext_$n.pt dg/dump_sptext_$n.pt
+done
+date -u > DONE_DG5; put DONE_DG5 dg/DONE_DG5; echo "[dg] JOB5_DONE $(date -u)"
+JOB
+  setsid nohup bash -c 'bash /root/job5.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
+  echo "[dg] s5: JOB5_LAUNCHED (waits for DONE_DG4) $(date -u)"
 fi
 if [ ! -e /root/.job4 ]; then touch /root/.job4
   cat > /root/job4.sh <<'JOB'
