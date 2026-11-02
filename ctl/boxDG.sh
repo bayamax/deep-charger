@@ -69,7 +69,10 @@
 # serial 14: no generation until the loss is down (the user) - serial 13 stops after its current segment (STOP_WT), then
 # the same training carries on with only the per-domain held-out KL after each segment, and stops by itself once the
 # mean over the five domains has not improved by 1% in 3 segments (DONE_WT); spWT_latest.pt every 3 segments and at the end.
-SER=14
+# serial 15: the window-0 loss (the user) - the held-out eval now also gives the KL by position in the chunk (0 = the token
+# right after the soft prompts, where the generation broke; 1-7; 8-63; 64+), for the no-SP floor and the current weights
+# once, then after every segment. Replaces serial 14's job before it starts (it waits for serial 13's last segment).
+SER=15
 if [ -f /root/.boxdg_serial ] && [ "$(cat /root/.boxdg_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxdg_serial
 echo "[dg] preflight GPU: $(nvidia-smi --query-gpu=name,memory.used,memory.total --format=csv,noheader)"
@@ -170,6 +173,77 @@ JOB
   setsid nohup bash -c 'bash /root/job4.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
   echo "[dg] s4: JOB4_LAUNCHED (waits for DONE_DG3) $(date -u)"
 fi
+if [ ! -e /root/.s15 ]; then touch /root/.s15
+  for J in $(pgrep -f "^bash /root/job14.sh"); do pkill -P $J; kill $J; done
+  cat > /root/job15.sh <<'JOB'
+while pgrep -f "^bash /root/job13.sh" > /dev/null; do sleep 30; done
+cd /root/w; export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null)
+rm -f /root/w/STOP_WT
+[ -s /root/w/wt_hist ] || printf '0.9157\n0.8451\n0.7072\n' > /root/w/wt_hist   # segments 1-3: the held-out means
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); cd /root/w
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+R=baya1116/hypernet-sp-distill; H=https://huggingface.co/$R/resolve/main; RAW=https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i
+put() { for _i in 1 2 3 4 5; do python3 -c "import sys; from huggingface_hub import HfApi; HfApi().upload_file(path_or_fileobj=sys.argv[1], path_in_repo='archive/sp3/'+sys.argv[2], repo_id='$R')" "$1" "$2" > put.err 2>&1 && { echo "[hub] $2"; return 0; }; sleep 60; done; echo "[hub] $2 FAILED"; }
+get() { for _i in 1 2 3; do curl -sSfL -H "Authorization: Bearer $HF_TOKEN" -o "$2" "$H/$1" && return 0; sleep 10; done; return 1; }
+curl -sS -o sp_qwen3.py "$RAW/tools/sp_qwen3.py?nocache=$(date +%s)"
+[ -s kv_full_p.jsonl ] || get archive/kvwin/q17_full_p.jsonl kv_full_p.jsonl
+if [ ! -s wt_pool.jsonl ]; then
+  for n in $(python3 -c "
+from huggingface_hub import HfApi
+print(' '.join(sorted(f.rsplit('/', 1)[-1][3:5] for f in HfApi().list_repo_files('$R') if f.startswith('archive/sp3/more/gm_'))))"); do get archive/sp3/more/gm_$n.jsonl gm_$n.jsonl; done
+  python3 -c "
+import glob, json, random
+rs = [l for f in sorted(glob.glob('gm_*.jsonl')) for l in open(f) if l.strip()]
+random.Random(0).shuffle(rs); open('wt_pool.jsonl', 'w').writelines(rs); print('[wt] pool', len(rs), 'traces')"
+fi
+[ -s wt_held.jsonl ] || python3 -c "
+import json
+rs = open('wt_pool.jsonl').readlines(); tail = rs[-1500:]; by = {}
+for l in tail: by.setdefault(json.loads(l).get('src', '?').split('-')[0], []).append(l)
+out = []
+for k in sorted(by): out += by[k][:13]
+open('wt_held.jsonl', 'w').writelines(out); open('wt_train.jsonl', 'w').writelines(rs[:-1500])
+print('[wt] held-out', len(out), {k: min(13, len(v)) for k, v in sorted(by.items())}, '| training pool', len(rs) - 1500)"
+LG=/root/w/sp.log; M="--S 32 --heads 8 --layers 3 --ffn 2048 --rw 1024 --C 128 --maxd 0"
+score() { python3 -c "
+import json, sys; sys.path.insert(0, '.')
+from sp_mathcheck import correct
+rs = [json.loads(l) for l in open(sys.argv[1])]
+print('[wt] ' + sys.argv[2] + f': {sum(correct(r) for r in rs)}/{len(rs)} correct, closed {sum(\"</think>\" in r[\"text\"] for r in rs)}')" "$1" "$2"; }
+evkl() { out=""; for d in chat code comp math mc; do python3 -c "
+import json, sys; [sys.stdout.write(l) for l in open('wt_held.jsonl') if json.loads(l).get('src', '?').split('-')[0] == sys.argv[1]]" $d > held_$d.jsonl
+  [ -s held_$d.jsonl ] || continue
+  r_=$(python3 sp_qwen3.py eval --traces held_$d.jsonl --max-len 8192 $M --win-teacher "$@" --log $LG 2>&1 | grep "\[sp\] eval" | tail -1)
+  k=$(echo "$r_" | grep -oP "KL \K[0-9.]+(?=  top1)"); out="$out $d $k"; echo "$d $(echo "$r_" | grep -oP 'by position \(0, 1-7, 8-63, 64\+\): \K.*')" >> wt_pos_last.txt; done; echo "$out"; }
+gen60() { n=$1; s=$2; shift 2; python3 sp_qwen3.py rollout --traces rl_eval60.jsonl $M --max-len 12288 "$@" --roll-cb --roll-batch 48 --grpo-tok-budget 60000 --seed $s --roll-out wt_${n}_s$s.jsonl --log $LG > run_wtgen.log 2>&1
+  grep -E "Error|Traceback" run_wtgen.log | tail -1 | sed "s/^/[wt] gen $n: /"; score wt_${n}_s$s.jsonl "$n seed $s"; put wt_${n}_s$s.jsonl wt/wt_${n}_s$s.jsonl; }
+if [ ! -e wt_pos_done ]; then
+  rm -f wt_pos_last.txt; e0=$(evkl --no-sp); echo "[wt] no SP by chunk position (0, 1-7, 8-63, 64+): $(tr '\n' ';' < wt_pos_last.txt)"
+  rm -f wt_pos_last.txt; e1=$(evkl --ckpt wt.pt); echo "[wt] segment $(cat wt_seg) SP by chunk position (0, 1-7, 8-63, 64+): $(tr '\n' ';' < wt_pos_last.txt) | mean KL by domain:$e1"
+  touch wt_pos_done; fi
+seg=$(cat wt_seg 2>/dev/null || echo 0); cur=""; [ -s wt.pt ] && cur=wt.pt
+while [ ! -e STOP_WT ]; do seg=$((seg + 1)); t0=$(date +%s); x="--const-lr"; [ $seg = 1 ] && x=""
+  python3 sp_qwen3.py train --traces wt_train.jsonl --skip $(( (seg - 1) * 600 )) --n 600 --max-len 16384 $M --win-teacher --chunks-per-trace 16 --wt-batch 8 --kl-rows 256 --accum 8 --lr 1e-4 $x ${cur:+--ckpt $cur} --seed $seg --out wt_next.pt --log $LG > run_wt.log 2>&1
+  if [ -s wt_next.pt ] && grep -q "^\[sp\] trained" run_wt.log; then mv wt_next.pt wt.pt; cur=wt.pt; echo $seg > wt_seg
+  else echo "[wt] segment $seg FAILED: $(grep -E 'Error' run_wt.log | tail -1 | cut -c1-200)"; break; fi
+  tk=$(grep -oP "KL [0-9.]+ top1 [0-9.]+%" run_wt.log | awk 'NR==1{f=$0} {l=$0} END{print "first 25 " f " / last 25 " l}')
+  rm -f wt_pos_last.txt; ev=$(evkl --ckpt wt.pt); m=$(echo "$ev" | python3 -c "import sys; v = sys.stdin.read().split()[1::2]; print(round(sum(map(float, v)) / len(v), 4))")
+  echo "[wt] segment $seg ($(( $(date +%s) - t0 )) s, OOM skips $(grep -c 'out of memory' run_wt.log)): train $tk | held-out window-teacher KL by domain with SP:$ev | mean $m"
+  echo "[wt] segment $seg by chunk position (0 = right after SP, 1-7, 8-63, 64+): $(tr '\n' ';' < wt_pos_last.txt)"
+  echo "$m" >> wt_hist
+  if python3 -c "
+import sys; h = [float(x) for x in open('wt_hist')]
+best_before = min(h[:-3]) if len(h) > 3 else None
+sys.exit(0 if best_before is not None and min(h[-3:]) > best_before * 0.99 else 1)"; then
+    echo "[wt] plateau: no 1% gain on the held-out mean in 3 segments ($(tr '\n' ' ' < wt_hist)) - stopping"; put wt.pt spWT_latest.pt; put $LG wt/wt.log; date -u > DONE_WT; put DONE_WT wt/DONE_WT; break; fi
+  if [ $((seg % 3)) = 0 ]; then put wt.pt spWT_latest.pt; put $LG wt/wt.log; fi
+done
+echo "[wt] stopped $(date -u)"
+JOB
+  setsid nohup bash -c 'bash /root/job15.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
+  echo "[wt] s15: JOB15_LAUNCHED (after serial 13's current segment) $(date -u)"
+fi
+touch /root/.s14
 if [ ! -e /root/.s14 ]; then touch /root/.s14
   touch /root/w/STOP_WT
   cat > /root/job14.sh <<'JOB'

@@ -572,6 +572,9 @@ def run_trace_par(ids, P, ref_h=None):
     return K, A_, N
 
 
+WTPOS = [[0.0, 0] for _ in range(4)]   # --win-teacher eval: KL by chunk position (0, 1-7, 8-63, 64+)
+
+
 def run_trace_wt(ids, P, train):
     """--win-teacher on one trace: for chunk starts c0 >= rw (all, or --chunks-per-trace at random) the teacher reads
     [prompt | a[c0-rw : c0+C-1]] and the student [prompt | SP(a[c0-rw : c0]) | a[c0 : c0+C-1]] (--no-sp: [prompt | chunk]);
@@ -616,8 +619,13 @@ def run_trace_wt(ids, P, train):
             thr = th.reshape(-1, H); loss = 0.0
             for j in range(0, hs.size(0), a.kl_rows):
                 tr = teacher_rows(thr[j:j + a.kl_rows])
-                kl, ag = (checkpoint(_kl_rows, hs[j:j + a.kl_rows], tr, None, use_reentrant=False) if train
-                          else _kl_rows(hs[j:j + a.kl_rows], tr))
+                if train: kl, ag = checkpoint(_kl_rows, hs[j:j + a.kl_rows], tr, None, use_reentrant=False)
+                else:   # eval: the KL by position in the chunk as well (0 = right after the soft prompts)
+                    lp = F.log_softmax(llm.lm_head(hs[j:j + a.kl_rows]).float(), -1); kr = (tr.exp() * (tr - lp)).sum(-1)
+                    kl, ag = kr.sum(), (lp.argmax(-1) == tr.argmax(-1)).float().sum()
+                    for q, v in zip(range(j, j + kr.numel()), kr.tolist()):
+                        w = q % a.C; b_ = 0 if w == 0 else 1 if w < 8 else 2 if w < 64 else 3
+                        WTPOS[b_][0] += v; WTPOS[b_][1] += 1
                 loss = loss + kl; K += kl.item(); A_ += ag.item(); N += tr.shape[0]
             if train: (loss / 1000.0).backward()
     return K, A_, N
@@ -1192,7 +1200,8 @@ elif a.mode == "eval":
     if DUMP is not None:
         torch.save([torch.cat(x) if x else torch.zeros(0, 7) for x in DUMP], a.dump)
     log(f"[sp] eval {tag} {os.path.basename(a.ckpt) or 'untrained'}: {len(data)} traces {int(N)} tokens  KL {K / max(N, 1):.4f}  "
-        f"top1 agree {100 * A_ / max(N, 1):.2f}%  reverse KL {RKL[0] / max(RKL[1], 1):.4f}  ({time.time() - t0:.0f}s)")
+        f"top1 agree {100 * A_ / max(N, 1):.2f}%  reverse KL {RKL[0] / max(RKL[1], 1):.4f}  ({time.time() - t0:.0f}s)"
+        + (" | by position (0, 1-7, 8-63, 64+): " + " ".join(f"{v[0] / max(v[1], 1):.4f}" for v in WTPOS) if a.win_teacher else ""))
     if a.end_stat:
         e = ENDST; log(f"[sp] end-stat {tag}: mean p(</think>) teacher {e['pt'] / max(e['n'], 1):.3e} student {e['ps'] / max(e['n'], 1):.3e} | "
                        f"at the {e['k']} real ends: log p teacher {e['lt'] / max(e['k'], 1):.3f} student {e['ls'] / max(e['k'], 1):.3f} | "
