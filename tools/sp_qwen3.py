@@ -120,6 +120,13 @@ ap.add_argument("--win-teacher", action="store_true", help="train/eval: the SP R
 ap.add_argument("--wt-batch", type=int, default=8, help="--win-teacher: chunk starts per forward")
 ap.add_argument("--sp-replace", action="store_true", help="rollout (--roll-cb): the --win-teacher deployment - once rw answer tokens exist, "
                 "[prompt | SP(the last rw tokens) | the chunk so far]; before that the plain window")
+ap.add_argument("--rmt", action="store_true", help="recurrent memory (RMT style) instead of the pooler: the LLM itself, with a LoRA "
+                "switched on only while writing, reads [prompt | previous memory | the next --rmt-block answer tokens | S learned write "
+                "tokens]; the write tokens' last hidden states (normalised to the embedding norm) are the new memory. Reading is the "
+                "frozen model on [prompt | memory | the raw tokens since the last written block (rw .. rw+block-1) | chunk]")
+ap.add_argument("--rmt-block", type=int, default=512, help="--rmt: answer tokens per memory write")
+ap.add_argument("--rmt-bptt", type=int, default=2, help="--rmt train: writes back-propagated through before a scored chunk")
+ap.add_argument("--rmt-rank", type=int, default=16, help="--rmt: LoRA rank (q/k/v/o and the MLP of every layer)")
 ap.add_argument("--const-lr", action="store_true", help="train: constant lr (no warm-up / decay) - for short repeated runs such as the "
                 "rounds of an on-policy loop, where a schedule per run would restart every round")
 ap.add_argument("--end-stat", action="store_true", help="eval: how much the student and the teacher want to stop thinking")
@@ -310,6 +317,57 @@ if a.ckpt:
         llm.load_state_dict({k: v.to(dev, dt) for k, v in ck["ft"].items()}, strict=False)
 pooler.pe_rev = a.pe_rev
 if a.pe_norm: pooler.pe_gain = target_norm / math.sqrt(H / 2)   # sinusoid norm sqrt(H/2) -> the embedding norm
+LORA = {"on": False}
+
+
+class LoRALinear(nn.Module):
+    """a frozen Linear plus a low-rank update that is applied only while LORA['on'] (the memory-writing passes)"""
+    def __init__(self, base, r, alpha):
+        super().__init__()
+        self.base = base; self.scale = alpha / r
+        self.A = nn.Parameter(torch.randn(r, base.in_features, device=base.weight.device) / math.sqrt(base.in_features))
+        self.B = nn.Parameter(torch.zeros(base.out_features, r, device=base.weight.device))
+    def forward(self, x):
+        y = self.base(x)
+        if LORA["on"]: y = y + ((x.float() @ self.A.t()) @ self.B.t() * self.scale).to(y.dtype)
+        return y
+
+
+class RMTMem(nn.Module):
+    """the memory writer's own parameters: the first memory, the write tokens, the output map and scale"""
+    def __init__(self, Hd, n, target_norm):
+        super().__init__()
+        self.m0 = nn.Parameter(torch.randn(n, Hd) * 0.02); self.wtok = nn.Parameter(torch.randn(n, Hd) * 0.02)
+        self.proj = nn.Linear(Hd, Hd); nn.init.eye_(self.proj.weight); nn.init.zeros_(self.proj.bias)
+        self.out_scale = nn.Parameter(torch.tensor(float(target_norm)))
+    def norm_out(self, h):
+        m = self.proj(h.float()); return m / m.norm(dim=-1, keepdim=True).clamp(min=1e-6) * self.out_scale.abs()
+
+
+RMT = None
+if a.rmt:
+    for li in range(NL):
+        L_ = llm.model.layers[li]
+        for mod, names in ((L_.self_attn, ("q_proj", "k_proj", "v_proj", "o_proj")), (L_.mlp, ("gate_proj", "up_proj", "down_proj"))):
+            for nm in names: setattr(mod, nm, LoRALinear(getattr(mod, nm), a.rmt_rank, 2 * a.rmt_rank))
+    RMT = RMTMem(H, a.S, target_norm).to(dev)
+    if a.ckpt and ck.get("rmt"):
+        RMT.load_state_dict(ck["rmt"]["mem"]); llm.load_state_dict(ck["rmt"]["lora"], strict=False)
+RMT_PARAMS = ([p_ for n_, p_ in llm.named_parameters() if n_.endswith((".A", ".B"))] + list(RMT.parameters())) if a.rmt else []
+for p_ in RMT_PARAMS: p_.requires_grad_(True)
+
+
+def rmt_write(m_prev, prompt_ids, block_ids):
+    """one memory write: [prompt | m_prev | block | write tokens] through the model with the LoRA on -> new memory (1, S, H)"""
+    LORA["on"] = True
+    try:
+        x = torch.cat([embed(prompt_ids[None]).to(dt), m_prev.to(dt), embed(block_ids[None]).to(dt), RMT.wtok[None].to(dt)], 1)
+        h = llm.model(inputs_embeds=x, position_ids=torch.arange(x.size(1), device=dev)[None]).last_hidden_state[:, -a.S:]
+    finally:
+        LORA["on"] = False
+    return RMT.norm_out(h)
+
+
 n_pool = sum(x.numel() for x in pooler.parameters())
 KV_TOK = NL * 2 * llm.config.num_key_value_heads * getattr(llm.config, "head_dim", H // llm.config.num_attention_heads) * 2
 log(f"[sp] pooler {n_pool / 1e6:.1f}M params (4-bit ~{n_pool / 2 / 2**20:.0f} MB) | S={a.S} rw={a.rw} C={a.C} maxd={a.maxd} | "
@@ -631,6 +689,51 @@ def run_trace_wt(ids, P, train):
     return K, A_, N
 
 
+def run_trace_rmt(ids, P, train):
+    """--rmt on one trace: memory chain over the answer's blocks (no grad), then for chunk starts c0 (>= rw + block: at least
+    one block written) the frozen model reads [prompt | M_n | a[n*block : c0] | chunk], n = (c0 - rw) // block, and the KL
+    to the full-KV teacher is taken on the chunk's tokens; in training the last --rmt-bptt writes are redone with grad.
+    --no-sp: the same raw part without the memory (the floor); --sp-null: the first memory m0 in place of M_n."""
+    T = min(len(ids), P + a.max_len); ids = ids.to(dev); a_ids = ids[P:T]; La = a_ids.numel(); blk = a.rmt_block
+    c0s = list(range(a.rw + blk, La - 8, a.C))
+    if not c0s: return 0.0, 0.0, 0
+    pick = sorted(random.sample(c0s, a.chunks_per_trace)) if train and a.chunks_per_trace and len(c0s) > a.chunks_per_trace else c0s
+    ref_h = teacher_hidden(ids, P + c0s[0], T)            # row j predicts answer token c0s[0] + j
+    pids = ids[:P]; nmax = (pick[-1] - a.rw) // blk
+    with torch.no_grad():
+        Ms = [RMT.m0[None]]
+        for k in range(nmax): Ms.append(rmt_write(Ms[-1], pids, a_ids[k * blk:(k + 1) * blk]))
+        pc = DynamicCache(); llm(input_ids=ids[None, :P], past_key_values=pc, use_cache=True)
+        pkv = [tuple(kv_of(pc, li)) for li in range(NL)]
+    K = A_ = N = 0.0
+    for c in pick:
+        n = (c - a.rw) // blk; c1 = min(c + a.C, La); cur = c1 - c
+        with torch.set_grad_enabled(train):
+            if a.no_sp: mem = None
+            elif a.sp_null: mem = RMT.m0[None]
+            elif train:
+                mem = Ms[max(0, n - a.rmt_bptt)].detach()
+                for k in range(max(0, n - a.rmt_bptt), n): mem = rmt_write(mem, pids, a_ids[k * blk:(k + 1) * blk])
+            else: mem = Ms[n]
+            parts = ([mem.to(dt)] if mem is not None else []) + [embed(a_ids[None, n * blk:c1 - 1]).to(dt)]
+            x = torch.cat(parts, 1); nb = x.size(1)
+            h0 = (0 if mem is None else a.S) + (c - 1 - n * blk)   # the row of a[c-1], which predicts a[c]
+            cache = DynamicCache()
+            for li, (k_, v_) in enumerate(pkv): cache.update(k_, v_, li)
+            pos = torch.arange(P, P + nb, device=dev)[None]
+            hs = llm.model(inputs_embeds=x, attention_mask=torch.ones(1, P + nb, device=dev), past_key_values=cache,
+                           position_ids=pos, cache_position=pos[0], use_cache=True).last_hidden_state[0, h0:]   # (cur, H)
+            tr = teacher_rows(ref_h[c - c0s[0]:c1 - c0s[0]])
+            lp = F.log_softmax(llm.lm_head(hs).float(), -1); kr = (tr.exp() * (tr - lp)).sum(-1)
+            if train: (kr.sum() / 1000.0).backward()
+        K += kr.sum().item(); A_ += (lp.argmax(-1) == tr.argmax(-1)).float().sum().item(); N += kr.numel()
+        if not train:
+            for w, v in enumerate(kr.tolist()):
+                b_ = 0 if w == 0 else 1 if w < 8 else 2 if w < 64 else 3
+                WTPOS[b_][0] += v; WTPOS[b_][1] += 1
+    return K, A_, N
+
+
 SNW = {"w": 1, "k0": 0.0, "n0": 0}
 DBK = {}   # --par: training KL by how much past lies outside the window (bucket -> [sum KL, rows]), logged and reset
 DB_EDGES = [1024, 2048, 4096, 8192]   # spnext: the current curriculum window and the window-0 KL since the last log
@@ -818,6 +921,7 @@ def sample_tok(lg):
     return si.gather(-1, torch.multinomial(sp_ / sp_.sum(-1, keepdim=True), 1)).squeeze(-1)
 
 
+RMS = {}   # rollout_cb --rmt: prompt index -> [memory (1, S, H), blocks written]
 LPG = {}   # rollout_cb --roll-lp: prompt index -> log p of each sampled token under the generator's logits
 
 
@@ -831,13 +935,21 @@ def rollout_cb(prompts, nslot):
     todo = list(range(len(prompts)))[::-1]; act = []
     gen = [[] for _ in prompts]; ended = [False] * len(prompts); kept = [None] * len(prompts); absorbed = [0] * len(prompts)
     while todo or act:
-        full = lambda j: len(prompts[j]) + a.S + a.rw + a.C   # the stream's largest re-prefill + chunk
+        full = lambda j: len(prompts[j]) + a.S + a.rw + a.C + (a.rmt_block if a.rmt else 0)   # the stream's largest re-prefill + chunk
         while todo and len(act) < nslot and (not act or not a.grpo_tok_budget
                                              or (len(act) + 1) * max(full(x) for x in act + [todo[-1]]) <= a.grpo_tok_budget):
             j = todo.pop(); act.append(j); kept[j] = torch.zeros(1, 0, dtype=torch.long, device=dev)
         blocks = []
         for j in act:
             c0 = len(gen[j]); R = min(c0, a.rw); nd = c0 - R
+            if a.rmt:   # [prompt | memory | raw since the last written block | chunk]
+                blk = a.rmt_block; nbk = max(0, (c0 - a.rw) // blk); st_ = RMS.setdefault(j, [RMT.m0[None], 0])
+                pt_ = torch.tensor(prompts[j], device=dev)
+                while st_[1] < nbk:
+                    k = st_[1]; st_[0] = rmt_write(st_[0], pt_, torch.tensor(gen[j][k * blk:(k + 1) * blk], device=dev)); st_[1] += 1
+                parts = [embed(pt_[None]).to(dt)] + ([st_[0].to(dt)] if nbk > 0 and not a.no_sp else [])
+                if c0 > nbk * blk: parts.append(embed(torch.tensor([gen[j][nbk * blk:c0]], device=dev)).to(dt))
+                blocks.append(torch.cat(parts, 1)); continue
             if a.sp_replace:   # [prompt | SP(last rw) | chunk] once rw tokens exist, else the plain window
                 parts = [embed(torch.tensor([prompts[j]], device=dev)).to(dt)]
                 if c0 >= a.rw: parts.append(pooler(embed(torch.tensor([gen[j][c0 - a.rw:c0]], device=dev)).float()).to(dt))
@@ -1140,7 +1252,7 @@ for r in rows:
     ans = r["ids"] if "ids" in r else tok.encode(r.get("text", r.get("chosen", "")), add_special_tokens=False)
     data.append((torch.tensor(pid + ans), len(pid)))   # CPU; moved per trace
 
-tag = f"S{a.S} rw{a.rw} C{a.C} maxd{a.maxd} L{a.layers} ffn{a.ffn}" + (" par" if a.par and a.mode == "train" else "") + (f" spin b{a.spin_beta}" if a.spin and a.mode == "train" else "") + (" spnext" + (f" win{a.sn_win}/{a.sn_win_every}" if a.sn_win != "1" else "") if a.spnext and a.mode == "train" else "") + (" no-SP" if a.no_sp else "") + (" SP-null" if a.sp_null else "") + (" SP-swap" if a.sp_swap else "") + (f" filler{FILL}" if a.sp_filler else "") + (" pin-think" if a.pin_think else "") + (" kv-evict" if a.kv_evict else "") + (" win-teacher" if a.win_teacher else "") + (" sp-replace" if a.sp_replace else "") + (f" ctxL{a.ctx_hidden}" if a.ctx_hidden else "") + (" pe-rev" if a.pe_rev else "") + (" pe-norm" if a.pe_norm else "") + (f" FT{a.ft_layers}" if a.ft_layers else "") + (f" from{a.score_from}" if a.score_from else "") + (f" rkl{a.rkl_weight}" if a.rkl_weight and a.mode == "train" else "")
+tag = f"S{a.S} rw{a.rw} C{a.C} maxd{a.maxd} L{a.layers} ffn{a.ffn}" + (" par" if a.par and a.mode == "train" else "") + (f" spin b{a.spin_beta}" if a.spin and a.mode == "train" else "") + (" spnext" + (f" win{a.sn_win}/{a.sn_win_every}" if a.sn_win != "1" else "") if a.spnext and a.mode == "train" else "") + (" no-SP" if a.no_sp else "") + (" SP-null" if a.sp_null else "") + (" SP-swap" if a.sp_swap else "") + (f" filler{FILL}" if a.sp_filler else "") + (" pin-think" if a.pin_think else "") + (" kv-evict" if a.kv_evict else "") + (" win-teacher" if a.win_teacher else "") + (" sp-replace" if a.sp_replace else "") + (f" rmt{a.rmt_block}" if a.rmt else "") + (f" ctxL{a.ctx_hidden}" if a.ctx_hidden else "") + (" pe-rev" if a.pe_rev else "") + (" pe-norm" if a.pe_norm else "") + (f" FT{a.ft_layers}" if a.ft_layers else "") + (f" from{a.score_from}" if a.score_from else "") + (f" rkl{a.rkl_weight}" if a.rkl_weight and a.mode == "train" else "")
 if a.mode == "profile":
     pooler.eval(); acc = {}
     for ids, P in data: profile_trace(ids, P, acc)
@@ -1196,19 +1308,19 @@ elif a.mode == "eval":
     pooler.eval(); t0 = time.time(); K = A_ = N = 0
     for ids, P in data:
         if DUMP is not None: DUMP.append([])
-        k, g, n = run_trace_wt(ids, P, False) if a.win_teacher else run_trace(ids, P, False); K += k; A_ += g; N += n
+        k, g, n = run_trace_rmt(ids, P, False) if a.rmt else run_trace_wt(ids, P, False) if a.win_teacher else run_trace(ids, P, False); K += k; A_ += g; N += n
     if DUMP is not None:
         torch.save([torch.cat(x) if x else torch.zeros(0, 7) for x in DUMP], a.dump)
     log(f"[sp] eval {tag} {os.path.basename(a.ckpt) or 'untrained'}: {len(data)} traces {int(N)} tokens  KL {K / max(N, 1):.4f}  "
         f"top1 agree {100 * A_ / max(N, 1):.2f}%  reverse KL {RKL[0] / max(RKL[1], 1):.4f}  ({time.time() - t0:.0f}s)"
-        + (" | by position (0, 1-7, 8-63, 64+): " + " ".join(f"{v[0] / max(v[1], 1):.4f}" for v in WTPOS) if a.win_teacher else ""))
+        + (" | by position (0, 1-7, 8-63, 64+): " + " ".join(f"{v[0] / max(v[1], 1):.4f}" for v in WTPOS) if (a.win_teacher or a.rmt) else ""))
     if a.end_stat:
         e = ENDST; log(f"[sp] end-stat {tag}: mean p(</think>) teacher {e['pt'] / max(e['n'], 1):.3e} student {e['ps'] / max(e['n'], 1):.3e} | "
                        f"at the {e['k']} real ends: log p teacher {e['lt'] / max(e['k'], 1):.3f} student {e['ls'] / max(e['k'], 1):.3f} | "
                        f"mean p(Wait/But/Alternatively/Hmm) teacher {e['ht'] / max(e['n'], 1):.4f} student {e['hs'] / max(e['n'], 1):.4f}")
 else:
     pooler.train()
-    groups = [{"params": list(pooler.parameters()), "lr": a.lr}]
+    groups = [{"params": list(pooler.parameters()) if not a.rmt else RMT_PARAMS, "lr": a.lr}]
     FTP, MASTER = [], []
     if a.ft_layers:
         if FT_SD is None:   # fresh run: the frozen original is the teacher; resuming from an FT ckpt keeps the original taken at load
@@ -1244,6 +1356,8 @@ else:
         if not a.out: return
         ck = {"pooler": {k: v.detach().cpu() for k, v in pooler.state_dict().items()}, "args": vars(a)}
         if a.ft_layers: ck["ft"] = {k: v.detach().cpu() for k, v in llm.state_dict().items() if k in FT_SD}
+        if a.rmt: ck["rmt"] = {"mem": {k: v.detach().cpu() for k, v in RMT.state_dict().items()},
+                               "lora": {k: v.detach().cpu() for k, v in llm.state_dict().items() if k.endswith((".A", ".B"))}}
         torch.save(ck, a.out)
 
     t0 = time.time(); K = A_ = N = 0
@@ -1259,7 +1373,7 @@ else:
         log(f"[sp] spin: reference log-probs of {len(SPIN)} pairs ({time.time() - t0:.0f}s)")
     for st in range(steps):
         ids, P = data[st % len(data)]
-        if FTP and st % a.accum == 0 and not a.spin and not a.win_teacher:   # the teacher pass for the next group of traces in ONE weight swap
+        if FTP and st % a.accum == 0 and not a.spin and not a.win_teacher and not a.rmt:   # the teacher pass for the next group of traces in ONE weight swap
             refs = {}
             with _Frozen():
                 for j in range(st, min(st + a.accum, steps)):
@@ -1276,6 +1390,7 @@ else:
                 else: SNW["w"] = WINS[min(st // a.sn_win_every, len(WINS) - 1)]
                 k, g, n = run_trace_spnext(ids, P, ref_h=_on_dev(refs.pop(st, None)))
             elif a.spin: k, g, n = run_pair_spin(st)
+            elif a.rmt: k, g, n = run_trace_rmt(ids, P, True)
             elif a.win_teacher: k, g, n = run_trace_wt(ids, P, True)
             elif a.par: k, g, n = run_trace_par(ids, P, ref_h=_on_dev(refs.pop(st, None)))
             else: k, g, n = run_trace(ids, P, True, ref_h=_on_dev(refs.pop(st, None)))
@@ -1288,7 +1403,7 @@ else:
                 f"{str(e_).splitlines()[0][:120]}"); k = g = n = 0
         K += k; A_ += g; N += n
         if (st + 1) % a.accum == 0 or st + 1 == steps:
-            torch.nn.utils.clip_grad_norm_(list(pooler.parameters()) + MASTER, 1.0)
+            torch.nn.utils.clip_grad_norm_((RMT_PARAMS if a.rmt else list(pooler.parameters())) + MASTER, 1.0)
             opt.step(); opt.zero_grad(set_to_none=True); sched.step()
             if FTP:
                 with torch.no_grad():
