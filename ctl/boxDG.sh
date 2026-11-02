@@ -56,7 +56,14 @@
 # SP), the 60 problems, seeds 1-3: (1) eviction without recompute, prompt + newest 1056 kept (--kv-evict, bounded),
 # (2) the re-prefilled raw window 1056 (the loop so far), (3) full KV with the same HF sampling code (--kv-evict, rw huge).
 # The on-policy loop is stopped. Marker DONE_DG11.
-SER=11
+# serial 12: the user's experiment - a textbook hypernet with a target it can reach: the teacher is the model reading only
+# the raw window ([prompt | last 1024 answer tokens | chunk]), the student reads [prompt | SP(those same 1024 tokens) |
+# chunk] (--win-teacher): compress the window 1024 -> 32 and behave the same. Base Qwen3 frozen, a fresh pooler (S 32, 3
+# layers, ffn 2048), C 128, 16 chunk starts per trace; text = the full-KV teacher traces already on the hub (gm_*, shuffled),
+# 600 per segment. After each segment the window-teacher KL on 32 held-out MATH traces (no-SP floor measured once); every 3
+# segments the 60 problems in that deployment (--sp-replace: [prompt | SP(last 1024) | chunk]) at seeds 1-2, against the
+# raw window of 1024 itself (measured once). Runs until STOP_WT.
+SER=12
 if [ -f /root/.boxdg_serial ] && [ "$(cat /root/.boxdg_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxdg_serial
 echo "[dg] preflight GPU: $(nvidia-smi --query-gpu=name,memory.used,memory.total --format=csv,noheader)"
@@ -64,7 +71,7 @@ echo "[dg] preflight GPU: $(nvidia-smi --query-gpu=name,memory.used,memory.total
 [ -s /root/.hf_token ] || { [ -n "$HF_TOKEN" ] && printf '%s' "$HF_TOKEN" > /root/.hf_token && chmod 600 /root/.hf_token; }
 mkdir -p /root/w
 cat > /root/status.sh <<'ST'
-grep -E "^\[(dg|op|hub)\]|Error|Traceback|out of memory" /root/w/w.log 2>/dev/null | tail -n 4 | cut -c1-300
+grep -E "^\[(dg|op|wt|hub)\]|Error|Traceback|out of memory" /root/w/w.log 2>/dev/null | tail -n 4 | cut -c1-300
 tail -n 1 /root/w/sp.log 2>/dev/null | cut -c1-200
 nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv,noheader
 ST
@@ -156,6 +163,52 @@ date -u > DONE_DG4; put DONE_DG4 dg/DONE_DG4; echo "[dg] JOB4_DONE $(date -u)"
 JOB
   setsid nohup bash -c 'bash /root/job4.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
   echo "[dg] s4: JOB4_LAUNCHED (waits for DONE_DG3) $(date -u)"
+fi
+if [ ! -e /root/.s12 ]; then touch /root/.s12
+  for J in $(pgrep -f "^bash /root/job"); do pkill -P $J; kill $J; done; sleep 3; pkill -f "sp_qwen3.py"; sleep 3
+  cat > /root/job12.sh <<'JOB'
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); cd /root/w
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+R=baya1116/hypernet-sp-distill; H=https://huggingface.co/$R/resolve/main; RAW=https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i
+put() { for _i in 1 2 3 4 5; do python3 -c "import sys; from huggingface_hub import HfApi; HfApi().upload_file(path_or_fileobj=sys.argv[1], path_in_repo='archive/sp3/'+sys.argv[2], repo_id='$R')" "$1" "$2" > put.err 2>&1 && { echo "[hub] $2"; return 0; }; sleep 60; done; echo "[hub] $2 FAILED"; }
+get() { for _i in 1 2 3; do curl -sSfL -H "Authorization: Bearer $HF_TOKEN" -o "$2" "$H/$1" && return 0; sleep 10; done; return 1; }
+curl -sS -o sp_qwen3.py "$RAW/tools/sp_qwen3.py?nocache=$(date +%s)"
+[ -s kv_full_p.jsonl ] || get archive/kvwin/q17_full_p.jsonl kv_full_p.jsonl
+if [ ! -s wt_pool.jsonl ]; then
+  for n in $(python3 -c "
+from huggingface_hub import HfApi
+print(' '.join(sorted(f.rsplit('/', 1)[-1][3:5] for f in HfApi().list_repo_files('$R') if f.startswith('archive/sp3/more/gm_'))))"); do get archive/sp3/more/gm_$n.jsonl gm_$n.jsonl; done
+  python3 -c "
+import glob, json, random
+rs = [l for f in sorted(glob.glob('gm_*.jsonl')) for l in open(f) if l.strip()]
+random.Random(0).shuffle(rs); open('wt_pool.jsonl', 'w').writelines(rs); print('[wt] pool', len(rs), 'traces')"
+fi
+LG=/root/w/sp.log; M="--S 32 --heads 8 --layers 3 --ffn 2048 --rw 1024 --C 128 --maxd 0"
+score() { python3 -c "
+import json, sys; sys.path.insert(0, '.')
+from sp_mathcheck import correct
+rs = [json.loads(l) for l in open(sys.argv[1])]
+print('[wt] ' + sys.argv[2] + f': {sum(correct(r) for r in rs)}/{len(rs)} correct, closed {sum(\"</think>\" in r[\"text\"] for r in rs)}')" "$1" "$2"; }
+evkl() { python3 sp_qwen3.py eval --traces kv_full_p.jsonl --n 32 --max-len 8192 $M --win-teacher "$@" --log $LG 2>&1 | grep -oP "KL [0-9.]+  top1 agree [0-9.]+%"; }
+gen60() { n=$1; s=$2; shift 2; python3 sp_qwen3.py rollout --traces rl_eval60.jsonl $M --max-len 12288 "$@" --roll-cb --roll-batch 48 --grpo-tok-budget 60000 --seed $s --roll-out wt_${n}_s$s.jsonl --log $LG > run_wtgen.log 2>&1
+  grep -E "Error|Traceback" run_wtgen.log | tail -1 | sed "s/^/[wt] gen $n: /"; score wt_${n}_s$s.jsonl "$n seed $s"; put wt_${n}_s$s.jsonl wt/wt_${n}_s$s.jsonl; }
+if [ ! -e wt_base_done ]; then
+  echo "[wt] window-teacher KL, no SP (prompt + chunk only - the floor the soft prompts must beat): $(evkl --no-sp)"
+  for s in 1 2; do gen60 raw1024 $s --no-sp; done; touch wt_base_done
+fi
+seg=$(cat wt_seg 2>/dev/null || echo 0); cur=""; [ -s wt.pt ] && cur=wt.pt
+while [ ! -e STOP_WT ]; do seg=$((seg + 1)); t0=$(date +%s); x="--const-lr"; [ $seg = 1 ] && x=""
+  python3 sp_qwen3.py train --traces wt_pool.jsonl --skip $(( (seg - 1) * 600 )) --n 600 --max-len 16384 $M --win-teacher --chunks-per-trace 16 --wt-batch 8 --kl-rows 256 --accum 8 --lr 1e-4 $x ${cur:+--ckpt $cur} --seed $seg --out wt_next.pt --log $LG > run_wt.log 2>&1
+  if [ -s wt_next.pt ] && grep -q "^\[sp\] trained" run_wt.log; then mv wt_next.pt wt.pt; cur=wt.pt; echo $seg > wt_seg
+  else echo "[wt] segment $seg FAILED: $(grep -E 'Error' run_wt.log | tail -1 | cut -c1-200)"; break; fi
+  tk=$(grep -oP "KL [0-9.]+ top1 [0-9.]+%" run_wt.log | awk 'NR==1{f=$0} {l=$0} END{print "first 25 " f " / last 25 " l}')
+  echo "[wt] segment $seg ($(( $(date +%s) - t0 )) s, OOM skips $(grep -c 'out of memory' run_wt.log)): train $tk | held-out window-teacher KL with SP: $(evkl --ckpt wt.pt)"
+  if [ $((seg % 3)) = 0 ]; then for s in 1 2; do gen60 spreplace_seg$seg $s --sp-replace --ckpt wt.pt; done; put wt.pt spWT_latest.pt; put $LG wt/wt.log; fi
+done
+echo "[wt] stopped $(date -u)"
+JOB
+  setsid nohup bash -c 'bash /root/job12.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
+  echo "[wt] s12: JOB12_LAUNCHED $(date -u)"
 fi
 if [ ! -e /root/.s11 ]; then touch /root/.s11
   for J in $(pgrep -f "^bash /root/job2.sh") $(pgrep -f "^bash /root/job10.sh"); do pkill -P $J; kill $J; done; sleep 5; pkill -f "sp_qwen3.py"; sleep 5

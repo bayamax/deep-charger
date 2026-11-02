@@ -113,6 +113,13 @@ ap.add_argument("--kv-evict", action="store_true", help="rollout: plain KV-cache
                 "past in view) and at their true positions - instead of re-prefilling the window from scratch (no SP). With a huge rw "
                 "it is full KV with the same sampling code")
 ap.add_argument("--kv-budget", type=int, default=150000, help="--kv-evict: cap on streams x (prompt + kept window + C) cached tokens")
+ap.add_argument("--win-teacher", action="store_true", help="train/eval: the SP REPLACES the raw window - teacher = the model reading "
+                "[prompt | the last rw answer tokens before chunk start c0 | the chunk] (the raw-window loop, nothing it does not "
+                "also hand the student), student = [prompt | SP(those same rw tokens) | the chunk]; KL on the chunk's tokens. A "
+                "fixed-ratio compression (rw -> S) with a target the soft prompts can in principle reach")
+ap.add_argument("--wt-batch", type=int, default=8, help="--win-teacher: chunk starts per forward")
+ap.add_argument("--sp-replace", action="store_true", help="rollout (--roll-cb): the --win-teacher deployment - once rw answer tokens exist, "
+                "[prompt | SP(the last rw tokens) | the chunk so far]; before that the plain window")
 ap.add_argument("--const-lr", action="store_true", help="train: constant lr (no warm-up / decay) - for short repeated runs such as the "
                 "rounds of an on-policy loop, where a schedule per run would restart every round")
 ap.add_argument("--end-stat", action="store_true", help="eval: how much the student and the teacher want to stop thinking")
@@ -565,6 +572,57 @@ def run_trace_par(ids, P, ref_h=None):
     return K, A_, N
 
 
+def run_trace_wt(ids, P, train):
+    """--win-teacher on one trace: for chunk starts c0 >= rw (all, or --chunks-per-trace at random) the teacher reads
+    [prompt | a[c0-rw : c0+C-1]] and the student [prompt | SP(a[c0-rw : c0]) | a[c0 : c0+C-1]] (--no-sp: [prompt | chunk]);
+    forward KL on a[c0 .. c0+C-1]. Teacher passes first (frozen weights), student passes after, batched by --wt-batch."""
+    T = min(len(ids), P + a.max_len); ids = ids.to(dev); a_ids = ids[None, P:T]; La = a_ids.size(1)
+    c0s = list(range(a.rw, La - a.C + 1, a.C))
+    if not c0s: return 0.0, 0.0, 0
+    if train and a.chunks_per_trace and len(c0s) > a.chunks_per_trace: c0s = sorted(random.sample(c0s, a.chunks_per_trace))
+    Bt = max(1, a.wt_batch); groups = [c0s[i:i + Bt] for i in range(0, len(c0s), Bt)]
+
+    def prompt_cache(Pn):
+        pc = DynamicCache(); llm(input_ids=ids[None, :Pn], past_key_values=pc, use_cache=True)
+        return [tuple(kv_of(pc, li)) for li in range(NL)]
+
+    def cache_for(pkv, B):
+        c = DynamicCache()
+        for li, (k_, v_) in enumerate(pkv): c.update(k_.expand(B, -1, -1, -1), v_.expand(B, -1, -1, -1), li)
+        return c
+    with torch.no_grad():
+        with _Frozen():
+            pkv_t = prompt_cache(P); TH = []
+            for cs in groups:
+                B = len(cs); x = torch.stack([a_ids[0, c - a.rw:c + a.C - 1] for c in cs]); L = x.size(1)
+                pos = torch.arange(P, P + L, device=dev)[None].expand(B, -1)
+                TH.append(llm.model(input_ids=x, attention_mask=torch.ones(B, P + L, device=dev), past_key_values=cache_for(pkv_t, B),
+                                    position_ids=pos, cache_position=pos[0], use_cache=True).last_hidden_state[:, a.rw - 1:])
+            del pkv_t
+        P0 = P - 1 if a.no_sp else P            # --no-sp: the block starts with the prompt's last token (its row predicts a[c0])
+        pkv_s = prompt_cache(P0)
+    K = A_ = N = 0.0
+    for cs, th in zip(groups, TH):
+        B = len(cs)
+        with torch.set_grad_enabled(train):
+            ch = embed(torch.stack([a_ids[0, c:c + a.C - 1] for c in cs])).to(dt)
+            if a.no_sp: xin = torch.cat([embed(ids[P - 1:P])[None].expand(B, -1, -1).to(dt), ch], 1); h0 = 0
+            else:
+                sp = pooler(embed(torch.stack([a_ids[0, c - a.rw:c] for c in cs])).float()).to(dt)
+                xin = torch.cat([sp, ch], 1); h0 = a.S - 1
+            L = xin.size(1); pos = torch.arange(P0, P0 + L, device=dev)[None].expand(B, -1)
+            hs = llm.model(inputs_embeds=xin, attention_mask=torch.ones(B, P0 + L, device=dev), past_key_values=cache_for(pkv_s, B),
+                           position_ids=pos, cache_position=pos[0], use_cache=True).last_hidden_state[:, h0:].reshape(-1, H)
+            thr = th.reshape(-1, H); loss = 0.0
+            for j in range(0, hs.size(0), a.kl_rows):
+                tr = teacher_rows(thr[j:j + a.kl_rows])
+                kl, ag = (checkpoint(_kl_rows, hs[j:j + a.kl_rows], tr, None, use_reentrant=False) if train
+                          else _kl_rows(hs[j:j + a.kl_rows], tr))
+                loss = loss + kl; K += kl.item(); A_ += ag.item(); N += tr.shape[0]
+            if train: (loss / 1000.0).backward()
+    return K, A_, N
+
+
 SNW = {"w": 1, "k0": 0.0, "n0": 0}
 DBK = {}   # --par: training KL by how much past lies outside the window (bucket -> [sum KL, rows]), logged and reset
 DB_EDGES = [1024, 2048, 4096, 8192]   # spnext: the current curriculum window and the window-0 KL since the last log
@@ -772,6 +830,11 @@ def rollout_cb(prompts, nslot):
         blocks = []
         for j in act:
             c0 = len(gen[j]); R = min(c0, a.rw); nd = c0 - R
+            if a.sp_replace:   # [prompt | SP(last rw) | chunk] once rw tokens exist, else the plain window
+                parts = [embed(torch.tensor([prompts[j]], device=dev)).to(dt)]
+                if c0 >= a.rw: parts.append(pooler(embed(torch.tensor([gen[j][c0 - a.rw:c0]], device=dev)).float()).to(dt))
+                elif c0 > 0: parts.append(embed(torch.tensor([gen[j]], device=dev)).to(dt))
+                blocks.append(torch.cat(parts, 1)); continue
             if nd > absorbed[j]: kept[j], absorbed[j] = update_buffer(kept[j], absorbed[j], torch.tensor([gen[j]], device=dev), nd)
             parts = [embed(torch.tensor([prompts[j] + pin_of(gen[j], c0 - R)], device=dev)).to(dt)]
             if kept[j].size(1) > 0 and not a.no_sp:
@@ -1069,7 +1132,7 @@ for r in rows:
     ans = r["ids"] if "ids" in r else tok.encode(r.get("text", r.get("chosen", "")), add_special_tokens=False)
     data.append((torch.tensor(pid + ans), len(pid)))   # CPU; moved per trace
 
-tag = f"S{a.S} rw{a.rw} C{a.C} maxd{a.maxd} L{a.layers} ffn{a.ffn}" + (" par" if a.par and a.mode == "train" else "") + (f" spin b{a.spin_beta}" if a.spin and a.mode == "train" else "") + (" spnext" + (f" win{a.sn_win}/{a.sn_win_every}" if a.sn_win != "1" else "") if a.spnext and a.mode == "train" else "") + (" no-SP" if a.no_sp else "") + (" SP-null" if a.sp_null else "") + (" SP-swap" if a.sp_swap else "") + (f" filler{FILL}" if a.sp_filler else "") + (" pin-think" if a.pin_think else "") + (" kv-evict" if a.kv_evict else "") + (f" ctxL{a.ctx_hidden}" if a.ctx_hidden else "") + (" pe-rev" if a.pe_rev else "") + (" pe-norm" if a.pe_norm else "") + (f" FT{a.ft_layers}" if a.ft_layers else "") + (f" from{a.score_from}" if a.score_from else "") + (f" rkl{a.rkl_weight}" if a.rkl_weight and a.mode == "train" else "")
+tag = f"S{a.S} rw{a.rw} C{a.C} maxd{a.maxd} L{a.layers} ffn{a.ffn}" + (" par" if a.par and a.mode == "train" else "") + (f" spin b{a.spin_beta}" if a.spin and a.mode == "train" else "") + (" spnext" + (f" win{a.sn_win}/{a.sn_win_every}" if a.sn_win != "1" else "") if a.spnext and a.mode == "train" else "") + (" no-SP" if a.no_sp else "") + (" SP-null" if a.sp_null else "") + (" SP-swap" if a.sp_swap else "") + (f" filler{FILL}" if a.sp_filler else "") + (" pin-think" if a.pin_think else "") + (" kv-evict" if a.kv_evict else "") + (" win-teacher" if a.win_teacher else "") + (" sp-replace" if a.sp_replace else "") + (f" ctxL{a.ctx_hidden}" if a.ctx_hidden else "") + (" pe-rev" if a.pe_rev else "") + (" pe-norm" if a.pe_norm else "") + (f" FT{a.ft_layers}" if a.ft_layers else "") + (f" from{a.score_from}" if a.score_from else "") + (f" rkl{a.rkl_weight}" if a.rkl_weight and a.mode == "train" else "")
 if a.mode == "profile":
     pooler.eval(); acc = {}
     for ids, P in data: profile_trace(ids, P, acc)
@@ -1125,7 +1188,7 @@ elif a.mode == "eval":
     pooler.eval(); t0 = time.time(); K = A_ = N = 0
     for ids, P in data:
         if DUMP is not None: DUMP.append([])
-        k, g, n = run_trace(ids, P, False); K += k; A_ += g; N += n
+        k, g, n = run_trace_wt(ids, P, False) if a.win_teacher else run_trace(ids, P, False); K += k; A_ += g; N += n
     if DUMP is not None:
         torch.save([torch.cat(x) if x else torch.zeros(0, 7) for x in DUMP], a.dump)
     log(f"[sp] eval {tag} {os.path.basename(a.ckpt) or 'untrained'}: {len(data)} traces {int(N)} tokens  KL {K / max(N, 1):.4f}  "
@@ -1187,7 +1250,7 @@ else:
         log(f"[sp] spin: reference log-probs of {len(SPIN)} pairs ({time.time() - t0:.0f}s)")
     for st in range(steps):
         ids, P = data[st % len(data)]
-        if FTP and st % a.accum == 0 and not a.spin:   # the teacher pass for the next group of traces in ONE weight swap
+        if FTP and st % a.accum == 0 and not a.spin and not a.win_teacher:   # the teacher pass for the next group of traces in ONE weight swap
             refs = {}
             with _Frozen():
                 for j in range(st, min(st + a.accum, steps)):
@@ -1204,6 +1267,7 @@ else:
                 else: SNW["w"] = WINS[min(st // a.sn_win_every, len(WINS) - 1)]
                 k, g, n = run_trace_spnext(ids, P, ref_h=_on_dev(refs.pop(st, None)))
             elif a.spin: k, g, n = run_pair_spin(st)
+            elif a.win_teacher: k, g, n = run_trace_wt(ids, P, True)
             elif a.par: k, g, n = run_trace_par(ids, P, ref_h=_on_dev(refs.pop(st, None)))
             else: k, g, n = run_trace(ids, P, True, ref_h=_on_dev(refs.pop(st, None)))
         except torch.cuda.OutOfMemoryError as e_:   # a long-prompt trace: drop it (and its half-built grads), keep training
