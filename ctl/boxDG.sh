@@ -72,7 +72,11 @@
 # serial 15: the window-0 loss (the user) - the held-out eval now also gives the KL by position in the chunk (0 = the token
 # right after the soft prompts, where the generation broke; 1-7; 8-63; 64+), for the no-SP floor and the current weights
 # once, then after every segment. Replaces serial 14's job before it starts (it waits for serial 13's last segment).
-SER=15
+# serial 16: once the window-teacher training stops (plateau, or its job ends), the 60 problems at seeds 1-2 with the
+# trained pooler in both layouts (the user): without a window ([prompt | SP(last 1024) | chunk], --sp-replace) and with one
+# ([prompt | SP(the 1024 tokens before the window) | raw window 1024 | chunk], --fifo 1024: the pooler sees 1024-token
+# buffers as trained); against the raw window of 1024 alone (42 / 44). Marker DONE_DG16.
+SER=16
 if [ -f /root/.boxdg_serial ] && [ "$(cat /root/.boxdg_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxdg_serial
 echo "[dg] preflight GPU: $(nvidia-smi --query-gpu=name,memory.used,memory.total --format=csv,noheader)"
@@ -172,6 +176,34 @@ date -u > DONE_DG4; put DONE_DG4 dg/DONE_DG4; echo "[dg] JOB4_DONE $(date -u)"
 JOB
   setsid nohup bash -c 'bash /root/job4.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
   echo "[dg] s4: JOB4_LAUNCHED (waits for DONE_DG3) $(date -u)"
+fi
+if [ ! -e /root/.s16 ]; then touch /root/.s16
+  cat > /root/job16.sh <<'JOB'
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); cd /root/w
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+R=baya1116/hypernet-sp-distill
+put() { for _i in 1 2 3 4 5; do python3 -c "import sys; from huggingface_hub import HfApi; HfApi().upload_file(path_or_fileobj=sys.argv[1], path_in_repo='archive/sp3/'+sys.argv[2], repo_id='$R')" "$1" "$2" > put.err 2>&1 && { echo "[hub] $2"; return 0; }; sleep 60; done; echo "[hub] $2 FAILED"; }
+while [ ! -e DONE_WT ] && pgrep -f "^bash /root/job1[345].sh" > /dev/null; do sleep 60; done
+sleep 5; pkill -f "^bash /root/job15.sh"; sleep 2
+LG=/root/w/sp.log; M="--S 32 --heads 8 --layers 3 --ffn 2048 --C 128 --maxd 0 --max-len 12288 --ckpt wt.pt"
+score() { python3 -c "
+import json, sys; sys.path.insert(0, '.')
+from sp_mathcheck import correct
+rs = [json.loads(l) for l in open(sys.argv[1])]
+print('[wt] ' + sys.argv[2] + f': {sum(correct(r) for r in rs)}/{len(rs)} correct, closed {sum(\"</think>\" in r[\"text\"] for r in rs)}')" "$1" "$2"; }
+sg=$(cat wt_seg)
+echo "[wt] s16: evaluating the segment-$sg pooler $(date -u)"
+for cfg in "nowin:--rw 1024 --sp-replace" "win1024:--rw 1024 --fifo 1024"; do n=${cfg%%:*}; x=${cfg#*:}
+  for s in 1 2; do
+    python3 sp_qwen3.py rollout --traces rl_eval60.jsonl $M $x --roll-cb --roll-batch 48 --grpo-tok-budget 60000 --seed $s --roll-out wt_${n}_seg${sg}_s$s.jsonl --log $LG > run_wtev.log 2>&1
+    grep -E "Error|Traceback" run_wtev.log | tail -1 | sed "s/^/[wt] $n s$s: /"
+    score wt_${n}_seg${sg}_s$s.jsonl "segment $sg $n seed $s"; put wt_${n}_seg${sg}_s$s.jsonl wt/wt_${n}_seg${sg}_s$s.jsonl
+  done
+done
+put wt.pt spWT_latest.pt; date -u > DONE_DG16; put DONE_DG16 dg/DONE_DG16; echo "[wt] JOB16_DONE $(date -u)"
+JOB
+  setsid nohup bash -c 'bash /root/job16.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
+  echo "[wt] s16: JOB16_LAUNCHED (waits for the training to stop) $(date -u)"
 fi
 if [ ! -e /root/.s15 ]; then touch /root/.s15
   for J in $(pgrep -f "^bash /root/job14.sh"); do pkill -P $J; kill $J; done
