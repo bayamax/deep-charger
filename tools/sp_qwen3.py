@@ -108,6 +108,11 @@ ap.add_argument("--probe-n", type=int, default=12, help="probe: traces; 4 chunk 
 ap.add_argument("--pin-think", action="store_true", help="eval/rollout/probe: keep the answer's opening '<think>\\n' right after the prompt "
                 "once the raw window has moved past it ([prompt | <think> | SP | window]) - otherwise the model writes on mid-thought "
                 "without the tag that says it is thinking, and the slot sits exactly where the tag belongs")
+ap.add_argument("--kv-evict", action="store_true", help="rollout: plain KV-cache generation that only DROPS old entries - every C "
+                "tokens the cache is cut to [prompt | newest rw answer tokens], the kept entries as they were computed (with the whole "
+                "past in view) and at their true positions - instead of re-prefilling the window from scratch (no SP). With a huge rw "
+                "it is full KV with the same sampling code")
+ap.add_argument("--kv-budget", type=int, default=150000, help="--kv-evict: cap on streams x (prompt + kept window + C) cached tokens")
 ap.add_argument("--const-lr", action="store_true", help="train: constant lr (no warm-up / decay) - for short repeated runs such as the "
                 "rounds of an on-policy loop, where a schedule per run would restart every round")
 ap.add_argument("--end-stat", action="store_true", help="eval: how much the student and the teacher want to stop thinking")
@@ -807,6 +812,79 @@ def rollout_cb(prompts, nslot):
     return gen, ended
 
 
+@torch.no_grad()
+def rollout_kv(prompts, nslot):
+    """--kv-evict generator: continuous batching over a left-padded KV cache. Every C tokens (and when streams join or
+    leave) the cache is rebuilt from each stream's kept entries - its prompt plus its newest rw answer tokens, exactly as
+    they were computed - so nothing is re-encoded; new tokens take their true positions (prompt length + index).
+    Returns (generated token lists, ended-by-stop-token flags)."""
+    stop = {i for i in [tok.eos_token_id, tok.convert_tokens_to_ids("<|im_end|>"), tok.convert_tokens_to_ids("<|endoftext|>")] if i is not None and i >= 0}
+    todo = list(range(len(prompts)))[::-1]; act = []
+    gen = [[] for _ in prompts]; ended = [False] * len(prompts)
+    cache = None; pad = []; nans = []; lastlog = None   # per row: left padding, answer entries cached
+    per = lambda j: len(prompts[j]) + min(a.rw, a.max_len) + a.C
+    while todo or act:
+        new = []
+        while todo and len(act) + len(new) < nslot and (len(act) + len(new) + 1) * max(per(x) for x in act + new + [todo[-1]]) <= a.kv_budget:
+            new.append(todo.pop())
+        newkv, newlog = {}, {}
+        for j in new:   # prompt prefill, alone (no padding)
+            pc = DynamicCache(); o = llm(input_ids=torch.tensor([prompts[j]], device=dev), past_key_values=pc, use_cache=True, logits_to_keep=1)
+            newkv[j] = [kv_of(pc, li) for li in range(NL)]; newlog[j] = o.logits[0, -1].float()
+        # what each stream keeps: (source, start, length) - continuing streams from the old batch, new ones from their prefill
+        keep = []
+        for b, j in enumerate(act):
+            P = len(prompts[j]); n = nans[b]; k = min(a.rw, n)
+            keep.append((j, b, pad[b], P, n - k, k))           # old row b: prompt [pad, pad+P), answer entries [pad+P, pad+P+n) = the newest n tokens
+        for j in new: keep.append((j, None, 0, len(prompts[j]), 0, 0))
+        Ln = max(P + k for (_, _, _, P, _, k) in keep)
+        B = len(keep); pad = [Ln - (P + k) for (_, _, _, P, _, k) in keep]
+        nc = DynamicCache()
+        for li in range(NL):
+            ref = kv_of(cache, li)[0] if cache is not None else newkv[new[0]][li][0]
+            K = torch.zeros((B, ref.size(1), Ln, ref.size(3)), device=dev, dtype=ref.dtype); V = torch.zeros_like(K)
+            ok, ov = kv_of(cache, li) if cache is not None else (None, None)
+            for r, (j, b, p0, P, s0, k) in enumerate(keep):
+                if b is None: K[r, :, pad[r]:], V[r, :, pad[r]:] = newkv[j][li][0][0], newkv[j][li][1][0]
+                else:
+                    K[r, :, pad[r]:pad[r] + P], V[r, :, pad[r]:pad[r] + P] = ok[b, :, p0:p0 + P], ov[b, :, p0:p0 + P]
+                    if k: K[r, :, pad[r] + P:], V[r, :, pad[r] + P:] = ok[b, :, p0 + P + s0:p0 + P + s0 + k], ov[b, :, p0 + P + s0:p0 + P + s0 + k]
+            nc.update(K, V, li)
+        cache = nc; del newkv
+        lastlog = torch.stack([lastlog[b] if b is not None else newlog[j] for (j, b, _, _, _, _) in keep])
+        act = [j for (j, _, _, _, _, _) in keep]; nans = [k for (_, _, _, _, _, k) in keep]
+        amask = torch.zeros((B, Ln), device=dev, dtype=torch.long)
+        for r in range(B): amask[r, pad[r]:] = 1
+        fin = [False] * B
+        for _ in range(a.C):
+            nx_t = sample_tok(lastlog); nx = nx_t.tolist()
+            if a.roll_lp: lpn = F.log_softmax(lastlog, -1).gather(1, nx_t[:, None])[:, 0].tolist()
+            for r, j in enumerate(act):
+                if fin[r]: continue
+                if nx[r] in stop: fin[r] = True; ended[j] = True; continue
+                gen[j].append(nx[r])
+                if a.roll_lp: LPG.setdefault(j, []).append(lpn[r])
+                if len(gen[j]) >= a.max_len: fin[r] = True
+            if all(fin): break
+            amask = torch.cat([amask, torch.ones((B, 1), device=dev, dtype=torch.long)], 1)
+            pos = torch.tensor([[len(prompts[j]) + max(len(gen[j]) - 1, 0)] for j in act], device=dev)
+            o = llm(input_ids=torch.tensor([[gen[j][-1] if gen[j] else 0] for j in act], device=dev), attention_mask=amask,
+                    position_ids=pos, past_key_values=cache, use_cache=True, logits_to_keep=1)
+            lastlog = o.logits[:, -1].float(); nans = [x + 1 for x in nans]   # every row got one entry (finished rows: dummies)
+        # entries of a stream that finished mid-chunk are fed dummies afterwards; such streams leave now
+        keep_rows = [r for r in range(B) if not fin[r]]
+        if len(keep_rows) < B:
+            sel = torch.tensor(keep_rows, device=dev, dtype=torch.long)
+            if keep_rows:
+                c2 = DynamicCache()
+                for li in range(NL):
+                    k_, v_ = kv_of(cache, li); c2.update(k_.index_select(0, sel), v_.index_select(0, sel), li)
+                cache = c2; lastlog = lastlog.index_select(0, sel)
+            else: cache = None; lastlog = None
+            act = [act[r] for r in keep_rows]; pad = [pad[r] for r in keep_rows]; nans = [nans[r] for r in keep_rows]
+    return gen, ended
+
+
 def run_grpo(opt, FTP, MASTER):
     """GRPO under the deployment loop (Dr. GRPO form): per update, --grpo-q problems x --group samples from rollout_cb (the
     deployment sampling); reward 1 for a correct final answer (sp_mathcheck: \\boxed after </think> vs gold, letters for
@@ -991,7 +1069,7 @@ for r in rows:
     ans = r["ids"] if "ids" in r else tok.encode(r.get("text", r.get("chosen", "")), add_special_tokens=False)
     data.append((torch.tensor(pid + ans), len(pid)))   # CPU; moved per trace
 
-tag = f"S{a.S} rw{a.rw} C{a.C} maxd{a.maxd} L{a.layers} ffn{a.ffn}" + (" par" if a.par and a.mode == "train" else "") + (f" spin b{a.spin_beta}" if a.spin and a.mode == "train" else "") + (" spnext" + (f" win{a.sn_win}/{a.sn_win_every}" if a.sn_win != "1" else "") if a.spnext and a.mode == "train" else "") + (" no-SP" if a.no_sp else "") + (" SP-null" if a.sp_null else "") + (" SP-swap" if a.sp_swap else "") + (f" filler{FILL}" if a.sp_filler else "") + (" pin-think" if a.pin_think else "") + (f" ctxL{a.ctx_hidden}" if a.ctx_hidden else "") + (" pe-rev" if a.pe_rev else "") + (" pe-norm" if a.pe_norm else "") + (f" FT{a.ft_layers}" if a.ft_layers else "") + (f" from{a.score_from}" if a.score_from else "") + (f" rkl{a.rkl_weight}" if a.rkl_weight and a.mode == "train" else "")
+tag = f"S{a.S} rw{a.rw} C{a.C} maxd{a.maxd} L{a.layers} ffn{a.ffn}" + (" par" if a.par and a.mode == "train" else "") + (f" spin b{a.spin_beta}" if a.spin and a.mode == "train" else "") + (" spnext" + (f" win{a.sn_win}/{a.sn_win_every}" if a.sn_win != "1" else "") if a.spnext and a.mode == "train" else "") + (" no-SP" if a.no_sp else "") + (" SP-null" if a.sp_null else "") + (" SP-swap" if a.sp_swap else "") + (f" filler{FILL}" if a.sp_filler else "") + (" pin-think" if a.pin_think else "") + (" kv-evict" if a.kv_evict else "") + (f" ctxL{a.ctx_hidden}" if a.ctx_hidden else "") + (" pe-rev" if a.pe_rev else "") + (" pe-norm" if a.pe_norm else "") + (f" FT{a.ft_layers}" if a.ft_layers else "") + (f" from{a.score_from}" if a.score_from else "") + (f" rkl{a.rkl_weight}" if a.rkl_weight and a.mode == "train" else "")
 if a.mode == "profile":
     pooler.eval(); acc = {}
     for ids, P in data: profile_trace(ids, P, acc)
@@ -1031,12 +1109,12 @@ elif a.mode == "probe":   # where the window's attention goes with a slot betwee
 elif a.mode == "rollout":
     pooler.eval(); t0 = time.time(); n_tok = 0
     with open(a.roll_out, "a") as fo:
-        step_ = len(rows) if a.roll_cb else a.roll_batch
+        step_ = len(rows) if (a.roll_cb or a.kv_evict) else a.roll_batch
         for i in range(0, len(rows), step_):
             rb = rows[i:i + step_]
             pr_ = [tok.encode(r["prompt"], add_special_tokens=False) for r in rb]
             LPG.clear()
-            gens = rollout_cb(pr_, a.roll_batch)[0] if a.roll_cb else rollout(pr_)
+            gens = rollout_kv(pr_, a.roll_batch)[0] if a.kv_evict else rollout_cb(pr_, a.roll_batch)[0] if a.roll_cb else rollout(pr_)
             for k_, (r, g) in enumerate(zip(rb, gens)):
                 rec = {"src": r.get("src", ""), "id": r.get("id", ""), "gold": r.get("gold", ""), "prompt": r["prompt"], "text": tok.decode(g)}
                 if a.roll_lp: rec["ids"] = g; rec["lp"] = [round(x, 5) for x in LPG.get(k_, [])]

@@ -49,7 +49,14 @@
 # serial 10: every round's training died at once - bitsandbytes (8-bit AdamW) was never installed on this box. The three
 # rounds' generations (288, all from the starting weights, so on-policy for them) are trained now in one run; then the
 # loop carries on from round 4.
-SER=10
+# serial 11: the user's point - the premise is that nobody reads 1000+ tokens back, so dropping them must not hurt; yet the
+# raw window alone loses to full KV (60 problems 50 vs 41-44, MATH-500 91% vs 88%). The loop RE-PREFILLS the window every
+# chunk, so the window's own KV no longer carries what those tokens took in from the distant past when they were computed;
+# KV-cache eviction (StreamingLLM / H2O style) drops old entries but keeps the rest as computed. The original Qwen3 (no
+# SP), the 60 problems, seeds 1-3: (1) eviction without recompute, prompt + newest 1056 kept (--kv-evict, bounded),
+# (2) the re-prefilled raw window 1056 (the loop so far), (3) full KV with the same HF sampling code (--kv-evict, rw huge).
+# The on-policy loop is stopped. Marker DONE_DG11.
+SER=11
 if [ -f /root/.boxdg_serial ] && [ "$(cat /root/.boxdg_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxdg_serial
 echo "[dg] preflight GPU: $(nvidia-smi --query-gpu=name,memory.used,memory.total --format=csv,noheader)"
@@ -149,6 +156,34 @@ date -u > DONE_DG4; put DONE_DG4 dg/DONE_DG4; echo "[dg] JOB4_DONE $(date -u)"
 JOB
   setsid nohup bash -c 'bash /root/job4.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
   echo "[dg] s4: JOB4_LAUNCHED (waits for DONE_DG3) $(date -u)"
+fi
+if [ ! -e /root/.s11 ]; then touch /root/.s11
+  for J in $(pgrep -f "^bash /root/job2.sh") $(pgrep -f "^bash /root/job10.sh"); do pkill -P $J; kill $J; done; sleep 5; pkill -f "sp_qwen3.py"; sleep 5
+  echo "[dg] s11: on-policy loop stopped; last lines: $(grep -E '^\[op\]' /root/w/w.log | tail -3 | tr '\n' ' ' | cut -c1-400)"
+  cat > /root/job11.sh <<'JOB'
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); cd /root/w
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+R=baya1116/hypernet-sp-distill; RAW=https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i
+put() { for _i in 1 2 3 4 5; do python3 -c "import sys; from huggingface_hub import HfApi; HfApi().upload_file(path_or_fileobj=sys.argv[1], path_in_repo='archive/sp3/'+sys.argv[2], repo_id='$R')" "$1" "$2" > put.err 2>&1 && { echo "[hub] $2"; return 0; }; sleep 60; done; echo "[hub] $2 FAILED"; }
+curl -sS -o sp_qwen3.py "$RAW/tools/sp_qwen3.py?nocache=$(date +%s)"
+LG=/root/w/sp.log; M="--S 32 --heads 8 --layers 3 --ffn 2048 --C 128 --maxd 0 --max-len 12288"
+score() { python3 -c "
+import json, sys; sys.path.insert(0, '.')
+from sp_mathcheck import correct
+rs = [json.loads(l) for l in open(sys.argv[1])]
+print('[dg] ' + sys.argv[2] + f': {sum(correct(r) for r in rs)}/{len(rs)} correct, closed {sum(\"</think>\" in r[\"text\"] for r in rs)}')" "$1" "$2"; }
+for sd in 1 2 3; do
+  for cfg in "evict1056:--kv-evict --rw 1056 --roll-batch 48" "reprefill1056:--no-sp --rw 1056 --roll-cb --roll-batch 48 --grpo-tok-budget 60000" "fullkv:--kv-evict --rw 100000 --roll-batch 48"; do
+    n=${cfg%%:*}; x=${cfg#*:}; t0=$(date +%s)
+    python3 sp_qwen3.py rollout --traces rl_eval60.jsonl $M $x --seed $sd --roll-out kv_${n}_s$sd.jsonl --log $LG > run_kv_$n.log 2>&1
+    grep -E "Error|Traceback" run_kv_$n.log | tail -1 | sed "s/^/[dg] $n s$sd: /"
+    score kv_${n}_s$sd.jsonl "base Qwen3 $n seed $sd ($(( $(date +%s) - t0 )) s)"; put kv_${n}_s$sd.jsonl dg/kv_${n}_s$sd.jsonl
+  done
+done
+date -u > DONE_DG11; put DONE_DG11 dg/DONE_DG11; echo "[dg] JOB11_DONE $(date -u)"
+JOB
+  setsid nohup bash -c 'bash /root/job11.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
+  echo "[dg] s11: JOB11_LAUNCHED $(date -u)"
 fi
 if [ ! -e /root/.s10 ]; then touch /root/.s10
   for J in $(pgrep -f "^bash /root/job2.sh"); do pkill -P $J; kill $J; done; sleep 5; pkill -f "sp_qwen3.py"; sleep 5
