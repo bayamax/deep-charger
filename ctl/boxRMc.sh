@@ -1,7 +1,9 @@
 #!/bin/bash
 # Candidate box for the RMT run (the user: start-up check, GPU check, then keep the cheapest that works): GPU empty?,
 # bf16 matmul speed, model download time. Prints one [pr] RESULT line and waits; the winner gets the training serial.
-SER=1
+# serial 2: this box passed (GPU empty, 68 TFLOPS bf16, model in 35 s) and is the cheapest that did - the RMT run moves here
+# from box RM after its segment 2: ctl/rm_job.sh carries on from the hub's spRM_latest.pt.
+SER=2
 if [ -f /root/.boxrmx_serial ] && [ "$(cat /root/.boxrmx_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxrmx_serial
 [ -d /venv/main/bin ] && export PATH=/venv/main/bin:$PATH
@@ -30,5 +32,10 @@ torch.cuda.synchronize(); print(round(50 * 2 * 4096**3 / (time.time() - t) / 1e1
 echo "[pr] RESULT gpu ($U0) | model download ${dl}s | bf16 matmul ${tf} TFLOPS | $(date -u)"
 JOB
   setsid nohup bash -c 'bash /root/probe.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
+fi
+if [ ! -e /root/.rmjob ]; then touch /root/.rmjob
+  curl -sS -o /root/rm_job.sh "https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl/rm_job.sh?nocache=$(date +%s)"
+  setsid nohup bash -c 'bash /root/rm_job.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
+  echo "[rm] RM job launched here $(date -u)"
 fi
 # CTL-END
