@@ -100,6 +100,11 @@ ap.add_argument("--ctl-para", action="store_true", help="train (with --ctl-windo
 ap.add_argument("--para-window", action="store_true", help="rollout (--kv-mem): every stream runs twice, with its memory and with the "
                 "memory masked out; the token opening a paragraph (after a blank line) is sampled from the masked twin - what to do next "
                 "from the bounded model, the rest with the memory")
+ap.add_argument("--twin-mix", type=float, default=-1.0, help="rollout (--kv-mem): run the memory-masked twin and sample from "
+                "(1 - w) x its logits + w x the memory's (w=0: the raw window, w=1: the memory); with --para-window, paragraph openings "
+                "still come from the twin alone")
+ap.add_argument("--twin-minent", action="store_true", help="rollout (--kv-mem): run the memory-masked twin and, per token, sample from "
+                "whichever of the two distributions has the lower entropy")
 ap.add_argument("--ctl-window", action="store_true", help="train (chunk mode, --kv-mem): the teacher's distribution with the total "
                 "mass on the control tokens (the 'keep checking' openers Wait/But/Alternatively/Hmm, and </think>) set to the raw-window "
                 "model's: content from the full-KV teacher, the decision to re-check or stop from the bounded model (the full-KV model "
@@ -1176,7 +1181,7 @@ def rollout_kvmem(prompts, nslot):
     each part at the stream's own true positions, then C tokens are sampled. Returns (generated token lists, ended flags)."""
     stop = {i for i in [tok.eos_token_id, tok.convert_tokens_to_ids("<|im_end|>"), tok.convert_tokens_to_ids("<|endoftext|>")] if i is not None and i >= 0}
     global PARA_END_L
-    TW = 2 if a.para_window else 1; dup = (lambda x: torch.cat([x] * TW, 0)) if TW > 1 else (lambda x: x)
+    TW = 2 if (a.para_window or a.twin_mix >= 0 or a.twin_minent) else 1; dup = (lambda x: torch.cat([x] * TW, 0)) if TW > 1 else (lambda x: x)
     if TW > 1 and PARA_END_L is None: PARA_END_L = [tok.decode([i]).endswith("\n\n") for i in range(len(tok))]
     todo = list(range(len(prompts)))[::-1]; act = []
     gen = [[] for _ in prompts]; ended = [False] * len(prompts); kept = [None] * len(prompts); absorbed = [0] * len(prompts)
@@ -1233,10 +1238,18 @@ def rollout_kvmem(prompts, nslot):
             last = plast
         nxt = dup(torch.tensor([[Ps[b] + (a.S if has[b] else 0) + Rs[b]] for b in range(N)], device=dev)); fin = [False] * N
         for _ in range(a.C):
-            if TW > 1:   # paragraph openings from the masked twin
-                pw = torch.tensor([bool(gen[j]) and bool(PARA_END_L[gen[j][-1]]) for j in act], device=dev)
-                PWN[0] += int(pw.sum()); PWN[1] += N
-                last = torch.where(pw[:, None], last[N:], last[:N])
+            if TW > 1:   # the memory-masked twin: paragraph openings / a mix / the lower-entropy side
+                lm_, lw_ = last[:N].float(), last[N:].float()
+                if a.twin_mix >= 0: sel = (1 - a.twin_mix) * lw_ + a.twin_mix * lm_
+                elif a.twin_minent:
+                    em = -(F.softmax(lm_, -1) * F.log_softmax(lm_, -1)).sum(-1); ew = -(F.softmax(lw_, -1) * F.log_softmax(lw_, -1)).sum(-1)
+                    sel = torch.where((ew < em)[:, None], lw_, lm_); PWN[0] += int((ew < em).sum()); PWN[1] += N
+                else: sel = lm_
+                if a.para_window:
+                    pw = torch.tensor([bool(gen[j]) and bool(PARA_END_L[gen[j][-1]]) for j in act], device=dev)
+                    PWN[0] += int(pw.sum()); PWN[1] += N
+                    sel = torch.where(pw[:, None], lw_, sel)
+                last = sel
             nx_t = sample_tok(last); nx = nx_t.tolist()
             if a.roll_lp: lpn = F.log_softmax(last.float(), -1).gather(1, nx_t[:, None])[:, 0].tolist()
             for b, j in enumerate(act):
@@ -1439,7 +1452,7 @@ for r in rows:
     ans = r["ids"] if "ids" in r else tok.encode(r.get("text", r.get("chosen", "")), add_special_tokens=False)
     data.append((torch.tensor(pid + ans), len(pid)))   # CPU; moved per trace
 
-tag = f"S{a.S} rw{a.rw} C{a.C} maxd{a.maxd} L{a.layers} ffn{a.ffn}" + (" par" if a.par and a.mode == "train" else "") + (f" spin b{a.spin_beta}" if a.spin and a.mode == "train" else "") + (" spnext" + (f" win{a.sn_win}/{a.sn_win_every}" if a.sn_win != "1" else "") if a.spnext and a.mode == "train" else "") + (" no-SP" if a.no_sp else "") + (" SP-null" if a.sp_null else "") + (" SP-swap" if a.sp_swap else "") + (f" filler{FILL}" if a.sp_filler else "") + (" pin-think" if a.pin_think else "") + (" kv-evict" if a.kv_evict else "") + (" para-window" if a.para_window else "") + (" win-teacher" if a.win_teacher else "") + (" sp-replace" if a.sp_replace else "") + (f" rmt{a.rmt_block}" if a.rmt else "") + (f" kvmem{a.kv_rank}" if a.kv_mem else "") + (f" ctxL{a.ctx_hidden}" if a.ctx_hidden else "") + (" pe-rev" if a.pe_rev else "") + (" pe-norm" if a.pe_norm else "") + (f" FT{a.ft_layers}" if a.ft_layers else "") + (f" from{a.score_from}" if a.score_from else "") + (f" rkl{a.rkl_weight}" if a.rkl_weight and a.mode == "train" else "") + (" ctl-window" if a.ctl_window and a.mode == "train" else "") + (" ctl-para" if a.ctl_para and a.mode == "train" else "")
+tag = f"S{a.S} rw{a.rw} C{a.C} maxd{a.maxd} L{a.layers} ffn{a.ffn}" + (" par" if a.par and a.mode == "train" else "") + (f" spin b{a.spin_beta}" if a.spin and a.mode == "train" else "") + (" spnext" + (f" win{a.sn_win}/{a.sn_win_every}" if a.sn_win != "1" else "") if a.spnext and a.mode == "train" else "") + (" no-SP" if a.no_sp else "") + (" SP-null" if a.sp_null else "") + (" SP-swap" if a.sp_swap else "") + (f" filler{FILL}" if a.sp_filler else "") + (" pin-think" if a.pin_think else "") + (" kv-evict" if a.kv_evict else "") + (" para-window" if a.para_window else "") + (f" twin-mix{a.twin_mix}" if a.twin_mix >= 0 else "") + (" twin-minent" if a.twin_minent else "") + (" win-teacher" if a.win_teacher else "") + (" sp-replace" if a.sp_replace else "") + (f" rmt{a.rmt_block}" if a.rmt else "") + (f" kvmem{a.kv_rank}" if a.kv_mem else "") + (f" ctxL{a.ctx_hidden}" if a.ctx_hidden else "") + (" pe-rev" if a.pe_rev else "") + (" pe-norm" if a.pe_norm else "") + (f" FT{a.ft_layers}" if a.ft_layers else "") + (f" from{a.score_from}" if a.score_from else "") + (f" rkl{a.rkl_weight}" if a.rkl_weight and a.mode == "train" else "") + (" ctl-window" if a.ctl_window and a.mode == "train" else "") + (" ctl-para" if a.ctl_para and a.mode == "train" else "")
 if a.mode == "profile":
     pooler.eval(); acc = {}
     for ids, P in data: profile_trace(ids, P, acc)
@@ -1491,7 +1504,7 @@ elif a.mode == "rollout":
                 fo.write(json.dumps(rec) + "\n"); n_tok += len(g)
             fo.flush()
             log(f"[sp] rollout {tag} {os.path.basename(a.ckpt) or 'untrained'}: {i + len(rb)}/{len(rows)} prompts, {n_tok} tokens ({time.time() - t0:.0f}s)"
-                + (f" | paragraph openings from the masked twin {100 * PWN[0] / max(PWN[1], 1):.2f}% of steps" if a.para_window else ""))
+                + (f" | steps taken from the masked twin {100 * PWN[0] / max(PWN[1], 1):.2f}%" if (a.para_window or a.twin_minent) else ""))
 elif a.mode == "eval":
     pooler.eval(); t0 = time.time(); K = A_ = N = 0
     for ids, P in data:
