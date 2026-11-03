@@ -30,15 +30,18 @@
 # serial 15: the same eval on 2 traces runs fine and the raw-window one on all 65 took minutes - one held-out trace makes the
 # memory eval spin. Watchdog: until the statistics are done, an eval older than 45 min is stopped (the job moves on); the
 # current kvr_job.sh re-measures the memory per domain and puts a timeout on every eval.
-SER=15
+# serial 16: --ctl-window segment 1 scored 40/60 with 3 closed-but-wrong, but 18 unclosed - the drift sits in what paragraphs
+# open with. Stop the --ctl-window job now (its segment 2 is dropped; segment 1 stays as kvr.pt / spKVR_latest.pt) and start
+# ctl/kvp_job.sh (--ctl-para) from segment 1.
+SER=16
 if [ -f /root/.boxrmx_serial ] && [ "$(cat /root/.boxrmx_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxrmx_serial
 [ -d /venv/main/bin ] && export PATH=/venv/main/bin:$PATH
 [ -s /root/.hf_token ] || { [ -n "$HF_TOKEN" ] && printf '%s' "$HF_TOKEN" > /root/.hf_token && chmod 600 /root/.hf_token; }
 mkdir -p /root/w
 cat > /root/status.sh <<'ST'
-grep -E "^\[(pr|rm|kv|kr|hub)\]|Error|Traceback|out of memory" /root/w/w.log 2>/dev/null | tail -n 6 | cut -c1-600
-tail -n 1 /root/w/sp_kvr.log 2>/dev/null | cut -c1-200
+grep -E "^\[(pr|rm|kv|kr|kp|hub)\]|Error|Traceback|out of memory" /root/w/w.log 2>/dev/null | tail -n 6 | cut -c1-600
+tail -n 1 /root/w/sp_kvp.log 2>/dev/null | cut -c1-200
 nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv,noheader
 ST
 chmod +x /root/status.sh
@@ -159,5 +162,14 @@ while [ ! -e /root/w/kr_diag_done ]; do
   for P in $(pgrep -f "sp_qwen3.py eval"); do [ "$(ps -o etimes= -p $P | tr -d ' ')" -gt 2700 ] 2>/dev/null && { kill $P; echo "[kr] s15: stopped eval $P after 45 min $(date -u)"; }; done; sleep 60; done
 JOB
   setsid nohup bash -c 'bash /root/s15.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
+fi
+if [ ! -e /root/.s16kp ]; then touch /root/.s16kp
+  for J in $(pgrep -f "^bash /root/kvr_job.sh") $(pgrep -f "bash /root/s12.sh"); do pkill -P $J; kill $J; done; sleep 3; pkill -f "sp_qwen3.py"; sleep 5
+  cat > /root/s16.sh <<'JOB'
+for _t in $(seq 60); do curl -sS -o /root/kvp_job.sh "https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl/kvp_job.sh?nocache=$(date +%s)"; grep -q -- "--ctl-para --ckpt" /root/kvp_job.sh && break; sleep 120; done
+echo "[kp] s16: --ctl-window job stopped (kept segment $(cat /root/w/kvr_seg)); --ctl-para job starting $(date -u)"
+exec bash /root/kvp_job.sh
+JOB
+  setsid nohup bash -c 'bash /root/s16.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
 fi
 # CTL-END

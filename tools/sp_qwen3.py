@@ -94,6 +94,9 @@ ap.add_argument("--fifo", type=int, default=0, help="distant buffer: keep only t
 ap.add_argument("--par-deploy", action="store_true", help="--par: score only the rows the deployment loop scores - in the block "
                 "[SP(tokens before b) | a[b : b+rw+C]] the last C (raw window >= rw), i.e. the chunk after a full raw window; the "
                 "rows with a short window (SP alone, never seen in deployment) are left out")
+ap.add_argument("--ctl-para", action="store_true", help="train (with --ctl-window): at paragraph openings (the previous token ends "
+                "with a blank line) the whole target is the raw-window model's distribution - what to do next (So / Wait / Alternatively "
+                "/ Therefore ...) from the bounded model, everything inside a paragraph from the full-KV teacher")
 ap.add_argument("--ctl-window", action="store_true", help="train (chunk mode, --kv-mem): the teacher's distribution with the total "
                 "mass on the control tokens (the 'keep checking' openers Wait/But/Alternatively/Hmm, and </think>) set to the raw-window "
                 "model's: content from the full-KV teacher, the decision to re-check or stop from the bounded model (the full-KV model "
@@ -509,13 +512,19 @@ DUMP = [] if a.dump else None   # eval --dump: per trace a list of (rows, 7) ten
 
 
 CTL_G = None
+CTLP = [0, 0]   # --ctl-para: paragraph-opening rows, all rows
 
 
-def ctl_target(tr, pkv, block, P, cur):
+PARA_END = None
+
+
+def ctl_target(tr, pkv, block, P, cur, prev=None):
     """--ctl-window: tr (cur, V) full-KV teacher log-probs -> the same with each control group's total mass (and the rest's)
     replaced by the raw-window model's on the same block (no memory, positions right after the prompt)"""
-    global CTL_G
+    global CTL_G, PARA_END
     if CTL_G is None: CTL_G = [torch.tensor(HES_IDS, device=dev), torch.tensor([END_ID], device=dev)]
+    if a.ctl_para and PARA_END is None:
+        PARA_END = torch.tensor([tok.decode([i]).endswith("\n\n") for i in range(len(tok))], device=dev)
     with torch.no_grad():
         cw = DynamicCache()
         for li, (k_, v_) in enumerate(pkv): cw.update(k_, v_, li)
@@ -528,6 +537,9 @@ def ctl_target(tr, pkv, block, P, cur):
         out = tr + (l1m(torch.logsumexp(wl[:, u], -1, keepdim=True)) - l1m(torch.logsumexp(tr[:, u], -1, keepdim=True)))
         for g in CTL_G:
             out[:, g] = tr[:, g] - torch.logsumexp(tr[:, g], -1, keepdim=True) + torch.logsumexp(wl[:, g], -1, keepdim=True)
+        if a.ctl_para and prev is not None:
+            m = PARA_END[prev.clamp(max=len(PARA_END) - 1)][:, None]; CTLP[0] += int(m.sum()); CTLP[1] += m.numel()
+            out = torch.where(m, wl, out)
     return out
 
 
@@ -580,7 +592,7 @@ def run_trace(ids, P, train, ref_h=None):
             # kept rows: the last window token + the chunk's tokens but its last -> they predict answer tokens c0 .. c1-1
             sl = F.log_softmax(o.logits[0, :cur].float(), -1)
             tr = teacher_rows(ref_h[c0 - first:c1 - first])     # teacher row j predicts answer token first + j
-            if a.ctl_window and train: tr = ctl_target(tr, pkv, block, P, cur)
+            if a.ctl_window and train: tr = ctl_target(tr, pkv, block, P, cur, a_ids[0, c0 - 1:c1 - 1])
             kl = (tr.exp() * (tr - sl)).sum(-1)
             rk = (sl.exp() * (sl - tr)).sum(-1)
             RKL[0] += rk.sum().item(); RKL[1] += rk.numel()
@@ -1410,7 +1422,7 @@ for r in rows:
     ans = r["ids"] if "ids" in r else tok.encode(r.get("text", r.get("chosen", "")), add_special_tokens=False)
     data.append((torch.tensor(pid + ans), len(pid)))   # CPU; moved per trace
 
-tag = f"S{a.S} rw{a.rw} C{a.C} maxd{a.maxd} L{a.layers} ffn{a.ffn}" + (" par" if a.par and a.mode == "train" else "") + (f" spin b{a.spin_beta}" if a.spin and a.mode == "train" else "") + (" spnext" + (f" win{a.sn_win}/{a.sn_win_every}" if a.sn_win != "1" else "") if a.spnext and a.mode == "train" else "") + (" no-SP" if a.no_sp else "") + (" SP-null" if a.sp_null else "") + (" SP-swap" if a.sp_swap else "") + (f" filler{FILL}" if a.sp_filler else "") + (" pin-think" if a.pin_think else "") + (" kv-evict" if a.kv_evict else "") + (" win-teacher" if a.win_teacher else "") + (" sp-replace" if a.sp_replace else "") + (f" rmt{a.rmt_block}" if a.rmt else "") + (f" kvmem{a.kv_rank}" if a.kv_mem else "") + (f" ctxL{a.ctx_hidden}" if a.ctx_hidden else "") + (" pe-rev" if a.pe_rev else "") + (" pe-norm" if a.pe_norm else "") + (f" FT{a.ft_layers}" if a.ft_layers else "") + (f" from{a.score_from}" if a.score_from else "") + (f" rkl{a.rkl_weight}" if a.rkl_weight and a.mode == "train" else "") + (" ctl-window" if a.ctl_window and a.mode == "train" else "")
+tag = f"S{a.S} rw{a.rw} C{a.C} maxd{a.maxd} L{a.layers} ffn{a.ffn}" + (" par" if a.par and a.mode == "train" else "") + (f" spin b{a.spin_beta}" if a.spin and a.mode == "train" else "") + (" spnext" + (f" win{a.sn_win}/{a.sn_win_every}" if a.sn_win != "1" else "") if a.spnext and a.mode == "train" else "") + (" no-SP" if a.no_sp else "") + (" SP-null" if a.sp_null else "") + (" SP-swap" if a.sp_swap else "") + (f" filler{FILL}" if a.sp_filler else "") + (" pin-think" if a.pin_think else "") + (" kv-evict" if a.kv_evict else "") + (" win-teacher" if a.win_teacher else "") + (" sp-replace" if a.sp_replace else "") + (f" rmt{a.rmt_block}" if a.rmt else "") + (f" kvmem{a.kv_rank}" if a.kv_mem else "") + (f" ctxL{a.ctx_hidden}" if a.ctx_hidden else "") + (" pe-rev" if a.pe_rev else "") + (" pe-norm" if a.pe_norm else "") + (f" FT{a.ft_layers}" if a.ft_layers else "") + (f" from{a.score_from}" if a.score_from else "") + (f" rkl{a.rkl_weight}" if a.rkl_weight and a.mode == "train" else "") + (" ctl-window" if a.ctl_window and a.mode == "train" else "") + (" ctl-para" if a.ctl_para and a.mode == "train" else "")
 if a.mode == "profile":
     pooler.eval(); acc = {}
     for ids, P in data: profile_trace(ids, P, acc)
@@ -1577,6 +1589,7 @@ else:
                 x += (" | KL by past outside the window: " + " ".join(f"{lab[k]} {v[0] / max(v[1], 1):.4f}" for k, v in sorted(DBK.items()))) if DBK else ""
                 DBK.clear()
                 if RKL[1]: x += f" | reverse KL {RKL[0] / RKL[1]:.4f}"; RKL[0] = 0.0; RKL[1] = 0
+                if CTLP[1]: x += f" | paragraph openings {100 * CTLP[0] / CTLP[1]:.1f}%"
                 log(f"[sp] train {tag} trace {st + 1}/{steps}: KL {K / max(N, 1):.4f} top1 {100 * A_ / max(N, 1):.2f}%{x} ({time.time() - t0:.0f}s)")
             if a.spnext and a.sn_win_plateau and N:   # curriculum by plateau: 100-trace means at this w, last vs the one before
                 WI["kl"].append(K / N); n_at = st + 1 - WI["from"]; hist = WI["kl"]
