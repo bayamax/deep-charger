@@ -19,9 +19,14 @@ M="--S 32 --heads 8 --layers 3 --ffn 2048 --rw 1024 --C 128 --maxd 0 --kv-mem --
 echo "[kr] ready $(date -u) | ctl-window in the script: $(grep -c '"--ctl-window"' sp_qwen3.py)"
 st() {   # st <label> <traces> <max-len> <args...>: one eval line + its end-stat line
   local lab=$1 tr=$2 ml=$3; shift 3
-  python3 sp_qwen3.py eval --traces $tr --max-len $ml $M --end-stat "$@" --log $LG > run_kr.log 2>&1
+  timeout 2700 python3 sp_qwen3.py eval --traces $tr --max-len $ml $M --end-stat "$@" --log $LG > run_kr.log 2>&1
   echo "[kr] $lab: $(grep '\[sp\] eval' run_kr.log | tail -1 | grep -oP 'KL [0-9.]+  top1 agree [0-9.]+%  reverse KL [0-9.]+') | $(grep '\[sp\] end-stat' run_kr.log | tail -1 | cut -d: -f2- | cut -c1-400)"
   grep -E "Error|Traceback" run_kr.log | tail -1 | sed "s/^/[kr] $lab error: /"; }
+std() {   # std <label> <args...>: st per held-out domain (the 65-trace file in one go once spun on the CPU for 45 min with the memory)
+  local lab=$1; shift
+  for d in chat code comp math mc; do python3 -c "
+import json, sys; [sys.stdout.write(l) for l in open('rm_held.jsonl') if json.loads(l).get('src', '?').split('-')[0] == sys.argv[1]]" $d > held_$d.jsonl
+    st "$lab [$d]" held_$d.jsonl 6144 "$@"; done; }
 score() { python3 -c "
 import json, sys; sys.path.insert(0, '.')
 from sp_mathcheck import correct
@@ -34,6 +39,7 @@ if [ ! -e kr_diag_done ]; then
   st "own seed-1 text, raw window only" kvm_mem_s1.jsonl 12288 --ckpt kvm.pt --no-sp
   touch kr_diag_done; put $LG kvr/kvr.log
 fi
+[ -e kr_mem_held_done ] || { std "held-out, segment 8 memory" --ckpt kvm.pt; touch kr_mem_held_done; put $LG kvr/kvr.log; }
 [ -s kvr.pt ] || cp kvm.pt kvr.pt
 gen() {   # gen <tag> <seed>
   [ -s kvr_$1_s$2.jsonl ] && return
@@ -46,7 +52,7 @@ while [ $seg -lt 3 ] && [ ! -e STOP_KR ]; do seg=$((seg + 1)); t0=$(date +%s)
   if [ -s kvr_next.pt ] && grep -q "^\[sp\] trained" run_kr_tr.log; then mv kvr_next.pt kvr.pt; echo $seg > kvr_seg
   else echo "[kr] ctl segment $seg FAILED: $(grep -E 'Error' run_kr_tr.log | tail -1 | cut -c1-200)"; break; fi
   echo "[kr] ctl segment $seg ($(( $(date +%s) - t0 )) s, OOM skips $(grep -c 'out of memory' run_kr_tr.log)): train $(grep -oP 'KL [0-9.]+ top1 [0-9.]+%' run_kr_tr.log | awk 'NR==1{f=$0} {l=$0} END{print "first 25 " f " / last 25 " l}')"
-  st "held-out, ctl segment $seg (KL to the true full-KV teacher)" rm_held.jsonl 6144 --ckpt kvr.pt
+  std "held-out, ctl segment $seg (KL to the true full-KV teacher)" --ckpt kvr.pt
   put kvr.pt spKVR_latest.pt; put $LG kvr/kvr.log
   [ $seg = 1 ] && gen seg1 1
 done

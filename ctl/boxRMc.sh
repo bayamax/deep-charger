@@ -27,7 +27,10 @@
 # serial 13: the first statistics eval has sat at 0% GPU (5.6 GB) for 40 minutes - print what the processes are doing.
 # serial 14: the eval spins one CPU core at 100% with the GPU idle (py-spy not allowed) - GPU check, stop it, and rerun the
 # same eval on 2 traces with a faulthandler traceback after 4 minutes to see where it hangs.
-SER=14
+# serial 15: the same eval on 2 traces runs fine and the raw-window one on all 65 took minutes - one held-out trace makes the
+# memory eval spin. Watchdog: until the statistics are done, an eval older than 45 min is stopped (the job moves on); the
+# current kvr_job.sh re-measures the memory per domain and puts a timeout on every eval.
+SER=15
 if [ -f /root/.boxrmx_serial ] && [ "$(cat /root/.boxrmx_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxrmx_serial
 [ -d /venv/main/bin ] && export PATH=/venv/main/bin:$PATH
@@ -149,5 +152,12 @@ grep -E "\[sp\] (eval|end-stat)|File|Error|line" dbg.out | grep -v "site-package
 echo "[kr] s14 done $(date -u)"
 JOB
   setsid nohup bash -c 'bash /root/s14.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
+fi
+if [ ! -e /root/.s15wd ]; then touch /root/.s15wd
+  cat > /root/s15.sh <<'JOB'
+while [ ! -e /root/w/kr_diag_done ]; do
+  for P in $(pgrep -f "sp_qwen3.py eval"); do [ "$(ps -o etimes= -p $P | tr -d ' ')" -gt 2700 ] 2>/dev/null && { kill $P; echo "[kr] s15: stopped eval $P after 45 min $(date -u)"; }; done; sleep 60; done
+JOB
+  setsid nohup bash -c 'bash /root/s15.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
 fi
 # CTL-END
