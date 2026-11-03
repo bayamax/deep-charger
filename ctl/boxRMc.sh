@@ -25,7 +25,9 @@
 # kvr_job.sh - once its statistics are done (kr_diag_done), stop it, drop anything it trained, and run the current kvr_job.sh
 # (it skips the statistics and goes to the --ctl-window training).
 # serial 13: the first statistics eval has sat at 0% GPU (5.6 GB) for 40 minutes - print what the processes are doing.
-SER=13
+# serial 14: the eval spins one CPU core at 100% with the GPU idle (py-spy not allowed) - GPU check, stop it, and rerun the
+# same eval on 2 traces with a faulthandler traceback after 4 minutes to see where it hangs.
+SER=14
 if [ -f /root/.boxrmx_serial ] && [ "$(cat /root/.boxrmx_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxrmx_serial
 [ -d /venv/main/bin ] && export PATH=/venv/main/bin:$PATH
@@ -131,5 +133,21 @@ if [ ! -e /root/.s13dbg ]; then touch /root/.s13dbg
   echo "[kr] s13 debug $(date -u)"; ps aux | grep -E "sp_qwen3|kvr_job|s1[12].sh" | grep -v grep | cut -c1-250 | sed 's/^/[kr] ps: /'
   tail -n 5 /root/w/run_kr.log 2>/dev/null | cut -c1-300 | sed 's/^/[kr] run_kr: /'; free -g | sed 's/^/[kr] mem: /'
   python3 -m pip install -q py-spy > /dev/null 2>&1; for P in $(pgrep -f "sp_qwen3.py eval"); do timeout 60 py-spy dump --pid $P 2>&1 | head -n 30 | sed 's/^/[kr] spy: /'; done
+fi
+if [ ! -e /root/.s14dbg ]; then touch /root/.s14dbg
+  cat > /root/s14.sh <<'JOB'
+cd /root/w; echo "[kr] s14 start $(date -u)"
+timeout 120 python3 -c "
+import torch, time; x = torch.randn(4096, 4096, device='cuda'); torch.cuda.synchronize(); t = time.time(); [x @ x for _ in range(20)]; torch.cuda.synchronize(); print('[kr] s14 gpu matmul ok', round(time.time() - t, 3), 's')" 2>&1 | tail -1
+pkill -f "sp_qwen3.py eval --traces rm_held.jsonl"; sleep 5
+head -n 2 rm_held.jsonl > dbg2.jsonl
+timeout 600 python3 -X faulthandler -c "
+import faulthandler, sys, runpy; faulthandler.dump_traceback_later(240, exit=True)
+sys.argv = ['sp_qwen3.py', 'eval', '--traces', 'dbg2.jsonl', '--max-len', '6144'] + '--S 32 --heads 8 --layers 3 --ffn 2048 --rw 1024 --C 128 --maxd 0 --kv-mem --kv-rank 512 --end-stat --ckpt kvm.pt --log dbg.log'.split()
+runpy.run_path('sp_qwen3.py', run_name='__main__')" > dbg.out 2>&1
+grep -E "\[sp\] (eval|end-stat)|File|Error|line" dbg.out | grep -v "site-packages/tqdm" | tail -n 25 | cut -c1-250 | sed 's/^/[kr] dbg: /'
+echo "[kr] s14 done $(date -u)"
+JOB
+  setsid nohup bash -c 'bash /root/s14.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
 fi
 # CTL-END
