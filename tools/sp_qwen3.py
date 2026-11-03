@@ -120,6 +120,11 @@ ap.add_argument("--win-teacher", action="store_true", help="train/eval: the SP R
 ap.add_argument("--wt-batch", type=int, default=8, help="--win-teacher: chunk starts per forward")
 ap.add_argument("--sp-replace", action="store_true", help="rollout (--roll-cb): the --win-teacher deployment - once rw answer tokens exist, "
                 "[prompt | SP(the last rw tokens) | the chunk so far]; before that the plain window")
+ap.add_argument("--kv-mem", action="store_true", help="the pooler's S outputs become per-layer KEY/VALUE memory instead of input "
+                "embeddings: a low-rank head per layer makes S keys (through that layer's k_norm, then RoPE at the slots right after the "
+                "prompt) and S values, put straight into the cache - each layer reads K/V of its own kind instead of re-processing "
+                "vectors from layer 0. The model stays frozen; chunk mode (train/eval) and rollout")
+ap.add_argument("--kv-rank", type=int, default=512, help="--kv-mem: rank of the per-layer key/value heads")
 ap.add_argument("--rmt", action="store_true", help="recurrent memory (RMT style) instead of the pooler: the LLM itself, with a LoRA "
                 "switched on only while writing, reads [prompt | previous memory | the next --rmt-block answer tokens | S learned write "
                 "tokens]; the write tokens' last hidden states (normalised to the embedding norm) are the new memory. Reading is the "
@@ -303,6 +308,23 @@ class AttnPoolSP(nn.Module):
 with torch.no_grad():
     target_norm = embed(torch.randint(0, embed.weight.size(0), (2048,), device=dev)).float().norm(dim=-1).mean().item()
 pooler = AttnPoolSP(H, a.S, a.heads, a.layers, a.ffn, target_norm).to(dev)
+KVH, KVD = llm.config.num_key_value_heads, getattr(llm.config, "head_dim", H // llm.config.num_attention_heads)
+
+
+class KVHead(nn.Module):
+    """--kv-mem: S pooler outputs -> per-layer keys (pre-norm, pre-RoPE) and values, low rank (shared down map, one up map per
+    layer); values start at zero, so the fresh memory adds nothing to the attention outputs"""
+    def __init__(self, Hd, nl, kvh, hd, r):
+        super().__init__()
+        self.down = nn.Linear(Hd, r)
+        self.uk = nn.Parameter(torch.randn(nl, r, kvh * hd) / math.sqrt(r)); self.bk = nn.Parameter(torch.zeros(nl, kvh * hd))
+        self.uv = nn.Parameter(torch.zeros(nl, r, kvh * hd)); self.bv = nn.Parameter(torch.zeros(nl, kvh * hd))
+    def forward(self, sp):
+        z = self.down(sp.float())                                                   # (B, S, r)
+        return torch.einsum("bsr,lrd->lbsd", z, self.uk) + self.bk[:, None, None], torch.einsum("bsr,lrd->lbsd", z, self.uv) + self.bv[:, None, None]
+
+
+if a.kv_mem: pooler.kvhead = KVHead(H, NL, KVH, KVD, a.kv_rank).to(dev)
 FT_SD = None
 if a.ckpt:
     ck = torch.load(a.ckpt, map_location="cpu", weights_only=False)
@@ -457,6 +479,20 @@ def pin_of(ans, lo):
     return [int(x) for x in ans[:k]] if lo >= k else []
 
 
+def kv_memory(sp, pos):
+    """--kv-mem: pooler outputs sp (B, S, H) -> per layer (k, v), each (B, kv heads, S, head dim) in the model's dtype: keys through
+    the layer's k_norm and RoPE at positions pos (B, S), exactly like the cache entries of S tokens sitting there"""
+    from transformers.models.qwen3.modeling_qwen3 import apply_rotary_pos_emb
+    K, V = pooler.kvhead(sp); B, S_ = sp.shape[:2]
+    cos, sin = llm.model.rotary_emb(sp.to(dt), pos)
+    out = []
+    for li in range(NL):
+        k = llm.model.layers[li].self_attn.k_norm(K[li].view(B, S_, KVH, KVD).to(dt)).transpose(1, 2)
+        _, k = apply_rotary_pos_emb(k, k, cos, sin)
+        out.append((k, V[li].view(B, S_, KVH, KVD).transpose(1, 2).to(dt)))
+    return out
+
+
 def slot(kept_ids, feat=None):
     """what goes between the prompt and the raw window once something is distant: the soft prompts, or a sanity stand-in"""
     if a.sp_filler: return embed(torch.tensor([FILL] * a.S, device=dev))[None].to(dt)
@@ -500,13 +536,19 @@ def run_trace(ids, P, train, ref_h=None):
         with torch.set_grad_enabled(train):
             pn = pin_of(a_ids[0], c0 - R)
             parts = [embed(torch.tensor([pn], device=dev)).to(dt)] if pn else []
-            if not a.no_sp: parts.append(slot(kept, feat))
+            if not a.no_sp and not a.kv_mem: parts.append(slot(kept, feat))
             block = torch.cat(parts + [embed(a_ids[:, c0 - R:c0]).to(dt), embed(a_ids[:, c0:c1]).to(dt)], 1)
             nb = block.size(1)
-            cache = DynamicCache()
-            for li, (k_, v_) in enumerate(pkv): cache.update(k_, v_, li)
-            pos = torch.arange(P, P + nb, device=dev)[None]
-            o = llm(inputs_embeds=block, attention_mask=torch.ones(1, P + nb, device=dev), past_key_values=cache,
+            cache = DynamicCache(); off = P
+            if a.kv_mem and not a.no_sp and kept.size(1) > 0:   # prompt KV + the memory's per-layer KV, then the block
+                sp = pooler(feat(kept) if feat else embed(kept).float())
+                mem = kv_memory(sp, torch.arange(P, P + a.S, device=dev)[None])
+                for li, (k_, v_) in enumerate(pkv): cache.update(torch.cat([k_, mem[li][0]], 2), torch.cat([v_, mem[li][1]], 2), li)
+                off = P + a.S
+            else:
+                for li, (k_, v_) in enumerate(pkv): cache.update(k_, v_, li)
+            pos = torch.arange(off, off + nb, device=dev)[None]
+            o = llm(inputs_embeds=block, attention_mask=torch.ones(1, off + nb, device=dev), past_key_values=cache,
                     position_ids=pos, cache_position=pos[0], use_cache=True, logits_to_keep=cur + 1)
             # kept rows: the last window token + the chunk's tokens but its last -> they predict answer tokens c0 .. c1-1
             sl = F.log_softmax(o.logits[0, :cur].float(), -1)
@@ -1079,6 +1121,82 @@ def rollout_kv(prompts, nslot):
     return gen, ended
 
 
+@torch.no_grad()
+def rollout_kvmem(prompts, nslot):
+    """--kv-mem generation: continuous batching as rollout_cb, but every chunk the cache is [prompt KV (left-padded) | the
+    stream's S memory slots (its pooled distant past; masked out while nothing is distant) | its raw window (left-padded)],
+    each part at the stream's own true positions, then C tokens are sampled. Returns (generated token lists, ended flags)."""
+    stop = {i for i in [tok.eos_token_id, tok.convert_tokens_to_ids("<|im_end|>"), tok.convert_tokens_to_ids("<|endoftext|>")] if i is not None and i >= 0}
+    todo = list(range(len(prompts)))[::-1]; act = []
+    gen = [[] for _ in prompts]; ended = [False] * len(prompts); kept = [None] * len(prompts); absorbed = [0] * len(prompts)
+    while todo or act:
+        full = lambda j: len(prompts[j]) + a.S + a.rw + a.C
+        while todo and len(act) < nslot and (not act or not a.grpo_tok_budget
+                                             or (len(act) + 1) * max(full(x) for x in act + [todo[-1]]) <= a.grpo_tok_budget):
+            j = todo.pop(); act.append(j); kept[j] = torch.zeros(1, 0, dtype=torch.long, device=dev)
+        N = len(act); Ps = [len(prompts[j]) for j in act]; Pm = max(Ps)
+        # 1) the prompts, left-padded
+        pin = torch.zeros((N, Pm), dtype=torch.long, device=dev); pm = torch.zeros((N, Pm), dtype=torch.long, device=dev)
+        ppos = torch.zeros((N, Pm), dtype=torch.long, device=dev)
+        for b, j in enumerate(act):
+            pin[b, Pm - Ps[b]:] = torch.tensor(prompts[j], device=dev); pm[b, Pm - Ps[b]:] = 1; ppos[b, Pm - Ps[b]:] = torch.arange(Ps[b], device=dev)
+        cache = DynamicCache()
+        plast = llm(input_ids=pin, attention_mask=pm, position_ids=ppos, past_key_values=cache, use_cache=True, logits_to_keep=1).logits[:, -1]
+        # 2) the memory slots
+        Rs, has = [], []
+        for b, j in enumerate(act):
+            c0 = len(gen[j]); R = min(c0, a.rw); nd = c0 - R
+            if nd > absorbed[j]: kept[j], absorbed[j] = update_buffer(kept[j], absorbed[j], torch.tensor([gen[j]], device=dev), nd)
+            Rs.append(R); has.append(kept[j].size(1) > 0 and not a.no_sp)
+        mm = torch.tensor([[1 if h else 0] * a.S for h in has], dtype=torch.long, device=dev)
+        if any(has):
+            sp = torch.cat([pooler(embed(kept[j]).float()) if h else torch.zeros(1, a.S, H, device=dev) for j, h in zip(act, has)], 0)
+            mem = kv_memory(sp, torch.tensor(Ps, device=dev)[:, None] + torch.arange(a.S, device=dev)[None])
+            nc = DynamicCache()
+            for li in range(NL):
+                k_, v_ = kv_of(cache, li); nc.update(torch.cat([k_, mem[li][0]], 2), torch.cat([v_, mem[li][1]], 2), li)
+        else:
+            nc = DynamicCache()
+            for li in range(NL):
+                k_, v_ = kv_of(cache, li); z = torch.zeros(N, k_.size(1), a.S, k_.size(3), device=dev, dtype=k_.dtype)
+                nc.update(torch.cat([k_, z], 2), torch.cat([v_, z], 2), li)
+        cache = nc
+        # 3) the raw windows, left-padded, at each stream's positions after its prompt (+ S when it has a memory)
+        Wm = max(Rs); amask = torch.cat([pm, mm], 1)
+        if Wm > 0:
+            win = torch.zeros((N, Wm), dtype=torch.long, device=dev); wm = torch.zeros((N, Wm), dtype=torch.long, device=dev)
+            wpos = torch.zeros((N, Wm), dtype=torch.long, device=dev)
+            for b, j in enumerate(act):
+                R = Rs[b]
+                if R:
+                    st = Ps[b] + (a.S if has[b] else 0)
+                    win[b, Wm - R:] = torch.tensor(gen[j][len(gen[j]) - R:], device=dev); wm[b, Wm - R:] = 1
+                    wpos[b, Wm - R:] = torch.arange(st, st + R, device=dev)
+            amask = torch.cat([amask, wm], 1)
+            o = llm(input_ids=win, attention_mask=amask, position_ids=wpos, past_key_values=cache, use_cache=True, logits_to_keep=1)
+            last = torch.where(torch.tensor([R > 0 for R in Rs], device=dev)[:, None], o.logits[:, -1], plast)
+        else:
+            last = plast
+        nxt = torch.tensor([[Ps[b] + (a.S if has[b] else 0) + Rs[b]] for b in range(N)], device=dev); fin = [False] * N
+        for _ in range(a.C):
+            nx_t = sample_tok(last); nx = nx_t.tolist()
+            if a.roll_lp: lpn = F.log_softmax(last.float(), -1).gather(1, nx_t[:, None])[:, 0].tolist()
+            for b, j in enumerate(act):
+                if fin[b]: continue
+                if nx[b] in stop: fin[b] = True; ended[j] = True; continue
+                gen[j].append(nx[b])
+                if a.roll_lp: LPG.setdefault(j, []).append(lpn[b])
+                if len(gen[j]) >= a.max_len: fin[b] = True
+            if all(fin): break
+            amask = torch.cat([amask, torch.ones((N, 1), device=dev, dtype=torch.long)], 1)
+            o = llm(input_ids=torch.tensor([[gen[j][-1] if gen[j] else 0] for j in act], device=dev), attention_mask=amask,
+                    position_ids=nxt, past_key_values=cache, use_cache=True, logits_to_keep=1)
+            last = o.logits[:, -1]; nxt = nxt + 1
+        del cache
+        act = [j for b, j in enumerate(act) if not fin[b]]
+    return gen, ended
+
+
 def run_grpo(opt, FTP, MASTER):
     """GRPO under the deployment loop (Dr. GRPO form): per update, --grpo-q problems x --group samples from rollout_cb (the
     deployment sampling); reward 1 for a correct final answer (sp_mathcheck: \\boxed after </think> vs gold, letters for
@@ -1263,7 +1381,7 @@ for r in rows:
     ans = r["ids"] if "ids" in r else tok.encode(r.get("text", r.get("chosen", "")), add_special_tokens=False)
     data.append((torch.tensor(pid + ans), len(pid)))   # CPU; moved per trace
 
-tag = f"S{a.S} rw{a.rw} C{a.C} maxd{a.maxd} L{a.layers} ffn{a.ffn}" + (" par" if a.par and a.mode == "train" else "") + (f" spin b{a.spin_beta}" if a.spin and a.mode == "train" else "") + (" spnext" + (f" win{a.sn_win}/{a.sn_win_every}" if a.sn_win != "1" else "") if a.spnext and a.mode == "train" else "") + (" no-SP" if a.no_sp else "") + (" SP-null" if a.sp_null else "") + (" SP-swap" if a.sp_swap else "") + (f" filler{FILL}" if a.sp_filler else "") + (" pin-think" if a.pin_think else "") + (" kv-evict" if a.kv_evict else "") + (" win-teacher" if a.win_teacher else "") + (" sp-replace" if a.sp_replace else "") + (f" rmt{a.rmt_block}" if a.rmt else "") + (f" ctxL{a.ctx_hidden}" if a.ctx_hidden else "") + (" pe-rev" if a.pe_rev else "") + (" pe-norm" if a.pe_norm else "") + (f" FT{a.ft_layers}" if a.ft_layers else "") + (f" from{a.score_from}" if a.score_from else "") + (f" rkl{a.rkl_weight}" if a.rkl_weight and a.mode == "train" else "")
+tag = f"S{a.S} rw{a.rw} C{a.C} maxd{a.maxd} L{a.layers} ffn{a.ffn}" + (" par" if a.par and a.mode == "train" else "") + (f" spin b{a.spin_beta}" if a.spin and a.mode == "train" else "") + (" spnext" + (f" win{a.sn_win}/{a.sn_win_every}" if a.sn_win != "1" else "") if a.spnext and a.mode == "train" else "") + (" no-SP" if a.no_sp else "") + (" SP-null" if a.sp_null else "") + (" SP-swap" if a.sp_swap else "") + (f" filler{FILL}" if a.sp_filler else "") + (" pin-think" if a.pin_think else "") + (" kv-evict" if a.kv_evict else "") + (" win-teacher" if a.win_teacher else "") + (" sp-replace" if a.sp_replace else "") + (f" rmt{a.rmt_block}" if a.rmt else "") + (f" kvmem{a.kv_rank}" if a.kv_mem else "") + (f" ctxL{a.ctx_hidden}" if a.ctx_hidden else "") + (" pe-rev" if a.pe_rev else "") + (" pe-norm" if a.pe_norm else "") + (f" FT{a.ft_layers}" if a.ft_layers else "") + (f" from{a.score_from}" if a.score_from else "") + (f" rkl{a.rkl_weight}" if a.rkl_weight and a.mode == "train" else "")
 if a.mode == "profile":
     pooler.eval(); acc = {}
     for ids, P in data: profile_trace(ids, P, acc)
@@ -1303,12 +1421,12 @@ elif a.mode == "probe":   # where the window's attention goes with a slot betwee
 elif a.mode == "rollout":
     pooler.eval(); t0 = time.time(); n_tok = 0
     with open(a.roll_out, "a") as fo:
-        step_ = len(rows) if (a.roll_cb or a.kv_evict) else a.roll_batch
+        step_ = len(rows) if (a.roll_cb or a.kv_evict or a.kv_mem) else a.roll_batch
         for i in range(0, len(rows), step_):
             rb = rows[i:i + step_]
             pr_ = [tok.encode(r["prompt"], add_special_tokens=False) for r in rb]
             LPG.clear()
-            gens = rollout_kv(pr_, a.roll_batch)[0] if a.kv_evict else rollout_cb(pr_, a.roll_batch)[0] if a.roll_cb else rollout(pr_)
+            gens = rollout_kvmem(pr_, a.roll_batch)[0] if a.kv_mem else rollout_kv(pr_, a.roll_batch)[0] if a.kv_evict else rollout_cb(pr_, a.roll_batch)[0] if a.roll_cb else rollout(pr_)
             for k_, (r, g) in enumerate(zip(rb, gens)):
                 rec = {"src": r.get("src", ""), "id": r.get("id", ""), "gold": r.get("gold", ""), "prompt": r["prompt"], "text": tok.decode(g)}
                 if a.roll_lp: rec["ids"] = g; rec["lp"] = [round(x, 5) for x in LPG.get(k_, [])]
