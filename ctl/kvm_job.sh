@@ -1,6 +1,6 @@
 #!/bin/bash
 # KV memory from the hypernet (the user: KV-level memory, but with the light separate pooler): the pooler reads the distant
-# past (token embeddings, the newest 4096 distant tokens) and its 32 outputs become per-layer KEYS/VALUES (low-rank heads,
+# past (token embeddings, all of it - no cap, the user) and its 32 outputs become per-layer KEYS/VALUES (low-rank heads,
 # keys through each layer's k_norm and RoPE at the slots after the prompt), put straight into the frozen model's cache:
 # [prompt | memory KV (32) | raw window 1024 | chunk]. Training: KL to the full-KV teacher on chunks after a full window,
 # 16 chunks per trace, 600 traces per segment; data and held-out split as the RMT runs (gm_* pool, 65 held out). After each
@@ -41,7 +41,7 @@ open('/root/w/kvm_base_done', 'w').write('hub\n'); print(f'[kv] resumed from the
 PY
 } || rm -f kvm.pt
 echo "[kv] ready $(date -u)"
-M="--S 32 --heads 8 --layers 3 --ffn 2048 --rw 1024 --C 128 --maxd 0 --fifo 4096 --kv-mem --kv-rank 512"
+M="--S 32 --heads 8 --layers 3 --ffn 2048 --rw 1024 --C 128 --maxd 0 --kv-mem --kv-rank 512"
 score() { python3 -c "
 import json, sys; sys.path.insert(0, '.')
 from sp_mathcheck import correct
