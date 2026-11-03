@@ -97,6 +97,9 @@ ap.add_argument("--par-deploy", action="store_true", help="--par: score only the
 ap.add_argument("--ctl-para", action="store_true", help="train (with --ctl-window): at paragraph openings (the previous token ends "
                 "with a blank line) the whole target is the raw-window model's distribution - what to do next (So / Wait / Alternatively "
                 "/ Therefore ...) from the bounded model, everything inside a paragraph from the full-KV teacher")
+ap.add_argument("--para-window", action="store_true", help="rollout (--kv-mem): every stream runs twice, with its memory and with the "
+                "memory masked out; the token opening a paragraph (after a blank line) is sampled from the masked twin - what to do next "
+                "from the bounded model, the rest with the memory")
 ap.add_argument("--ctl-window", action="store_true", help="train (chunk mode, --kv-mem): the teacher's distribution with the total "
                 "mass on the control tokens (the 'keep checking' openers Wait/But/Alternatively/Hmm, and </think>) set to the raw-window "
                 "model's: content from the full-KV teacher, the decision to re-check or stop from the bounded model (the full-KV model "
@@ -1162,18 +1165,25 @@ def rollout_kv(prompts, nslot):
     return gen, ended
 
 
+PARA_END_L = None
+PWN = [0, 0]   # --para-window: openings sampled from the masked twin, all sampled steps
+
+
 @torch.no_grad()
 def rollout_kvmem(prompts, nslot):
     """--kv-mem generation: continuous batching as rollout_cb, but every chunk the cache is [prompt KV (left-padded) | the
     stream's S memory slots (its pooled distant past; masked out while nothing is distant) | its raw window (left-padded)],
     each part at the stream's own true positions, then C tokens are sampled. Returns (generated token lists, ended flags)."""
     stop = {i for i in [tok.eos_token_id, tok.convert_tokens_to_ids("<|im_end|>"), tok.convert_tokens_to_ids("<|endoftext|>")] if i is not None and i >= 0}
+    global PARA_END_L
+    TW = 2 if a.para_window else 1; dup = (lambda x: torch.cat([x] * TW, 0)) if TW > 1 else (lambda x: x)
+    if TW > 1 and PARA_END_L is None: PARA_END_L = [tok.decode([i]).endswith("\n\n") for i in range(len(tok))]
     todo = list(range(len(prompts)))[::-1]; act = []
     gen = [[] for _ in prompts]; ended = [False] * len(prompts); kept = [None] * len(prompts); absorbed = [0] * len(prompts)
     while todo or act:
         full = lambda j: len(prompts[j]) + a.S + a.rw + a.C
         while todo and len(act) < nslot and (not act or not a.grpo_tok_budget
-                                             or (len(act) + 1) * max(full(x) for x in act + [todo[-1]]) <= a.grpo_tok_budget):
+                                             or TW * (len(act) + 1) * max(full(x) for x in act + [todo[-1]]) <= a.grpo_tok_budget):
             j = todo.pop(); act.append(j); kept[j] = torch.zeros(1, 0, dtype=torch.long, device=dev)
         N = len(act); Ps = [len(prompts[j]) for j in act]; Pm = max(Ps)
         # 1) the prompts, left-padded
@@ -1181,6 +1191,7 @@ def rollout_kvmem(prompts, nslot):
         ppos = torch.zeros((N, Pm), dtype=torch.long, device=dev)
         for b, j in enumerate(act):
             pin[b, Pm - Ps[b]:] = torch.tensor(prompts[j], device=dev); pm[b, Pm - Ps[b]:] = 1; ppos[b, Pm - Ps[b]:] = torch.arange(Ps[b], device=dev)
+        pin, pm, ppos = dup(pin), dup(pm), dup(ppos)
         cache = DynamicCache()
         plast = llm(input_ids=pin, attention_mask=pm, position_ids=ppos, past_key_values=cache, use_cache=True, logits_to_keep=1).logits[:, -1]
         # 2) the memory slots
@@ -1189,17 +1200,18 @@ def rollout_kvmem(prompts, nslot):
             c0 = len(gen[j]); R = min(c0, a.rw); nd = c0 - R
             if nd > absorbed[j]: kept[j], absorbed[j] = update_buffer(kept[j], absorbed[j], torch.tensor([gen[j]], device=dev), nd)
             Rs.append(R); has.append(kept[j].size(1) > 0 and not a.no_sp)
-        mm = torch.tensor([[1 if h else 0] * a.S for h in has], dtype=torch.long, device=dev)
+        mm = torch.tensor([[1 if h else 0] * a.S for h in has] + [[0] * a.S for _ in has] * (TW - 1), dtype=torch.long, device=dev)
         if any(has):
             sp = torch.cat([pooler(embed(kept[j]).float()) if h else torch.zeros(1, a.S, H, device=dev) for j, h in zip(act, has)], 0)
             mem = kv_memory(sp, torch.tensor(Ps, device=dev)[:, None] + torch.arange(a.S, device=dev)[None])
+            mem = [(dup(k_), dup(v_)) for k_, v_ in mem]
             nc = DynamicCache()
             for li in range(NL):
                 k_, v_ = kv_of(cache, li); nc.update(torch.cat([k_, mem[li][0]], 2), torch.cat([v_, mem[li][1]], 2), li)
         else:
             nc = DynamicCache()
             for li in range(NL):
-                k_, v_ = kv_of(cache, li); z = torch.zeros(N, k_.size(1), a.S, k_.size(3), device=dev, dtype=k_.dtype)
+                k_, v_ = kv_of(cache, li); z = torch.zeros(TW * N, k_.size(1), a.S, k_.size(3), device=dev, dtype=k_.dtype)
                 nc.update(torch.cat([k_, z], 2), torch.cat([v_, z], 2), li)
         cache = nc
         # 3) the raw windows, left-padded, at each stream's positions after its prompt (+ S when it has a memory)
@@ -1213,13 +1225,18 @@ def rollout_kvmem(prompts, nslot):
                     st = Ps[b] + (a.S if has[b] else 0)
                     win[b, Wm - R:] = torch.tensor(gen[j][len(gen[j]) - R:], device=dev); wm[b, Wm - R:] = 1
                     wpos[b, Wm - R:] = torch.arange(st, st + R, device=dev)
+            win, wm, wpos = dup(win), dup(wm), dup(wpos)
             amask = torch.cat([amask, wm], 1)
             o = llm(input_ids=win, attention_mask=amask, position_ids=wpos, past_key_values=cache, use_cache=True, logits_to_keep=1)
-            last = torch.where(torch.tensor([R > 0 for R in Rs], device=dev)[:, None], o.logits[:, -1], plast)
+            last = torch.where(dup(torch.tensor([R > 0 for R in Rs], device=dev))[:, None], o.logits[:, -1], plast)
         else:
             last = plast
-        nxt = torch.tensor([[Ps[b] + (a.S if has[b] else 0) + Rs[b]] for b in range(N)], device=dev); fin = [False] * N
+        nxt = dup(torch.tensor([[Ps[b] + (a.S if has[b] else 0) + Rs[b]] for b in range(N)], device=dev)); fin = [False] * N
         for _ in range(a.C):
+            if TW > 1:   # paragraph openings from the masked twin
+                pw = torch.tensor([bool(gen[j]) and bool(PARA_END_L[gen[j][-1]]) for j in act], device=dev)
+                PWN[0] += int(pw.sum()); PWN[1] += N
+                last = torch.where(pw[:, None], last[N:], last[:N])
             nx_t = sample_tok(last); nx = nx_t.tolist()
             if a.roll_lp: lpn = F.log_softmax(last.float(), -1).gather(1, nx_t[:, None])[:, 0].tolist()
             for b, j in enumerate(act):
@@ -1229,8 +1246,8 @@ def rollout_kvmem(prompts, nslot):
                 if a.roll_lp: LPG.setdefault(j, []).append(lpn[b])
                 if len(gen[j]) >= a.max_len: fin[b] = True
             if all(fin): break
-            amask = torch.cat([amask, torch.ones((N, 1), device=dev, dtype=torch.long)], 1)
-            o = llm(input_ids=torch.tensor([[gen[j][-1] if gen[j] else 0] for j in act], device=dev), attention_mask=amask,
+            amask = torch.cat([amask, torch.ones((TW * N, 1), device=dev, dtype=torch.long)], 1)
+            o = llm(input_ids=dup(torch.tensor([[gen[j][-1] if gen[j] else 0] for j in act], device=dev)), attention_mask=amask,
                     position_ids=nxt, past_key_values=cache, use_cache=True, logits_to_keep=1)
             last = o.logits[:, -1]; nxt = nxt + 1
         del cache
@@ -1422,7 +1439,7 @@ for r in rows:
     ans = r["ids"] if "ids" in r else tok.encode(r.get("text", r.get("chosen", "")), add_special_tokens=False)
     data.append((torch.tensor(pid + ans), len(pid)))   # CPU; moved per trace
 
-tag = f"S{a.S} rw{a.rw} C{a.C} maxd{a.maxd} L{a.layers} ffn{a.ffn}" + (" par" if a.par and a.mode == "train" else "") + (f" spin b{a.spin_beta}" if a.spin and a.mode == "train" else "") + (" spnext" + (f" win{a.sn_win}/{a.sn_win_every}" if a.sn_win != "1" else "") if a.spnext and a.mode == "train" else "") + (" no-SP" if a.no_sp else "") + (" SP-null" if a.sp_null else "") + (" SP-swap" if a.sp_swap else "") + (f" filler{FILL}" if a.sp_filler else "") + (" pin-think" if a.pin_think else "") + (" kv-evict" if a.kv_evict else "") + (" win-teacher" if a.win_teacher else "") + (" sp-replace" if a.sp_replace else "") + (f" rmt{a.rmt_block}" if a.rmt else "") + (f" kvmem{a.kv_rank}" if a.kv_mem else "") + (f" ctxL{a.ctx_hidden}" if a.ctx_hidden else "") + (" pe-rev" if a.pe_rev else "") + (" pe-norm" if a.pe_norm else "") + (f" FT{a.ft_layers}" if a.ft_layers else "") + (f" from{a.score_from}" if a.score_from else "") + (f" rkl{a.rkl_weight}" if a.rkl_weight and a.mode == "train" else "") + (" ctl-window" if a.ctl_window and a.mode == "train" else "") + (" ctl-para" if a.ctl_para and a.mode == "train" else "")
+tag = f"S{a.S} rw{a.rw} C{a.C} maxd{a.maxd} L{a.layers} ffn{a.ffn}" + (" par" if a.par and a.mode == "train" else "") + (f" spin b{a.spin_beta}" if a.spin and a.mode == "train" else "") + (" spnext" + (f" win{a.sn_win}/{a.sn_win_every}" if a.sn_win != "1" else "") if a.spnext and a.mode == "train" else "") + (" no-SP" if a.no_sp else "") + (" SP-null" if a.sp_null else "") + (" SP-swap" if a.sp_swap else "") + (f" filler{FILL}" if a.sp_filler else "") + (" pin-think" if a.pin_think else "") + (" kv-evict" if a.kv_evict else "") + (" para-window" if a.para_window else "") + (" win-teacher" if a.win_teacher else "") + (" sp-replace" if a.sp_replace else "") + (f" rmt{a.rmt_block}" if a.rmt else "") + (f" kvmem{a.kv_rank}" if a.kv_mem else "") + (f" ctxL{a.ctx_hidden}" if a.ctx_hidden else "") + (" pe-rev" if a.pe_rev else "") + (" pe-norm" if a.pe_norm else "") + (f" FT{a.ft_layers}" if a.ft_layers else "") + (f" from{a.score_from}" if a.score_from else "") + (f" rkl{a.rkl_weight}" if a.rkl_weight and a.mode == "train" else "") + (" ctl-window" if a.ctl_window and a.mode == "train" else "") + (" ctl-para" if a.ctl_para and a.mode == "train" else "")
 if a.mode == "profile":
     pooler.eval(); acc = {}
     for ids, P in data: profile_trace(ids, P, acc)
@@ -1473,7 +1490,8 @@ elif a.mode == "rollout":
                 if a.roll_lp: rec["ids"] = g; rec["lp"] = [round(x, 5) for x in LPG.get(k_, [])]
                 fo.write(json.dumps(rec) + "\n"); n_tok += len(g)
             fo.flush()
-            log(f"[sp] rollout {tag} {os.path.basename(a.ckpt) or 'untrained'}: {i + len(rb)}/{len(rows)} prompts, {n_tok} tokens ({time.time() - t0:.0f}s)")
+            log(f"[sp] rollout {tag} {os.path.basename(a.ckpt) or 'untrained'}: {i + len(rb)}/{len(rows)} prompts, {n_tok} tokens ({time.time() - t0:.0f}s)"
+                + (f" | paragraph openings from the masked twin {100 * PWN[0] / max(PWN[1], 1):.2f}% of steps" if a.para_window else ""))
 elif a.mode == "eval":
     pooler.eval(); t0 = time.time(); K = A_ = N = 0
     for ids, P in data:
