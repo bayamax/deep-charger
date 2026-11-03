@@ -8,7 +8,8 @@
 # serial 4: the frozen-reader run scored 38/60 with the memory (seed 1; the raw window alone 42-44) - the paper-faithful phase
 # (ctl/rmf_job.sh: shared read/write weights, copy writes, all layers tuned, from segment 13) starts once the memory run at
 # seed 2 is done; the no-memory runs of the frozen-reader job are dropped (that is the untouched model's raw window).
-SER=4
+# serial 5: the status lines show the fine-tune phase's own log (sp_f.log).
+SER=5
 if [ -f /root/.boxrmx_serial ] && [ "$(cat /root/.boxrmx_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxrmx_serial
 [ -d /venv/main/bin ] && export PATH=/venv/main/bin:$PATH
@@ -16,7 +17,7 @@ echo $SER > /root/.boxrmx_serial
 mkdir -p /root/w
 cat > /root/status.sh <<'ST'
 grep -E "^\[(pr|rm|hub)\]|Error|Traceback|out of memory" /root/w/w.log 2>/dev/null | tail -n 4 | cut -c1-300
-tail -n 1 /root/w/sp.log 2>/dev/null | cut -c1-200
+tail -n 1 /root/w/sp_f.log 2>/dev/null | cut -c1-200
 nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv,noheader
 ST
 chmod +x /root/status.sh
