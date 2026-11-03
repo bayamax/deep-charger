@@ -33,14 +33,16 @@
 # serial 16: --ctl-window segment 1 scored 40/60 with 3 closed-but-wrong, but 18 unclosed - the drift sits in what paragraphs
 # open with. Stop the --ctl-window job now (its segment 2 is dropped; segment 1 stays as kvr.pt / spKVR_latest.pt) and start
 # ctl/kvp_job.sh (--ctl-para) from segment 1.
-SER=16
+# serial 17: --ctl-para segment 1: 40/60, unclosed 18 -> 13 (raw window 8 / 10). Once the --ctl-para job is done, decode its
+# last weights with --para-window as well (ctl/kvw_job.sh, seeds 1-2).
+SER=17
 if [ -f /root/.boxrmx_serial ] && [ "$(cat /root/.boxrmx_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxrmx_serial
 [ -d /venv/main/bin ] && export PATH=/venv/main/bin:$PATH
 [ -s /root/.hf_token ] || { [ -n "$HF_TOKEN" ] && printf '%s' "$HF_TOKEN" > /root/.hf_token && chmod 600 /root/.hf_token; }
 mkdir -p /root/w
 cat > /root/status.sh <<'ST'
-grep -E "^\[(pr|rm|kv|kr|kp|hub)\]|Error|Traceback|out of memory" /root/w/w.log 2>/dev/null | tail -n 6 | cut -c1-600
+grep -E "^\[(pr|rm|kv|kr|kp|kw|hub)\]|Error|Traceback|out of memory" /root/w/w.log 2>/dev/null | tail -n 6 | cut -c1-600
 tail -n 1 /root/w/sp_kvp.log 2>/dev/null | cut -c1-200
 nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv,noheader
 ST
@@ -171,5 +173,15 @@ echo "[kp] s16: --ctl-window job stopped (kept segment $(cat /root/w/kvr_seg)); 
 exec bash /root/kvp_job.sh
 JOB
   setsid nohup bash -c 'bash /root/s16.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
+fi
+if [ ! -e /root/.s17kw ]; then touch /root/.s17kw
+  cat > /root/s17.sh <<'JOB'
+while [ ! -e /root/w/DONE_KP ]; do sleep 30; done; sleep 30
+for _t in $(seq 60); do curl -sS -o /root/kvw_job.sh "https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl/kvw_job.sh?nocache=$(date +%s)"; grep -q -- "--para-window --max-len" /root/kvw_job.sh && break; sleep 120; done
+echo "[kw] s17: --ctl-para job done - para-window decoding $(date -u)"
+exec bash /root/kvw_job.sh
+JOB
+  setsid nohup bash -c 'bash /root/s17.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
+  echo "[kw] s17: waiting for the --ctl-para job $(date -u)"
 fi
 # CTL-END
