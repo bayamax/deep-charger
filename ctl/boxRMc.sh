@@ -3,7 +3,9 @@
 # bf16 matmul speed, model download time. Prints one [pr] RESULT line and waits; the winner gets the training serial.
 # serial 2: this box passed (GPU empty, 68 TFLOPS bf16, model in 35 s) and is the cheapest that did - the RMT run moves here
 # from box RM after its segment 2: ctl/rm_job.sh carries on from the hub's spRM_latest.pt.
-SER=2
+# serial 3: the held-out mean is flat (0.0656 / 0.0660 / 0.0651 / 0.0646 over segments 10-13) - stop the training now (segment
+# 14 is killed, segment 13's weights stay) and go straight to the 60 problems with and without the memory.
+SER=3
 if [ -f /root/.boxrmx_serial ] && [ "$(cat /root/.boxrmx_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxrmx_serial
 [ -d /venv/main/bin ] && export PATH=/venv/main/bin:$PATH
@@ -37,5 +39,8 @@ if [ ! -e /root/.rmjob ]; then touch /root/.rmjob
   curl -sS -o /root/rm_job.sh "https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl/rm_job.sh?nocache=$(date +%s)"
   setsid nohup bash -c 'bash /root/rm_job.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
   echo "[rm] RM job launched here $(date -u)"
+fi
+if [ ! -e /root/.s3stop ]; then touch /root/.s3stop
+  touch /root/w/STOP_RM; pkill -f "sp_qwen3.py train"; echo "[rm] s3: training stopped after segment $(cat /root/w/rm_seg) - on to the 60 problems $(date -u)"
 fi
 # CTL-END
