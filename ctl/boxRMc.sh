@@ -17,15 +17,19 @@
 # serial 9: the account ran out of credit and the box was stopped mid segment 8 - after the restart the KV-memory job is
 # launched again (it carries on from its local kvm.pt = segment 7).
 # serial 10: enough (the user) - stop the KV-memory training after segment 8 and go to the 60 problems (seeds 1-2).
-SER=10
+# serial 11: the user is asleep and asked me to keep trying. KV memory scored 35 / 37 (raw window 42 / 44); its generations fail
+# to finish (17 unclosed vs 8-10) with ~60% more "Wait" / "Alternatively" - the hesitation drift again. ctl/kvr_job.sh, once the
+# KV job is done: stopping / hesitation / entropy statistics with and without the memory, then 3 segments with a half reverse-KL
+# objective from segment 8, then the 60 problems (seeds 1-2).
+SER=11
 if [ -f /root/.boxrmx_serial ] && [ "$(cat /root/.boxrmx_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxrmx_serial
 [ -d /venv/main/bin ] && export PATH=/venv/main/bin:$PATH
 [ -s /root/.hf_token ] || { [ -n "$HF_TOKEN" ] && printf '%s' "$HF_TOKEN" > /root/.hf_token && chmod 600 /root/.hf_token; }
 mkdir -p /root/w
 cat > /root/status.sh <<'ST'
-grep -E "^\[(pr|rm|kv|hub)\]|Error|Traceback|out of memory" /root/w/w.log 2>/dev/null | tail -n 4 | cut -c1-300
-tail -n 1 /root/w/sp_kv.log 2>/dev/null | cut -c1-200
+grep -E "^\[(pr|rm|kv|kr|hub)\]|Error|Traceback|out of memory" /root/w/w.log 2>/dev/null | tail -n 6 | cut -c1-600
+tail -n 1 /root/w/sp_kvr.log 2>/dev/null | cut -c1-200
 nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv,noheader
 ST
 chmod +x /root/status.sh
@@ -96,5 +100,15 @@ exec bash /root/kvm_job.sh
 JOB
   setsid nohup bash -c 'bash /root/s7.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
   echo "[kv] s7: waiting for the RMT fine-tune's segment 5 $(date -u)"
+fi
+if [ ! -e /root/.s11kr ]; then touch /root/.s11kr
+  cat > /root/s11.sh <<'JOB'
+while [ ! -e /root/w/DONE_KV ]; do sleep 30; done; sleep 60
+curl -sS -o /root/kvr_job.sh "https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl/kvr_job.sh?nocache=$(date +%s)"
+echo "[kr] s11: KV job done - hesitation statistics, then half reverse-KL training $(date -u)"
+exec bash /root/kvr_job.sh
+JOB
+  setsid nohup bash -c 'bash /root/s11.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
+  echo "[kr] s11: waiting for the KV job to finish $(date -u)"
 fi
 # CTL-END

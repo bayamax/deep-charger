@@ -190,7 +190,7 @@ THINK_ID = tok.convert_tokens_to_ids("<think>")
 FILL = tok.encode(a.sp_filler.encode().decode("unicode_escape"), add_special_tokens=False)[0] if a.sp_filler else None
 HES_IDS = sorted({x[0] for w in ("Wait", " Wait", "But", " But", "Alternatively", " Alternatively", "Hmm", " Hmm")
                   for x in [tok.encode(w, add_special_tokens=False)] if len(x) == 1})   # "keep checking" openers
-ENDST = {"pt": 0.0, "ps": 0.0, "n": 0, "lt": 0.0, "ls": 0.0, "k": 0, "ht": 0.0, "hs": 0.0}   # --end-stat: mean p(</think>) all rows; log p at real ends
+ENDST = {"pt": 0.0, "ps": 0.0, "n": 0, "lt": 0.0, "ls": 0.0, "k": 0, "ht": 0.0, "hs": 0.0, "et": 0.0, "es": 0.0}   # --end-stat: mean p(</think>) all rows; log p at real ends
 llm = AutoModelForCausalLM.from_pretrained(a.model, dtype=dt, attn_implementation="sdpa").to(dev).eval()
 for p_ in llm.parameters(): p_.requires_grad_(False)
 embed = llm.get_input_embeddings(); H = llm.config.hidden_size; NL = llm.config.num_hidden_layers
@@ -567,6 +567,7 @@ def run_trace(ids, P, train, ref_h=None):
             if a.end_stat:
                 ENDST["pt"] += tr[:, END_ID].exp().sum().item(); ENDST["ps"] += sl[:, END_ID].exp().sum().item(); ENDST["n"] += kl.numel()
                 ENDST["ht"] += tr[:, HES_IDS].exp().sum().item(); ENDST["hs"] += sl[:, HES_IDS].exp().sum().item()
+                ENDST["et"] -= (tr.exp() * tr).sum().item(); ENDST["es"] -= (sl.exp() * sl).sum().item()
                 hit = (a_ids[0, c0:c1] == END_ID).nonzero().flatten()
                 if hit.numel(): ENDST["lt"] += tr[hit, END_ID].sum().item(); ENDST["ls"] += sl[hit, END_ID].sum().item(); ENDST["k"] += hit.numel()
     return K, A_, N
@@ -1446,7 +1447,8 @@ elif a.mode == "eval":
     if a.end_stat:
         e = ENDST; log(f"[sp] end-stat {tag}: mean p(</think>) teacher {e['pt'] / max(e['n'], 1):.3e} student {e['ps'] / max(e['n'], 1):.3e} | "
                        f"at the {e['k']} real ends: log p teacher {e['lt'] / max(e['k'], 1):.3f} student {e['ls'] / max(e['k'], 1):.3f} | "
-                       f"mean p(Wait/But/Alternatively/Hmm) teacher {e['ht'] / max(e['n'], 1):.4f} student {e['hs'] / max(e['n'], 1):.4f}")
+                       f"mean p(Wait/But/Alternatively/Hmm) teacher {e['ht'] / max(e['n'], 1):.4f} student {e['hs'] / max(e['n'], 1):.4f} | "
+                       f"mean entropy (nats) teacher {e['et'] / max(e['n'], 1):.4f} student {e['es'] / max(e['n'], 1):.4f}")
 else:
     pooler.train()
     groups = [{"params": list(pooler.parameters()) if not a.rmt else RMT_PARAMS, "lr": a.lr}]
