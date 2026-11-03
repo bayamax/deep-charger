@@ -21,7 +21,10 @@
 # to finish (17 unclosed vs 8-10) with ~60% more "Wait" / "Alternatively" - the hesitation drift again. ctl/kvr_job.sh, once the
 # KV job is done: stopping / hesitation / entropy statistics with and without the memory, then 3 segments with a half reverse-KL
 # objective from segment 8, then the 60 problems (seeds 1-2).
-SER=11
+# serial 12: serial 11 reached the box before the switch to --ctl-window and started the half reverse-KL version of
+# kvr_job.sh - once its statistics are done (kr_diag_done), stop it, drop anything it trained, and run the current kvr_job.sh
+# (it skips the statistics and goes to the --ctl-window training).
+SER=12
 if [ -f /root/.boxrmx_serial ] && [ "$(cat /root/.boxrmx_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxrmx_serial
 [ -d /venv/main/bin ] && export PATH=/venv/main/bin:$PATH
@@ -110,5 +113,17 @@ exec bash /root/kvr_job.sh
 JOB
   setsid nohup bash -c 'bash /root/s11.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
   echo "[kr] s11: waiting for the KV job to finish $(date -u)"
+fi
+if [ ! -e /root/.s12ctl ]; then touch /root/.s12ctl
+  cat > /root/s12.sh <<'JOB'
+while [ ! -e /root/w/kr_diag_done ]; do sleep 20; done
+for J in $(pgrep -f "^bash /root/kvr_job.sh") $(pgrep -f "^bash /root/s11.sh"); do pkill -P $J; kill $J; done; sleep 3; pkill -f "sp_qwen3.py"; sleep 5
+cd /root/w && rm -f kvr.pt kvr_next.pt kvr_seg
+for _t in $(seq 60); do curl -sS -o /root/kvr_job.sh "https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl/kvr_job.sh?nocache=$(date +%s)"; grep -q -- "--ctl-window --ckpt" /root/kvr_job.sh && break; sleep 120; done
+echo "[kr] s12: half reverse-KL version stopped after the statistics; --ctl-window job ($(grep -c ctl-window /root/kvr_job.sh) mentions) $(date -u)"
+exec bash /root/kvr_job.sh
+JOB
+  setsid nohup bash -c 'bash /root/s12.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
+  echo "[kr] s12: waiting for the statistics to finish $(date -u)"
 fi
 # CTL-END
