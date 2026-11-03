@@ -9,7 +9,9 @@
 # (ctl/rmf_job.sh: shared read/write weights, copy writes, all layers tuned, from segment 13) starts once the memory run at
 # seed 2 is done; the no-memory runs of the frozen-reader job are dropped (that is the untouched model's raw window).
 # serial 5: the status lines show the fine-tune phase's own log (sp_f.log).
-SER=5
+# serial 6: the fine-tune at lr 1e-5 did not move off the floor in two segments (held-out mean 0.0938, 0.0947; chat worse than
+# the floor - the model drifting from the original) - the user chose to go on at a lower lr: 2e-6, from segment 2.
+SER=6
 if [ -f /root/.boxrmx_serial ] && [ "$(cat /root/.boxrmx_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxrmx_serial
 [ -d /venv/main/bin ] && export PATH=/venv/main/bin:$PATH
@@ -57,5 +59,11 @@ exec bash /root/rmf_job.sh
 JOB
   setsid nohup bash -c 'bash /root/s4.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
   echo "[rm] s4: waiting for the seed-2 memory run $(date -u)"
+fi
+if [ ! -e /root/.s6lr ]; then touch /root/.s6lr
+  for J in $(pgrep -f "^bash /root/rmf_job.sh") $(pgrep -f "^bash /root/s4.sh"); do pkill -P $J; kill $J; done; sleep 3; pkill -f "sp_qwen3.py"; sleep 3
+  curl -sS -o /root/rmf_job.sh "https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl/rmf_job.sh?nocache=$(date +%s)"
+  setsid nohup bash -c 'FTLR=2e-6 bash /root/rmf_job.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
+  echo "[rm] s6: fine-tune restarted at lr 2e-6 from segment $(cat /root/w/rmf_seg) $(date -u)"
 fi
 # CTL-END

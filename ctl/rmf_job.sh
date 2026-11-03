@@ -58,7 +58,7 @@ if [ ! -e rmf_start_done ]; then
   e=$(evkl --ckpt rmf.pt); echo "[rm] F start (frozen-reader weights read with the shared LoRA and copy writes):$e"; touch rmf_start_done; fi
 seg=$(cat rmf_seg 2>/dev/null || echo 0); cur=rmf.pt
 while [ ! -e STOP_RMF ]; do seg=$((seg + 1)); t0=$(date +%s)
-  python3 sp_qwen3.py train --traces rm_pool.jsonl --skip $(( ((seg - 1) * 600) % 9600 )) --n 600 --max-len 8192 $M --ft-layers 28 --opt8bit --ft-lr 1e-5 --grad-ckpt --chunks-per-trace 4 --rmt-bptt 2 --accum 8 --lr 1e-4 --const-lr --ckpt $cur --seed $((100 + seg)) --out rmf_next.pt --log $LG > run_rmf.log 2>&1
+  python3 sp_qwen3.py train --traces rm_pool.jsonl --skip $(( ((seg - 1) * 600) % 9600 )) --n 600 --max-len 8192 $M --ft-layers 28 --opt8bit --ft-lr ${FTLR:-1e-5} --grad-ckpt --chunks-per-trace 4 --rmt-bptt 2 --accum 8 --lr 1e-4 --const-lr --ckpt $cur --seed $((100 + seg)) --out rmf_next.pt --log $LG > run_rmf.log 2>&1
   if [ -s rmf_next.pt ] && grep -q "^\[sp\] trained" run_rmf.log; then mv rmf_next.pt rmf.pt; echo $seg > rmf_seg
   else echo "[rm] F segment $seg FAILED: $(grep -E 'Error' run_rmf.log | tail -1 | cut -c1-200)"; break; fi
   tk=$(grep -oP "KL [0-9.]+ top1 [0-9.]+%" run_rmf.log | awk 'NR==1{f=$0} {l=$0} END{print "first 25 " f " / last 25 " l}')
