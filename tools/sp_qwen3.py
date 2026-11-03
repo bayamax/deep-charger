@@ -126,6 +126,12 @@ ap.add_argument("--rmt", action="store_true", help="recurrent memory (RMT style)
                 "frozen model on [prompt | memory | the raw tokens since the last written block (rw .. rw+block-1) | chunk]")
 ap.add_argument("--rmt-block", type=int, default=512, help="--rmt: answer tokens per memory write")
 ap.add_argument("--rmt-bptt", type=int, default=2, help="--rmt train: writes back-propagated through before a scored chunk")
+ap.add_argument("--rmt-shared", action="store_true", help="--rmt as in the RMT paper: reading and writing share the weights - the LoRA "
+                "is on in every pass of the student (the teacher stays the original model)")
+ap.add_argument("--rmt-copy", action="store_true", help="--rmt as in the RMT paper: the write block's inputs are a copy of the current "
+                "memory ([prompt | M | block | M]) instead of separate learned write tokens")
+ap.add_argument("--grad-ckpt", action="store_true", help="train: gradient checkpointing in the decoder layers (activation memory for "
+                "full fine-tuning with the RMT passes)")
 ap.add_argument("--rmt-rank", type=int, default=16, help="--rmt: LoRA rank (q/k/v/o and the MLP of every layer)")
 ap.add_argument("--const-lr", action="store_true", help="train: constant lr (no warm-up / decay) - for short repeated runs such as the "
                 "rounds of an on-policy loop, where a schedule per run would restart every round")
@@ -317,7 +323,7 @@ if a.ckpt:
         llm.load_state_dict({k: v.to(dev, dt) for k, v in ck["ft"].items()}, strict=False)
 pooler.pe_rev = a.pe_rev
 if a.pe_norm: pooler.pe_gain = target_norm / math.sqrt(H / 2)   # sinusoid norm sqrt(H/2) -> the embedding norm
-LORA = {"on": False}
+LORA = {"on": False, "default": False}   # default: the state outside memory writes (on for --rmt-shared)
 
 
 class LoRALinear(nn.Module):
@@ -345,6 +351,7 @@ class RMTMem(nn.Module):
 
 
 RMT = None
+if a.rmt and a.rmt_shared: LORA["default"] = LORA["on"] = True
 if a.rmt:
     for li in range(NL):
         L_ = llm.model.layers[li]
@@ -364,10 +371,11 @@ def rmt_write(m_prev, prompt_ids, block_ids):
     """one memory write: [prompt | m_prev | block | write tokens] through the model with the LoRA on -> new memory (1, S, H)"""
     LORA["on"] = True
     try:
-        x = torch.cat([embed(prompt_ids[None]).to(dt), m_prev.to(dt), embed(block_ids[None]).to(dt), RMT.wtok[None].to(dt)], 1)
-        h = llm.model(inputs_embeds=x, position_ids=torch.arange(x.size(1), device=dev)[None]).last_hidden_state[:, -a.S:]
+        wt = m_prev.to(dt) if a.rmt_copy else RMT.wtok[None].to(dt)
+        x = torch.cat([embed(prompt_ids[None]).to(dt), m_prev.to(dt), embed(block_ids[None]).to(dt), wt], 1)
+        h = llm.model(inputs_embeds=x, position_ids=torch.arange(x.size(1), device=dev)[None], use_cache=False).last_hidden_state[:, -a.S:]
     finally:
-        LORA["on"] = False
+        LORA["on"] = LORA["default"]
     return RMT.norm_out(h)
 
 
@@ -427,8 +435,12 @@ class _Frozen:
 @torch.no_grad()
 def teacher_hidden(ids, lo, hi):
     """the full-context teacher's last hidden states whose rows predict tokens lo..hi-1 (lm head applied per chunk)"""
-    with _Frozen():
-        return llm.model(input_ids=ids[None, :hi]).last_hidden_state[0, lo - 1:hi - 1]
+    on = LORA["on"]; LORA["on"] = False   # the teacher is the original model (no LoRA, frozen weights)
+    try:
+        with _Frozen():
+            return llm.model(input_ids=ids[None, :hi], use_cache=False).last_hidden_state[0, lo - 1:hi - 1]
+    finally:
+        LORA["on"] = on
 
 
 @torch.no_grad()
@@ -706,8 +718,6 @@ def run_trace_rmt(ids, P, train):
     with torch.no_grad():
         Ms = [RMT.m0[None]]
         for k in range(nmax): Ms.append(rmt_write(Ms[-1], pids, a_ids[k * blk:(k + 1) * blk]))
-        pc = DynamicCache(); llm(input_ids=ids[None, :P], past_key_values=pc, use_cache=True)
-        pkv = [tuple(kv_of(pc, li)) for li in range(NL)]
     K = A_ = N = 0.0
     for c in pick:
         n = (c - a.rw) // blk; c1 = min(c + a.C, La); cur = c1 - c
@@ -718,14 +728,12 @@ def run_trace_rmt(ids, P, train):
                 mem = Ms[max(0, n - a.rmt_bptt)].detach()
                 for k in range(max(0, n - a.rmt_bptt), n): mem = rmt_write(mem, pids, a_ids[k * blk:(k + 1) * blk])
             else: mem = Ms[n]
-            parts = ([mem.to(dt)] if mem is not None else []) + [embed(a_ids[None, n * blk:c1 - 1]).to(dt)]
-            x = torch.cat(parts, 1); nb = x.size(1)
-            h0 = (0 if mem is None else a.S) + (c - 1 - n * blk)   # the row of a[c-1], which predicts a[c]
-            cache = DynamicCache()
-            for li, (k_, v_) in enumerate(pkv): cache.update(k_, v_, li)
-            pos = torch.arange(P, P + nb, device=dev)[None]
-            hs = llm.model(inputs_embeds=x, attention_mask=torch.ones(1, P + nb, device=dev), past_key_values=cache,
-                           position_ids=pos, cache_position=pos[0], use_cache=True).last_hidden_state[0, h0:]   # (cur, H)
+            # the reading pass, prompt included (no cache: the same in training with gradient checkpointing and in generation)
+            parts = [embed(pids[None]).to(dt)] + ([mem.to(dt)] if mem is not None else []) + [embed(a_ids[None, n * blk:c1 - 1]).to(dt)]
+            x = torch.cat(parts, 1)
+            h0 = P + (0 if mem is None else a.S) + (c - 1 - n * blk)   # the row of a[c-1], which predicts a[c]
+            hs = llm.model(inputs_embeds=x, position_ids=torch.arange(x.size(1), device=dev)[None],
+                           use_cache=False).last_hidden_state[0, h0:]   # (cur, H)
             tr = teacher_rows(ref_h[c - c0s[0]:c1 - c0s[0]])
             lp = F.log_softmax(llm.lm_head(hs).float(), -1); kr = (tr.exp() * (tr - lp)).sum(-1)
             if train: (kr.sum() / 1000.0).backward()
@@ -1364,6 +1372,8 @@ else:
         torch.save(ck, a.out)
 
     t0 = time.time(); K = A_ = N = 0
+    if a.grad_ckpt:
+        llm.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False}); llm.train()
     if FTP:   # pinned frozen copies in the same order as the tuned params, for the fast swap
         names = [n_ for li in range(a.ft_layers) for n_, _ in llm.model.layers[li].named_parameters(prefix=f"model.layers.{li}") if not n_.endswith((".A", ".B"))]
         SWAP["pairs"] = [(p_, FT_SD[n_].pin_memory() if dev == "cuda" else FT_SD[n_], m_) for p_, n_, m_ in zip(FTP, names, MASTER)]

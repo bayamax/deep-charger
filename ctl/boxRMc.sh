@@ -5,7 +5,10 @@
 # from box RM after its segment 2: ctl/rm_job.sh carries on from the hub's spRM_latest.pt.
 # serial 3: the held-out mean is flat (0.0656 / 0.0660 / 0.0651 / 0.0646 over segments 10-13) - stop the training now (segment
 # 14 is killed, segment 13's weights stay) and go straight to the 60 problems with and without the memory.
-SER=3
+# serial 4: the frozen-reader run scored 38/60 with the memory (seed 1; the raw window alone 42-44) - the paper-faithful phase
+# (ctl/rmf_job.sh: shared read/write weights, copy writes, all layers tuned, from segment 13) starts once the memory run at
+# seed 2 is done; the no-memory runs of the frozen-reader job are dropped (that is the untouched model's raw window).
+SER=4
 if [ -f /root/.boxrmx_serial ] && [ "$(cat /root/.boxrmx_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxrmx_serial
 [ -d /venv/main/bin ] && export PATH=/venv/main/bin:$PATH
@@ -42,5 +45,16 @@ if [ ! -e /root/.rmjob ]; then touch /root/.rmjob
 fi
 if [ ! -e /root/.s3stop ]; then touch /root/.s3stop
   touch /root/w/STOP_RM; pkill -f "sp_qwen3.py train"; echo "[rm] s3: training stopped after segment $(cat /root/w/rm_seg) - on to the 60 problems $(date -u)"
+fi
+if [ ! -e /root/.s4f ]; then touch /root/.s4f
+  cat > /root/s4.sh <<'JOB'
+while ! grep -q "segment 13 mem seed 2" /root/w/w.log; do sleep 30; done
+for J in $(pgrep -f "^bash /root/rm_job.sh"); do pkill -P $J; kill $J; done; sleep 3; pkill -f "sp_qwen3.py"; sleep 3
+curl -sS -o /root/rmf_job.sh "https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl/rmf_job.sh?nocache=$(date +%s)"
+echo "[rm] s4: frozen-reader job stopped after the seed-2 memory run; paper-faithful phase starting $(date -u)"
+exec bash /root/rmf_job.sh
+JOB
+  setsid nohup bash -c 'bash /root/s4.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
+  echo "[rm] s4: waiting for the seed-2 memory run $(date -u)"
 fi
 # CTL-END
