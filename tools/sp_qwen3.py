@@ -94,6 +94,10 @@ ap.add_argument("--fifo", type=int, default=0, help="distant buffer: keep only t
 ap.add_argument("--par-deploy", action="store_true", help="--par: score only the rows the deployment loop scores - in the block "
                 "[SP(tokens before b) | a[b : b+rw+C]] the last C (raw window >= rw), i.e. the chunk after a full raw window; the "
                 "rows with a short window (SP alone, never seen in deployment) are left out")
+ap.add_argument("--ctl-window", action="store_true", help="train (chunk mode, --kv-mem): the teacher's distribution with the total "
+                "mass on the control tokens (the 'keep checking' openers Wait/But/Alternatively/Hmm, and </think>) set to the raw-window "
+                "model's: content from the full-KV teacher, the decision to re-check or stop from the bounded model (the full-KV model "
+                "explores because it can see its earlier checks; a student copying that without the recall never converges)")
 ap.add_argument("--rkl-weight", type=float, default=0.0, help="train (chunk mode): loss = (1-w) KL(teacher||student) + w KL(student||teacher) "
                 "per token. Reverse KL is mode-seeking: on the model's OWN generations (on-policy distillation) it punishes tokens the "
                 "full-KV teacher would not write at that state - e.g. a guessed value the soft prompts only blur - where the forward KL "
@@ -504,6 +508,29 @@ RKL = [0.0, 0]   # chunk mode: summed reverse KL(student||teacher) and rows sinc
 DUMP = [] if a.dump else None   # eval --dump: per trace a list of (rows, 7) tensors
 
 
+CTL_G = None
+
+
+def ctl_target(tr, pkv, block, P, cur):
+    """--ctl-window: tr (cur, V) full-KV teacher log-probs -> the same with each control group's total mass (and the rest's)
+    replaced by the raw-window model's on the same block (no memory, positions right after the prompt)"""
+    global CTL_G
+    if CTL_G is None: CTL_G = [torch.tensor(HES_IDS, device=dev), torch.tensor([END_ID], device=dev)]
+    with torch.no_grad():
+        cw = DynamicCache()
+        for li, (k_, v_) in enumerate(pkv): cw.update(k_, v_, li)
+        nb = block.size(1); pos = torch.arange(P, P + nb, device=dev)[None]
+        ow = llm(inputs_embeds=block.detach(), attention_mask=torch.ones(1, P + nb, device=dev), past_key_values=cw,
+                 position_ids=pos, cache_position=pos[0], use_cache=True, logits_to_keep=cur + 1)
+        wl = F.log_softmax(ow.logits[0, :cur].float(), -1); del ow, cw
+        u = torch.cat(CTL_G)
+        l1m = lambda x: torch.log(-torch.expm1(x.clamp(max=-1e-6)))
+        out = tr + (l1m(torch.logsumexp(wl[:, u], -1, keepdim=True)) - l1m(torch.logsumexp(tr[:, u], -1, keepdim=True)))
+        for g in CTL_G:
+            out[:, g] = tr[:, g] - torch.logsumexp(tr[:, g], -1, keepdim=True) + torch.logsumexp(wl[:, g], -1, keepdim=True)
+    return out
+
+
 def run_trace(ids, P, train, ref_h=None):
     """teacher-forced SP-evict over one trace: returns (sum KL, sum top-1 agree, n tokens) on tokens past the window."""
     T = min(len(ids), P + a.max_len)
@@ -553,6 +580,7 @@ def run_trace(ids, P, train, ref_h=None):
             # kept rows: the last window token + the chunk's tokens but its last -> they predict answer tokens c0 .. c1-1
             sl = F.log_softmax(o.logits[0, :cur].float(), -1)
             tr = teacher_rows(ref_h[c0 - first:c1 - first])     # teacher row j predicts answer token first + j
+            if a.ctl_window and train: tr = ctl_target(tr, pkv, block, P, cur)
             kl = (tr.exp() * (tr - sl)).sum(-1)
             rk = (sl.exp() * (sl - tr)).sum(-1)
             RKL[0] += rk.sum().item(); RKL[1] += rk.numel()
@@ -1382,7 +1410,7 @@ for r in rows:
     ans = r["ids"] if "ids" in r else tok.encode(r.get("text", r.get("chosen", "")), add_special_tokens=False)
     data.append((torch.tensor(pid + ans), len(pid)))   # CPU; moved per trace
 
-tag = f"S{a.S} rw{a.rw} C{a.C} maxd{a.maxd} L{a.layers} ffn{a.ffn}" + (" par" if a.par and a.mode == "train" else "") + (f" spin b{a.spin_beta}" if a.spin and a.mode == "train" else "") + (" spnext" + (f" win{a.sn_win}/{a.sn_win_every}" if a.sn_win != "1" else "") if a.spnext and a.mode == "train" else "") + (" no-SP" if a.no_sp else "") + (" SP-null" if a.sp_null else "") + (" SP-swap" if a.sp_swap else "") + (f" filler{FILL}" if a.sp_filler else "") + (" pin-think" if a.pin_think else "") + (" kv-evict" if a.kv_evict else "") + (" win-teacher" if a.win_teacher else "") + (" sp-replace" if a.sp_replace else "") + (f" rmt{a.rmt_block}" if a.rmt else "") + (f" kvmem{a.kv_rank}" if a.kv_mem else "") + (f" ctxL{a.ctx_hidden}" if a.ctx_hidden else "") + (" pe-rev" if a.pe_rev else "") + (" pe-norm" if a.pe_norm else "") + (f" FT{a.ft_layers}" if a.ft_layers else "") + (f" from{a.score_from}" if a.score_from else "") + (f" rkl{a.rkl_weight}" if a.rkl_weight and a.mode == "train" else "")
+tag = f"S{a.S} rw{a.rw} C{a.C} maxd{a.maxd} L{a.layers} ffn{a.ffn}" + (" par" if a.par and a.mode == "train" else "") + (f" spin b{a.spin_beta}" if a.spin and a.mode == "train" else "") + (" spnext" + (f" win{a.sn_win}/{a.sn_win_every}" if a.sn_win != "1" else "") if a.spnext and a.mode == "train" else "") + (" no-SP" if a.no_sp else "") + (" SP-null" if a.sp_null else "") + (" SP-swap" if a.sp_swap else "") + (f" filler{FILL}" if a.sp_filler else "") + (" pin-think" if a.pin_think else "") + (" kv-evict" if a.kv_evict else "") + (" win-teacher" if a.win_teacher else "") + (" sp-replace" if a.sp_replace else "") + (f" rmt{a.rmt_block}" if a.rmt else "") + (f" kvmem{a.kv_rank}" if a.kv_mem else "") + (f" ctxL{a.ctx_hidden}" if a.ctx_hidden else "") + (" pe-rev" if a.pe_rev else "") + (" pe-norm" if a.pe_norm else "") + (f" FT{a.ft_layers}" if a.ft_layers else "") + (f" from{a.score_from}" if a.score_from else "") + (f" rkl{a.rkl_weight}" if a.rkl_weight and a.mode == "train" else "") + (" ctl-window" if a.ctl_window and a.mode == "train" else "")
 if a.mode == "profile":
     pooler.eval(); acc = {}
     for ids, P in data: profile_trace(ids, P, acc)
