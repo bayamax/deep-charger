@@ -312,7 +312,7 @@ if a.ckpt:
         if (ck.get("args") or {}).get("pe_rev"): a.pe_rev = True
         if (ck.get("args") or {}).get("pe_norm"): a.pe_norm = True
         if (ck.get("args") or {}).get("ctx_hidden"): a.ctx_hidden = ck["args"]["ctx_hidden"]
-    if ck.get("ft"):
+    if ck.get("ft") and not a.rmt:
         FT_SD = {k: v.detach().to("cpu", copy=True) for k, v in llm.state_dict().items() if k in ck["ft"]}   # frozen copy = teacher
         llm.load_state_dict({k: v.to(dev, dt) for k, v in ck["ft"].items()}, strict=False)
 pooler.pe_rev = a.pe_rev
@@ -353,6 +353,9 @@ if a.rmt:
     RMT = RMTMem(H, a.S, target_norm).to(dev)
     if a.ckpt and ck.get("rmt"):
         RMT.load_state_dict(ck["rmt"]["mem"]); llm.load_state_dict(ck["rmt"]["lora"], strict=False)
+    if a.ckpt and ck.get("ft"):   # tuned base weights (names after the wrapping: ...q_proj.base.weight); the original = the teacher
+        FT_SD = {k: v.detach().to("cpu", copy=True) for k, v in llm.state_dict().items() if k in ck["ft"]}
+        llm.load_state_dict({k: v.to(dev, dt) for k, v in ck["ft"].items()}, strict=False)
 RMT_PARAMS = ([p_ for n_, p_ in llm.named_parameters() if n_.endswith((".A", ".B"))] + list(RMT.parameters())) if a.rmt else []
 for p_ in RMT_PARAMS: p_.requires_grad_(True)
 
@@ -1326,9 +1329,9 @@ else:
         if FT_SD is None:   # fresh run: the frozen original is the teacher; resuming from an FT ckpt keeps the original taken at load
             FT_SD = {}
         for k, v in llm.state_dict().items():   # layers tuned now but not in the checkpoint are still the original: add them
-            if k.startswith("model.layers.") and int(k.split(".")[2]) < a.ft_layers and k not in FT_SD:
+            if k.startswith("model.layers.") and int(k.split(".")[2]) < a.ft_layers and k not in FT_SD and not k.endswith((".A", ".B")):
                 FT_SD[k] = v.detach().to("cpu", copy=True)
-        FTP = [p_ for li in range(a.ft_layers) for p_ in llm.model.layers[li].parameters()]
+        FTP = [p_ for li in range(a.ft_layers) for n_, p_ in llm.model.layers[li].named_parameters() if not n_.endswith((".A", ".B"))]
         for p_ in FTP: p_.requires_grad_(True)
         MASTER = [p_.detach().float().clone().requires_grad_(True) for p_ in FTP]
         def _acc(m_):
@@ -1362,7 +1365,7 @@ else:
 
     t0 = time.time(); K = A_ = N = 0
     if FTP:   # pinned frozen copies in the same order as the tuned params, for the fast swap
-        names = [n_ for li in range(a.ft_layers) for n_, _ in llm.model.layers[li].named_parameters(prefix=f"model.layers.{li}")]
+        names = [n_ for li in range(a.ft_layers) for n_, _ in llm.model.layers[li].named_parameters(prefix=f"model.layers.{li}") if not n_.endswith((".A", ".B"))]
         SWAP["pairs"] = [(p_, FT_SD[n_].pin_memory() if dev == "cuda" else FT_SD[n_], m_) for p_, n_, m_ in zip(FTP, names, MASTER)]
     refs = {}; WINS = [int(x) for x in a.sn_win.split(",")]
     _on_dev = lambda r: None if r is None else r.to(dev, non_blocking=True)
