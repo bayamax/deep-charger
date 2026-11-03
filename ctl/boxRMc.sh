@@ -35,14 +35,16 @@
 # ctl/kvp_job.sh (--ctl-para) from segment 1.
 # serial 17: --ctl-para segment 1: 40/60, unclosed 18 -> 13 (raw window 8 / 10). Once the --ctl-para job is done, decode its
 # last weights with --para-window as well (ctl/kvw_job.sh, seeds 1-2).
-SER=17
+# serial 18: para-window decoding seed 1: 37/60 (plain 35). Once that job is done, two more decodings of the same weights with
+# the memory-masked twin (ctl/kvt_job.sh): the lower-entropy side per token, and a half/half logit mix.
+SER=18
 if [ -f /root/.boxrmx_serial ] && [ "$(cat /root/.boxrmx_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxrmx_serial
 [ -d /venv/main/bin ] && export PATH=/venv/main/bin:$PATH
 [ -s /root/.hf_token ] || { [ -n "$HF_TOKEN" ] && printf '%s' "$HF_TOKEN" > /root/.hf_token && chmod 600 /root/.hf_token; }
 mkdir -p /root/w
 cat > /root/status.sh <<'ST'
-grep -E "^\[(pr|rm|kv|kr|kp|kw|hub)\]|Error|Traceback|out of memory" /root/w/w.log 2>/dev/null | tail -n 6 | cut -c1-600
+grep -E "^\[(pr|rm|kv|kr|kp|kw|kt|hub)\]|Error|Traceback|out of memory" /root/w/w.log 2>/dev/null | tail -n 6 | cut -c1-600
 tail -n 1 /root/w/sp_kvp.log 2>/dev/null | cut -c1-200
 nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv,noheader
 ST
@@ -183,5 +185,14 @@ exec bash /root/kvw_job.sh
 JOB
   setsid nohup bash -c 'bash /root/s17.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
   echo "[kw] s17: waiting for the --ctl-para job $(date -u)"
+fi
+if [ ! -e /root/.s18kt ]; then touch /root/.s18kt
+  cat > /root/s18.sh <<'JOB'
+while [ ! -e /root/w/DONE_KW ]; do sleep 30; done; sleep 30
+for _t in $(seq 60); do curl -sS -o /root/kvt_job.sh "https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl/kvt_job.sh?nocache=$(date +%s)"; grep -q -- "twin-minent" /root/kvt_job.sh && break; sleep 120; done
+echo "[kt] s18: para-window job done - twin-minent / twin-mix decoding $(date -u)"
+exec bash /root/kvt_job.sh
+JOB
+  setsid nohup bash -c 'bash /root/s18.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
 fi
 # CTL-END
