@@ -42,6 +42,7 @@ PY
 } || rm -f kvm.pt
 echo "[kv] ready $(date -u)"
 M="--S 32 --heads 8 --layers 3 --ffn 2048 --rw 1024 --C 128 --maxd 0 --kv-mem --kv-rank 512"
+echo "[kv] config: $M"
 score() { python3 -c "
 import json, sys; sys.path.insert(0, '.')
 from sp_mathcheck import correct
