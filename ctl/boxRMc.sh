@@ -43,14 +43,17 @@
 # sequence log-probs under the KV-memory loop, the 60 problems at seeds 1-2).
 # serial 21: the user - round 1 first (all 300), then a second round: the raw window redrawn on the problems both sides
 # failed (ctl/kvd2_job.sh), then DPO on the pairs from both rounds. The serial-20 waiter is replaced.
-SER=21
+# serial 22: the user - grow the DPO corpus step by step towards the pairs it needs (~200-300): after the first DPO run
+# (kvo), ctl/kvi_job.sh iterates: 300 new problems, raw window + memory with the current weights, redraws, pairs both ways, DPO,
+# the 60 problems and the held-out KL - up to 6 iterations, stopping early if it falls 4+ below the start twice running.
+SER=22
 if [ -f /root/.boxrmx_serial ] && [ "$(cat /root/.boxrmx_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxrmx_serial
 [ -d /venv/main/bin ] && export PATH=/venv/main/bin:$PATH
 [ -s /root/.hf_token ] || { [ -n "$HF_TOKEN" ] && printf '%s' "$HF_TOKEN" > /root/.hf_token && chmod 600 /root/.hf_token; }
 mkdir -p /root/w
 cat > /root/status.sh <<'ST'
-grep -E "^\[(pr|rm|kv|kr|kp|kw|kt|kd|ko|hub)\]|Error|Traceback|out of memory" /root/w/w.log 2>/dev/null | tail -n 6 | cut -c1-600
+grep -E "^\[(pr|rm|kv|kr|kp|kw|kt|kd|ko|ki|hub)\]|Error|Traceback|out of memory" /root/w/w.log 2>/dev/null | tail -n 6 | cut -c1-600
 tail -n 1 /root/w/sp_kvp.log 2>/dev/null | cut -c1-200
 nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv,noheader
 ST
@@ -234,5 +237,15 @@ exec bash /root/kvo_job.sh
 JOB
   setsid nohup bash -c 'bash /root/s21.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
   echo "[kd] s21: waiting for round 1 $(date -u)"
+fi
+if [ ! -e /root/.s22ki ]; then touch /root/.s22ki
+  cat > /root/s22.sh <<'JOB'
+while [ ! -e /root/w/DONE_KO ]; do sleep 60; done; sleep 30
+for _t in $(seq 60); do curl -sS -o /root/kvi_job.sh "https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl/kvi_job.sh?nocache=$(date +%s)"; grep -q -- "dpo_pairs.py" /root/kvi_job.sh && break; sleep 120; done
+echo "[ki] s22: first DPO run done - iterative DPO $(date -u)"
+exec bash /root/kvi_job.sh
+JOB
+  setsid nohup bash -c 'bash /root/s22.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
+  echo "[ki] s22: waiting for the first DPO run $(date -u)"
 fi
 # CTL-END
