@@ -621,34 +621,50 @@ def run_trace(ids, P, train, ref_h=None):
     return K, A_, N
 
 
+class PrefixCache(DynamicCache):
+    """a cache that, once frozen, prepends its stored prefix (prompt KV + memory KV) to each layer's new keys/values without
+    storing them - so a layer recomputed by gradient checkpointing sees the same keys as the first time"""
+    frozen = False
+
+    def update(self, key_states, value_states, layer_idx, cache_kwargs=None):
+        if self.frozen:
+            pk, pv = kv_of(self, layer_idx)
+            return torch.cat([pk, key_states], 2), torch.cat([pv, value_states], 2)
+        return super().update(key_states, value_states, layer_idx, cache_kwargs)
+
+
 def seq_logp_kv(ids, P, coef=None, temp=1.0):
     """seq_logp under the --kv-mem deployment loop (rollout_kvmem): every C tokens the distant tokens are pooled into the
     per-layer memory KV (none while nothing is distant), the cache is [prompt KV | memory KV at P..P+S-1 | raw window]
     and the chunk's tokens are scored; the first answer token (predicted by the prompt alone) is left out."""
     T = min(len(ids), P + a.max_len); ids = ids.to(dev); a_ids = ids[None, P:T]; La = a_ids.size(1)
+    was = llm.training; llm.eval()   # the prompt prefill fills a cache: not in train mode (gradient checkpointing drops caches)
     with torch.no_grad():
         pc = DynamicCache(); llm(input_ids=ids[None, :P], past_key_values=pc, use_cache=True)
         pkv = [tuple(t for t in kv_of(pc, li)) for li in range(NL)]
+    llm.train(was)
     kept = torch.zeros(1, 0, dtype=torch.long, device=dev); absorbed = 0; tot = 0.0; n = 0
     for c0 in range(0, La, a.C):
         c1 = min(c0 + a.C, La); R = min(c0, a.rw); lo = c0 - R
         kept, absorbed = update_buffer(kept, absorbed, a_ids, lo)
         use = kept.size(1) > 0 and not a.no_sp; t0 = c0 if c0 > 0 else 1
         if c1 - t0 < 1: continue
-        with torch.set_grad_enabled(coef is not None and use):   # no memory yet: nothing to train in this chunk
-            cache = DynamicCache(); off = P
+        trn = coef is not None and (use or a.ft_layers > 0)   # no memory yet: nothing to train here unless the model itself is tuned
+        with torch.set_grad_enabled(trn):
+            cache = PrefixCache(); off = P
             if use:
                 mem = kv_memory(pooler(embed(kept).float()), torch.arange(P, P + a.S, device=dev)[None])
                 for li, (k_, v_) in enumerate(pkv): cache.update(torch.cat([k_, mem[li][0]], 2), torch.cat([v_, mem[li][1]], 2), li)
                 off = P + a.S
             else:
                 for li, (k_, v_) in enumerate(pkv): cache.update(k_, v_, li)
+            cache.frozen = True
             blk = a_ids[:, lo:c1 - 1]; nb = blk.size(1); pos = torch.arange(off, off + nb, device=dev)[None]
             hs = llm.model(inputs_embeds=embed(blk).to(dt), attention_mask=torch.ones(1, off + nb, device=dev), past_key_values=cache,
                            position_ids=pos, cache_position=pos[0], use_cache=True).last_hidden_state[0]
             h0 = t0 - lo - 1   # block row r predicts answer token lo + r + 1
             lp = F.log_softmax(llm.lm_head(hs[h0:h0 + c1 - t0]).float() / temp, -1).gather(1, a_ids[0, t0:c1, None]).sum()
-            if coef is not None and use: (coef * lp).backward()
+            if trn: (coef * lp).backward()
             lp = lp.detach()
         tot += lp.item(); n += c1 - t0
     return tot, n
