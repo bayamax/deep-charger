@@ -170,6 +170,9 @@ ap.add_argument("--ctx-hidden", type=int, default=0, help="pooler input = the fr
 ap.add_argument("--sp-empty", action="store_true", help="rollout: prepend the SP of an EMPTY buffer while nothing is distant yet "
                 "(the first rw tokens) - training never scores those states, so by default they get the plain window")
 ap.add_argument("--group", type=int, default=8, help="grpo: samples per problem")
+ap.add_argument("--grpo-guide", default="", help="grpo: jsonl of guide trajectories (id, text - e.g. the raw window's right and closed "
+                "draws): a problem with one gets it as one more group member with reward 1, scored under the policy like the "
+                "samples (off-policy guidance: a problem the policy never solves still carries signal)")
 ap.add_argument("--grpo-q", type=int, default=16, help="grpo: problems per update")
 ap.add_argument("--grpo-updates", type=int, default=200, help="grpo: most updates")
 ap.add_argument("--grpo-hours", type=float, default=0.0, help="grpo: stop after this many hours (0 = no limit)")
@@ -1348,6 +1351,12 @@ def run_grpo(opt, FTP, MASTER):
         if a.grpo_hook: subprocess.Popen(a.grpo_hook + " " + " ".join(files), shell=True)
 
     EV = [json.loads(l) for l in open(a.grpo_eval)] if a.grpo_eval else []
+    GUIDE = {}
+    for l in (open(a.grpo_guide) if a.grpo_guide else []):
+        r = json.loads(l)
+        if "</think>" in r["text"] and correct(r): GUIDE.setdefault(r["id"], r["text"])
+    if a.grpo_guide: log(f"[grpo] guides: {len(GUIDE)} right-and-closed trajectories from {a.grpo_guide}")
+    NG = [0, 0]   # groups that had a guide, groups informative only because of it
     KLD = []
     for l in (open(a.grpo_kl) if a.grpo_kl else []):
         r = json.loads(l); pid = tok.encode(r["prompt"], add_special_tokens=False)
@@ -1398,7 +1407,7 @@ def run_grpo(opt, FTP, MASTER):
 
     def gen_safe(pr):   # out of memory while generating: fewer streams, generate the whole batch again
         while True:
-            try: return rollout_cb(pr, a.grpo_slots)
+            try: return rollout_kvmem(pr, a.grpo_slots) if a.kv_mem else rollout_cb(pr, a.grpo_slots)
             except torch.cuda.OutOfMemoryError:
                 torch.cuda.empty_cache(); a.grpo_slots = max(4, a.grpo_slots * 3 // 4)
                 if a.grpo_tok_budget: a.grpo_tok_budget = a.grpo_tok_budget * 3 // 4
@@ -1433,12 +1442,16 @@ def run_grpo(opt, FTP, MASTER):
         n_inf = n_bw = oom = 0
         for i in range(a.grpo_q):
             rs = R[i * a.group:(i + 1) * a.group]
+            seqs = [pids[i] + gens[i * a.group + k] + ([im_end] if ended[i * a.group + k] else []) for k in range(a.group)]
+            g_txt = GUIDE.get(batch[i].get("id", ""))
+            if g_txt is not None:   # the guide joins the group with reward 1
+                NG[0] += 1; NG[1] += int(max(rs) == min(rs) == 0.0)
+                rs = rs + [1.0]; seqs.append(pids[i] + tok.encode(g_txt, add_special_tokens=False) + [im_end])
             if max(rs) == min(rs): continue
-            n_inf += 1; m_ = sum(rs) / a.group
-            for k in range(a.group):
-                j = i * a.group + k; A = rs[k] - m_
-                ids = torch.tensor(pids[i] + gens[j] + ([im_end] if ended[j] else []))
-                try: seq_logp(ids, len(pids[i]), coef=-A / (a.group * a.grpo_q * a.grpo_lnorm), temp=a.temp); n_bw += 1
+            n_inf += 1; m_ = sum(rs) / len(rs)
+            for k in range(len(rs)):
+                A = rs[k] - m_; ids = torch.tensor(seqs[k])
+                try: seq_logp(ids, len(pids[i]), coef=-A / (len(rs) * a.grpo_q * a.grpo_lnorm), temp=a.temp); n_bw += 1
                 except torch.cuda.OutOfMemoryError:
                     oom += 1; torch.cuda.empty_cache()
         if n_inf:
@@ -1462,7 +1475,7 @@ def run_grpo(opt, FTP, MASTER):
                f"{sum(HIST[k] for k in ks[:6]) / len(ks[:6]):.3f}") if len(ks) >= 6 else ""
         log(f"[grpo] u{u}: reward {sum(R) / len(R):.3f} (" + " ".join(f"{k} {v[0] / v[1]:.2f}" for k, v in sorted(by.items()))
             + f") | ended {sum(ended) / len(ended):.2f} | tokens {sum(len(g) for g in gens) / len(gens):.0f} | informative groups "
-            f"{n_inf}/{a.grpo_q} | grad norm {gn:.3f}{f' | {oom} OOM' if oom else ''} | gen {t1 - t0:.0f}s, update {time.time() - t1:.0f}s"
+            f"{n_inf}/{a.grpo_q}" + (f" (with a guide so far {NG[0]}, informative only through it {NG[1]})" if GUIDE else "") + f" | grad norm {gn:.3f}{f' | {oom} OOM' if oom else ''} | gen {t1 - t0:.0f}s, update {time.time() - t1:.0f}s"
             f" | peak {mem:.1f} GiB, resident while generating {res:.1f} GiB, {a.grpo_slots} streams" + tr_)
         late = a.grpo_hours and time.time() - t_start > 3600 * a.grpo_hours
         if u % a.grpo_eval_every == 0 or late or u == a.grpo_updates:   # a check: eval (if any), teacher KL, state saved
