@@ -170,6 +170,10 @@ ap.add_argument("--ctx-hidden", type=int, default=0, help="pooler input = the fr
 ap.add_argument("--sp-empty", action="store_true", help="rollout: prepend the SP of an EMPTY buffer while nothing is distant yet "
                 "(the first rw tokens) - training never scores those states, so by default they get the plain window")
 ap.add_argument("--group", type=int, default=8, help="grpo: samples per problem")
+ap.add_argument("--grpo-groups", action="store_true", help="train: GRPO from pre-generated groups - rows {id, prompt, gold, samples: "
+                "[texts drawn by the collectors with recent weights], guide: a raw-window text or null}; reward 1 = closed and right; "
+                "a right-and-closed guide joins its group with reward 1; advantage = reward - group mean; uniform groups are dropped; "
+                "--accum groups per update; sequence log-probs at --temp under the deployment loop")
 ap.add_argument("--grpo-guide", default="", help="grpo: jsonl of guide trajectories (id, text - e.g. the raw window's right and closed "
                 "draws): a problem with one gets it as one more group member with reward 1, scored under the policy like the "
                 "samples (off-policy guidance: a problem the policy never solves still carries signal)")
@@ -707,6 +711,14 @@ def seq_logp(ids, P, coef=None, temp=1.0):
 
 
 SPIN_REF = {}
+
+
+def run_group(st):
+    """one pre-generated GRPO group (--grpo-groups): backward of -(reward - mean) x sequence log-prob for each member"""
+    P, seqs, rs = GROUPS[st % len(GROUPS)]; m_ = sum(rs) / len(rs)
+    for ids, r_ in zip(seqs, rs):
+        seq_logp(ids, P, coef=-(r_ - m_) / (len(rs) * a.accum * a.grpo_lnorm), temp=a.temp)
+    return sum(rs[:len(rs)]) / len(rs), 1.0, 1
 
 
 def run_pair_spin(st):
@@ -1507,7 +1519,24 @@ if not all("prompt" in r for r in rows):
                                               add_generation_prompt=True, tokenize=False, enable_thinking=True)
 rows = rows[a.skip:]
 if a.n: rows = rows[:a.n]
-data = []; SPIN = []
+data = []; SPIN = []; GROUPS = []
+if a.grpo_groups:
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from sp_mathcheck import correct as _correct
+    _im_end = tok.convert_tokens_to_ids("<|im_end|>"); _gs = [0, 0, 0]
+    for r in rows:
+        pid = tok.encode(r["prompt"], add_special_tokens=False); seqs, rs = [], []
+        for t_ in r.get("samples", []):
+            ans = tok.encode(t_, add_special_tokens=False)
+            seqs.append(torch.tensor(pid + ans + ([_im_end] if len(ans) < a.max_len - 1 else []))); rs.append(float("</think>" in t_ and _correct({"text": t_, "gold": r["gold"]})))
+        g_ = r.get("guide")
+        if g_ and "</think>" in g_ and _correct({"text": g_, "gold": r["gold"]}):
+            seqs.append(torch.tensor(pid + tok.encode(g_, add_special_tokens=False) + [_im_end])); rs.append(1.0); _gs[2] += 1
+        _gs[0] += 1
+        if rs and max(rs) > min(rs): GROUPS.append((len(pid), seqs, rs)); _gs[1] += 1
+    rows = []
+    log(f"[sp] grpo groups: {_gs[0]} problems, {_gs[1]} informative (a right guide in {_gs[2]}), {sum(len(g[1]) for g in GROUPS)} sequences")
+    data = [(g[1][0], g[0]) for g in GROUPS]
 for r in rows:
     pid = tok.encode(r["prompt"], add_special_tokens=False)
     if a.spin:
@@ -1515,7 +1544,7 @@ for r in rows:
     ans = r["ids"] if "ids" in r else tok.encode(r.get("text", r.get("chosen", "")), add_special_tokens=False)
     data.append((torch.tensor(pid + ans), len(pid)))   # CPU; moved per trace
 
-tag = f"S{a.S} rw{a.rw} C{a.C} maxd{a.maxd} L{a.layers} ffn{a.ffn}" + (" par" if a.par and a.mode == "train" else "") + (f" spin b{a.spin_beta}" if a.spin and a.mode == "train" else "") + (" spnext" + (f" win{a.sn_win}/{a.sn_win_every}" if a.sn_win != "1" else "") if a.spnext and a.mode == "train" else "") + (" no-SP" if a.no_sp else "") + (" SP-null" if a.sp_null else "") + (" SP-swap" if a.sp_swap else "") + (f" filler{FILL}" if a.sp_filler else "") + (" pin-think" if a.pin_think else "") + (" kv-evict" if a.kv_evict else "") + (" para-window" if a.para_window else "") + (f" twin-mix{a.twin_mix}" if a.twin_mix >= 0 else "") + (" twin-minent" if a.twin_minent else "") + (" win-teacher" if a.win_teacher else "") + (" sp-replace" if a.sp_replace else "") + (f" rmt{a.rmt_block}" if a.rmt else "") + (f" kvmem{a.kv_rank}" if a.kv_mem else "") + (f" ctxL{a.ctx_hidden}" if a.ctx_hidden else "") + (" pe-rev" if a.pe_rev else "") + (" pe-norm" if a.pe_norm else "") + (f" FT{a.ft_layers}" if a.ft_layers else "") + (f" from{a.score_from}" if a.score_from else "") + (f" rkl{a.rkl_weight}" if a.rkl_weight and a.mode == "train" else "") + (" ctl-window" if a.ctl_window and a.mode == "train" else "") + (" ctl-para" if a.ctl_para and a.mode == "train" else "")
+tag = f"S{a.S} rw{a.rw} C{a.C} maxd{a.maxd} L{a.layers} ffn{a.ffn}" + (" par" if a.par and a.mode == "train" else "") + (f" spin b{a.spin_beta}" if a.spin and a.mode == "train" else "") + (" grpo-groups" if a.grpo_groups and a.mode == "train" else "") + (" spnext" + (f" win{a.sn_win}/{a.sn_win_every}" if a.sn_win != "1" else "") if a.spnext and a.mode == "train" else "") + (" no-SP" if a.no_sp else "") + (" SP-null" if a.sp_null else "") + (" SP-swap" if a.sp_swap else "") + (f" filler{FILL}" if a.sp_filler else "") + (" pin-think" if a.pin_think else "") + (" kv-evict" if a.kv_evict else "") + (" para-window" if a.para_window else "") + (f" twin-mix{a.twin_mix}" if a.twin_mix >= 0 else "") + (" twin-minent" if a.twin_minent else "") + (" win-teacher" if a.win_teacher else "") + (" sp-replace" if a.sp_replace else "") + (f" rmt{a.rmt_block}" if a.rmt else "") + (f" kvmem{a.kv_rank}" if a.kv_mem else "") + (f" ctxL{a.ctx_hidden}" if a.ctx_hidden else "") + (" pe-rev" if a.pe_rev else "") + (" pe-norm" if a.pe_norm else "") + (f" FT{a.ft_layers}" if a.ft_layers else "") + (f" from{a.score_from}" if a.score_from else "") + (f" rkl{a.rkl_weight}" if a.rkl_weight and a.mode == "train" else "") + (" ctl-window" if a.ctl_window and a.mode == "train" else "") + (" ctl-para" if a.ctl_para and a.mode == "train" else "")
 if a.mode == "profile":
     pooler.eval(); acc = {}
     for ids, P in data: profile_trace(ids, P, acc)
@@ -1640,7 +1669,7 @@ else:
         log(f"[sp] spin: reference log-probs of {len(SPIN)} pairs ({time.time() - t0:.0f}s)")
     for st in range(steps):
         ids, P = data[st % len(data)]
-        if FTP and st % a.accum == 0 and not a.spin and not a.win_teacher and not a.rmt:   # the teacher pass for the next group of traces in ONE weight swap
+        if FTP and st % a.accum == 0 and not a.spin and not a.grpo_groups and not a.win_teacher and not a.rmt:   # the teacher pass for the next group of traces in ONE weight swap
             refs = {}
             with _Frozen():
                 for j in range(st, min(st + a.accum, steps)):
@@ -1657,6 +1686,7 @@ else:
                 else: SNW["w"] = WINS[min(st // a.sn_win_every, len(WINS) - 1)]
                 k, g, n = run_trace_spnext(ids, P, ref_h=_on_dev(refs.pop(st, None)))
             elif a.spin: k, g, n = run_pair_spin(st)
+            elif a.grpo_groups: k, g, n = run_group(st)
             elif a.rmt: k, g, n = run_trace_rmt(ids, P, True)
             elif a.win_teacher: k, g, n = run_trace_wt(ids, P, True)
             elif a.par: k, g, n = run_trace_par(ids, P, ref_h=_on_dev(refs.pop(st, None)))
@@ -1678,6 +1708,7 @@ else:
         if (st + 1) % 25 == 0 or st + 1 == steps:
             x = f" | w{SNW['w']} window-0 KL {SNW['k0'] / max(SNW['n0'], 1):.4f}" if a.spnext and len(WINS) > 1 else ""
             if a.spin: log(f"[sp] train {tag} pair {st + 1}/{steps}: DPO loss {K / max(N, 1):.4f} chosen ahead {100 * A_ / max(N, 1):.0f}% ({time.time() - t0:.0f}s)")
+            elif a.grpo_groups: log(f"[sp] train {tag} grpo group {st + 1}/{steps}: mean reward {K / max(N, 1):.3f} ({time.time() - t0:.0f}s)")
             else:
                 lab = ["<1k", "1-2k", "2-4k", "4-8k", "8k+"]
                 x += (" | KL by past outside the window: " + " ".join(f"{lab[k]} {v[0] / max(v[1], 1):.4f}" for k, v in sorted(DBK.items()))) if DBK else ""

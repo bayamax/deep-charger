@@ -38,6 +38,40 @@ gen() { local p=$1 o=$2 sd=$3; shift 3; [ -s $o ] && return; local rb=$RB tb=$TB
     echo "[kc] gen $o (batch $rb): $(grep -E 'Error|out of memory' run_kc.log | tail -1 | cut -c1-120)"; rm -f $o; rb=$((rb / 2)); tb=$((tb / 2)); done
   return 1; }
 b=$(cat kc_block 2>/dev/null || echo 0)
+if [ "$MODE" = grpo ]; then   # GRPO rollout worker: per block the raw window once (the guide) and the memory G times
+  G=${G:-4}
+  while [ $b -lt $NB ] && [ ! -e STOP_KC ]; do t0=$(date +%s)
+    sed -n "$(( b * BS + 1 )),$(( (b + 1) * BS ))p" shard.jsonl > p_$b.jsonl
+    python3 -c "
+import sys; L = open('p_$b.jsonl').readlines(); open('pg_$b.jsonl', 'w').writelines(l for l in L for _ in range($G))"
+    v=$(weights); sd=$(( 7000 + SHARD * 1000 + b * 4 ))
+    gen p_$b.jsonl graw_$b.jsonl $sd --ckpt ref.pt --no-sp
+    gen pg_$b.jsonl gmem_${b}_v$v.jsonl $((sd + 1)) --ckpt mem.pt
+    s=$(python3 - $b $v <<'PY2'
+import json, sys; sys.path.insert(0, '.')
+from sp_mathcheck import correct
+b, v = sys.argv[1], sys.argv[2]; ok = lambda r: '</think>' in r['text'] and correct(r)
+raw = {json.loads(l)['id']: json.loads(l) for l in open(f'graw_{b}.jsonl')}
+grp = {}
+for l in open(f'gmem_{b}_v{v}.jsonl'):
+    r = json.loads(l); g = grp.setdefault(r['id'], {'id': r['id'], 'src': r.get('src', ''), 'gold': r['gold'], 'prompt': r['prompt'], 'samples': [], 'guide': None})
+    g['samples'].append(r['text'])
+for k, g in grp.items():
+    if k in raw and ok(raw[k]): g['guide'] = raw[k]['text']
+open(f'grp_b{b}_v{v}.jsonl', 'w').writelines(json.dumps(g) + '\n' for g in grp.values())
+G = list(grp.values()); rs = [[ok({'text': t, 'gold': g['gold']}) for t in g['samples']] for g in G]
+mixed = sum(0 < sum(x) < len(x) for x in rs); allbad = sum(sum(x) == 0 for x in rs)
+print(f"{len(G)} problems, memory right {sum(map(sum, rs))}/{sum(map(len, rs))}, closed {sum('</think>' in t for g in G for t in g['samples'])} | "
+      f"mixed groups {mixed}, all wrong {allbad} (with a right guide {sum(1 for g, x in zip(G, rs) if sum(x) == 0 and g['guide'])})")
+PY2
+)
+    put grp_b${b}_v$v.jsonl dpo_col_g/s$SHARD/grp_b${b}_v$v.jsonl
+    b=$((b + 1)); echo $b > kc_block
+    echo "[kc] grpo block $b/$NB ($(( ($(date +%s) - t0) / 60 )) min, memory weights v$v): $s"
+    [ -n "$ONE" ] && exit 0
+  done
+  echo "[kc] JOB_DONE $(date -u)"; exit 0
+fi
 while [ $b -lt $NB ] && [ ! -e STOP_KC ]; do t0=$(date +%s)
   sed -n "$(( b * BS + 1 )),$(( (b + 1) * BS ))p" shard.jsonl > p_$b.jsonl
   v=$(weights); sd=$(( 5000 + SHARD * 1000 + b * 4 ))
