@@ -17,7 +17,7 @@ python3 -c "from huggingface_hub import snapshot_download; snapshot_download('Qw
 [ -s ref.pt ] || get archive/sp3/spKVR_latest.pt ref.pt || { echo "[kc] no reference weights"; exit 1; }
 LG=/root/w/sp_kc.log; SHARD=${SHARD:-0}; NSHARD=${NSHARD:-3}; BS=24
 M="--S 32 --heads 8 --layers 3 --ffn 2048 --rw 1024 --C 128 --maxd 0 --kv-mem --kv-rank 512"
-GB=${GB:-"--roll-batch 24 --grpo-tok-budget 30000"}
+RB=${RB:-12}; TB=${TB:-16000}   # streams / token budget per batch (12 GB cards: 24 / 30000 ran out of memory)
 python3 -c "
 import sys
 L = open('dpo_pool.jsonl').readlines()[300:]
@@ -31,9 +31,12 @@ weights() {   # newest trainer weights -> mem.pt; echoes the version (0 = the re
     if [ "$v" = 0 ]; then cp ref.pt mem.pt; else get archive/sp3/spKVF_latest.pt mem_new.pt && mv mem_new.pt mem.pt || v=$(cat mem_v 2>/dev/null || echo 0); fi
     echo $v > mem_v; fi
   cat mem_v; }
-gen() { local p=$1 o=$2 sd=$3; shift 3; [ -s $o ] && return
-  python3 sp_qwen3.py rollout --traces $p $M "$@" --max-len 12288 $GB --seed $sd --roll-out $o --log $LG > run_kc.log 2>&1
-  grep -E "Error|Traceback|out of memory" run_kc.log | tail -1 | sed "s/^/[kc] gen $o: /"; }
+gen() { local p=$1 o=$2 sd=$3; shift 3; [ -s $o ] && return; local rb=$RB tb=$TB
+  for _try in 1 2 3; do   # out of memory: halve the batch and go again
+    python3 sp_qwen3.py rollout --traces $p $M "$@" --max-len 12288 --roll-batch $rb --grpo-tok-budget $tb --seed $sd --roll-out $o --log $LG > run_kc.log 2>&1
+    [ "$(wc -l < $o 2>/dev/null || echo 0)" = "$(wc -l < $p)" ] && return
+    echo "[kc] gen $o (batch $rb): $(grep -E 'Error|out of memory' run_kc.log | tail -1 | cut -c1-120)"; rm -f $o; rb=$((rb / 2)); tb=$((tb / 2)); done
+  return 1; }
 b=$(cat kc_block 2>/dev/null || echo 0)
 while [ $b -lt $NB ] && [ ! -e STOP_KC ]; do t0=$(date +%s)
   sed -n "$(( b * BS + 1 )),$(( (b + 1) * BS ))p" shard.jsonl > p_$b.jsonl

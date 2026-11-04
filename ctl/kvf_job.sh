@@ -48,7 +48,7 @@ PY
   n=$(wc -l < new_pairs.jsonl)
   if [ $n -lt $NEWP ]; then   # meanwhile collect one block of its own shard (the last one)
     curl -sS -o kvc_job.sh "$RAW/ctl/kvc_job.sh?nocache=$(date +%s)"
-    SHARD=$((NSH - 1)) NSHARD=$NSH ONE=1 GB="--roll-batch 48 --grpo-tok-budget 60000" bash kvc_job.sh | grep "^\[kc\] block" | sed 's/^\[kc\]/[kf] own/' || sleep 600
+    SHARD=$((NSH - 1)) NSHARD=$NSH ONE=1 RB=48 TB=60000 bash kvc_job.sh | grep "^\[kc\] block" | sed 's/^\[kc\]/[kf] own/' || sleep 600
     continue; fi
   rd=$((rd + 1)); cat new_list.txt >> used_pairs.txt; cp new_pairs.jsonl kvf_pairs_r$rd.jsonl; put kvf_pairs_r$rd.jsonl kvf/kvf_pairs_r$rd.jsonl
   echo "[kf] round $rd: $n new pairs from $(wc -l < new_list.txt) collector blocks ($(python3 -c "
