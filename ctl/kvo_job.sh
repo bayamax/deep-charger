@@ -32,10 +32,11 @@ for k in raw:
         pairs.append({'id': k, 'prompt': rg[0]['prompt'], 'chosen': rg[0]['text'], 'rejected': mb[0]['text'],
                       'why': 'unclosed' if '</think>' not in mb[0]['text'] else 'wrong'})
     if mg and rb:   # the other way round: the memory's right path (what the distant past it carries is good for) over a failed raw one
-        pairs.append({'id': k, 'prompt': mg[0]['prompt'], 'chosen': mg[0]['text'], 'rejected': rb[0]['text'], 'why': 'memory-only'})
+        neg = mb[0] if mb else rb[0]   # the memory's own failed draw when there is one (on-policy both sides), else the raw failure
+        pairs.append({'id': k, 'prompt': mg[0]['prompt'], 'chosen': mg[0]['text'], 'rejected': neg['text'], 'why': 'memory-self' if mb else 'memory-only'})
 both = sum(1 for k in raw if k in mem)
 print(f"[ko] problems with both sides {both}: raw right (any draw) {sum(any(map(ok, raw[k])) for k in raw if k in mem)}, memory right (any draw) {sum(any(map(ok, mem[k])) for k in raw if k in mem)}"
-      f" | pairs {len(pairs)} (raw chosen, memory unclosed {sum(p['why'] == 'unclosed' for p in pairs)} / wrong {sum(p['why'] == 'wrong' for p in pairs)}; memory chosen over a failed raw {sum(p['why'] == 'memory-only' for p in pairs)})"
+      f" | pairs {len(pairs)} (raw chosen, memory unclosed {sum(p['why'] == 'unclosed' for p in pairs)} / wrong {sum(p['why'] == 'wrong' for p in pairs)}; memory chosen over a failed raw {sum(p['why'] == 'memory-only' for p in pairs)} / over its own failed draw {sum(p['why'] == 'memory-self' for p in pairs)})"
       )
 open('dpo_pairs.jsonl', 'w').writelines(json.dumps(p) + '\n' for p in pairs)
 PY
