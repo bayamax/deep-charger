@@ -46,7 +46,8 @@
 # serial 22: the user - grow the DPO corpus step by step towards the pairs it needs (~200-300): after the first DPO run
 # (kvo), ctl/kvi_job.sh iterates: 300 new problems, raw window + memory with the current weights, redraws, pairs both ways, DPO,
 # the 60 problems and the held-out KL - up to 6 iterations, stopping early if it falls 4+ below the start twice running.
-SER=22
+# serial 23: the status lines show the newest sp_*.log (the DPO run's own log was not visible).
+SER=23
 if [ -f /root/.boxrmx_serial ] && [ "$(cat /root/.boxrmx_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxrmx_serial
 [ -d /venv/main/bin ] && export PATH=/venv/main/bin:$PATH
@@ -54,7 +55,7 @@ echo $SER > /root/.boxrmx_serial
 mkdir -p /root/w
 cat > /root/status.sh <<'ST'
 grep -E "^\[(pr|rm|kv|kr|kp|kw|kt|kd|ko|ki|hub)\]|Error|Traceback|out of memory" /root/w/w.log 2>/dev/null | tail -n 6 | cut -c1-600
-tail -n 1 /root/w/sp_kvp.log 2>/dev/null | cut -c1-200
+tail -n 1 $(ls -t /root/w/sp_*.log 2>/dev/null | head -1) 2>/dev/null | cut -c1-250
 nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv,noheader
 ST
 chmod +x /root/status.sh
