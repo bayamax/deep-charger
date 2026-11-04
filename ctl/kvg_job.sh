@@ -12,7 +12,7 @@ export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 R=baya1116/hypernet-sp-distill; H=https://huggingface.co/$R/resolve/main; RAW=https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i
 put() { for _i in 1 2 3 4 5; do python3 -c "import sys; from huggingface_hub import HfApi; HfApi().upload_file(path_or_fileobj=sys.argv[1], path_in_repo='archive/sp3/'+sys.argv[2], repo_id='$R')" "$1" "$2" > put.err 2>&1 && { echo "[hub] $2"; return 0; }; sleep 60; done; echo "[hub] $2 FAILED"; }
 for _t in $(seq 60); do curl -sS -o sp_qwen3.py "$RAW/tools/sp_qwen3.py?nocache=$(date +%s)"; grep -q '"--grpo-groups"' sp_qwen3.py && break; sleep 120; done
-LG=/root/w/sp_kvg.log; NEWG=${NEWG:-48}; NSH=${NSH:-4}
+LG=/root/w/sp_kvg.log; NEWG=${NEWG:-24}; NSH=${NSH:-4}; EVERY=${EVERY:-3}; GMIN=${GMIN:-12}
 M="--S 32 --heads 8 --layers 3 --ffn 2048 --rw 1024 --C 128 --maxd 0 --kv-mem --kv-rank 512"
 GT="--grpo-groups --ft-layers 28 --opt8bit --ft-lr ${FTLR:-1e-6} --lr 2e-5 --epochs 1 --accum 4 --const-lr"
 rd=$(cat kvg_round 2>/dev/null || echo 0); v0=$(cat VERSION 2>/dev/null || echo 0)
@@ -27,19 +27,22 @@ from sp_mathcheck import correct
 rs = [json.loads(l) for l in open(sys.argv[1])]; print(sum(correct(r) for r in rs), sum('</think>' in r['text'] for r in rs))" "$1"; }
 touch used_groups.txt
 while [ ! -e STOP_KG ]; do
-  V0=$v0 python3 - <<'PY' > newg_list.txt
+  V0=$v0 GMIN=$GMIN python3 - <<'PY' > newg_list.txt
 import os, re
 from huggingface_hub import HfApi
 used = set(open('used_groups.txt').read().split()); v0 = int(os.environ['V0'])
 fs = [f for f in HfApi().list_repo_files('baya1116/hypernet-sp-distill') if f.startswith('archive/sp3/dpo_col_g/') and f not in used]
-print('\n'.join(sorted(f for f in fs if int(re.search(r'_v(\d+)\.jsonl$', f).group(1)) >= v0)))   # only groups drawn from this run's weights
+gmin = int(os.environ.get('GMIN', '0'))
+def g_(f):   # group size from the file name (g12_b..); the first G=4 files carry none
+    m = re.search(r'/g(\d+)_b', f); return int(m.group(1)) if m else 4
+print('\n'.join(sorted(f for f in fs if int(re.search(r'_v(\d+)\.jsonl$', f).group(1)) >= v0 and g_(f) >= gmin)))   # this run's weights, big groups
 PY
   : > newg.jsonl
   for f in $(cat newg_list.txt); do curl -sSfL -H "Authorization: Bearer $HF_TOKEN" "$H/$f" >> newg.jsonl 2>/dev/null; done
   n=$(wc -l < newg.jsonl)
   if [ $n -lt $NEWG ]; then   # meanwhile one rollout block of its own shard
     curl -sS -o kvc_job.sh "$RAW/ctl/kvc_job.sh?nocache=$(date +%s)"
-    MODE=grpo SHARD=$((NSH - 1)) NSHARD=$NSH ONE=1 RB=48 TB=60000 bash kvc_job.sh | grep "^\[kc\] grpo block" | sed 's/^\[kc\]/[kg] own/' || sleep 600
+    MODE=grpo SHARD=$((NSH - 1)) NSHARD=$NSH ONE=1 RB=48 TB=60000 bash kvc_job.sh | grep "^\[kc\] grpo" | sed 's/^\[kc\]/[kg] own/' || sleep 600
     continue; fi
   rd=$((rd + 1)); cat newg_list.txt >> used_groups.txt; cp newg.jsonl kvg_groups_r$rd.jsonl
   cp kvg.pt kvg_prev.pt
@@ -49,6 +52,7 @@ PY
   [ -s kvg_next.pt ] && grep -q "^\[sp\] trained" run_kg_tr.log || { echo "[kg] round $rd: training FAILED"; break; }
   mv kvg_next.pt kvg.pt; echo $rd > kvg_round; v=$((v0 + rd)); echo $v > VERSION; cp kvg.pt kvf.pt
   put kvg.pt spKVF_latest.pt && put VERSION kvf/VERSION
+  if [ $((rd % EVERY)) != 0 ]; then echo "[kg] round $rd (weights v$v) published"; continue; fi
   o=kvg_r${rd}_s1.jsonl
   python3 sp_qwen3.py rollout --traces rl_eval60.jsonl $M --ckpt kvg.pt --max-len 12288 --roll-batch 48 --grpo-tok-budget 60000 --seed 1 --roll-out $o --log $LG > run_kggen.log 2>&1
   put $o kvg/$o; echo "[kg] round $rd (weights v$v) seed 1: $(ok60 $o | awk '{print $1 "/60 correct, closed " $2}')"; put $LG kvg/kvg.log

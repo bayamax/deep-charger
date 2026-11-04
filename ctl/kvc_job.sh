@@ -38,14 +38,17 @@ gen() { local p=$1 o=$2 sd=$3; shift 3; [ -s $o ] && return; local rb=$RB tb=$TB
     echo "[kc] gen $o (batch $rb): $(grep -E 'Error|out of memory' run_kc.log | tail -1 | cut -c1-120)"; rm -f $o; rb=$((rb / 2)); tb=$((tb / 2)); done
   return 1; }
 b=$(cat kc_block 2>/dev/null || echo 0)
-if [ "$MODE" = grpo ]; then   # GRPO rollout worker: per block the raw window once (the guide) and the memory G times
-  G=${G:-4}
+if [ "$MODE" = grpo ]; then   # GRPO rollout worker: per block the memory G times per problem (GUIDE=1: the raw window once too)
+  G=${G:-12}; GUIDE=${GUIDE:-0}; BS=${GBS:-6}; NB=$(( ($(wc -l < shard.jsonl) + BS - 1) / BS ))
+  [ -s kcg_block ] || echo $(( $(cat kc_block 2>/dev/null || echo 0) * 24 / BS )) > kcg_block   # carry on after the problems used so far
+  b=$(cat kcg_block)
   while [ $b -lt $NB ] && [ ! -e STOP_KC ]; do t0=$(date +%s)
     sed -n "$(( b * BS + 1 )),$(( (b + 1) * BS ))p" shard.jsonl > p_$b.jsonl
+    [ -s p_$b.jsonl ] || break
     python3 -c "
 import sys; L = open('p_$b.jsonl').readlines(); open('pg_$b.jsonl', 'w').writelines(l for l in L for _ in range($G))"
     v=$(weights); sd=$(( 7000 + SHARD * 1000 + b * 4 ))
-    gen p_$b.jsonl graw_$b.jsonl $sd --ckpt ref.pt --no-sp
+    if [ "$GUIDE" = 1 ]; then gen p_$b.jsonl graw_$b.jsonl $sd --ckpt ref.pt --no-sp; else : > graw_$b.jsonl; fi
     gen pg_$b.jsonl gmem_${b}_v$v.jsonl $((sd + 1)) --ckpt mem.pt
     s=$(python3 - $b $v <<'PY2'
 import json, sys; sys.path.insert(0, '.')
@@ -65,9 +68,9 @@ print(f"{len(G)} problems, memory right {sum(map(sum, rs))}/{sum(map(len, rs))},
       f"mixed groups {mixed}, all wrong {allbad} (with a right guide {sum(1 for g, x in zip(G, rs) if sum(x) == 0 and g['guide'])})")
 PY2
 )
-    put grp_b${b}_v$v.jsonl dpo_col_g/s$SHARD/grp_b${b}_v$v.jsonl
-    b=$((b + 1)); echo $b > kc_block
-    echo "[kc] grpo block $b/$NB ($(( ($(date +%s) - t0) / 60 )) min, memory weights v$v): $s"
+    put grp_b${b}_v$v.jsonl dpo_col_g/s$SHARD/g${G}_b${b}_v$v.jsonl
+    b=$((b + 1)); echo $b > kcg_block
+    echo "[kc] grpo G$G block $b/$NB ($(( ($(date +%s) - t0) / 60 )) min, memory weights v$v): $s"
     [ -n "$ONE" ] && exit 0
   done
   echo "[kc] JOB_DONE $(date -u)"; exit 0

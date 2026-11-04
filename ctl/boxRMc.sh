@@ -54,7 +54,9 @@
 # serial 25: DPO round 2 did not generalise (48% / 56% chosen-ahead on its unseen pairs) and its 60 problems fell to 37 (closed
 # 53 - it learned to stop, not to be right). Switch to GRPO with raw-window guides (ctl/kvg_job.sh) from the round-1 weights
 # (kvf_prev.pt: 42 / 39), published first as the next version; the collectors become rollout workers.
-SER=25
+# serial 26: the user - plain GRPO, groups of 12 at least, as many updates as possible. Restart the trainer with the current
+# kvg_job.sh (24 new problems per round, groups of 12 only, the 60 problems every 3rd round); it carries on from its round 1.
+SER=26
 if [ -f /root/.boxrmx_serial ] && [ "$(cat /root/.boxrmx_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxrmx_serial
 [ -d /venv/main/bin ] && export PATH=/venv/main/bin:$PATH
@@ -274,5 +276,14 @@ echo "[kg] s25: DPO stopped - GRPO with guides from the round-1 weights $(date -
 START=kvf_round1.pt exec bash /root/kvg_job.sh
 JOB
   setsid nohup bash -c 'bash /root/s25.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
+fi
+if [ ! -e /root/.s26kg ]; then touch /root/.s26kg
+  for J in $(pgrep -f "bash /root/s25.sh") $(pgrep -f "^bash /root/kvg_job.sh") $(pgrep -f "bash kvc_job.sh"); do pkill -P $J; kill $J; done; sleep 3; pkill -f "sp_qwen3.py"; sleep 5
+  cat > /root/s26.sh <<'JOB'
+for _t in $(seq 60); do curl -sS -o /root/kvg_job.sh "https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl/kvg_job.sh?nocache=$(date +%s)"; grep -q -- "GMIN" /root/kvg_job.sh && break; sleep 120; done
+echo "[kg] s26: plain GRPO, groups of 12 $(date -u)"
+exec bash /root/kvg_job.sh
+JOB
+  setsid nohup bash -c 'bash /root/s26.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
 fi
 # CTL-END

@@ -6,7 +6,8 @@
 # serial 3: the first generation ran out of memory at 24 streams / 30000 tokens - restart the collector with the current
 # kvc_job.sh (12 streams / 16000 tokens, halved again on an out-of-memory).
 # serial 4: GRPO with guides - restart as a rollout worker (MODE=grpo: the memory x4 + the raw window per problem).
-SER=4; COLLECT=1; SHARD=1; NSHARD=4; MODE=grpo
+# serial 5: plain GRPO (the user): groups of 12 memory draws, no raw-window guide, blocks of 6 problems.
+SER=5; COLLECT=1; SHARD=1; NSHARD=4; MODE=grpo
 if [ -f /root/.boxc_serial ] && [ "$(cat /root/.boxc_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxc_serial
 [ -d /venv/main/bin ] && export PATH=/venv/main/bin:$PATH
@@ -36,7 +37,7 @@ echo "[pr] RESULT gpu ($U0) | model download ${dl}s | bf16 matmul ${tf} TFLOPS |
 JOB
   setsid nohup bash -c 'bash /root/probe.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
 fi
-if [ "$COLLECT" = 1 ] && [ ! -e /root/.collect_g ]; then touch /root/.collect_g /root/.collect3 /root/.collect
+if [ "$COLLECT" = 1 ] && [ ! -e /root/.collect_g12 ]; then touch /root/.collect_g12 /root/.collect_g /root/.collect3 /root/.collect
   for J in $(pgrep -f "bash /root/kvc_job.sh"); do pkill -P $J; kill $J; done; sleep 3; pkill -f "sp_qwen3.py"; sleep 3
   curl -sS -o /root/kvc_job.sh "https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl/kvc_job.sh?nocache=$(date +%s)"
   setsid nohup bash -c "MODE=$MODE SHARD=$SHARD NSHARD=$NSHARD bash /root/kvc_job.sh >> /root/w/w.log 2>&1" > /dev/null 2>&1 < /dev/null &
