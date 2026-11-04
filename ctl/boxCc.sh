@@ -2,7 +2,8 @@
 # Collector candidate Cc (the user: parallel DPO data collection on cheaper boxes; start-up check, GPU check, keep the cheapest
 # that work). Serial 1: GPU empty?, bf16 matmul speed, model download time - one [pr] RESULT line. COLLECT=1 (a later serial)
 # starts ctl/kvc_job.sh with this box's shard.
-SER=1; COLLECT=0; SHARD=0; NSHARD=4
+# serial 2: passed the probe (GPU empty, ~25 TFLOPS bf16) - collect shard 2 of 4.
+SER=2; COLLECT=1; SHARD=2; NSHARD=4
 if [ -f /root/.boxc_serial ] && [ "$(cat /root/.boxc_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxc_serial
 [ -d /venv/main/bin ] && export PATH=/venv/main/bin:$PATH
