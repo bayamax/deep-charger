@@ -1,7 +1,7 @@
 #!/bin/bash
 # DPO on the KV memory (the user: the raw-window trajectory as the ideal). Pairs from the DPO data (ctl/kvd_job.sh): the same
 # problem, chosen = the raw window 1024's generation that closed its thought and is right, rejected = the memory model's that
-# did not close or is wrong. Sequence log-probs under the KV-memory deployment loop (seq_logp_kv; checked equal to the
+# did not close or is wrong; and the other way round where only the memory got it (its path chosen over the failed raw one). Sequence log-probs under the KV-memory deployment loop (seq_logp_kv; checked equal to the
 # generator's own log-probs), only the memory hypernet trains (the model stays frozen); reference = the starting weights
 # (--ctl-window segment 1). Round 2 of the data (ctl/kvd2_job.sh) adds raw-window redraws. Then the 60 problems, seeds 1-2.
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); cd /root/w
@@ -25,9 +25,13 @@ for f in sorted(glob.glob('dpo_raw2_*.jsonl')):   # round 2: a raw-window redraw
         if r['id'] in raw and not ok(raw[r['id']]) and ok(r): raw[r['id']] = r
 pairs = [{'id': k, 'prompt': raw[k]['prompt'], 'chosen': raw[k]['text'], 'rejected': mem[k]['text'],
           'why': 'unclosed' if '</think>' not in mem[k]['text'] else 'wrong'} for k in raw if k in mem and ok(raw[k]) and not ok(mem[k])]
+# and the other way round: the memory right and closed where the raw window failed - its own successful path chosen over the
+# raw window's failed one (keeps what the memory is good for: the distant past it carries)
+pairs += [{'id': k, 'prompt': mem[k]['prompt'], 'chosen': mem[k]['text'], 'rejected': raw[k]['text'], 'why': 'memory-only'}
+          for k in raw if k in mem and ok(mem[k]) and not ok(raw[k])]
 both = sum(1 for k in raw if k in mem)
 print(f"[ko] problems with both sides {both}: raw right {sum(ok(raw[k]) for k in raw if k in mem)}, memory right {sum(ok(mem[k]) for k in raw if k in mem)}"
-      f" | pairs {len(pairs)} (rejected unclosed {sum(p['why'] == 'unclosed' for p in pairs)}, wrong {sum(p['why'] == 'wrong' for p in pairs)})"
+      f" | pairs {len(pairs)} (raw chosen, memory unclosed {sum(p['why'] == 'unclosed' for p in pairs)} / wrong {sum(p['why'] == 'wrong' for p in pairs)}; memory chosen over a failed raw {sum(p['why'] == 'memory-only' for p in pairs)})"
       f" | memory right, raw not: {sum(1 for k in raw if k in mem and ok(mem[k]) and not ok(raw[k]))}")
 open('dpo_pairs.jsonl', 'w').writelines(json.dumps(p) + '\n' for p in pairs)
 PY
