@@ -16,23 +16,27 @@ echo "[ko] ready $(date -u) | seq_logp_kv in the script: $(grep -c 'def seq_logp
 python3 - <<'PY'
 import json, glob, sys; sys.path.insert(0, '.')
 from sp_mathcheck import correct
-def load(side): return {r['id']: r for f in sorted(glob.glob(f'dpo_{side}_b*.jsonl')) for l in open(f) for r in [json.loads(l)]}
-raw, mem = load('raw'), load('mem')
+def load(pat):
+    d = {}
+    for f in sorted(glob.glob(pat)):
+        for l in open(f): r = json.loads(l); d.setdefault(r['id'], []).append(r)
+    return d
+raw, mem = load('dpo_raw*.jsonl'), load('dpo_mem*.jsonl')   # round 1 (dpo_raw_b*) and round 2 (dpo_raw2_all / dpo_mem2_all) draws
 ok = lambda r: '</think>' in r['text'] and correct(r)
-for f in sorted(glob.glob('dpo_raw2_*.jsonl')):   # round 2: a raw-window redraw that succeeds replaces a failed first draw
-    for l in open(f):
-        r = json.loads(l)
-        if r['id'] in raw and not ok(raw[r['id']]) and ok(r): raw[r['id']] = r
-pairs = [{'id': k, 'prompt': raw[k]['prompt'], 'chosen': raw[k]['text'], 'rejected': mem[k]['text'],
-          'why': 'unclosed' if '</think>' not in mem[k]['text'] else 'wrong'} for k in raw if k in mem and ok(raw[k]) and not ok(mem[k])]
-# and the other way round: the memory right and closed where the raw window failed - its own successful path chosen over the
-# raw window's failed one (keeps what the memory is good for: the distant past it carries)
-pairs += [{'id': k, 'prompt': mem[k]['prompt'], 'chosen': mem[k]['text'], 'rejected': raw[k]['text'], 'why': 'memory-only'}
-          for k in raw if k in mem and ok(mem[k]) and not ok(raw[k])]
+pairs = []
+for k in raw:
+    if k not in mem: continue
+    rg, rb = [r for r in raw[k] if ok(r)], [r for r in raw[k] if not ok(r)]
+    mg, mb = [r for r in mem[k] if ok(r)], [r for r in mem[k] if not ok(r)]
+    if rg and mb:   # the raw window's right path chosen over the memory's failure
+        pairs.append({'id': k, 'prompt': rg[0]['prompt'], 'chosen': rg[0]['text'], 'rejected': mb[0]['text'],
+                      'why': 'unclosed' if '</think>' not in mb[0]['text'] else 'wrong'})
+    if mg and rb:   # the other way round: the memory's right path (what the distant past it carries is good for) over a failed raw one
+        pairs.append({'id': k, 'prompt': mg[0]['prompt'], 'chosen': mg[0]['text'], 'rejected': rb[0]['text'], 'why': 'memory-only'})
 both = sum(1 for k in raw if k in mem)
-print(f"[ko] problems with both sides {both}: raw right {sum(ok(raw[k]) for k in raw if k in mem)}, memory right {sum(ok(mem[k]) for k in raw if k in mem)}"
+print(f"[ko] problems with both sides {both}: raw right (any draw) {sum(any(map(ok, raw[k])) for k in raw if k in mem)}, memory right (any draw) {sum(any(map(ok, mem[k])) for k in raw if k in mem)}"
       f" | pairs {len(pairs)} (raw chosen, memory unclosed {sum(p['why'] == 'unclosed' for p in pairs)} / wrong {sum(p['why'] == 'wrong' for p in pairs)}; memory chosen over a failed raw {sum(p['why'] == 'memory-only' for p in pairs)})"
-      f" | memory right, raw not: {sum(1 for k in raw if k in mem and ok(mem[k]) and not ok(raw[k]))}")
+      )
 open('dpo_pairs.jsonl', 'w').writelines(json.dumps(p) + '\n' for p in pairs)
 PY
 put dpo_pairs.jsonl dpo/dpo_pairs.jsonl

@@ -2,7 +2,8 @@
 # DPO data, round 2 (the user: run the planned 300 through first, then a second round). Round 1 gave 2 pairs in its first 50
 # problems (raw window right & memory wrong); most problems are right for both or wrong for both. Round 2: the problems where
 # the memory failed (unclosed or wrong) and the raw window failed too get one more raw-window generation at another seed -
-# a raw success there makes a pair. Problems the raw window already solved are not redrawn.
+# a raw success there makes a pair - and the memory is redrawn on them too (the user: redraw both), a memory success there
+# makes a pair the other way round.
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); cd /root/w
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 R=baya1116/hypernet-sp-distill
@@ -19,16 +20,24 @@ P = {json.loads(l)['id']: l for l in open('dpo_prompts300.jsonl')}
 todo = [k for k in mem if k in raw and not ok(mem[k]) and not ok(raw[k])]
 n_pair = sum(1 for k in mem if k in raw and not ok(mem[k]) and ok(raw[k]))
 open('dpo_r2_todo.jsonl', 'w').writelines(P[k] for k in todo)
-print(f"[kd] round 1: {len(mem)} problems | raw right {sum(ok(raw[k]) for k in raw)}, memory right {sum(ok(mem[k]) for k in mem)} | pairs {n_pair} | round 2 redraws the raw window on {len(todo)} problems")
+print(f"[kd] round 1: {len(mem)} problems | raw right {sum(ok(raw[k]) for k in raw)}, memory right {sum(ok(mem[k]) for k in mem)} | pairs {n_pair} | round 2 redraws both sides on {len(todo)} problems")
 PY
 out=dpo_raw2_all.jsonl
 if [ ! -s $out ]; then
   python3 sp_qwen3.py rollout --traces dpo_r2_todo.jsonl $M --ckpt dpo_ref.pt --no-sp --max-len 12288 --roll-batch 48 --grpo-tok-budget 60000 --seed 1011 --roll-out $out --log $LG > run_kd2gen.log 2>&1
   grep -E "Error|Traceback" run_kd2gen.log | tail -1 | sed "s/^/[kd] gen round 2: /"
 fi
+put $out dpo/$out
+out2=dpo_mem2_all.jsonl
+if [ ! -s $out2 ]; then
+  python3 sp_qwen3.py rollout --traces dpo_r2_todo.jsonl $M --ckpt dpo_ref.pt --max-len 12288 --roll-batch 48 --grpo-tok-budget 60000 --seed 1012 --roll-out $out2 --log $LG > run_kd2gen.log 2>&1
+  grep -E "Error|Traceback" run_kd2gen.log | tail -1 | sed "s/^/[kd] gen round 2 memory: /"
+fi
+put $out2 dpo/$out2
 python3 -c "
 import json, sys; sys.path.insert(0, '.')
 from sp_mathcheck import correct
-rs = [json.loads(l) for l in open('$out')]
-print(f'[kd] round 2 raw window: {sum(\"</think>\" in r[\"text\"] and correct(r) for r in rs)}/{len(rs)} right and closed (each a new pair)')"
-put $out dpo/$out; date -u > DONE_KD2; put DONE_KD2 dpo/DONE_KD2; echo "[kd] ROUND2_DONE $(date -u)"
+for side, f in (('raw window', '$out'), ('memory', '$out2')):
+    rs = [json.loads(l) for l in open(f)]
+    print(f'[kd] round 2 {side}: {sum(\"</think>\" in r[\"text\"] and correct(r) for r in rs)}/{len(rs)} right and closed')"
+date -u > DONE_KD2; put DONE_KD2 dpo/DONE_KD2; echo "[kd] ROUND2_DONE $(date -u)"
