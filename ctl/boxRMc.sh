@@ -51,14 +51,17 @@
 # and collect the data in parallel on cheaper boxes. The iterative hypernet-only loop (kvi) stops; ctl/kvf_job.sh trains all 28
 # layers + the hypernet on the 53 pairs, publishes the weights for the collectors, then trains on their pairs in rounds and
 # collects its own shard while it waits.
-SER=24
+# serial 25: DPO round 2 did not generalise (48% / 56% chosen-ahead on its unseen pairs) and its 60 problems fell to 37 (closed
+# 53 - it learned to stop, not to be right). Switch to GRPO with raw-window guides (ctl/kvg_job.sh) from the round-1 weights
+# (kvf_prev.pt: 42 / 39), published first as the next version; the collectors become rollout workers.
+SER=25
 if [ -f /root/.boxrmx_serial ] && [ "$(cat /root/.boxrmx_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxrmx_serial
 [ -d /venv/main/bin ] && export PATH=/venv/main/bin:$PATH
 [ -s /root/.hf_token ] || { [ -n "$HF_TOKEN" ] && printf '%s' "$HF_TOKEN" > /root/.hf_token && chmod 600 /root/.hf_token; }
 mkdir -p /root/w
 cat > /root/status.sh <<'ST'
-grep -E "^\[(pr|rm|kv|kr|kp|kw|kt|kd|ko|ki|kf|hub)\]|Error|Traceback|out of memory" /root/w/w.log 2>/dev/null | tail -n 6 | cut -c1-600
+grep -E "^\[(pr|rm|kv|kr|kp|kw|kt|kd|ko|ki|kf|kg|hub)\]|Error|Traceback|out of memory" /root/w/w.log 2>/dev/null | tail -n 6 | cut -c1-600
 tail -n 1 $(ls -t /root/w/sp_*.log 2>/dev/null | head -1) 2>/dev/null | cut -c1-250
 nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv,noheader
 ST
@@ -261,5 +264,15 @@ echo "[kf] s24: iterative hypernet-only DPO stopped - DPO with the model unfroze
 exec bash /root/kvf_job.sh
 JOB
   setsid nohup bash -c 'bash /root/s24.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
+fi
+if [ ! -e /root/.s25kg ]; then touch /root/.s25kg
+  for J in $(pgrep -f "bash /root/s24.sh") $(pgrep -f "^bash /root/kvf_job.sh") $(pgrep -f "bash kvc_job.sh"); do pkill -P $J; kill $J; done; sleep 3; pkill -f "sp_qwen3.py"; sleep 5
+  cp /root/w/kvf_prev.pt /root/w/kvf_round1.pt
+  cat > /root/s25.sh <<'JOB'
+for _t in $(seq 60); do curl -sS -o /root/kvg_job.sh "https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl/kvg_job.sh?nocache=$(date +%s)"; grep -q -- "kvg_v0" /root/kvg_job.sh && break; sleep 120; done
+echo "[kg] s25: DPO stopped - GRPO with guides from the round-1 weights $(date -u)"
+START=kvf_round1.pt exec bash /root/kvg_job.sh
+JOB
+  setsid nohup bash -c 'bash /root/s25.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
 fi
 # CTL-END
