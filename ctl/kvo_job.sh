@@ -3,7 +3,7 @@
 # problem, chosen = the raw window 1024's generation that closed its thought and is right, rejected = the memory model's that
 # did not close or is wrong. Sequence log-probs under the KV-memory deployment loop (seq_logp_kv; checked equal to the
 # generator's own log-probs), only the memory hypernet trains (the model stays frozen); reference = the starting weights
-# (--ctl-window segment 1). Then the 60 problems, seeds 1-2.
+# (--ctl-window segment 1). Round 2 of the data (ctl/kvd2_job.sh) adds raw-window redraws. Then the 60 problems, seeds 1-2.
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); cd /root/w
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 R=baya1116/hypernet-sp-distill; RAW=https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i
@@ -19,6 +19,10 @@ from sp_mathcheck import correct
 def load(side): return {r['id']: r for f in sorted(glob.glob(f'dpo_{side}_b*.jsonl')) for l in open(f) for r in [json.loads(l)]}
 raw, mem = load('raw'), load('mem')
 ok = lambda r: '</think>' in r['text'] and correct(r)
+for f in sorted(glob.glob('dpo_raw2_*.jsonl')):   # round 2: a raw-window redraw that succeeds replaces a failed first draw
+    for l in open(f):
+        r = json.loads(l)
+        if r['id'] in raw and not ok(raw[r['id']]) and ok(r): raw[r['id']] = r
 pairs = [{'id': k, 'prompt': raw[k]['prompt'], 'chosen': raw[k]['text'], 'rejected': mem[k]['text'],
           'why': 'unclosed' if '</think>' not in mem[k]['text'] else 'wrong'} for k in raw if k in mem and ok(raw[k]) and not ok(mem[k])]
 both = sum(1 for k in raw if k in mem)

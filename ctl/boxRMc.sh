@@ -41,7 +41,9 @@
 # para-window job is done, generate the DPO data (ctl/kvd_job.sh: 300 training problems, raw window and memory).
 # serial 20: once the DPO data is done, the DPO run itself (ctl/kvo_job.sh: pairs, training of the memory hypernet with the
 # sequence log-probs under the KV-memory loop, the 60 problems at seeds 1-2).
-SER=20
+# serial 21: the user - round 1 first (all 300), then a second round: the raw window redrawn on the problems both sides
+# failed (ctl/kvd2_job.sh), then DPO on the pairs from both rounds. The serial-20 waiter is replaced.
+SER=21
 if [ -f /root/.boxrmx_serial ] && [ "$(cat /root/.boxrmx_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxrmx_serial
 [ -d /venv/main/bin ] && export PATH=/venv/main/bin:$PATH
@@ -219,5 +221,18 @@ exec bash /root/kvo_job.sh
 JOB
   setsid nohup bash -c 'bash /root/s20.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
   echo "[ko] s20: waiting for the DPO data $(date -u)"
+fi
+if [ ! -e /root/.s21kd2 ]; then touch /root/.s21kd2
+  for J in $(pgrep -f "bash /root/s20.sh"); do pkill -P $J; kill $J; done
+  cat > /root/s21.sh <<'JOB'
+while [ ! -e /root/w/DONE_KD ]; do sleep 30; done; sleep 30
+for _t in $(seq 60); do curl -sS -o /root/kvd2_job.sh "https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl/kvd2_job.sh?nocache=$(date +%s)"; grep -q -- "dpo_r2_todo" /root/kvd2_job.sh && break; sleep 120; done
+echo "[kd] s21: round 1 done - round 2 $(date -u)"; bash /root/kvd2_job.sh
+for _t in $(seq 60); do curl -sS -o /root/kvo_job.sh "https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl/kvo_job.sh?nocache=$(date +%s)"; grep -q -- "dpo_raw2_" /root/kvo_job.sh && break; sleep 120; done
+echo "[ko] s21: round 2 done - DPO training $(date -u)"
+exec bash /root/kvo_job.sh
+JOB
+  setsid nohup bash -c 'bash /root/s21.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
+  echo "[kd] s21: waiting for round 1 $(date -u)"
 fi
 # CTL-END
