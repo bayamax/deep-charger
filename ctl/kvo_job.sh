@@ -38,6 +38,13 @@ if [ ! -s kvo.pt ]; then
   grep -E "\[sp\] (spin|train .* pair)|Error|Traceback|out of memory" run_ko_tr.log | tail -n 8 | cut -c1-250 | sed 's/^/[ko] /'
   [ -s kvo.pt ] && put kvo.pt spKVO_latest.pt
 fi
+# does the memory still carry the past, or did DPO make it inert? held-out KL to full KV by domain (segment 8 memory 0.0648
+# mean, the raw window alone 0.107)
+if [ -s kvo.pt ] && [ ! -e kvo_kl_done ]; then out=""
+  for d in chat code comp math mc; do python3 -c "
+import json, sys; [sys.stdout.write(l) for l in open('rm_held.jsonl') if json.loads(l).get('src', '?').split('-')[0] == sys.argv[1]]" $d > held_$d.jsonl
+    for ck in dpo_ref.pt kvo.pt; do k=$(timeout 2700 python3 sp_qwen3.py eval --traces held_$d.jsonl --max-len 6144 $M --ckpt $ck --log $LG 2>&1 | grep "\[sp\] eval" | tail -1 | grep -oP "KL \K[0-9.]+(?=  top1)"); out="$out $d/${ck%.pt} $k"; done; done
+  echo "[ko] held-out KL to full KV, before / after DPO:$out"; touch kvo_kl_done; fi
 for sd in 1 2; do
   [ -s kvo_s$sd.jsonl ] && continue
   python3 sp_qwen3.py rollout --traces rl_eval60.jsonl $M --max-len 12288 --ckpt kvo.pt --roll-batch 48 --grpo-tok-budget 60000 --seed $sd --roll-out kvo_s$sd.jsonl --log $LG > run_kogen.log 2>&1
