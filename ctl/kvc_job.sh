@@ -45,11 +45,24 @@ if [ "$MODE" = grpo ]; then   # GRPO rollout worker: per block the memory G time
   while [ $b -lt $NB ] && [ ! -e STOP_KC ]; do t0=$(date +%s)
     sed -n "$(( b * BS + 1 )),$(( (b + 1) * BS ))p" shard.jsonl > p_$b.jsonl
     [ -s p_$b.jsonl ] || break
-    python3 -c "
-import sys; L = open('p_$b.jsonl').readlines(); open('pg_$b.jsonl', 'w').writelines(l for l in L for _ in range($G))"
     v=$(weights); sd=$(( 7000 + SHARD * 1000 + b * 4 ))
     if [ "$GUIDE" = 1 ]; then gen p_$b.jsonl graw_$b.jsonl $sd --ckpt ref.pt --no-sp; else : > graw_$b.jsonl; fi
-    gen pg_$b.jsonl gmem_${b}_v$v.jsonl $((sd + 1)) --ckpt mem.pt
+    # two stages (dynamic sampling): G1 draws for every problem; the rest of the G only where those G1 were mixed
+    G1=${G1:-4}
+    python3 -c "
+import sys; L = open('p_$b.jsonl').readlines(); open('pg1_$b.jsonl', 'w').writelines(l for l in L for _ in range($G1))"
+    gen pg1_$b.jsonl gm1_${b}_v$v.jsonl $((sd + 1)) --ckpt mem.pt
+    python3 - $b $v $G $G1 <<'PY2'
+import json, sys; sys.path.insert(0, '.')
+from sp_mathcheck import correct
+b, v, G, G1 = sys.argv[1], sys.argv[2], int(sys.argv[3]), int(sys.argv[4]); ok = lambda r: '</think>' in r['text'] and correct(r)
+R = {}
+for l in open(f'gm1_{b}_v{v}.jsonl'): r = json.loads(l); R.setdefault(r['id'], []).append(ok(r))
+P = [l for l in open(f'p_{b}.jsonl') if 0 < sum(R.get(json.loads(l)['id'], [])) < G1]
+open(f'pg2_{b}.jsonl', 'w').writelines(l for l in P for _ in range(G - G1))
+PY2
+    if [ -s pg2_$b.jsonl ]; then gen pg2_$b.jsonl gm2_${b}_v$v.jsonl $((sd + 2)) --ckpt mem.pt; else : > gm2_${b}_v$v.jsonl; fi
+    cat gm1_${b}_v$v.jsonl gm2_${b}_v$v.jsonl > gmem_${b}_v$v.jsonl
     s=$(python3 - $b $v <<'PY2'
 import json, sys; sys.path.insert(0, '.')
 from sp_mathcheck import correct
@@ -64,7 +77,7 @@ for k, g in grp.items():
 open(f'grp_b{b}_v{v}.jsonl', 'w').writelines(json.dumps(g) + '\n' for g in grp.values())
 G = list(grp.values()); rs = [[ok({'text': t, 'gold': g['gold']}) for t in g['samples']] for g in G]
 mixed = sum(0 < sum(x) < len(x) for x in rs); allbad = sum(sum(x) == 0 for x in rs)
-print(f"{len(G)} problems, memory right {sum(map(sum, rs))}/{sum(map(len, rs))}, closed {sum('</think>' in t for g in G for t in g['samples'])} | "
+print(f"{len(G)} problems ({sum(len(g['samples']) > 4 for g in G)} filled to 12), memory right {sum(map(sum, rs))}/{sum(map(len, rs))}, closed {sum('</think>' in t for g in G for t in g['samples'])} | "
       f"mixed groups {mixed}, all wrong {allbad} (with a right guide {sum(1 for g, x in zip(G, rs) if sum(x) == 0 and g['guide'])})")
 PY2
 )

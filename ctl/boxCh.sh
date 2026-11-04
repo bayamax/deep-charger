@@ -2,7 +2,9 @@
 # Collector Ch: an extra GRPO rollout worker (the user: as many updates as possible) on the far half of shard 2 (from block 60).
 # that work). Serial 1: GPU empty?, bf16 matmul speed, model download time - one [pr] RESULT line. COLLECT=1 (a later serial)
 # starts ctl/kvc_job.sh with this box's shard.
-SER=1; COLLECT=1; SHARD=2; NSHARD=4; MODE=grpo
+# serial 2: two-stage sampling (4 draws, then 8 more only where the 4 were mixed) - the running block finishes first
+# (STOP_KC), then the current kvc_job.sh carries on.
+SER=2; COLLECT=1; SHARD=2; NSHARD=4; MODE=grpo
 if [ -f /root/.boxc_serial ] && [ "$(cat /root/.boxc_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxc_serial
 [ -d /venv/main/bin ] && export PATH=/venv/main/bin:$PATH
@@ -37,5 +39,16 @@ if [ "$COLLECT" = 1 ] && [ ! -e /root/.collect_g12 ]; then touch /root/.collect_
   curl -sS -o /root/kvc_job.sh "https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl/kvc_job.sh?nocache=$(date +%s)"
   setsid nohup bash -c "KCG_START=60 MODE=$MODE SHARD=$SHARD NSHARD=$NSHARD bash /root/kvc_job.sh >> /root/w/w.log 2>&1" > /dev/null 2>&1 < /dev/null &
   echo "[kc] collector launched: shard $SHARD of $NSHARD $(date -u)"
+fi
+if [ ! -e /root/.graceful2 ] && [ -e /root/.collect_g12 -o -e /root/.collect_g ]; then touch /root/.graceful2
+  touch /root/w/STOP_KC
+  cat > /root/regen.sh <<'JOB'
+while pgrep -f "bash /root/kvc_job.sh" > /dev/null; do sleep 30; done
+rm -f /root/w/STOP_KC
+curl -sS -o /root/kvc_job.sh "https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl/kvc_job.sh?nocache=$(date +%s)"
+echo "[kc] two-stage sampling from here $(date -u) ($(grep -c 'G1=' /root/kvc_job.sh))"
+exec env KCG_START=60 MODE=grpo SHARD=2 NSHARD=4 bash /root/kvc_job.sh
+JOB
+  setsid nohup bash -c 'bash /root/regen.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
 fi
 # CTL-END
