@@ -39,14 +39,16 @@
 # the memory-masked twin (ctl/kvt_job.sh): the lower-entropy side per token, and a half/half logit mix.
 # serial 19: the user - DPO with the raw-window trajectories as the ideal. The twin decodings of serial 18 are dropped; once the
 # para-window job is done, generate the DPO data (ctl/kvd_job.sh: 300 training problems, raw window and memory).
-SER=19
+# serial 20: once the DPO data is done, the DPO run itself (ctl/kvo_job.sh: pairs, training of the memory hypernet with the
+# sequence log-probs under the KV-memory loop, the 60 problems at seeds 1-2).
+SER=20
 if [ -f /root/.boxrmx_serial ] && [ "$(cat /root/.boxrmx_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxrmx_serial
 [ -d /venv/main/bin ] && export PATH=/venv/main/bin:$PATH
 [ -s /root/.hf_token ] || { [ -n "$HF_TOKEN" ] && printf '%s' "$HF_TOKEN" > /root/.hf_token && chmod 600 /root/.hf_token; }
 mkdir -p /root/w
 cat > /root/status.sh <<'ST'
-grep -E "^\[(pr|rm|kv|kr|kp|kw|kt|kd|hub)\]|Error|Traceback|out of memory" /root/w/w.log 2>/dev/null | tail -n 6 | cut -c1-600
+grep -E "^\[(pr|rm|kv|kr|kp|kw|kt|kd|ko|hub)\]|Error|Traceback|out of memory" /root/w/w.log 2>/dev/null | tail -n 6 | cut -c1-600
 tail -n 1 /root/w/sp_kvp.log 2>/dev/null | cut -c1-200
 nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv,noheader
 ST
@@ -207,5 +209,15 @@ exec bash /root/kvd_job.sh
 JOB
   setsid nohup bash -c 'bash /root/s19.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
   echo "[kd] s19: twin decodings dropped; waiting for the para-window job $(date -u)"
+fi
+if [ ! -e /root/.s20ko ]; then touch /root/.s20ko
+  cat > /root/s20.sh <<'JOB'
+while [ ! -e /root/w/DONE_KD ]; do sleep 30; done; sleep 30
+for _t in $(seq 60); do curl -sS -o /root/kvo_job.sh "https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl/kvo_job.sh?nocache=$(date +%s)"; grep -q -- "dpo_pairs" /root/kvo_job.sh && break; sleep 120; done
+echo "[ko] s20: DPO data done - DPO training $(date -u)"
+exec bash /root/kvo_job.sh
+JOB
+  setsid nohup bash -c 'bash /root/s20.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
+  echo "[ko] s20: waiting for the DPO data $(date -u)"
 fi
 # CTL-END
