@@ -40,7 +40,7 @@ gen() { local p=$1 o=$2 sd=$3; shift 3; [ -s $o ] && return; local rb=$RB tb=$TB
 b=$(cat kc_block 2>/dev/null || echo 0)
 if [ "$MODE" = grpo ]; then   # GRPO rollout worker: per block the memory G times per problem (GUIDE=1: the raw window once too)
   G=${G:-12}; GUIDE=${GUIDE:-0}; BS=${GBS:-6}; NB=$(( ($(wc -l < shard.jsonl) + BS - 1) / BS ))
-  [ -s kcg_block ] || echo $(( $(cat kc_block 2>/dev/null || echo 0) * 24 / BS )) > kcg_block   # carry on after the problems used so far
+  [ -s kcg_block ] || echo ${KCG_START:-$(( $(cat kc_block 2>/dev/null || echo 0) * 24 / BS ))} > kcg_block   # carry on after the problems used so far (KCG_START: an extra worker on the far half of a shard)
   b=$(cat kcg_block)
   while [ $b -lt $NB ] && [ ! -e STOP_KC ]; do t0=$(date +%s)
     sed -n "$(( b * BS + 1 )),$(( (b + 1) * BS ))p" shard.jsonl > p_$b.jsonl
