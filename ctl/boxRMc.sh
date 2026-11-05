@@ -56,7 +56,11 @@
 # (kvf_prev.pt: 42 / 39), published first as the next version; the collectors become rollout workers.
 # serial 26: the user - plain GRPO, groups of 12 at least, as many updates as possible. Restart the trainer with the current
 # kvg_job.sh (24 new problems per round, groups of 12 only, the 60 problems every 3rd round); it carries on from its round 1.
-SER=26
+# serial 27: 60 problems at v9: 36 (seed 1) / 35 (seed 2), closed 59 - the GRPO so far taught closing, not correctness
+# (training-problem accuracy flat at ~56-58% over v6-v9, repeating tails up). Likely cause: 4 groups per update is a tiny,
+# noisy batch (DeepScaleR-style runs use ~128 prompts per update) - only the consistent signal (close) gets learned. After the
+# running round the trainer restarts with the current kvg_job.sh at 16 groups per update (flags re-read every round).
+SER=27
 if [ -f /root/.boxrmx_serial ] && [ "$(cat /root/.boxrmx_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxrmx_serial
 [ -d /venv/main/bin ] && export PATH=/venv/main/bin:$PATH
@@ -285,5 +289,16 @@ echo "[kg] s26: plain GRPO, groups of 12 $(date -u)"
 exec bash /root/kvg_job.sh
 JOB
   setsid nohup bash -c 'bash /root/s26.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
+fi
+if [ ! -e /root/.s27kg ]; then touch /root/.s27kg
+  echo 16 > /root/w/kvg_accum; touch /root/w/STOP_KG
+  cat > /root/s27.sh <<'JOB'
+while pgrep -f "^bash /root/kvg_job.sh" > /dev/null; do sleep 30; done
+rm -f /root/w/STOP_KG
+for _t in $(seq 60); do curl -sS -o /root/kvg_job.sh "https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl/kvg_job.sh?nocache=$(date +%s)"; grep -q -- "kvg_accum" /root/kvg_job.sh && break; sleep 120; done
+echo "[kg] s27: 16 groups per update from here $(date -u)"
+exec bash /root/kvg_job.sh
+JOB
+  setsid nohup bash -c 'bash /root/s27.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
 fi
 # CTL-END

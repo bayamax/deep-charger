@@ -14,7 +14,9 @@ put() { for _i in 1 2 3 4 5; do python3 -c "import sys; from huggingface_hub imp
 for _t in $(seq 60); do curl -sS -o sp_qwen3.py "$RAW/tools/sp_qwen3.py?nocache=$(date +%s)"; grep -q '"--grpo-groups"' sp_qwen3.py && break; sleep 120; done
 LG=/root/w/sp_kvg.log; NEWG=${NEWG:-24}; NSH=${NSH:-4}; EVERY=${EVERY:-3}; GMIN=${GMIN:-12}
 M="--S 32 --heads 8 --layers 3 --ffn 2048 --rw 1024 --C 128 --maxd 0 --kv-mem --kv-rank 512"
-GT="--grpo-groups --ft-layers 28 --opt8bit --ft-lr ${FTLR:-1e-6} --lr 2e-5 --epochs 1 --accum 4 --const-lr"
+gt() {   # the GRPO flags, re-read every round: kvg_accum / kvg_ftlr / kvg_ftlayers in /root/w override the defaults without a restart
+  echo "--grpo-groups --ft-layers $(cat kvg_ftlayers 2>/dev/null || echo 28) --opt8bit --ft-lr $(cat kvg_ftlr 2>/dev/null || echo ${FTLR:-1e-6}) --lr 2e-5 --epochs 1 --accum $(cat kvg_accum 2>/dev/null || echo ${ACCUM:-4}) --const-lr"; }
+GT=$(gt)
 rd=$(cat kvg_round 2>/dev/null || echo 0); v0=$(cat VERSION 2>/dev/null || echo 0)
 if [ ! -s kvg.pt ]; then   # the starting weights go out first, so the rollout workers sample from the policy being trained
   cp ${START:-kvf.pt} kvg.pt; cp kvg.pt kvf.pt; v0=$((v0 + 1)); echo $v0 > VERSION; echo $v0 > kvg_v0
@@ -46,6 +48,7 @@ PY
     continue; fi
   rd=$((rd + 1)); cat newg_list.txt >> used_groups.txt; cp newg.jsonl kvg_groups_r$rd.jsonl
   cp kvg.pt kvg_prev.pt
+  GT=$(gt); echo "[kg] round $rd flags: $GT"
   python3 sp_qwen3.py train --traces kvg_groups_r$rd.jsonl $M --max-len 12288 --ckpt kvg_prev.pt $GT --seed $((6000 + rd)) --out kvg_next.pt --log $LG > run_kg_tr.log 2>&1
   echo "[kg] round $rd: $n problems | $(grep '\[sp\] grpo groups' run_kg_tr.log | tail -1 | cut -d: -f2-) | $(grep -E '\[sp\] train .*grpo group' run_kg_tr.log | tail -1 | grep -oP 'mean reward.*')"
   grep -E "Error|Traceback|out of memory" run_kg_tr.log | tail -1 | sed "s/^/[kg] round $rd: /"
