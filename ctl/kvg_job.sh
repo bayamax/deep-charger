@@ -27,6 +27,14 @@ ok60() { python3 -c "
 import json, sys; sys.path.insert(0, '.')
 from sp_mathcheck import correct
 rs = [json.loads(l) for l in open(sys.argv[1])]; print(sum(correct(r) for r in rs), sum('</think>' in r['text'] for r in rs))" "$1"; }
+curl -sS -o param_sketch.py "$RAW/ctl/param_sketch.py?nocache=$(date +%s)"
+sk() {   # sk <ckpt> <version>: the weights' sketch (parameter-movement tracking), kept locally and on the hub
+  [ -s sk_v$2.pt ] || { python3 param_sketch.py sketch $1 sk_v$2.pt && put sk_v$2.pt kvg/sk_v$2.pt > /dev/null; }; }
+[ -s kvf_round1.pt ] && sk kvf_round1.pt $v0
+[ -s kvg_prev.pt ] && [ -s kvg.pt ] && [ "$(cat VERSION 2>/dev/null)" -gt $((v0 + 1)) ] 2>/dev/null && sk kvg_prev.pt $(( $(cat VERSION) - 1 ))
+[ -s kvg.pt ] && sk kvg.pt $(cat VERSION)
+moves() { python3 param_sketch.py report $(ls sk_v*.pt | sort -t v -k2 -n) 2>&1 | sed 's/^/[kg] params /'; }
+moves
 touch used_groups.txt
 while [ ! -e STOP_KG ]; do
   V0=$v0 GMIN=$GMIN python3 - <<'PY' > newg_list.txt
@@ -55,6 +63,7 @@ PY
   [ -s kvg_next.pt ] && grep -q "^\[sp\] trained" run_kg_tr.log || { echo "[kg] round $rd: training FAILED"; break; }
   mv kvg_next.pt kvg.pt; echo $rd > kvg_round; v=$((v0 + rd)); echo $v > VERSION; cp kvg.pt kvf.pt
   put kvg.pt spKVF_latest.pt && put VERSION kvf/VERSION
+  sk kvg.pt $v; moves
   if [ $((rd % EVERY)) != 0 ]; then echo "[kg] round $rd (weights v$v) published"; continue; fi
   o=kvg_r${rd}_s1.jsonl
   python3 sp_qwen3.py rollout --traces rl_eval60.jsonl $M --ckpt kvg.pt --max-len 12288 --roll-batch 48 --grpo-tok-budget 60000 --seed 1 --roll-out $o --log $LG > run_kggen.log 2>&1
