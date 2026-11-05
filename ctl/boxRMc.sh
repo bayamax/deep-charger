@@ -67,7 +67,11 @@
 # out as the next version so the workers sample from it, older groups are not used.
 # serial 30: CPU-only diagnosis while the GRPO restart runs: how far did the first GRPO run (v3 -> v10) move the model vs
 # the hypernet (exact relative change, ctl/param_diff.py), also v3 -> v9 if kept.
-SER=30
+# serial 31: the first GRPO run learned to guess - wrong answers went from running to the cap to closing early (wrong-but-
+# closed 46% -> 95% of the wrong ones, their median length 29.7k -> 13.2k chars, distinct answers per 4 draws 1.27 -> 2.24):
+# with 0 for unclosed and for wrong alike, any answer beats thinking on. Closed-but-wrong now scores -0.2 (guessing pays only
+# above 1/6). The restarted run has not trained yet: restart its trainer with the current kvg_job.sh / sp_qwen3.py (state kept).
+SER=31
 if [ -f /root/.boxrmx_serial ] && [ "$(cat /root/.boxrmx_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxrmx_serial
 [ -d /venv/main/bin ] && export PATH=/venv/main/bin:$PATH
@@ -326,5 +330,15 @@ cd /root/w; curl -sS -o param_diff.py "https://raw.githubusercontent.com/bayamax
 for c in grpo_run1/kvg.pt grpo_run1/kvg_prev.pt; do [ -s $c ] && nice -n 19 python3 param_diff.py kvf_round1.pt $c 2>&1 | sed "s|^|[kg] diff v3 -> $c: |"; done
 JOB
   setsid nohup bash -c 'bash /root/s30.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
+fi
+if [ ! -e /root/.s31kg ]; then touch /root/.s31kg
+  echo -0.2 > /root/w/kvg_wrong
+  for J in $(pgrep -f "bash /root/s28.sh") $(pgrep -f "^bash /root/kvg_job.sh") $(pgrep -f "bash kvc_job.sh"); do pkill -P $J; kill $J; done; sleep 3; pkill -f "sp_qwen3.py rollout"; pkill -f "sp_qwen3.py train"; sleep 5
+  cat > /root/s31.sh <<'JOB'
+for _t in $(seq 60); do curl -sS -o /root/kvg_job.sh "https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl/kvg_job.sh?nocache=$(date +%s)"; grep -q -- "kvg_wrong" /root/kvg_job.sh && break; sleep 120; done
+echo "[kg] s31: closed-but-wrong = $(cat /root/w/kvg_wrong) $(date -u)"
+cd /root/w && START=kvf_round1.pt exec bash /root/kvg_job.sh
+JOB
+  setsid nohup bash -c 'bash /root/s31.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
 fi
 # CTL-END

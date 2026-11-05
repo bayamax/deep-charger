@@ -174,6 +174,8 @@ ap.add_argument("--grpo-groups", action="store_true", help="train: GRPO from pre
                 "[texts drawn by the collectors with recent weights], guide: a raw-window text or null}; reward 1 = closed and right; "
                 "a right-and-closed guide joins its group with reward 1; advantage = reward - group mean; uniform groups are dropped; "
                 "--accum groups per update; sequence log-probs at --temp under the deployment loop")
+ap.add_argument("--grpo-wrong", type=float, default=0.0, help="grpo-groups: reward of a closed but wrong answer (right = 1, "
+                "unclosed = 0). Negative removes the pay-off of guessing: with 0, answering anything beats thinking to the cap")
 ap.add_argument("--grpo-guide", default="", help="grpo: jsonl of guide trajectories (id, text - e.g. the raw window's right and closed "
                 "draws): a problem with one gets it as one more group member with reward 1, scored under the policy like the "
                 "samples (off-policy guidance: a problem the policy never solves still carries signal)")
@@ -1528,7 +1530,8 @@ if a.grpo_groups:
         pid = tok.encode(r["prompt"], add_special_tokens=False); seqs, rs = [], []
         for t_ in r.get("samples", []):
             ans = tok.encode(t_, add_special_tokens=False)
-            seqs.append(torch.tensor(pid + ans + ([_im_end] if len(ans) < a.max_len - 1 else []))); rs.append(float("</think>" in t_ and _correct({"text": t_, "gold": r["gold"]})))
+            seqs.append(torch.tensor(pid + ans + ([_im_end] if len(ans) < a.max_len - 1 else [])))
+            rs.append(1.0 if "</think>" in t_ and _correct({"text": t_, "gold": r["gold"]}) else (a.grpo_wrong if "</think>" in t_ else 0.0))
         g_ = r.get("guide")
         if g_ and "</think>" in g_ and _correct({"text": g_, "gold": r["gold"]}):
             seqs.append(torch.tensor(pid + tok.encode(g_, add_special_tokens=False) + [_im_end])); rs.append(1.0); _gs[2] += 1
