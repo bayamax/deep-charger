@@ -15,7 +15,7 @@ for _t in $(seq 60); do curl -sS -o sp_qwen3.py "$RAW/tools/sp_qwen3.py?nocache=
 LG=/root/w/sp_kvg.log; NEWG=${NEWG:-24}; NSH=${NSH:-4}; EVERY=${EVERY:-3}; GMIN=${GMIN:-12}
 M="--S 32 --heads 8 --layers 3 --ffn 2048 --rw 1024 --C 128 --maxd 0 --kv-mem --kv-rank 512"
 gt() {   # the GRPO flags, re-read every round: kvg_accum / kvg_ftlr / kvg_ftlayers in /root/w override the defaults without a restart
-  echo "--grpo-groups --ft-layers $(cat kvg_ftlayers 2>/dev/null || echo 28) --opt8bit --ft-lr $(cat kvg_ftlr 2>/dev/null || echo ${FTLR:-1e-6}) --lr 2e-5 --epochs 1 --accum $(cat kvg_accum 2>/dev/null || echo ${ACCUM:-4}) --const-lr --grpo-wrong $(cat kvg_wrong 2>/dev/null || echo 0)"; }
+  echo "--grpo-groups --ft-layers $(cat kvg_ftlayers 2>/dev/null || echo 28) --opt8bit --ft-lr $(cat kvg_ftlr 2>/dev/null || echo ${FTLR:-1e-6}) --lr $(cat kvg_plr 2>/dev/null || echo 2e-5) --epochs 1 --accum $(cat kvg_accum 2>/dev/null || echo ${ACCUM:-4}) --const-lr --grpo-wrong $(cat kvg_wrong 2>/dev/null || echo 0)"; }
 GT=$(gt)
 rd=$(cat kvg_round 2>/dev/null || echo 0); v0=$(cat VERSION 2>/dev/null || echo 0)
 if [ ! -s kvg.pt ]; then   # the starting weights go out first, so the rollout workers sample from the policy being trained

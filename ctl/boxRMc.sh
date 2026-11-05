@@ -73,7 +73,11 @@
 # above 1/6). The restarted run has not trained yet: restart its trainer with the current kvg_job.sh / sp_qwen3.py (state kept).
 # serial 32: the user - the guessing comes from the training settings (tiny noisy updates, high lr), not the reward; change
 # one thing at a time. Closed-but-wrong back to 0 (the standard 1 / 0 reward) from the next round on (kvg_wrong is re-read).
-SER=32
+# serial 33: diagnosis of run 1 - the model's layers moved 5-9e-5 (relative), the size of ~40 Adam steps of lr 1e-6 in
+# uncorrelated directions (sqrt(40) x 1e-6): a random walk, not a direction. The hypernet ran at lr 2e-5 (20-40x the model's)
+# and so walked 20-40x as far - set its lr to the model's 5e-7 (kvg_plr, re-read each round). Also: the totals of the
+# v3 -> v9 / v10 diff (the top lines were lost from the log), and what is running.
+SER=33
 if [ -f /root/.boxrmx_serial ] && [ "$(cat /root/.boxrmx_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxrmx_serial
 [ -d /venv/main/bin ] && export PATH=/venv/main/bin:$PATH
@@ -344,4 +348,12 @@ JOB
   setsid nohup bash -c 'bash /root/s31.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
 fi
 [ -e /root/.s32w ] || { touch /root/.s32w; echo 0 > /root/w/kvg_wrong; echo "[kg] s32: closed-but-wrong back to 0 $(date -u)"; }
+if [ ! -e /root/.s33 ]; then touch /root/.s33
+  echo 5e-7 > /root/w/kvg_plr; echo "[kg] s33: hypernet lr 5e-7 from the next round $(date -u)"
+  ps aux | grep -E "sp_qwen3.py|kvg_job|kvc_job|s31.sh|s28.sh" | grep -v grep | awk '{print "[kg] ps:", $11, $12, $13, $14, $15, $16}' | cut -c1-150
+  cat > /root/s33.sh <<'JOB'
+cd /root/w; for c in grpo_run1/kvg.pt grpo_run1/kvg_prev.pt; do [ -s $c ] && nice -n 19 python3 param_diff.py kvf_round1.pt $c 2>&1 | head -n 6 | sed "s|^|[kg] diff2 v3 -> $c: |"; done
+JOB
+  setsid nohup bash -c 'bash /root/s33.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
+fi
 # CTL-END
