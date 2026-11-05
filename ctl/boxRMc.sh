@@ -87,7 +87,12 @@
 # round). Same run-2 settings (fp32 LoRA rank 32 lr 1e-5, hypernet frozen, 16 groups per update, 48 problems per round).
 # serial 36: the container log drops lines (the round summaries went missing) - a side loop uploads the [kg]/[kc] lines of
 # w.log to the hub (archive/sp3/kvg/wlog.txt) every 10 min; no restart of the trainer.
-SER=36
+# serial 37: (a) the round-3 eval appended to run 1's kvg_r3_s1.jsonl (73/60 in the log) - run 2's rows separated offline:
+# 39/60; old eval files moved away, evals now named by version. (b) the LoRA steps of rounds 2 and 3 are uncorrelated
+# (cos +0.06): every round starts a fresh optimizer, so its single update is lr x sign(grad) for every parameter and noise
+# moves as far as signal. The optimizer state now persists across rounds (--opt-state kvg_opt.pt): Adam's momentum averages
+# the rounds. The trainer restarts after its running round (STOP_KG, state kept).
+SER=37
 if [ -f /root/.boxrmx_serial ] && [ "$(cat /root/.boxrmx_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxrmx_serial
 [ -d /venv/main/bin ] && export PATH=/venv/main/bin:$PATH
@@ -397,5 +402,16 @@ while true; do grep -E "^\[k[gc]\]|^\[sp\] (grpo groups|LoRA|trained)" w.log | t
 JOB
   setsid nohup bash -c 'bash /root/wlog.sh > /dev/null 2>&1' > /dev/null 2>&1 < /dev/null &
   echo "[kg] s36: w.log mirror to the hub started $(date -u)"
+fi
+if [ ! -e /root/.s37opt ]; then touch /root/.s37opt
+  cd /root/w && mkdir -p grpo_run1 && mv -f kvg_r[0-9]*_s1.jsonl grpo_run1/ 2>/dev/null; touch STOP_KG
+  cat > /root/s37.sh <<'JOB'
+while pgrep -f "^bash /root/kvg_job.sh" > /dev/null; do sleep 30; done
+rm -f /root/w/STOP_KG
+for _t in $(seq 60); do curl -sS -o /root/kvg_job.sh "https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl/kvg_job.sh?nocache=$(date +%s)"; grep -q -- "opt-state" /root/kvg_job.sh && break; sleep 120; done
+echo "[kg] s37: optimizer state across rounds from here $(date -u)"
+cd /root/w && START=dpo_ref.pt exec bash /root/kvg_job.sh
+JOB
+  setsid nohup bash -c 'bash /root/s37.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
 fi
 # CTL-END

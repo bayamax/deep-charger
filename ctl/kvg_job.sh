@@ -11,11 +11,11 @@ export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); cd /root/w
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 R=baya1116/hypernet-sp-distill; H=https://huggingface.co/$R/resolve/main; RAW=https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i
 put() { for _i in 1 2 3 4 5; do python3 -c "import sys; from huggingface_hub import HfApi; HfApi().upload_file(path_or_fileobj=sys.argv[1], path_in_repo='archive/sp3/'+sys.argv[2], repo_id='$R')" "$1" "$2" > put.err 2>&1 && { echo "[hub] $2"; return 0; }; sleep 60; done; echo "[hub] $2 FAILED"; }
-for _t in $(seq 60); do curl -sS -o sp_qwen3.py "$RAW/tools/sp_qwen3.py?nocache=$(date +%s)"; grep -q '"--lora-lr"' sp_qwen3.py && break; sleep 120; done
+for _t in $(seq 60); do curl -sS -o sp_qwen3.py "$RAW/tools/sp_qwen3.py?nocache=$(date +%s)"; grep -q '"--opt-state"' sp_qwen3.py && break; sleep 120; done
 LG=/root/w/sp_kvg.log; NEWG=${NEWG:-24}; NSH=${NSH:-4}; EVERY=${EVERY:-3}; GMIN=${GMIN:-12}
 M="--S 32 --heads 8 --layers 3 --ffn 2048 --rw 1024 --C 128 --maxd 0 --kv-mem --kv-rank 512"
 gt() {   # the GRPO flags, re-read every round: kvg_accum / kvg_ftlr / kvg_ftlayers in /root/w override the defaults without a restart
-  echo "--grpo-groups --ft-layers $(cat kvg_ftlayers 2>/dev/null || echo 28) --opt8bit --ft-lr $(cat kvg_ftlr 2>/dev/null || echo ${FTLR:-1e-6}) --lr $(cat kvg_plr 2>/dev/null || echo 2e-5) --lora $(cat kvg_lora 2>/dev/null || echo 0) --lora-lr $(cat kvg_loralr 2>/dev/null || echo 1e-5) --epochs 1 --accum $(cat kvg_accum 2>/dev/null || echo ${ACCUM:-4}) --const-lr --grpo-wrong $(cat kvg_wrong 2>/dev/null || echo 0)"; }
+  echo "--grpo-groups --ft-layers $(cat kvg_ftlayers 2>/dev/null || echo 28) --opt8bit --ft-lr $(cat kvg_ftlr 2>/dev/null || echo ${FTLR:-1e-6}) --lr $(cat kvg_plr 2>/dev/null || echo 2e-5) --lora $(cat kvg_lora 2>/dev/null || echo 0) --lora-lr $(cat kvg_loralr 2>/dev/null || echo 1e-5) --epochs 1 --accum $(cat kvg_accum 2>/dev/null || echo ${ACCUM:-4}) --const-lr --grpo-wrong $(cat kvg_wrong 2>/dev/null || echo 0) --opt-state kvg_opt.pt"; }
 GT=$(gt)
 rd=$(cat kvg_round 2>/dev/null || echo 0); v0=$(cat VERSION 2>/dev/null || echo 0)
 if [ ! -s kvg.pt ]; then   # the starting weights go out first, so the rollout workers sample from the policy being trained
@@ -70,7 +70,7 @@ PY
     python3 param_sketch.py report $(ls sk_v*.pt | sort -t v -k2 -n) 2>&1 | grep "^\[lora\]" | sed 's/^/  /'; } >> kvg_rounds.txt
   put kvg_rounds.txt kvg/rounds.txt > /dev/null   # the container log drops lines; the round summaries live here too
   if [ $((rd % EVERY)) != 0 ]; then echo "[kg] round $rd (weights v$v) published"; continue; fi
-  o=kvg_r${rd}_s1.jsonl
+  o=kvg_v${v}_s1.jsonl; rm -f $o   # (an older run's file of the same name was appended to once)
   python3 sp_qwen3.py rollout --traces rl_eval60.jsonl $M --ckpt kvg.pt --max-len 12288 --roll-batch 48 --grpo-tok-budget 60000 --seed 1 --roll-out $o --log $LG > run_kggen.log 2>&1
   put $o kvg/$o; echo "[kg] round $rd (weights v$v) seed 1: $(ok60 $o | awk '{print $1 "/60 correct, closed " $2}')"; put $LG kvg/kvg.log
 done

@@ -155,6 +155,9 @@ ap.add_argument("--grad-ckpt", action="store_true", help="train: gradient checkp
 ap.add_argument("--lora", type=int, default=0, help="train the model through fp32 LoRA adapters of this rank on q/k/v/o and the MLP of "
                 "every layer (0 = off; a checkpoint that carries LoRA turns it on at its rank). The bf16 weights cannot take small "
                 "updates (one bf16 step is 4e-3 relative; RL updates at lr 1e-6 are 100x smaller and round away) - fp32 adapters can")
+ap.add_argument("--opt-state", default="", help="train: load the optimizer state from this file if it exists and save it there at the "
+                "end - Adam's momentum then carries across the short rounds of an RL run (a fresh optimizer makes every round's first "
+                "step lr x sign(grad) for every parameter, so noise moves as far as signal)")
 ap.add_argument("--lora-lr", type=float, default=1e-5, help="--lora: the adapters' learning rate")
 ap.add_argument("--rmt-rank", type=int, default=16, help="--rmt: LoRA rank (q/k/v/o and the MLP of every layer)")
 ap.add_argument("--const-lr", action="store_true", help="train: constant lr (no warm-up / decay) - for short repeated runs such as the "
@@ -1659,6 +1662,9 @@ else:
         opt = bnb.optim.AdamW8bit(groups, weight_decay=0.0)
     else:
         opt = torch.optim.AdamW(groups, weight_decay=0.0)
+    if a.opt_state and os.path.exists(a.opt_state):
+        try: opt.load_state_dict(torch.load(a.opt_state, map_location="cpu", weights_only=False)); log(f"[sp] optimizer state loaded from {a.opt_state}")
+        except Exception as e_: log(f"[sp] optimizer state NOT loaded ({str(e_)[:100]}) - fresh optimizer")
     steps = int(len(data) * a.epochs); n_upd = max(1, steps // a.accum)
     if a.mode == "train":
         sched = torch.optim.lr_scheduler.LambdaLR(opt, (lambda s: 1.0) if a.const_lr else
@@ -1678,6 +1684,7 @@ else:
             ck["lora"] = {k: v.detach().cpu() for k, v in llm.state_dict().items() if k.endswith((".A", ".B"))}; ck["lora_rank"] = LORA_RANK
             if not a.ft_layers and BASE_FT is not None: ck["ft"] = BASE_FT   # the tuned base the adapters sit on
         torch.save(ck, a.out)
+        if a.opt_state: torch.save(opt.state_dict(), a.opt_state)
 
     t0 = time.time(); K = A_ = N = 0
     if a.grad_ckpt:
