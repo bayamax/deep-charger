@@ -18,10 +18,13 @@ python3 -c "from huggingface_hub import snapshot_download; snapshot_download('Qw
 LG=/root/w/sp_kc.log; SHARD=${SHARD:-0}; NSHARD=${NSHARD:-3}; BS=24
 M="--S 32 --heads 8 --layers 3 --ffn 2048 --rw 1024 --C 128 --maxd 0 --kv-mem --kv-rank 512"
 RB=${RB:-12}; TB=${TB:-16000}   # streams / token budget per batch (12 GB cards: 24 / 30000 ran out of memory)
+PASS=${PASS:-1}   # pass 2+: the whole pool again in another order (the policy has moved; new draws of old problems are new data)
 python3 -c "
-import sys
+import sys, random
 L = open('dpo_pool.jsonl').readlines()[300:]
+if $PASS > 1: random.Random(1000 + $PASS).shuffle(L)
 open('shard.jsonl', 'w').writelines(l for i, l in enumerate(L) if i % $NSHARD == $SHARD)"
+COL=dpo_col_g; [ $PASS -gt 1 ] && COL=dpo_col_g/p$PASS
 NB=$(( ($(wc -l < shard.jsonl) + BS - 1) / BS ))
 echo "[kc] ready $(date -u) | shard $SHARD/$NSHARD: $(wc -l < shard.jsonl) problems, $NB blocks of $BS | $(nvidia-smi --query-gpu=name,memory.total --format=csv,noheader)"
 weights() {   # newest trainer weights -> mem.pt; echoes the version (0 = the reference)
@@ -41,12 +44,13 @@ gen() { local p=$1 o=$2 sd=$3; shift 3; [ -s $o ] && return; local rb=$RB tb=$TB
 b=$(cat kc_block 2>/dev/null || echo 0)
 if [ "$MODE" = grpo ]; then   # GRPO rollout worker: per block the memory G times per problem (GUIDE=1: the raw window once too)
   G=${G:-12}; GUIDE=${GUIDE:-0}; BS=${GBS:-6}; NB=$(( ($(wc -l < shard.jsonl) + BS - 1) / BS ))
-  [ -s kcg_block ] || echo ${KCG_START:-$(( $(cat kc_block 2>/dev/null || echo 0) * 24 / BS ))} > kcg_block   # carry on after the problems used so far (KCG_START: an extra worker on the far half of a shard)
-  b=$(cat kcg_block)
+  BF=kcg_block; [ $PASS -gt 1 ] && BF=kcg${PASS}_block
+  [ -s $BF ] || echo ${KCG_START:-$(( $(cat kc_block 2>/dev/null || echo 0) * 24 / BS ))} > $BF   # carry on after the problems used so far (KCG_START: an extra worker on the far half of a shard)
+  b=$(cat $BF)
   while [ $b -lt $NB ] && [ ! -e STOP_KC ]; do t0=$(date +%s)
     sed -n "$(( b * BS + 1 )),$(( (b + 1) * BS ))p" shard.jsonl > p_$b.jsonl
     [ -s p_$b.jsonl ] || break
-    v=$(weights); sd=$(( 7000 + SHARD * 1000 + b * 4 ))
+    v=$(weights); sd=$(( 7000 + PASS * 20000 + SHARD * 1000 + b * 4 ))
     if [ "$GUIDE" = 1 ]; then gen p_$b.jsonl graw_$b.jsonl $sd --ckpt ref.pt --no-sp; else : > graw_$b.jsonl; fi
     # two stages (dynamic sampling): G1 draws for every problem; the rest of the G only where those G1 were mixed
     G1=${G1:-4}
@@ -82,9 +86,9 @@ print(f"{len(G)} problems ({sum(len(g['samples']) > 4 for g in G)} filled to 12)
       f"mixed groups {mixed}, all wrong {allbad} (with a right guide {sum(1 for g, x in zip(G, rs) if sum(x) == 0 and g['guide'])})")
 PY2
 )
-    put grp_b${b}_v$v.jsonl dpo_col_g/s$SHARD/g${G}_b${b}_v$v.jsonl
-    b=$((b + 1)); echo $b > kcg_block
-    echo "[kc] grpo G$G block $b/$NB ($(( ($(date +%s) - t0) / 60 )) min, memory weights v$v): $s"
+    put grp_b${b}_v$v.jsonl $COL/s$SHARD/g${G}_b${b}_v$v.jsonl
+    b=$((b + 1)); echo $b > $BF
+    echo "[kc] grpo pass $PASS G$G block $b/$NB ($(( ($(date +%s) - t0) / 60 )) min, memory weights v$v): $s"
     [ -n "$ONE" ] && exit 0
   done
   echo "[kc] JOB_DONE $(date -u)"; exit 0

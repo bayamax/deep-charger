@@ -11,7 +11,9 @@
 # (STOP_KC), then the current kvc_job.sh carries on.
 # serial 7: new code (the trainer's weights now carry fp32 LoRA adapters; the rollout loads them from the checkpoint) -
 # after the running block, fetch sp_qwen3.py / kvc_job.sh again and carry on.
-SER=7; COLLECT=1; SHARD=1; NSHARD=4; MODE=grpo
+# serial 8: pass 1 of the pool is nearly used up (Cg finished its range and sat idle) - after the running block, pass 2:
+# the whole pool reshuffled, 6 shards, this box shard 1.
+SER=8; COLLECT=1; SHARD=1; NSHARD=4; MODE=grpo
 if [ -f /root/.boxc_serial ] && [ "$(cat /root/.boxc_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxc_serial
 [ -d /venv/main/bin ] && export PATH=/venv/main/bin:$PATH
@@ -69,5 +71,16 @@ echo "[kc] LoRA-aware code from here $(date -u)"
 exec env MODE=grpo SHARD=1 NSHARD=4 bash /root/kvc_job.sh
 JOB
   setsid nohup bash -c 'bash /root/regen3.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
+fi
+if [ ! -e /root/.pass2 ]; then touch /root/.pass2
+  touch /root/w/STOP_KC
+  cat > /root/pass2.sh <<'JOB'
+while pgrep -f "bash /root/kvc_job.sh" > /dev/null; do sleep 30; done
+rm -f /root/w/STOP_KC; cd /root/w
+for _t in $(seq 60); do curl -sS -o /root/kvc_job.sh "https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl/kvc_job.sh?nocache=$(date +%s)"; grep -q -- "PASS=" /root/kvc_job.sh && break; sleep 120; done
+echo "[kc] pass 2, shard 1 of 6 from here $(date -u)"
+exec env PASS=2 MODE=grpo SHARD=1 NSHARD=6 bash /root/kvc_job.sh
+JOB
+  setsid nohup bash -c 'bash /root/pass2.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
 fi
 # CTL-END
