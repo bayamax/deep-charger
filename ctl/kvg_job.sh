@@ -66,6 +66,9 @@ PY
   mv kvg_next.pt kvg.pt; echo $rd > kvg_round; v=$((v0 + rd)); echo $v > VERSION; cp kvg.pt kvf.pt
   put kvg.pt spKVF_latest.pt && put VERSION kvf/VERSION
   sk kvg.pt $v; moves
+  { echo "round $rd -> v$v $(date -u +%H:%MZ) | $(grep '\[sp\] grpo groups' run_kg_tr.log | tail -1 | cut -d: -f2-) | $(grep -E '\[sp\] train .*grpo group' run_kg_tr.log | tail -1 | grep -oP 'mean reward [0-9.]+')"
+    python3 param_sketch.py report $(ls sk_v*.pt | sort -t v -k2 -n) 2>&1 | grep "^\[lora\]" | sed 's/^/  /'; } >> kvg_rounds.txt
+  put kvg_rounds.txt kvg/rounds.txt > /dev/null   # the container log drops lines; the round summaries live here too
   if [ $((rd % EVERY)) != 0 ]; then echo "[kg] round $rd (weights v$v) published"; continue; fi
   o=kvg_r${rd}_s1.jsonl
   python3 sp_qwen3.py rollout --traces rl_eval60.jsonl $M --ckpt kvg.pt --max-len 12288 --roll-batch 48 --grpo-tok-budget 60000 --seed 1 --roll-out $o --log $LG > run_kggen.log 2>&1
