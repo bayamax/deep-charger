@@ -11,7 +11,8 @@ export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 R=baya1116/hypernet-sp-distill; H=https://huggingface.co/$R/resolve/main; RAW=https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i
 put() { for _i in 1 2 3 4 5; do python3 -c "import sys; from huggingface_hub import HfApi; HfApi().upload_file(path_or_fileobj=sys.argv[1], path_in_repo='archive/sp3/'+sys.argv[2], repo_id='$R')" "$1" "$2" > put.err 2>&1 && return 0; sleep 60; done; echo "[kc] upload $2 FAILED"; }
 get() { for _i in 1 2 3; do curl -sSfL -H "Authorization: Bearer $HF_TOKEN" -o "$2" "$H/$1" && return 0; sleep 10; done; return 1; }
-for f in tools/sp_qwen3.py tools/sp_mathcheck.py ctl/dpo_pool.jsonl ctl/dpo_pairs.py; do curl -sS -o $(basename $f) "$RAW/$f?nocache=$(date +%s)"; done
+POOL=${POOL:-dpo_pool.jsonl}   # POOL=grpo_pool2.jsonl: fresh problems (tools/build_grpo_pool2.py), once each, under TAG
+for f in tools/sp_qwen3.py tools/sp_mathcheck.py ctl/$POOL ctl/dpo_pairs.py; do curl -sS -o $(basename $f) "$RAW/$f?nocache=$(date +%s)"; done
 python3 -c "import transformers" 2>/dev/null || python3 -m pip install -q "huggingface_hub[hf_xet]" transformers "math-verify[antlr4_13_2]" 2>&1 | grep -v -i warn | tail -1
 python3 -c "from huggingface_hub import snapshot_download; snapshot_download('Qwen/Qwen3-1.7B')" > dl.log 2>&1
 [ -s ref.pt ] || get archive/sp3/spKVR_latest.pt ref.pt || { echo "[kc] no reference weights"; exit 1; }
@@ -21,10 +22,10 @@ RB=${RB:-12}; TB=${TB:-16000}   # streams / token budget per batch (12 GB cards:
 PASS=${PASS:-1}   # pass 2+: the whole pool again in another order (the policy has moved; new draws of old problems are new data)
 python3 -c "
 import sys, random
-L = open('dpo_pool.jsonl').readlines()[300:]
+L = open('$POOL').readlines()[300 if '$POOL' == 'dpo_pool.jsonl' else 0:]
 if $PASS > 1: random.Random(1000 + $PASS).shuffle(L)
 open('shard.jsonl', 'w').writelines(l for i, l in enumerate(L) if i % $NSHARD == $SHARD)"
-COL=dpo_col_g; [ $PASS -gt 1 ] && COL=dpo_col_g/p$PASS
+TAG=${TAG:-}; COL=dpo_col_g; [ $PASS -gt 1 ] && COL=dpo_col_g/p$PASS; [ -n "$TAG" ] && COL=dpo_col_g/$TAG
 NB=$(( ($(wc -l < shard.jsonl) + BS - 1) / BS ))
 echo "[kc] ready $(date -u) | shard $SHARD/$NSHARD: $(wc -l < shard.jsonl) problems, $NB blocks of $BS | $(nvidia-smi --query-gpu=name,memory.total --format=csv,noheader)"
 weights() {   # newest trainer weights -> mem.pt; echoes the version (0 = the reference)
@@ -44,13 +45,14 @@ gen() { local p=$1 o=$2 sd=$3; shift 3; [ -s $o ] && return; local rb=$RB tb=$TB
 b=$(cat kc_block 2>/dev/null || echo 0)
 if [ "$MODE" = grpo ]; then   # GRPO rollout worker: per block the memory G times per problem (GUIDE=1: the raw window once too)
   G=${G:-12}; GUIDE=${GUIDE:-0}; BS=${GBS:-6}; NB=$(( ($(wc -l < shard.jsonl) + BS - 1) / BS ))
-  BF=kcg_block; [ $PASS -gt 1 ] && BF=kcg${PASS}_block
-  [ -s $BF ] || echo ${KCG_START:-$(( $(cat kc_block 2>/dev/null || echo 0) * 24 / BS ))} > $BF   # carry on after the problems used so far (KCG_START: an extra worker on the far half of a shard)
+  BF=kcg_block; [ $PASS -gt 1 ] && BF=kcg${PASS}_block; [ -n "$TAG" ] && BF=kcg_${TAG}_block
+  K0=$(( $(cat kc_block 2>/dev/null || echo 0) * 24 / BS )); [ -n "$TAG" ] && K0=0   # a fresh pool starts at its first block
+  [ -s $BF ] || echo ${KCG_START:-$K0} > $BF   # carry on after the problems used so far (KCG_START: an extra worker on the far half of a shard)
   b=$(cat $BF)
   while [ $b -lt $NB ] && [ ! -e STOP_KC ]; do t0=$(date +%s)
     sed -n "$(( b * BS + 1 )),$(( (b + 1) * BS ))p" shard.jsonl > p_$b.jsonl
     [ -s p_$b.jsonl ] || break
-    v=$(weights); sd=$(( 7000 + PASS * 20000 + SHARD * 1000 + b * 4 ))
+    v=$(weights); sd=$(( 7000 + PASS * 20000 + ${#TAG} * 100000 + SHARD * 1000 + b * 4 ))
     if [ "$GUIDE" = 1 ]; then gen p_$b.jsonl graw_$b.jsonl $sd --ckpt ref.pt --no-sp; else : > graw_$b.jsonl; fi
     # two stages (dynamic sampling): G1 draws for every problem; the rest of the G only where those G1 were mixed
     G1=${G1:-4}

@@ -13,7 +13,9 @@
 # after the running block, fetch sp_qwen3.py / kvc_job.sh again and carry on.
 # serial 8: pass 1 of the pool is nearly used up (Cg finished its range and sat idle) - after the running block, pass 2:
 # the whole pool reshuffled, 6 shards, this box shard 0.
-SER=8; COLLECT=1; SHARD=2; NSHARD=4; MODE=grpo
+# serial 9: fresh problems instead of pass 2 (the user: problems once each) - after the running block, ctl/grpo_pool2.jsonl
+# (4498 unused problems, tools/build_grpo_pool2.py) in 6 shards, this box shard 0, under dpo_col_g/n2/.
+SER=9; COLLECT=1; SHARD=2; NSHARD=4; MODE=grpo
 if [ -f /root/.boxc_serial ] && [ "$(cat /root/.boxc_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxc_serial
 [ -d /venv/main/bin ] && export PATH=/venv/main/bin:$PATH
@@ -82,5 +84,16 @@ echo "[kc] pass 2, shard 0 of 6 from here $(date -u)"
 exec env PASS=2 MODE=grpo SHARD=0 NSHARD=6 bash /root/kvc_job.sh
 JOB
   setsid nohup bash -c 'bash /root/pass2.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
+fi
+if [ ! -e /root/.pool2 ]; then touch /root/.pool2
+  touch /root/w/STOP_KC
+  cat > /root/pool2.sh <<'JOB'
+while pgrep -f "bash /root/kvc_job.sh" > /dev/null; do sleep 30; done
+rm -f /root/w/STOP_KC; cd /root/w
+for _t in $(seq 60); do curl -sS -o /root/kvc_job.sh "https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl/kvc_job.sh?nocache=$(date +%s)"; grep -q -- 'TAG=' /root/kvc_job.sh && break; sleep 120; done
+echo "[kc] fresh pool grpo_pool2, shard 0 of 6 from here $(date -u)"
+exec env POOL=grpo_pool2.jsonl TAG=n2 MODE=grpo SHARD=0 NSHARD=6 bash /root/kvc_job.sh
+JOB
+  setsid nohup bash -c 'bash /root/pool2.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
 fi
 # CTL-END
