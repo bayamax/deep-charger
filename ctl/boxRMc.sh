@@ -85,7 +85,9 @@
 # serial 35: the user - restart from a model close to the base that did well: dpo_ref.pt (= kvr.pt, the --ctl-window
 # segment-1 hypernet on the UNTOUCHED base model; 40/60, 3 closed-but-wrong) instead of v3 (whose hypernet carries a DPO
 # round). Same run-2 settings (fp32 LoRA rank 32 lr 1e-5, hypernet frozen, 16 groups per update, 48 problems per round).
-SER=35
+# serial 36: the container log drops lines (the round summaries went missing) - a side loop uploads the [kg]/[kc] lines of
+# w.log to the hub (archive/sp3/kvg/wlog.txt) every 10 min; no restart of the trainer.
+SER=36
 if [ -f /root/.boxrmx_serial ] && [ "$(cat /root/.boxrmx_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxrmx_serial
 [ -d /venv/main/bin ] && export PATH=/venv/main/bin:$PATH
@@ -386,5 +388,14 @@ echo "[kg] s35: run 2 from the base model + the segment-1 hypernet (dpo_ref.pt) 
 cd /root/w && START=dpo_ref.pt exec bash /root/kvg_job.sh
 JOB
   setsid nohup bash -c 'bash /root/s35.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
+fi
+if [ ! -e /root/.s36wlog ]; then touch /root/.s36wlog
+  cat > /root/wlog.sh <<'JOB'
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token); cd /root/w
+while true; do grep -E "^\[k[gc]\]|^\[sp\] (grpo groups|LoRA|trained)" w.log | tail -n 400 > wlog.txt
+  python3 -c "from huggingface_hub import HfApi; HfApi().upload_file(path_or_fileobj='wlog.txt', path_in_repo='archive/sp3/kvg/wlog.txt', repo_id='baya1116/hypernet-sp-distill')" > /dev/null 2>&1; sleep 600; done
+JOB
+  setsid nohup bash -c 'bash /root/wlog.sh > /dev/null 2>&1' > /dev/null 2>&1 < /dev/null &
+  echo "[kg] s36: w.log mirror to the hub started $(date -u)"
 fi
 # CTL-END
