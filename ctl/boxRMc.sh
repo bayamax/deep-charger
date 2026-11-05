@@ -60,11 +60,12 @@
 # (training-problem accuracy flat at ~56-58% over v6-v9, repeating tails up). Likely cause: 4 groups per update is a tiny,
 # noisy batch (DeepScaleR-style runs use ~128 prompts per update) - only the consistent signal (close) gets learned. After the
 # running round the trainer restarts with the current kvg_job.sh at 16 groups per update (flags re-read every round).
+# serial 29: write kvg_newg (48 problems per round) even if serial 28 already ran.
 # serial 28: the GRPO is coming apart - training-problem accuracy v8 58.6% -> v9 55.2% -> v10 49.2% (100+ problems each),
 # answers shorter, the 60 problems at v9 37 (avg of 3). Stop the running round now and start over from v3 (the round-1 DPO
 # weights, 42 / 39) at 16 groups per update and model lr 5e-7, with the parameter-movement tracking from the start; v3 goes
 # out as the next version so the workers sample from it, older groups are not used.
-SER=28
+SER=29
 if [ -f /root/.boxrmx_serial ] && [ "$(cat /root/.boxrmx_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxrmx_serial
 [ -d /venv/main/bin ] && export PATH=/venv/main/bin:$PATH
@@ -316,4 +317,5 @@ cd /root/w && START=kvf_round1.pt exec bash /root/kvg_job.sh
 JOB
   setsid nohup bash -c 'bash /root/s28.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
 fi
+[ -e /root/w/kvg_newg ] || echo 48 > /root/w/kvg_newg
 # CTL-END
