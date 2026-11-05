@@ -51,8 +51,16 @@ PY
   : > newg.jsonl
   for f in $(cat newg_list.txt); do curl -sSfL -H "Authorization: Bearer $HF_TOKEN" "$H/$f" >> newg.jsonl 2>/dev/null; done
   n=$(wc -l < newg.jsonl)
-  NEWG=$(cat kvg_newg 2>/dev/null || echo $NEWG)
-  if [ $n -lt $NEWG ]; then   # meanwhile one rollout block of its own shard
+  NEWG=$(cat kvg_newg 2>/dev/null || echo $NEWG); NEWINF=$(cat kvg_newinf 2>/dev/null || echo 16)
+  ninf=$(python3 -c "
+import json, sys; sys.path.insert(0, '.')
+from sp_mathcheck import correct
+k = 0
+for l in open('newg.jsonl'):
+    g = json.loads(l); r = [('</think>' in t and correct({'text': t, 'gold': g['gold']})) for t in g['samples']]
+    k += 0 < sum(r) < len(r)
+print(k)")
+  if [ $n -lt $NEWG ] || [ $ninf -lt $NEWINF ]; then   # a round needs NEWINF informative groups (one full update), not just NEWG problems   # meanwhile one rollout block of its own shard
     curl -sS -o kvc_job.sh "$RAW/ctl/kvc_job.sh?nocache=$(date +%s)"
     MODE=grpo SHARD=$((NSH - 1)) NSHARD=$NSH ONE=1 RB=48 TB=60000 bash kvc_job.sh | grep "^\[kc\] grpo" | sed 's/^\[kc\]/[kg] own/' || sleep 600
     continue; fi
@@ -60,7 +68,7 @@ PY
   cp kvg.pt kvg_prev.pt
   GT=$(gt); echo "[kg] round $rd flags: $GT"
   python3 sp_qwen3.py train --traces kvg_groups_r$rd.jsonl $M --max-len 12288 --ckpt kvg_prev.pt $GT --seed $((6000 + rd)) --out kvg_next.pt --log $LG > run_kg_tr.log 2>&1
-  echo "[kg] round $rd: $n problems | $(grep '\[sp\] grpo groups' run_kg_tr.log | tail -1 | cut -d: -f2-) | $(grep -E '\[sp\] train .*grpo group' run_kg_tr.log | tail -1 | grep -oP 'mean reward.*') | $(grep -oP '\[sp\] LoRA.*' run_kg_tr.log | head -1)"
+  echo "[kg] round $rd: $n problems ($ninf informative at the gate) | $(grep '\[sp\] grpo groups' run_kg_tr.log | tail -1 | cut -d: -f2-) | $(grep -E '\[sp\] train .*grpo group' run_kg_tr.log | tail -1 | grep -oP 'mean reward.*') | $(grep -oP '\[sp\] LoRA.*' run_kg_tr.log | head -1)"
   grep -E "Error|Traceback|out of memory" run_kg_tr.log | tail -1 | sed "s/^/[kg] round $rd: /"
   [ -s kvg_next.pt ] && grep -q "^\[sp\] trained" run_kg_tr.log || { echo "[kg] round $rd: training FAILED"; break; }
   mv kvg_next.pt kvg.pt; echo $rd > kvg_round; v=$((v0 + rd)); echo $v > VERSION; cp kvg.pt kvf.pt
