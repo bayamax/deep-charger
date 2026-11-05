@@ -60,7 +60,11 @@
 # (training-problem accuracy flat at ~56-58% over v6-v9, repeating tails up). Likely cause: 4 groups per update is a tiny,
 # noisy batch (DeepScaleR-style runs use ~128 prompts per update) - only the consistent signal (close) gets learned. After the
 # running round the trainer restarts with the current kvg_job.sh at 16 groups per update (flags re-read every round).
-SER=27
+# serial 28: the GRPO is coming apart - training-problem accuracy v8 58.6% -> v9 55.2% -> v10 49.2% (100+ problems each),
+# answers shorter, the 60 problems at v9 37 (avg of 3). Stop the running round now and start over from v3 (the round-1 DPO
+# weights, 42 / 39) at 16 groups per update and model lr 5e-7, with the parameter-movement tracking from the start; v3 goes
+# out as the next version so the workers sample from it, older groups are not used.
+SER=28
 if [ -f /root/.boxrmx_serial ] && [ "$(cat /root/.boxrmx_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxrmx_serial
 [ -d /venv/main/bin ] && export PATH=/venv/main/bin:$PATH
@@ -300,5 +304,16 @@ echo "[kg] s27: 16 groups per update from here $(date -u)"
 exec bash /root/kvg_job.sh
 JOB
   setsid nohup bash -c 'bash /root/s27.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
+fi
+if [ ! -e /root/.s28kg ]; then touch /root/.s28kg
+  for J in $(pgrep -f "bash /root/s27.sh") $(pgrep -f "bash /root/s26.sh") $(pgrep -f "^bash /root/kvg_job.sh") $(pgrep -f "bash kvc_job.sh"); do pkill -P $J; kill $J; done; sleep 3; pkill -f "sp_qwen3.py"; sleep 5
+  cd /root/w && mkdir -p grpo_run1 && mv -f kvg.pt kvg_prev.pt kvg_round kvg_v0 sk_v*.pt grpo_run1/ 2>/dev/null; rm -f STOP_KG
+  echo 16 > kvg_accum; echo 5e-7 > kvg_ftlr
+  cat > /root/s28.sh <<'JOB'
+for _t in $(seq 60); do curl -sS -o /root/kvg_job.sh "https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl/kvg_job.sh?nocache=$(date +%s)"; grep -q -- "param_sketch" /root/kvg_job.sh && break; sleep 120; done
+echo "[kg] s28: GRPO over from v3, 16 groups per update, model lr 5e-7 $(date -u)"
+cd /root/w && START=kvf_round1.pt exec bash /root/kvg_job.sh
+JOB
+  setsid nohup bash -c 'bash /root/s28.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
 fi
 # CTL-END
