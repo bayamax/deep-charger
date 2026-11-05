@@ -71,7 +71,9 @@
 # closed 46% -> 95% of the wrong ones, their median length 29.7k -> 13.2k chars, distinct answers per 4 draws 1.27 -> 2.24):
 # with 0 for unclosed and for wrong alike, any answer beats thinking on. Closed-but-wrong now scores -0.2 (guessing pays only
 # above 1/6). The restarted run has not trained yet: restart its trainer with the current kvg_job.sh / sp_qwen3.py (state kept).
-SER=31
+# serial 32: the user - the guessing comes from the training settings (tiny noisy updates, high lr), not the reward; change
+# one thing at a time. Closed-but-wrong back to 0 (the standard 1 / 0 reward) from the next round on (kvg_wrong is re-read).
+SER=32
 if [ -f /root/.boxrmx_serial ] && [ "$(cat /root/.boxrmx_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxrmx_serial
 [ -d /venv/main/bin ] && export PATH=/venv/main/bin:$PATH
@@ -341,4 +343,5 @@ cd /root/w && START=kvf_round1.pt exec bash /root/kvg_job.sh
 JOB
   setsid nohup bash -c 'bash /root/s31.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
 fi
+[ -e /root/.s32w ] || { touch /root/.s32w; echo 0 > /root/w/kvg_wrong; echo "[kg] s32: closed-but-wrong back to 0 $(date -u)"; }
 # CTL-END
