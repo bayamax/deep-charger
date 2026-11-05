@@ -13,7 +13,7 @@ D = 1 << 20
 
 def sketch(path, out):
     ck = torch.load(path, map_location="cpu", weights_only=False)
-    parts = {"model": ck.get("ft") or {}, "hypernet": ck["pooler"]}
+    parts = {"model": ck.get("ft") or {}, "hypernet": ck["pooler"], "lora": ck.get("lora") or {}}
     sk = {}
     for name, sd in parts.items():
         s = torch.zeros(D, dtype=torch.float64)

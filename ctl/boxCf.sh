@@ -6,7 +6,9 @@
 # (STOP_KC), then the current kvc_job.sh carries on.
 # serial 3: after the running block, one evaluation of the newest weights (60 problems, seed 2; ctl/kve_job.sh) - the
 # trainer's seed-1 scores (41, 34, 36) disagree with the rising training-problem accuracy - then collecting again.
-SER=3; COLLECT=1; SHARD=0; NSHARD=4; MODE=grpo
+# serial 4: new code (the trainer's weights now carry fp32 LoRA adapters; the rollout loads them from the checkpoint) -
+# after the running block, fetch sp_qwen3.py / kvc_job.sh again and carry on.
+SER=4; COLLECT=1; SHARD=0; NSHARD=4; MODE=grpo
 if [ -f /root/.boxc_serial ] && [ "$(cat /root/.boxc_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxc_serial
 [ -d /venv/main/bin ] && export PATH=/venv/main/bin:$PATH
@@ -64,5 +66,17 @@ curl -sS -o /root/kvc_job.sh "https://raw.githubusercontent.com/bayamax/deep-cha
 exec env MODE=grpo SHARD=0 NSHARD=4 bash /root/kvc_job.sh
 JOB
   setsid nohup bash -c 'bash /root/eval.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
+fi
+if [ ! -e /root/.graceful3 ]; then touch /root/.graceful3
+  touch /root/w/STOP_KC
+  cat > /root/regen3.sh <<'JOB'
+while pgrep -f "bash /root/kvc_job.sh" > /dev/null; do sleep 30; done
+rm -f /root/w/STOP_KC; cd /root/w
+for _t in $(seq 60); do curl -sS -o sp_new.py "https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/tools/sp_qwen3.py?nocache=$(date +%s)"; grep -q '"--lora-lr"' sp_new.py && break; sleep 120; done; mv sp_new.py sp_qwen3.py
+curl -sS -o /root/kvc_job.sh "https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl/kvc_job.sh?nocache=$(date +%s)"
+echo "[kc] LoRA-aware code from here $(date -u)"
+exec env KCG_START=60 MODE=grpo SHARD=0 NSHARD=4 bash /root/kvc_job.sh
+JOB
+  setsid nohup bash -c 'bash /root/regen3.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
 fi
 # CTL-END

@@ -11,11 +11,11 @@ export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); cd /root/w
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 R=baya1116/hypernet-sp-distill; H=https://huggingface.co/$R/resolve/main; RAW=https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i
 put() { for _i in 1 2 3 4 5; do python3 -c "import sys; from huggingface_hub import HfApi; HfApi().upload_file(path_or_fileobj=sys.argv[1], path_in_repo='archive/sp3/'+sys.argv[2], repo_id='$R')" "$1" "$2" > put.err 2>&1 && { echo "[hub] $2"; return 0; }; sleep 60; done; echo "[hub] $2 FAILED"; }
-for _t in $(seq 60); do curl -sS -o sp_qwen3.py "$RAW/tools/sp_qwen3.py?nocache=$(date +%s)"; grep -q '"--grpo-wrong"' sp_qwen3.py && break; sleep 120; done
+for _t in $(seq 60); do curl -sS -o sp_qwen3.py "$RAW/tools/sp_qwen3.py?nocache=$(date +%s)"; grep -q '"--lora-lr"' sp_qwen3.py && break; sleep 120; done
 LG=/root/w/sp_kvg.log; NEWG=${NEWG:-24}; NSH=${NSH:-4}; EVERY=${EVERY:-3}; GMIN=${GMIN:-12}
 M="--S 32 --heads 8 --layers 3 --ffn 2048 --rw 1024 --C 128 --maxd 0 --kv-mem --kv-rank 512"
 gt() {   # the GRPO flags, re-read every round: kvg_accum / kvg_ftlr / kvg_ftlayers in /root/w override the defaults without a restart
-  echo "--grpo-groups --ft-layers $(cat kvg_ftlayers 2>/dev/null || echo 28) --opt8bit --ft-lr $(cat kvg_ftlr 2>/dev/null || echo ${FTLR:-1e-6}) --lr $(cat kvg_plr 2>/dev/null || echo 2e-5) --epochs 1 --accum $(cat kvg_accum 2>/dev/null || echo ${ACCUM:-4}) --const-lr --grpo-wrong $(cat kvg_wrong 2>/dev/null || echo 0)"; }
+  echo "--grpo-groups --ft-layers $(cat kvg_ftlayers 2>/dev/null || echo 28) --opt8bit --ft-lr $(cat kvg_ftlr 2>/dev/null || echo ${FTLR:-1e-6}) --lr $(cat kvg_plr 2>/dev/null || echo 2e-5) --lora $(cat kvg_lora 2>/dev/null || echo 0) --lora-lr $(cat kvg_loralr 2>/dev/null || echo 1e-5) --epochs 1 --accum $(cat kvg_accum 2>/dev/null || echo ${ACCUM:-4}) --const-lr --grpo-wrong $(cat kvg_wrong 2>/dev/null || echo 0)"; }
 GT=$(gt)
 rd=$(cat kvg_round 2>/dev/null || echo 0); v0=$(cat VERSION 2>/dev/null || echo 0)
 if [ ! -s kvg.pt ]; then   # the starting weights go out first, so the rollout workers sample from the policy being trained
@@ -37,7 +37,7 @@ moves() { python3 param_sketch.py report $(ls sk_v*.pt | sort -t v -k2 -n) 2>&1 
 moves
 touch used_groups.txt
 while [ ! -e STOP_KG ]; do
-  V0=$v0 GMIN=$GMIN python3 - <<'PY' > newg_list.txt
+  V0=$v0 GMIN=$GMIN CUR=$(cat VERSION) python3 - <<'PY' > newg_list.txt
 import os, re
 from huggingface_hub import HfApi
 used = set(open('used_groups.txt').read().split()); v0 = int(os.environ['V0'])
@@ -45,7 +45,8 @@ fs = [f for f in HfApi().list_repo_files('baya1116/hypernet-sp-distill') if f.st
 gmin = int(os.environ.get('GMIN', '0'))
 def g_(f):   # group size from the file name (g12_b..); the first G=4 files carry none
     m = re.search(r'/g(\d+)_b', f); return int(m.group(1)) if m else 4
-print('\n'.join(sorted(f for f in fs if int(re.search(r'_v(\d+)\.jsonl$', f).group(1)) >= v0 and g_(f) >= gmin)))   # this run's weights, big groups
+lo = max(v0, int(os.environ.get('CUR', v0)) - 1)   # this run's weights, at most one version stale (asynchronous workers)
+print('\n'.join(sorted(f for f in fs if int(re.search(r'_v(\d+)\.jsonl$', f).group(1)) >= lo and g_(f) >= gmin)))
 PY
   : > newg.jsonl
   for f in $(cat newg_list.txt); do curl -sSfL -H "Authorization: Bearer $HF_TOKEN" "$H/$f" >> newg.jsonl 2>/dev/null; done
@@ -59,7 +60,7 @@ PY
   cp kvg.pt kvg_prev.pt
   GT=$(gt); echo "[kg] round $rd flags: $GT"
   python3 sp_qwen3.py train --traces kvg_groups_r$rd.jsonl $M --max-len 12288 --ckpt kvg_prev.pt $GT --seed $((6000 + rd)) --out kvg_next.pt --log $LG > run_kg_tr.log 2>&1
-  echo "[kg] round $rd: $n problems | $(grep '\[sp\] grpo groups' run_kg_tr.log | tail -1 | cut -d: -f2-) | $(grep -E '\[sp\] train .*grpo group' run_kg_tr.log | tail -1 | grep -oP 'mean reward.*')"
+  echo "[kg] round $rd: $n problems | $(grep '\[sp\] grpo groups' run_kg_tr.log | tail -1 | cut -d: -f2-) | $(grep -E '\[sp\] train .*grpo group' run_kg_tr.log | tail -1 | grep -oP 'mean reward.*') | $(grep -oP '\[sp\] LoRA.*' run_kg_tr.log | head -1)"
   grep -E "Error|Traceback|out of memory" run_kg_tr.log | tail -1 | sed "s/^/[kg] round $rd: /"
   [ -s kvg_next.pt ] && grep -q "^\[sp\] trained" run_kg_tr.log || { echo "[kg] round $rd: training FAILED"; break; }
   mv kvg_next.pt kvg.pt; echo $rd > kvg_round; v=$((v0 + rd)); echo $v > VERSION; cp kvg.pt kvf.pt

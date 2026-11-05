@@ -77,7 +77,12 @@
 # uncorrelated directions (sqrt(40) x 1e-6): a random walk, not a direction. The hypernet ran at lr 2e-5 (20-40x the model's)
 # and so walked 20-40x as far - set its lr to the model's 5e-7 (kvg_plr, re-read each round). Also: the totals of the
 # v3 -> v9 / v10 diff (the top lines were lost from the log), and what is running.
-SER=33
+# serial 34: the cause of run 1 (and of the DPO rounds' faint effect): the model's weights are bf16, one bf16 step is 4e-3
+# relative, and the fp32 masters moved 5-9e-5 in the whole run - the updates rounded away on the copy back; only the fp32
+# hypernet moved (at 20x the lr) and drifted. Run 2: the model through fp32 LoRA (rank 32 on q/k/v/o and the MLP of all
+# 28 layers, lr 1e-5), the hypernet frozen (lr 0), 16 groups per update, 48 problems per round, reward 1 / 0, from v3
+# (kvf_round1.pt). Published first as the next version (B = 0: the same policy), groups more than one version old are skipped.
+SER=34
 if [ -f /root/.boxrmx_serial ] && [ "$(cat /root/.boxrmx_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxrmx_serial
 [ -d /venv/main/bin ] && export PATH=/venv/main/bin:$PATH
@@ -355,5 +360,16 @@ if [ ! -e /root/.s33 ]; then touch /root/.s33
 cd /root/w; for c in grpo_run1/kvg.pt grpo_run1/kvg_prev.pt; do [ -s $c ] && nice -n 19 python3 param_diff.py kvf_round1.pt $c 2>&1 | head -n 6 | sed "s|^|[kg] diff2 v3 -> $c: |"; done
 JOB
   setsid nohup bash -c 'bash /root/s33.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
+fi
+if [ ! -e /root/.s34kg ]; then touch /root/.s34kg
+  for J in $(pgrep -f "bash /root/s31.sh") $(pgrep -f "bash /root/s28.sh") $(pgrep -f "^bash /root/kvg_job.sh") $(pgrep -f "bash kvc_job.sh"); do pkill -P $J; kill $J; done; sleep 3; pkill -f "sp_qwen3.py rollout"; pkill -f "sp_qwen3.py train"; sleep 5
+  cd /root/w && mkdir -p grpo_run2_pre && mv -f kvg.pt kvg_prev.pt kvg_round kvg_v0 sk_v*.pt grpo_run2_pre/ 2>/dev/null; rm -f STOP_KG
+  echo 32 > kvg_lora; echo 1e-5 > kvg_loralr; echo 0 > kvg_ftlayers; echo 0 > kvg_plr; echo 16 > kvg_accum; echo 48 > kvg_newg; echo 0 > kvg_wrong
+  cat > /root/s34.sh <<'JOB'
+for _t in $(seq 60); do curl -sS -o /root/kvg_job.sh "https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl/kvg_job.sh?nocache=$(date +%s)"; grep -q -- "kvg_loralr" /root/kvg_job.sh && break; sleep 120; done
+echo "[kg] s34: run 2 - fp32 LoRA rank 32 lr 1e-5, hypernet frozen, 16 groups per update, from v3 $(date -u)"
+cd /root/w && START=kvf_round1.pt exec bash /root/kvg_job.sh
+JOB
+  setsid nohup bash -c 'bash /root/s34.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
 fi
 # CTL-END

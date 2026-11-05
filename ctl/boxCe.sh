@@ -6,7 +6,9 @@
 # serial 3: plain GRPO (the user): groups of 12 memory draws, no raw-window guide, blocks of 6 problems.
 # serial 4: two-stage sampling (4 draws, then 8 more only where the 4 were mixed) - the running block finishes first
 # (STOP_KC), then the current kvc_job.sh carries on.
-SER=4; COLLECT=1; SHARD=0; NSHARD=4; MODE=grpo
+# serial 5: new code (the trainer's weights now carry fp32 LoRA adapters; the rollout loads them from the checkpoint) -
+# after the running block, fetch sp_qwen3.py / kvc_job.sh again and carry on.
+SER=5; COLLECT=1; SHARD=0; NSHARD=4; MODE=grpo
 if [ -f /root/.boxc_serial ] && [ "$(cat /root/.boxc_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxc_serial
 [ -d /venv/main/bin ] && export PATH=/venv/main/bin:$PATH
@@ -52,5 +54,17 @@ echo "[kc] two-stage sampling from here $(date -u) ($(grep -c 'G1=' /root/kvc_jo
 exec env MODE=grpo SHARD=0 NSHARD=4 bash /root/kvc_job.sh
 JOB
   setsid nohup bash -c 'bash /root/regen.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
+fi
+if [ ! -e /root/.graceful3 ]; then touch /root/.graceful3
+  touch /root/w/STOP_KC
+  cat > /root/regen3.sh <<'JOB'
+while pgrep -f "bash /root/kvc_job.sh" > /dev/null; do sleep 30; done
+rm -f /root/w/STOP_KC; cd /root/w
+for _t in $(seq 60); do curl -sS -o sp_new.py "https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/tools/sp_qwen3.py?nocache=$(date +%s)"; grep -q '"--lora-lr"' sp_new.py && break; sleep 120; done; mv sp_new.py sp_qwen3.py
+curl -sS -o /root/kvc_job.sh "https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl/kvc_job.sh?nocache=$(date +%s)"
+echo "[kc] LoRA-aware code from here $(date -u)"
+exec env MODE=grpo SHARD=0 NSHARD=4 bash /root/kvc_job.sh
+JOB
+  setsid nohup bash -c 'bash /root/regen3.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
 fi
 # CTL-END

@@ -28,6 +28,7 @@ weights() {   # newest trainer weights -> mem.pt; echoes the version (0 = the re
   local v; v=$(curl -sSfL -H "Authorization: Bearer $HF_TOKEN" "$H/archive/sp3/kvf/VERSION" 2>/dev/null | tr -d '[:space:]')
   [ -n "$v" ] || v=0
   if [ "$v" != "$(cat mem_v 2>/dev/null)" ]; then
+    curl -sS -o sp_new.py "$RAW/tools/sp_qwen3.py?nocache=$(date +%s)" && python3 -c "import ast, sys; ast.parse(open('sp_new.py').read())" 2>/dev/null && mv sp_new.py sp_qwen3.py   # new weights may need new code (LoRA)
     if [ "$v" = 0 ]; then cp ref.pt mem.pt; else get archive/sp3/spKVF_latest.pt mem_new.pt && mv mem_new.pt mem.pt || v=$(cat mem_v 2>/dev/null || echo 0); fi
     echo $v > mem_v; fi
   cat mem_v; }

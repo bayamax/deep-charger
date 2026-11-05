@@ -152,6 +152,10 @@ ap.add_argument("--rmt-copy", action="store_true", help="--rmt as in the RMT pap
                 "memory ([prompt | M | block | M]) instead of separate learned write tokens")
 ap.add_argument("--grad-ckpt", action="store_true", help="train: gradient checkpointing in the decoder layers (activation memory for "
                 "full fine-tuning with the RMT passes)")
+ap.add_argument("--lora", type=int, default=0, help="train the model through fp32 LoRA adapters of this rank on q/k/v/o and the MLP of "
+                "every layer (0 = off; a checkpoint that carries LoRA turns it on at its rank). The bf16 weights cannot take small "
+                "updates (one bf16 step is 4e-3 relative; RL updates at lr 1e-6 are 100x smaller and round away) - fp32 adapters can")
+ap.add_argument("--lora-lr", type=float, default=1e-5, help="--lora: the adapters' learning rate")
 ap.add_argument("--rmt-rank", type=int, default=16, help="--rmt: LoRA rank (q/k/v/o and the MLP of every layer)")
 ap.add_argument("--const-lr", action="store_true", help="train: constant lr (no warm-up / decay) - for short repeated runs such as the "
                 "rounds of an on-policy loop, where a schedule per run would restart every round")
@@ -412,6 +416,19 @@ if a.rmt:
 RMT_PARAMS = ([p_ for n_, p_ in llm.named_parameters() if n_.endswith((".A", ".B"))] + list(RMT.parameters())) if a.rmt else []
 for p_ in RMT_PARAMS: p_.requires_grad_(True)
 
+BASE_FT = ck.get("ft") if a.ckpt else None   # tuned base weights carried through a LoRA run's checkpoints
+LORA_RANK = a.lora or ((ck.get("lora_rank") or 0) if a.ckpt else 0)
+if LORA_RANK and not a.rmt:
+    for li in range(NL):
+        L_ = llm.model.layers[li]
+        for mod, names in ((L_.self_attn, ("q_proj", "k_proj", "v_proj", "o_proj")), (L_.mlp, ("gate_proj", "up_proj", "down_proj"))):
+            for nm in names: setattr(mod, nm, LoRALinear(getattr(mod, nm), LORA_RANK, 2 * LORA_RANK))
+    LORA["default"] = LORA["on"] = True
+    if a.ckpt and ck.get("lora"): llm.load_state_dict({k: v.to(dev) for k, v in ck["lora"].items()}, strict=False)
+    print(f"[sp] LoRA rank {LORA_RANK} on all {NL} layers" + (" (loaded)" if a.ckpt and ck.get("lora") else " (fresh: B = 0)"), flush=True)
+LORA_PARAMS = [p_ for n_, p_ in llm.named_parameters() if n_.endswith((".A", ".B"))] if (LORA_RANK and not a.rmt) else []
+for p_ in LORA_PARAMS: p_.requires_grad_(True)
+
 
 def rmt_write(m_prev, prompt_ids, block_ids):
     """one memory write: [prompt | m_prev | block | write tokens] through the model with the LoRA on -> new memory (1, S, H)"""
@@ -658,7 +675,7 @@ def seq_logp_kv(ids, P, coef=None, temp=1.0):
         kept, absorbed = update_buffer(kept, absorbed, a_ids, lo)
         use = kept.size(1) > 0 and not a.no_sp; t0 = c0 if c0 > 0 else 1
         if c1 - t0 < 1: continue
-        trn = coef is not None and (use or a.ft_layers > 0)   # no memory yet: nothing to train here unless the model itself is tuned
+        trn = coef is not None and (use or a.ft_layers > 0 or bool(LORA_PARAMS))   # no memory yet: nothing to train here unless the model itself is tuned
         with torch.set_grad_enabled(trn):
             cache = PrefixCache(); off = P
             if use:
@@ -1547,7 +1564,7 @@ for r in rows:
     ans = r["ids"] if "ids" in r else tok.encode(r.get("text", r.get("chosen", "")), add_special_tokens=False)
     data.append((torch.tensor(pid + ans), len(pid)))   # CPU; moved per trace
 
-tag = f"S{a.S} rw{a.rw} C{a.C} maxd{a.maxd} L{a.layers} ffn{a.ffn}" + (" par" if a.par and a.mode == "train" else "") + (f" spin b{a.spin_beta}" if a.spin and a.mode == "train" else "") + (" grpo-groups" if a.grpo_groups and a.mode == "train" else "") + (" spnext" + (f" win{a.sn_win}/{a.sn_win_every}" if a.sn_win != "1" else "") if a.spnext and a.mode == "train" else "") + (" no-SP" if a.no_sp else "") + (" SP-null" if a.sp_null else "") + (" SP-swap" if a.sp_swap else "") + (f" filler{FILL}" if a.sp_filler else "") + (" pin-think" if a.pin_think else "") + (" kv-evict" if a.kv_evict else "") + (" para-window" if a.para_window else "") + (f" twin-mix{a.twin_mix}" if a.twin_mix >= 0 else "") + (" twin-minent" if a.twin_minent else "") + (" win-teacher" if a.win_teacher else "") + (" sp-replace" if a.sp_replace else "") + (f" rmt{a.rmt_block}" if a.rmt else "") + (f" kvmem{a.kv_rank}" if a.kv_mem else "") + (f" ctxL{a.ctx_hidden}" if a.ctx_hidden else "") + (" pe-rev" if a.pe_rev else "") + (" pe-norm" if a.pe_norm else "") + (f" FT{a.ft_layers}" if a.ft_layers else "") + (f" from{a.score_from}" if a.score_from else "") + (f" rkl{a.rkl_weight}" if a.rkl_weight and a.mode == "train" else "") + (" ctl-window" if a.ctl_window and a.mode == "train" else "") + (" ctl-para" if a.ctl_para and a.mode == "train" else "")
+tag = f"S{a.S} rw{a.rw} C{a.C} maxd{a.maxd} L{a.layers} ffn{a.ffn}" + (" par" if a.par and a.mode == "train" else "") + (f" spin b{a.spin_beta}" if a.spin and a.mode == "train" else "") + (" grpo-groups" if a.grpo_groups and a.mode == "train" else "") + (" spnext" + (f" win{a.sn_win}/{a.sn_win_every}" if a.sn_win != "1" else "") if a.spnext and a.mode == "train" else "") + (" no-SP" if a.no_sp else "") + (" SP-null" if a.sp_null else "") + (" SP-swap" if a.sp_swap else "") + (f" filler{FILL}" if a.sp_filler else "") + (" pin-think" if a.pin_think else "") + (" kv-evict" if a.kv_evict else "") + (" para-window" if a.para_window else "") + (f" twin-mix{a.twin_mix}" if a.twin_mix >= 0 else "") + (" twin-minent" if a.twin_minent else "") + (" win-teacher" if a.win_teacher else "") + (" sp-replace" if a.sp_replace else "") + (f" rmt{a.rmt_block}" if a.rmt else "") + (f" kvmem{a.kv_rank}" if a.kv_mem else "") + (f" ctxL{a.ctx_hidden}" if a.ctx_hidden else "") + (" pe-rev" if a.pe_rev else "") + (" pe-norm" if a.pe_norm else "") + (f" FT{a.ft_layers}" if a.ft_layers else "") + (f" lora{LORA_RANK}" if LORA_RANK and not a.rmt else "") + (f" from{a.score_from}" if a.score_from else "") + (f" rkl{a.rkl_weight}" if a.rkl_weight and a.mode == "train" else "") + (" ctl-window" if a.ctl_window and a.mode == "train" else "") + (" ctl-para" if a.ctl_para and a.mode == "train" else "")
 if a.mode == "profile":
     pooler.eval(); acc = {}
     for ids, P in data: profile_trace(ids, P, acc)
@@ -1618,6 +1635,7 @@ elif a.mode == "eval":
 else:
     pooler.train()
     groups = [{"params": list(pooler.parameters()) if not a.rmt else RMT_PARAMS, "lr": a.lr}]
+    if LORA_PARAMS: groups.append({"params": LORA_PARAMS, "lr": a.lora_lr})
     FTP, MASTER = [], []
     if a.ft_layers:
         if FT_SD is None:   # fresh run: the frozen original is the teacher; resuming from an FT ckpt keeps the original taken at load
@@ -1647,7 +1665,8 @@ else:
                                                   (lambda s: min(1.0, (s + 1) / max(2, n_upd // 15)) * max(0.1, 1 - s / n_upd)))
     if a.mode == "grpo": run_grpo(opt, FTP, MASTER); sys.exit(0)
     log(f"[sp] train {tag}: {steps} traces, {a.accum} per update ({n_upd} updates), pooler lr {a.lr}"
-        + (f", FT layers 0-{a.ft_layers - 1} lr {a.ft_lr} ({sum(p_.numel() for p_ in FTP) / 1e6:.0f}M)" if a.ft_layers else ""))
+        + (f", FT layers 0-{a.ft_layers - 1} lr {a.ft_lr} ({sum(p_.numel() for p_ in FTP) / 1e6:.0f}M)" if a.ft_layers else "")
+        + (f", LoRA rank {LORA_RANK} lr {a.lora_lr} ({sum(p_.numel() for p_ in LORA_PARAMS) / 1e6:.1f}M, fp32)" if LORA_PARAMS else ""))
 
     def save():
         if not a.out: return
@@ -1655,6 +1674,9 @@ else:
         if a.ft_layers: ck["ft"] = {k: v.detach().cpu() for k, v in llm.state_dict().items() if k in FT_SD}
         if a.rmt: ck["rmt"] = {"mem": {k: v.detach().cpu() for k, v in RMT.state_dict().items()},
                                "lora": {k: v.detach().cpu() for k, v in llm.state_dict().items() if k.endswith((".A", ".B"))}}
+        if LORA_PARAMS:
+            ck["lora"] = {k: v.detach().cpu() for k, v in llm.state_dict().items() if k.endswith((".A", ".B"))}; ck["lora_rank"] = LORA_RANK
+            if not a.ft_layers and BASE_FT is not None: ck["ft"] = BASE_FT   # the tuned base the adapters sit on
         torch.save(ck, a.out)
 
     t0 = time.time(); K = A_ = N = 0
@@ -1696,14 +1718,14 @@ else:
             else: k, g, n = run_trace(ids, P, True, ref_h=_on_dev(refs.pop(st, None)))
         except torch.cuda.OutOfMemoryError as e_:   # a long-prompt trace: drop it (and its half-built grads), keep training
             refs.pop(st, None); pooler.zero_grad(set_to_none=True)
-            for p_ in FTP: p_.grad = None
+            for p_ in FTP + LORA_PARAMS: p_.grad = None
             for m_ in MASTER: m_.grad = None
             ma, mr = torch.cuda.memory_allocated() / 2**30, torch.cuda.memory_reserved() / 2**30; torch.cuda.empty_cache()
             log(f"[sp] trace {st + 1} ({len(ids) - P} tokens): out of memory, skipped | {ma:.1f} / {mr:.1f} GiB allocated / reserved | "
                 f"{str(e_).splitlines()[0][:120]}"); k = g = n = 0
         K += k; A_ += g; N += n
         if (st + 1) % a.accum == 0 or st + 1 == steps:
-            torch.nn.utils.clip_grad_norm_((RMT_PARAMS if a.rmt else list(pooler.parameters())) + MASTER, 1.0)
+            torch.nn.utils.clip_grad_norm_((RMT_PARAMS if a.rmt else list(pooler.parameters())) + MASTER + LORA_PARAMS, 1.0)
             opt.step(); opt.zero_grad(set_to_none=True); sched.step()
             if FTP:
                 with torch.no_grad():
