@@ -4,7 +4,9 @@
 # starts ctl/kvc_job.sh with this box's shard.
 # serial 2: two-stage sampling (4 draws, then 8 more only where the 4 were mixed) - the running block finishes first
 # (STOP_KC), then the current kvc_job.sh carries on.
-SER=2; COLLECT=1; SHARD=0; NSHARD=4; MODE=grpo
+# serial 3: after the running block, one evaluation of the newest weights (60 problems, seed 2; ctl/kve_job.sh) - the
+# trainer's seed-1 scores (41, 34, 36) disagree with the rising training-problem accuracy - then collecting again.
+SER=3; COLLECT=1; SHARD=0; NSHARD=4; MODE=grpo
 if [ -f /root/.boxc_serial ] && [ "$(cat /root/.boxc_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxc_serial
 [ -d /venv/main/bin ] && export PATH=/venv/main/bin:$PATH
@@ -50,5 +52,17 @@ echo "[kc] two-stage sampling from here $(date -u) ($(grep -c 'G1=' /root/kvc_jo
 exec env KCG_START=60 MODE=grpo SHARD=0 NSHARD=4 bash /root/kvc_job.sh
 JOB
   setsid nohup bash -c 'bash /root/regen.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
+fi
+if [ ! -e /root/.eval3 ]; then touch /root/.eval3
+  touch /root/w/STOP_KC
+  cat > /root/eval.sh <<'JOB'
+while pgrep -f "bash /root/kvc_job.sh" > /dev/null; do sleep 30; done
+rm -f /root/w/STOP_KC
+curl -sS -o /root/kve_job.sh "https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl/kve_job.sh?nocache=$(date +%s)"
+SEED=2 bash /root/kve_job.sh
+curl -sS -o /root/kvc_job.sh "https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl/kvc_job.sh?nocache=$(date +%s)"
+exec env MODE=grpo SHARD=0 NSHARD=4 bash /root/kvc_job.sh
+JOB
+  setsid nohup bash -c 'bash /root/eval.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
 fi
 # CTL-END
