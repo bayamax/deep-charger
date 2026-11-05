@@ -65,7 +65,9 @@
 # answers shorter, the 60 problems at v9 37 (avg of 3). Stop the running round now and start over from v3 (the round-1 DPO
 # weights, 42 / 39) at 16 groups per update and model lr 5e-7, with the parameter-movement tracking from the start; v3 goes
 # out as the next version so the workers sample from it, older groups are not used.
-SER=29
+# serial 30: CPU-only diagnosis while the GRPO restart runs: how far did the first GRPO run (v3 -> v10) move the model vs
+# the hypernet (exact relative change, ctl/param_diff.py), also v3 -> v9 if kept.
+SER=30
 if [ -f /root/.boxrmx_serial ] && [ "$(cat /root/.boxrmx_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxrmx_serial
 [ -d /venv/main/bin ] && export PATH=/venv/main/bin:$PATH
@@ -318,4 +320,11 @@ JOB
   setsid nohup bash -c 'bash /root/s28.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
 fi
 [ -e /root/w/kvg_newg ] || echo 48 > /root/w/kvg_newg
+if [ ! -e /root/.s30diff ]; then touch /root/.s30diff
+  cat > /root/s30.sh <<'JOB'
+cd /root/w; curl -sS -o param_diff.py "https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl/param_diff.py?nocache=$(date +%s)"
+for c in grpo_run1/kvg.pt grpo_run1/kvg_prev.pt; do [ -s $c ] && nice -n 19 python3 param_diff.py kvf_round1.pt $c 2>&1 | sed "s|^|[kg] diff v3 -> $c: |"; done
+JOB
+  setsid nohup bash -c 'bash /root/s30.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
+fi
 # CTL-END
