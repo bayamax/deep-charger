@@ -308,7 +308,7 @@ fi
 if [ ! -e /root/.s28kg ]; then touch /root/.s28kg
   for J in $(pgrep -f "bash /root/s27.sh") $(pgrep -f "bash /root/s26.sh") $(pgrep -f "^bash /root/kvg_job.sh") $(pgrep -f "bash kvc_job.sh"); do pkill -P $J; kill $J; done; sleep 3; pkill -f "sp_qwen3.py"; sleep 5
   cd /root/w && mkdir -p grpo_run1 && mv -f kvg.pt kvg_prev.pt kvg_round kvg_v0 sk_v*.pt grpo_run1/ 2>/dev/null; rm -f STOP_KG
-  echo 16 > kvg_accum; echo 5e-7 > kvg_ftlr
+  echo 16 > kvg_accum; echo 5e-7 > kvg_ftlr; echo 48 > kvg_newg   # ~16 informative groups = one full update per round
   cat > /root/s28.sh <<'JOB'
 for _t in $(seq 60); do curl -sS -o /root/kvg_job.sh "https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl/kvg_job.sh?nocache=$(date +%s)"; grep -q -- "param_sketch" /root/kvg_job.sh && break; sleep 120; done
 echo "[kg] s28: GRPO over from v3, 16 groups per update, model lr 5e-7 $(date -u)"

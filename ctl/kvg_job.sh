@@ -50,6 +50,7 @@ PY
   : > newg.jsonl
   for f in $(cat newg_list.txt); do curl -sSfL -H "Authorization: Bearer $HF_TOKEN" "$H/$f" >> newg.jsonl 2>/dev/null; done
   n=$(wc -l < newg.jsonl)
+  NEWG=$(cat kvg_newg 2>/dev/null || echo $NEWG)
   if [ $n -lt $NEWG ]; then   # meanwhile one rollout block of its own shard
     curl -sS -o kvc_job.sh "$RAW/ctl/kvc_job.sh?nocache=$(date +%s)"
     MODE=grpo SHARD=$((NSH - 1)) NSHARD=$NSH ONE=1 RB=48 TB=60000 bash kvc_job.sh | grep "^\[kc\] grpo" | sed 's/^\[kc\]/[kg] own/' || sleep 600
