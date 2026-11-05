@@ -30,7 +30,7 @@ rs = [json.loads(l) for l in open(sys.argv[1])]; print(sum(correct(r) for r in r
 curl -sS -o param_sketch.py "$RAW/ctl/param_sketch.py?nocache=$(date +%s)"
 sk() {   # sk <ckpt> <version>: the weights' sketch (parameter-movement tracking), kept locally and on the hub
   [ -s sk_v$2.pt ] || { python3 param_sketch.py sketch $1 sk_v$2.pt && put sk_v$2.pt kvg/sk_v$2.pt > /dev/null; }; }
-[ -s kvf_round1.pt ] && sk kvf_round1.pt $v0
+[ -s ${START:-kvf_round1.pt} ] && sk ${START:-kvf_round1.pt} $v0
 [ -s kvg_prev.pt ] && [ -s kvg.pt ] && [ "$(cat VERSION 2>/dev/null)" -gt $((v0 + 1)) ] 2>/dev/null && sk kvg_prev.pt $(( $(cat VERSION) - 1 ))
 [ -s kvg.pt ] && sk kvg.pt $(cat VERSION)
 moves() { python3 param_sketch.py report $(ls sk_v*.pt | sort -t v -k2 -n) 2>&1 | sed 's/^/[kg] params /'; }

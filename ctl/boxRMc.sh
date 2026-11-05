@@ -82,7 +82,10 @@
 # hypernet moved (at 20x the lr) and drifted. Run 2: the model through fp32 LoRA (rank 32 on q/k/v/o and the MLP of all
 # 28 layers, lr 1e-5), the hypernet frozen (lr 0), 16 groups per update, 48 problems per round, reward 1 / 0, from v3
 # (kvf_round1.pt). Published first as the next version (B = 0: the same policy), groups more than one version old are skipped.
-SER=34
+# serial 35: the user - restart from a model close to the base that did well: dpo_ref.pt (= kvr.pt, the --ctl-window
+# segment-1 hypernet on the UNTOUCHED base model; 40/60, 3 closed-but-wrong) instead of v3 (whose hypernet carries a DPO
+# round). Same run-2 settings (fp32 LoRA rank 32 lr 1e-5, hypernet frozen, 16 groups per update, 48 problems per round).
+SER=35
 if [ -f /root/.boxrmx_serial ] && [ "$(cat /root/.boxrmx_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxrmx_serial
 [ -d /venv/main/bin ] && export PATH=/venv/main/bin:$PATH
@@ -371,5 +374,17 @@ echo "[kg] s34: run 2 - fp32 LoRA rank 32 lr 1e-5, hypernet frozen, 16 groups pe
 cd /root/w && START=kvf_round1.pt exec bash /root/kvg_job.sh
 JOB
   setsid nohup bash -c 'bash /root/s34.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
+fi
+if [ ! -e /root/.s35kg ]; then touch /root/.s35kg
+  for J in $(pgrep -f "bash /root/s34.sh") $(pgrep -f "bash /root/s31.sh") $(pgrep -f "^bash /root/kvg_job.sh") $(pgrep -f "bash kvc_job.sh"); do pkill -P $J; kill $J; done; sleep 3; pkill -f "sp_qwen3.py rollout"; pkill -f "sp_qwen3.py train"; sleep 5
+  cd /root/w && mkdir -p grpo_run2_v3start && mv -f kvg.pt kvg_prev.pt kvg_round kvg_v0 sk_v*.pt grpo_run2_v3start/ 2>/dev/null; rm -f STOP_KG
+  [ -s dpo_ref.pt ] || curl -sSfL -H "Authorization: Bearer $(tr -d '[:space:]' < /root/.hf_token)" -o dpo_ref.pt "https://huggingface.co/baya1116/hypernet-sp-distill/resolve/main/archive/sp3/spKVR_latest.pt"
+  echo 32 > kvg_lora; echo 1e-5 > kvg_loralr; echo 0 > kvg_ftlayers; echo 0 > kvg_plr; echo 16 > kvg_accum; echo 48 > kvg_newg; echo 0 > kvg_wrong
+  cat > /root/s35.sh <<'JOB'
+for _t in $(seq 60); do curl -sS -o /root/kvg_job.sh "https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl/kvg_job.sh?nocache=$(date +%s)"; grep -q -- "kvg_loralr" /root/kvg_job.sh && break; sleep 120; done
+echo "[kg] s35: run 2 from the base model + the segment-1 hypernet (dpo_ref.pt) $(date -u)"
+cd /root/w && START=dpo_ref.pt exec bash /root/kvg_job.sh
+JOB
+  setsid nohup bash -c 'bash /root/s35.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
 fi
 # CTL-END
