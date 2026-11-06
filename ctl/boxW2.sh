@@ -5,8 +5,8 @@
 # going on grpo_pool2 shard 2 of 6 (dpo_col_g/n2/): on its first start it begins two blocks after the last one on the
 # hub for the shard (the block the replaced box may still be running is skipped); afterwards kvc_job's own block counter
 # (kcg_n2_block, on this box's disk) carries on. Touch /root/w/PAUSE_W to hold it.
-# serial 1: first start.
-SER=1; SHARD=2
+# serial 1: first start. serial 2: streams / token budget from /root/w/kvc_rb, kvc_tb (default 12 / 16000).
+SER=2; SHARD=2
 if [ -f /root/.boxw_serial ] && [ "$(cat /root/.boxw_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxw_serial
 [ -d /venv/main/bin ] && export PATH=/venv/main/bin:$PATH
@@ -35,11 +35,14 @@ print(max(b) + 2 if b else 0)" 2>/dev/null)
     fi
     curl -sS -o /root/kvc_job.sh "$RAW/ctl/kvc_job.sh?nocache=$(date +%s)"
     echo "[w] kvc_job (re)started $(date -u)"
-    POOL=grpo_pool2.jsonl TAG=n2 MODE=grpo SHARD=$SHARD NSHARD=6 bash /root/kvc_job.sh >> /root/w/w.log 2>&1
+    RB=$(cat kvc_rb 2>/dev/null || echo 12) TB=$(cat kvc_tb 2>/dev/null || echo 16000) POOL=grpo_pool2.jsonl TAG=n2 MODE=grpo SHARD=$SHARD NSHARD=6 bash /root/kvc_job.sh >> /root/w/w.log 2>&1
   fi
   sleep 60
 done
 JOB
+if [ -n "" ] && [ "$(cat /root/w/kvc_rb 2>/dev/null)" != "" ]; then   # new streams / budget: the running kvc_job stops after its block
+  echo  > /root/w/kvc_rb; echo  > /root/w/kvc_tb; touch /root/w/STOP_KC; fi
+if [ ! -e /root/.wloop2 ]; then touch /root/.wloop2; pkill -f "bash /root/wloop.sh"; fi   # the loop script changed: restart it (the running kvc_job carries on)
 pgrep -f "bash /root/wloop.sh" > /dev/null || setsid nohup bash -c 'bash /root/wloop.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
 echo "[w] ctl run $(date -u)"
 # CTL-END
