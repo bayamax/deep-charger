@@ -1265,6 +1265,14 @@ PARA_END_L = None
 PWN = [0, 0]   # --para-window: openings sampled from the masked twin, all sampled steps
 
 
+RT = {"prompt": 0.0, "memory": 0.0, "window": 0.0, "decode": 0.0, "chunks": 0, "streams": 0, "wtok": 0, "ptok": 0}   # where rollout_kvmem's time goes
+
+
+def _now():
+    if dev == "cuda": torch.cuda.synchronize()
+    return time.time()
+
+
 @torch.no_grad()
 def rollout_kvmem(prompts, nslot):
     """--kv-mem generation: continuous batching as rollout_cb, but every chunk the cache is [prompt KV (left-padded) | the
@@ -1288,8 +1296,10 @@ def rollout_kvmem(prompts, nslot):
         for b, j in enumerate(act):
             pin[b, Pm - Ps[b]:] = torch.tensor(prompts[j], device=dev); pm[b, Pm - Ps[b]:] = 1; ppos[b, Pm - Ps[b]:] = torch.arange(Ps[b], device=dev)
         pin, pm, ppos = dup(pin), dup(pm), dup(ppos)
+        t_ = _now(); RT["chunks"] += 1; RT["streams"] += N; RT["ptok"] += N * Pm
         cache = DynamicCache()
         plast = llm(input_ids=pin, attention_mask=pm, position_ids=ppos, past_key_values=cache, use_cache=True, logits_to_keep=1).logits[:, -1]
+        t1_ = _now(); RT["prompt"] += t1_ - t_; t_ = t1_
         # 2) the memory slots
         Rs, has = [], []
         for b, j in enumerate(act):
@@ -1310,6 +1320,7 @@ def rollout_kvmem(prompts, nslot):
                 k_, v_ = kv_of(cache, li); z = torch.zeros(TW * N, k_.size(1), a.S, k_.size(3), device=dev, dtype=k_.dtype)
                 nc.update(torch.cat([k_, z], 2), torch.cat([v_, z], 2), li)
         cache = nc
+        t1_ = _now(); RT["memory"] += t1_ - t_; t_ = t1_
         # 3) the raw windows, left-padded, at each stream's positions after its prompt (+ S when it has a memory)
         Wm = max(Rs); amask = torch.cat([pm, mm], 1)
         if Wm > 0:
@@ -1327,6 +1338,7 @@ def rollout_kvmem(prompts, nslot):
             last = torch.where(dup(torch.tensor([R > 0 for R in Rs], device=dev))[:, None], o.logits[:, -1], plast)
         else:
             last = plast
+        t1_ = _now(); RT["window"] += t1_ - t_; t_ = t1_; RT["wtok"] += N * Wm
         nxt = dup(torch.tensor([[Ps[b] + (a.S if has[b] else 0) + Rs[b]] for b in range(N)], device=dev)); fin = [False] * N
         for _ in range(a.C):
             if TW > 1:   # the memory-masked twin: paragraph openings / a mix / the lower-entropy side
@@ -1354,7 +1366,7 @@ def rollout_kvmem(prompts, nslot):
             o = llm(input_ids=dup(torch.tensor([[gen[j][-1] if gen[j] else 0] for j in act], device=dev)), attention_mask=amask,
                     position_ids=nxt, past_key_values=cache, use_cache=True, logits_to_keep=1)
             last = o.logits[:, -1]; nxt = nxt + 1
-        del cache
+        del cache; RT["decode"] += _now() - t_
         act = [j for b, j in enumerate(act) if not fin[b]]
     return gen, ended
 
@@ -1623,7 +1635,9 @@ elif a.mode == "rollout":
                 fo.write(json.dumps(rec) + "\n"); n_tok += len(g)
             fo.flush()
             log(f"[sp] rollout {tag} {os.path.basename(a.ckpt) or 'untrained'}: {i + len(rb)}/{len(rows)} prompts, {n_tok} tokens ({time.time() - t0:.0f}s)"
-                + (f" | steps taken from the masked twin {100 * PWN[0] / max(PWN[1], 1):.2f}%" if (a.para_window or a.twin_minent) else ""))
+                + (f" | steps taken from the masked twin {100 * PWN[0] / max(PWN[1], 1):.2f}%" if (a.para_window or a.twin_minent) else "")
+                + (" | time " + " ".join(f"{k} {100 * RT[k] / max(sum(RT[x] for x in ('prompt', 'memory', 'window', 'decode')), 1e-9):.0f}%" for k in ("prompt", "memory", "window", "decode"))
+                   + f" (chunks {RT['chunks']}, streams {RT['streams'] / max(RT['chunks'], 1):.1f}, prompt {RT['ptok'] / max(RT['streams'], 1):.0f} + window {RT['wtok'] / max(RT['streams'], 1):.0f} tokens re-read per stream-chunk)" if a.kv_mem else ""))
 elif a.mode == "eval":
     pooler.eval(); t0 = time.time(); K = A_ = N = 0
     for ids, P in data:
