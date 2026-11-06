@@ -12,7 +12,7 @@ R=baya1116/hypernet-sp-distill; H=https://huggingface.co/$R/resolve/main; RAW=ht
 put() { for _i in 1 2 3 4 5; do python3 -c "import sys; from huggingface_hub import HfApi; HfApi().upload_file(path_or_fileobj=sys.argv[1], path_in_repo='archive/sp3/'+sys.argv[2], repo_id='$R')" "$1" "$2" > put.err 2>&1 && return 0; sleep 60; done; echo "[kc] upload $2 FAILED"; }
 get() { for _i in 1 2 3; do curl -sSfL -H "Authorization: Bearer $HF_TOKEN" -o "$2" "$H/$1" && return 0; sleep 10; done; return 1; }
 POOL=${POOL:-dpo_pool.jsonl}   # POOL=grpo_pool2.jsonl: fresh problems (tools/build_grpo_pool2.py), once each, under TAG
-for f in tools/sp_qwen3.py tools/sp_mathcheck.py ctl/$POOL ctl/dpo_pairs.py; do curl -sS -o $(basename $f) "$RAW/$f?nocache=$(date +%s)"; done
+for f in tools/sp_qwen3.py tools/sp_mathcheck.py tools/sp_codecheck.py ctl/$POOL ctl/dpo_pairs.py; do curl -sS -o $(basename $f) "$RAW/$f?nocache=$(date +%s)"; done
 python3 -c "import transformers" 2>/dev/null || python3 -m pip install -q "huggingface_hub[hf_xet]" transformers "math-verify[antlr4_13_2]" 2>&1 | grep -v -i warn | tail -1
 python3 -c "from huggingface_hub import snapshot_download; snapshot_download('Qwen/Qwen3-1.7B')" > dl.log 2>&1
 [ -s ref.pt ] || get archive/sp3/spKVR_latest.pt ref.pt || { echo "[kc] no reference weights"; exit 1; }

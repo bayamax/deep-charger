@@ -38,6 +38,9 @@ def rep4(t):
 
 
 def correct(r):
+    if isinstance(r.get("gold"), dict):   # a coding problem: the program is run on its tests (tools/sp_codecheck.py)
+        from sp_codecheck import code_correct
+        return code_correct(r["text"], r["gold"])
     b = boxed(r["text"])
     if b is None: return False
     if norm(b) == norm(r.get("gold")): return True
