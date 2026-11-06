@@ -155,6 +155,10 @@ ap.add_argument("--grad-ckpt", action="store_true", help="train: gradient checkp
 ap.add_argument("--lora", type=int, default=0, help="train the model through fp32 LoRA adapters of this rank on q/k/v/o and the MLP of "
                 "every layer (0 = off; a checkpoint that carries LoRA turns it on at its rank). The bf16 weights cannot take small "
                 "updates (one bf16 step is 4e-3 relative; RL updates at lr 1e-6 are 100x smaller and round away) - fp32 adapters can")
+ap.add_argument("--grad-sketch", default="", help="train --grpo-groups: count-sketch (2^20 buckets) of each group's LoRA gradient, "
+                "summed separately over the even- and the odd-numbered groups, saved to this file; their cosine is logged. Two halves "
+                "of the same round under the same weights: a positive cosine is a gradient direction the groups agree on, ~0 is noise "
+                "(the cosine of consecutive optimizer steps is not that measure once Adam's momentum carries across rounds)")
 ap.add_argument("--opt-state", default="", help="train: load the optimizer state from this file if it exists and save it there at the "
                 "end - Adam's momentum then carries across the short rounds of an RL run (a fresh optimizer makes every round's first "
                 "step lr x sign(grad) for every parameter, so noise moves as far as signal)")
@@ -1687,6 +1691,19 @@ else:
         if a.opt_state: torch.save(opt.state_dict(), a.opt_state)
 
     t0 = time.time(); K = A_ = N = 0
+    GSK = None
+    if a.grad_sketch and a.grpo_groups and LORA_PARAMS:
+        def _gsk():
+            out = torch.zeros(1 << 20, device=dev, dtype=torch.float64)
+            with torch.no_grad():
+                for i_, p_ in enumerate(LORA_PARAMS):
+                    if p_.grad is None: continue
+                    g_ = torch.Generator(device=p_.device).manual_seed(1000 + i_)
+                    idx = torch.randint(0, 1 << 20, (p_.numel(),), generator=g_, device=p_.device)
+                    sg = torch.randint(0, 2, (p_.numel(),), generator=g_, device=p_.device).double() * 2 - 1
+                    out.index_add_(0, idx, p_.grad.detach().flatten().double() * sg)
+            return out
+        GSK = [torch.zeros(1 << 20, device=dev, dtype=torch.float64) for _ in range(3)] + [[0, 0]]
     if a.grad_ckpt:
         llm.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False}); llm.train()
     if FTP:   # pinned frozen copies in the same order as the tuned params, for the fast swap
@@ -1723,7 +1740,10 @@ else:
             elif a.win_teacher: k, g, n = run_trace_wt(ids, P, True)
             elif a.par: k, g, n = run_trace_par(ids, P, ref_h=_on_dev(refs.pop(st, None)))
             else: k, g, n = run_trace(ids, P, True, ref_h=_on_dev(refs.pop(st, None)))
+            if GSK is not None:   # this group's gradient = the accumulated gradient now minus before it (the sketch is linear)
+                s_ = _gsk(); GSK[st % 2] += s_ - GSK[2]; GSK[2] = s_; GSK[3][st % 2] += 1
         except torch.cuda.OutOfMemoryError as e_:   # a long-prompt trace: drop it (and its half-built grads), keep training
+            if GSK is not None: GSK[2] = torch.zeros_like(GSK[2])
             refs.pop(st, None); pooler.zero_grad(set_to_none=True)
             for p_ in FTP + LORA_PARAMS: p_.grad = None
             for m_ in MASTER: m_.grad = None
@@ -1734,6 +1754,7 @@ else:
         if (st + 1) % a.accum == 0 or st + 1 == steps:
             torch.nn.utils.clip_grad_norm_((RMT_PARAMS if a.rmt else list(pooler.parameters())) + MASTER + LORA_PARAMS, 1.0)
             opt.step(); opt.zero_grad(set_to_none=True); sched.step()
+            if GSK is not None: GSK[2] = torch.zeros_like(GSK[2])
             if FTP:
                 with torch.no_grad():
                     for p_, m_ in zip(FTP, MASTER): p_.copy_(m_.to(p_.dtype))
@@ -1760,4 +1781,8 @@ else:
             K = A_ = N = 0; SNW["k0"] = 0.0; SNW["n0"] = 0
         if (st + 1) % 200 == 0: save()
         if STOP["now"]: break
+    if GSK is not None:
+        e_, o_ = GSK[0], GSK[1]; c_ = (e_ @ o_ / (e_.norm() * o_.norm() + 1e-30)).item()
+        torch.save({"even": e_.cpu(), "odd": o_.cpu(), "n": GSK[3]}, a.grad_sketch)
+        log(f"[sp] gradient halves: cos {c_:+.3f} (even {GSK[3][0]} groups, odd {GSK[3][1]}) -> {a.grad_sketch}")
     save(); log(f"[sp] trained {tag} -> {a.out}")

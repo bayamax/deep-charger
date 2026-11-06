@@ -11,7 +11,7 @@ export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); cd /root/w
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 R=baya1116/hypernet-sp-distill; H=https://huggingface.co/$R/resolve/main; RAW=https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i
 put() { for _i in 1 2 3 4 5; do python3 -c "import sys; from huggingface_hub import HfApi; HfApi().upload_file(path_or_fileobj=sys.argv[1], path_in_repo='archive/sp3/'+sys.argv[2], repo_id='$R')" "$1" "$2" > put.err 2>&1 && { echo "[hub] $2"; return 0; }; sleep 60; done; echo "[hub] $2 FAILED"; }
-for _t in $(seq 60); do curl -sS -o sp_qwen3.py "$RAW/tools/sp_qwen3.py?nocache=$(date +%s)"; grep -q '"--opt-state"' sp_qwen3.py && break; sleep 120; done
+for _t in $(seq 60); do curl -sS -o sp_qwen3.py "$RAW/tools/sp_qwen3.py?nocache=$(date +%s)"; grep -q '"--grad-sketch"' sp_qwen3.py && break; sleep 120; done
 LG=/root/w/sp_kvg.log; NEWG=${NEWG:-24}; NSH=${NSH:-4}; EVERY=${EVERY:-3}; GMIN=${GMIN:-12}
 M="--S 32 --heads 8 --layers 3 --ffn 2048 --rw 1024 --C 128 --maxd 0 --kv-mem --kv-rank 512"
 gt() {   # the GRPO flags, re-read every round: kvg_accum / kvg_ftlr / kvg_ftlayers in /root/w override the defaults without a restart
@@ -67,14 +67,25 @@ print(k)")
   rd=$((rd + 1)); cat newg_list.txt >> used_groups.txt; cp newg.jsonl kvg_groups_r$rd.jsonl
   cp kvg.pt kvg_prev.pt
   GT=$(gt); echo "[kg] round $rd flags: $GT"
-  python3 sp_qwen3.py train --traces kvg_groups_r$rd.jsonl $M --max-len 12288 --ckpt kvg_prev.pt $GT --seed $((6000 + rd)) --out kvg_next.pt --log $LG > run_kg_tr.log 2>&1
+  python3 sp_qwen3.py train --traces kvg_groups_r$rd.jsonl $M --max-len 12288 --ckpt kvg_prev.pt $GT --seed $((6000 + rd)) --grad-sketch kvg_gsk_r$rd.pt --out kvg_next.pt --log $LG > run_kg_tr.log 2>&1
   echo "[kg] round $rd: $n problems ($ninf informative at the gate) | $(grep '\[sp\] grpo groups' run_kg_tr.log | tail -1 | cut -d: -f2-) | $(grep -E '\[sp\] train .*grpo group' run_kg_tr.log | tail -1 | grep -oP 'mean reward.*') | $(grep -oP '\[sp\] LoRA.*' run_kg_tr.log | head -1)"
   grep -E "Error|Traceback|out of memory" run_kg_tr.log | tail -1 | sed "s/^/[kg] round $rd: /"
   [ -s kvg_next.pt ] && grep -q "^\[sp\] trained" run_kg_tr.log || { echo "[kg] round $rd: training FAILED"; break; }
+  gq=$(python3 - $rd <<'PY2' 2>/dev/null
+import sys, os, torch   # the gradient itself, not the optimizer's steps: even vs odd groups of this round, and this round vs the last
+r = int(sys.argv[1]); a = torch.load(f'kvg_gsk_r{r}.pt'); t = a['even'] + a['odd']
+cos = lambda x, y: (x @ y / (x.norm() * y.norm() + 1e-30)).item()
+out = f"gradient halves cos {cos(a['even'], a['odd']):+.3f} ({a['n'][0]}+{a['n'][1]} groups)"
+if os.path.exists(f'kvg_gsk_r{r - 1}.pt'):
+    b = torch.load(f'kvg_gsk_r{r - 1}.pt'); out += f", vs the last round's gradient {cos(t, b['even'] + b['odd']):+.3f}"
+print(out)
+PY2
+)
+  echo "[kg] round $rd: $gq"; [ -s kvg_gsk_r$rd.pt ] && put kvg_gsk_r$rd.pt kvg/gsk_r$rd.pt > /dev/null
   mv kvg_next.pt kvg.pt; echo $rd > kvg_round; v=$((v0 + rd)); echo $v > VERSION; cp kvg.pt kvf.pt
   put kvg.pt spKVF_latest.pt && put VERSION kvf/VERSION
   sk kvg.pt $v; moves
-  { echo "round $rd -> v$v $(date -u +%H:%MZ) | $(grep '\[sp\] grpo groups' run_kg_tr.log | tail -1 | cut -d: -f2-) | $(grep -E '\[sp\] train .*grpo group' run_kg_tr.log | tail -1 | grep -oP 'mean reward [0-9.]+')"
+  { echo "round $rd -> v$v $(date -u +%H:%MZ) | $(grep '\[sp\] grpo groups' run_kg_tr.log | tail -1 | cut -d: -f2-) | $(grep -E '\[sp\] train .*grpo group' run_kg_tr.log | tail -1 | grep -oP 'mean reward [0-9.]+') | $gq"
     python3 param_sketch.py report $(ls sk_v*.pt | sort -t v -k2 -n) 2>&1 | grep "^\[lora\]" | sed 's/^/  /'; } >> kvg_rounds.txt
   put kvg_rounds.txt kvg/rounds.txt > /dev/null   # the container log drops lines; the round summaries live here too
   if [ $((rd % EVERY)) != 0 ]; then echo "[kg] round $rd (weights v$v) published"; continue; fi
