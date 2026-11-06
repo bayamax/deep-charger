@@ -103,7 +103,9 @@
 # serial 41: round 11 - the hypernet's gradient agrees across groups far more than the LoRA's (even/odd cos +0.61 against +0.12):
 # a direction worth following. The hypernet is unfrozen at lr 1e-6 (kvg_plr; Adam's state for it has been accumulating
 # at lr 0) from the next round; the weights before it are kept as kvg_before_hyper.pt (hub history has them too).
-SER=41
+# serial 42: v25 (the first round with the hypernet unfrozen) read 36/60 with 11 closed-but-wrong (5-7 before) - the guessing
+# of run 1? The hypernet is frozen again from the next round (kvg_plr 0) while v25 at seed 2 and v24 at seed 1 settle it.
+SER=42
 if [ -f /root/.boxrmx_serial ] && [ "$(cat /root/.boxrmx_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxrmx_serial
 [ -d /venv/main/bin ] && export PATH=/venv/main/bin:$PATH
@@ -462,5 +464,8 @@ fi
 if [ ! -e /root/.s41hyper ]; then touch /root/.s41hyper
   cd /root/w && cp kvg.pt kvg_before_hyper.pt && cat VERSION > kvg_before_hyper.version && echo 1e-6 > kvg_plr
   echo "[kg] s41: hypernet lr 1e-6 from the next round (weights before it: v$(cat VERSION)) $(date -u)" >> /root/w/w.log
+fi
+if [ ! -e /root/.s42freeze ]; then touch /root/.s42freeze
+  echo 0 > /root/w/kvg_plr; echo "[kg] s42: hypernet frozen again from the next round $(date -u)" >> /root/w/w.log
 fi
 # CTL-END

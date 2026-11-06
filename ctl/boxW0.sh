@@ -45,4 +45,15 @@ if [ -n "" ] && [ "$(cat /root/w/kvc_rb 2>/dev/null)" != "" ]; then   # new stre
 if [ ! -e /root/.wloop2 ]; then touch /root/.wloop2; pkill -f "bash /root/wloop.sh"; fi   # the loop script changed: restart it (the running kvc_job carries on)
 pgrep -f "bash /root/wloop.sh" > /dev/null || setsid nohup bash -c 'bash /root/wloop.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
 echo "[w] ctl run $(date -u)"
+if [ ! -e /root/.evx_v25_s2 ]; then touch /root/.evx_v25_s2 /root/w/PAUSE_W   # one 60-problem eval now (v25, seed 2); the block resumes after it
+  for J in $(pgrep -f "bash /root/kvc_job.sh"); do pkill -P $J; kill $J; done
+  cat > /root/evx.sh <<'JOB'
+sleep 20; RAW=https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i
+curl -sS -o /root/kvx_job.sh "$RAW/ctl/kvx_job.sh?nocache=$(date +%s)"
+echo "[kc] eval v25 seed 2 from here $(date -u)"
+REV=3802635e85 VN=v25 SEED=2 bash /root/kvx_job.sh
+rm -f /root/w/PAUSE_W
+JOB
+  setsid nohup bash -c 'bash /root/evx.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
+fi
 # CTL-END
