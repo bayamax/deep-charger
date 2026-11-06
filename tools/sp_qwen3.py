@@ -1681,7 +1681,11 @@ else:
     else:
         opt = torch.optim.AdamW(groups, weight_decay=0.0)
     if a.opt_state and os.path.exists(a.opt_state):
-        try: opt.load_state_dict(torch.load(a.opt_state, map_location="cpu", weights_only=False)); log(f"[sp] optimizer state loaded from {a.opt_state}")
+        try:
+            want_ = [g_["lr"] for g_ in opt.param_groups]
+            opt.load_state_dict(torch.load(a.opt_state, map_location="cpu", weights_only=False))
+            for g_, w_ in zip(opt.param_groups, want_): g_["lr"] = w_; g_.pop("initial_lr", None)   # load_state_dict brings back the saved lrs: keep this run's
+            log(f"[sp] optimizer state loaded from {a.opt_state} (lrs {', '.join(f'{x:g}' for x in want_)})")
         except Exception as e_: log(f"[sp] optimizer state NOT loaded ({str(e_)[:100]}) - fresh optimizer")
     steps = int(len(data) * a.epochs); n_upd = max(1, steps // a.accum)
     if a.mode == "train":

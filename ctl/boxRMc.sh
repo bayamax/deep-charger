@@ -108,7 +108,11 @@
 # serial 43: v24 (last frozen-hypernet weights) 40/60; v25 36 and 38. With v18-v24 at 37-41 (mean 39.2) the unfrozen hypernet
 # looks ~2 lower, math most (23-24 of 36 against 25-28). After its running round the trainer stops, its weights get
 # v24's hypernet back (the LoRA of the rounds since is kept), and it starts again (hypernet still frozen).
-SER=43
+# serial 44: s43 found the hypernet of v26 equal to v24's (largest change 0.0): the "unfrozen" rounds 12-13 never moved it.
+# torch's load_state_dict brings back the learning rates saved with the optimizer state, so since round 6 (the first
+# carried state, saved with hypernet lr 0) every lr flag was ignored; sp_qwen3.py now puts this run's lrs back. v25's
+# 36/38 was LoRA-only noise. The hypernet is unfrozen at lr 1e-6 for real (weights before it kept as kvg_before_hyper2.pt).
+SER=44
 if [ -f /root/.boxrmx_serial ] && [ "$(cat /root/.boxrmx_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxrmx_serial
 [ -d /venv/main/bin ] && export PATH=/venv/main/bin:$PATH
@@ -485,5 +489,11 @@ echo 0 > kvg_plr
 START=dpo_ref.pt exec bash /root/kvg_job.sh
 JOB
   setsid nohup bash -c 'bash /root/s43.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
+fi
+if [ ! -e /root/.s44hyper ]; then touch /root/.s44hyper
+  cd /root/w; for _t in $(seq 60); do curl -sS -o sp_new.py "https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/tools/sp_qwen3.py?nocache=$(date +%s)"; grep -q "keep this run's" sp_new.py && break; sleep 120; done
+  pgrep -f "sp_qwen3.py train" > /dev/null || mv sp_new.py sp_qwen3.py   # a running training keeps its copy; the next own block refreshes it anyway
+  cp kvg.pt kvg_before_hyper2.pt && cat VERSION > kvg_before_hyper2.version && echo 1e-6 > kvg_plr
+  echo "[kg] s44: lrs now kept across the optimizer state; hypernet lr 1e-6 from the next round (weights before: v$(cat VERSION)) $(date -u)" >> /root/w/w.log
 fi
 # CTL-END
