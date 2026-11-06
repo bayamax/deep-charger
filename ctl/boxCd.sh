@@ -18,7 +18,9 @@
 # serial 10: a coding probe (the user: build a checker for programs, merge coding problems if it works) - after the running
 # block, the sandbox check (tools/sp_codecheck.py sandbox), then 16 problems of ctl/code_probe.jsonl (part 0 of 2) drawn 4 times
 # (g4 files under dpo_col_g/cp/: the trainer takes only groups of 12), then back to grpo_pool2 shard 1.
-SER=10; COLLECT=1; SHARD=1; NSHARD=4; MODE=grpo
+# serial 12: the user: coding problems later, RL first (the probe's long generations cost too much time now) - stop the
+# running probe; its wrapper then goes straight on to grpo_pool2.
+SER=12; COLLECT=1; SHARD=1; NSHARD=4; MODE=grpo
 if [ -f /root/.boxc_serial ] && [ "$(cat /root/.boxc_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxc_serial
 [ -d /venv/main/bin ] && export PATH=/venv/main/bin:$PATH
@@ -113,5 +115,10 @@ echo "[kc] code probe done; fresh pool grpo_pool2, shard 1 of 6 from here $(date
 exec env POOL=grpo_pool2.jsonl TAG=n2 MODE=grpo SHARD=1 NSHARD=6 bash /root/kvc_job.sh
 JOB
   setsid nohup bash -c 'bash /root/codeprobe.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
+fi
+if [ ! -e /root/.probestop ]; then touch /root/.probestop
+  for J in $(pgrep -f "bash /root/kvc_job.sh"); do grep -q "TAG=cp" /proc/$J/environ 2>/dev/null && { pkill -P $J; kill $J; }; done
+  sleep 5; pgrep -af "sp_qwen3.py rollout --traces pg1_dpo_col_g_cp" | awk '{print $1}' | xargs -r kill
+  echo "[kc] code probe stopped (RL first) $(date -u)"
 fi
 # CTL-END
