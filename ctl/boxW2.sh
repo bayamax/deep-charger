@@ -5,8 +5,9 @@
 # going on grpo_pool2 shard 2 of 6 (dpo_col_g/n2/): on its first start it begins two blocks after the last one on the
 # hub for the shard (the block the replaced box may still be running is skipped); afterwards kvc_job's own block counter
 # (kcg_n2_block, on this box's disk) carries on. Touch /root/w/PAUSE_W to hold it.
-# serial 1: first start. serial 2: streams / token budget from /root/w/kvc_rb, kvc_tb (default 12 / 16000).
-SER=2; SHARD=2
+# serial 1: first start. serial 2: streams / token budget from /root/w/kvc_rb, kvc_tb (default 12 / 16000). serial 3: problems
+# per block from /root/w/kvc_gbs (default 6; another size writes to dpo_col_g/n2g<size>/, carrying on after the problems done).
+SER=3; SHARD=2
 if [ -f /root/.boxw_serial ] && [ "$(cat /root/.boxw_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxw_serial
 [ -d /venv/main/bin ] && export PATH=/venv/main/bin:$PATH
@@ -26,34 +27,28 @@ python3 -c "import huggingface_hub" 2>/dev/null || python3 -m pip install -q "hu
 while true; do
   if [ ! -e PAUSE_W ] && ! pgrep -f "bash /root/kvc_job.sh" > /dev/null; then
     rm -f STOP_KC
-    if [ ! -s kcg_n2_block ]; then   # first start: after the replaced box's blocks
+    G=$(cat kvc_gbs 2>/dev/null || echo 6); T=n2; [ "$G" != 6 ] && T=n2g$G   # problems per block (another size: its own output directory)
+    if [ ! -s kcg_${T}_block ]; then   # first start of this size: after every problem of the shard done so far, here or on the hub
       st=$(python3 -c "
-import re; from huggingface_hub import HfApi
-b = [int(re.search(r'/g12_b(\d+)_v', f).group(1)) for f in HfApi().list_repo_files('baya1116/hypernet-sp-distill') if f.startswith('archive/sp3/dpo_col_g/n2/s$SHARD/')]
-print(max(b) + 2 if b else 0)" 2>/dev/null)
-      [ -n "$st" ] && echo $st > kcg_n2_block; echo "[w] shard $SHARD starts at block $(cat kcg_n2_block 2>/dev/null)"
+import re, os; from huggingface_hub import HfApi
+done = int(open('kcg_n2_block').read()) * 6 if os.path.exists('kcg_n2_block') else 0
+for f in HfApi().list_repo_files('baya1116/hypernet-sp-distill'):
+    m = re.match(r'archive/sp3/dpo_col_g/n2(?:g(\d+))?/s$SHARD/g12_b(\d+)_v', f)
+    if m: done = max(done, (int(m.group(2)) + 1) * int(m.group(1) or 6) + (0 if os.path.exists('kcg_n2_block') else 6))
+print(-(-done // $G))" 2>/dev/null)
+      [ -n "$st" ] && echo $st > kcg_${T}_block; echo "[w] shard $SHARD, $G problems per block ($T), starts at block $(cat kcg_${T}_block 2>/dev/null)"
     fi
     curl -sS -o /root/kvc_job.sh "$RAW/ctl/kvc_job.sh?nocache=$(date +%s)"
     echo "[w] kvc_job (re)started $(date -u)"
-    RB=$(cat kvc_rb 2>/dev/null || echo 12) TB=$(cat kvc_tb 2>/dev/null || echo 16000) POOL=grpo_pool2.jsonl TAG=n2 MODE=grpo SHARD=$SHARD NSHARD=6 bash /root/kvc_job.sh >> /root/w/w.log 2>&1
+    GBS=$G RB=$(cat kvc_rb 2>/dev/null || echo 12) TB=$(cat kvc_tb 2>/dev/null || echo 16000) POOL=grpo_pool2.jsonl TAG=$T MODE=grpo SHARD=$SHARD NSHARD=6 bash /root/kvc_job.sh >> /root/w/w.log 2>&1
   fi
   sleep 60
 done
 JOB
 if [ -n "" ] && [ "$(cat /root/w/kvc_rb 2>/dev/null)" != "" ]; then   # new streams / budget: the running kvc_job stops after its block
   echo  > /root/w/kvc_rb; echo  > /root/w/kvc_tb; touch /root/w/STOP_KC; fi
-if [ ! -e /root/.wloop2 ]; then touch /root/.wloop2; pkill -f "bash /root/wloop.sh"; fi   # the loop script changed: restart it (the running kvc_job carries on)
+if [ -n "" ] && [ "$(cat /root/w/kvc_gbs 2>/dev/null || echo 6)" != "" ]; then echo  > /root/w/kvc_gbs; touch /root/w/STOP_KC; fi
+if [ ! -e /root/.wloop3 ]; then touch /root/.wloop3; pkill -f "bash /root/wloop.sh"; fi   # the loop script changed: restart it (the running kvc_job carries on)
 pgrep -f "bash /root/wloop.sh" > /dev/null || setsid nohup bash -c 'bash /root/wloop.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
 echo "[w] ctl run $(date -u)"
-if [ ! -e /root/.evx_v24_s1 ]; then touch /root/.evx_v24_s1 /root/w/PAUSE_W   # one 60-problem eval now (v24, seed 1); the block resumes after it
-  for J in $(pgrep -f "bash /root/kvc_job.sh"); do pkill -P $J; kill $J; done
-  cat > /root/evx.sh <<'JOB'
-sleep 20; RAW=https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i
-curl -sS -o /root/kvx_job.sh "$RAW/ctl/kvx_job.sh?nocache=$(date +%s)"
-echo "[kc] eval v24 seed 1 from here $(date -u)"
-REV=255192b8c0 VN=v24 SEED=1 bash /root/kvx_job.sh
-rm -f /root/w/PAUSE_W
-JOB
-  setsid nohup bash -c 'bash /root/evx.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
-fi
 # CTL-END
