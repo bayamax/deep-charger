@@ -50,16 +50,17 @@ if [ "$MODE" = grpo ]; then   # GRPO rollout worker: per block the memory G time
   [ -s $BF ] || echo ${KCG_START:-$K0} > $BF   # carry on after the problems used so far (KCG_START: an extra worker on the far half of a shard)
   b=$(cat $BF)
   while [ $b -lt $NB ] && [ ! -e STOP_KC ]; do t0=$(date +%s)
-    sed -n "$(( b * BS + 1 )),$(( (b + 1) * BS ))p" shard.jsonl > p_$b.jsonl
-    [ -s p_$b.jsonl ] || break
+    k=${COL//\//_}_s${SHARD}_$b   # local file key: the pool and shard too (a block of another pool with the same number and weights version would otherwise be taken as done)
+    sed -n "$(( b * BS + 1 )),$(( (b + 1) * BS ))p" shard.jsonl > p_$k.jsonl
+    [ -s p_$k.jsonl ] || break
     v=$(weights); sd=$(( 7000 + PASS * 20000 + ${#TAG} * 100000 + SHARD * 1000 + b * 4 ))
-    if [ "$GUIDE" = 1 ]; then gen p_$b.jsonl graw_$b.jsonl $sd --ckpt ref.pt --no-sp; else : > graw_$b.jsonl; fi
+    if [ "$GUIDE" = 1 ]; then gen p_$k.jsonl graw_$k.jsonl $sd --ckpt ref.pt --no-sp; else : > graw_$k.jsonl; fi
     # two stages (dynamic sampling): G1 draws for every problem; the rest of the G only where those G1 were mixed
     G1=${G1:-4}
     python3 -c "
-import sys; L = open('p_$b.jsonl').readlines(); open('pg1_$b.jsonl', 'w').writelines(l for l in L for _ in range($G1))"
-    gen pg1_$b.jsonl gm1_${b}_v$v.jsonl $((sd + 1)) --ckpt mem.pt
-    python3 - $b $v $G $G1 <<'PY2'
+import sys; L = open('p_$k.jsonl').readlines(); open('pg1_$k.jsonl', 'w').writelines(l for l in L for _ in range($G1))"
+    gen pg1_$k.jsonl gm1_${k}_v$v.jsonl $((sd + 1)) --ckpt mem.pt
+    python3 - $k $v $G $G1 <<'PY2'
 import json, sys; sys.path.insert(0, '.')
 from sp_mathcheck import correct
 b, v, G, G1 = sys.argv[1], sys.argv[2], int(sys.argv[3]), int(sys.argv[4]); ok = lambda r: '</think>' in r['text'] and correct(r)
@@ -68,9 +69,9 @@ for l in open(f'gm1_{b}_v{v}.jsonl'): r = json.loads(l); R.setdefault(r['id'], [
 P = [l for l in open(f'p_{b}.jsonl') if 0 < sum(R.get(json.loads(l)['id'], [])) < G1]
 open(f'pg2_{b}.jsonl', 'w').writelines(l for l in P for _ in range(G - G1))
 PY2
-    if [ -s pg2_$b.jsonl ]; then gen pg2_$b.jsonl gm2_${b}_v$v.jsonl $((sd + 2)) --ckpt mem.pt; else : > gm2_${b}_v$v.jsonl; fi
-    cat gm1_${b}_v$v.jsonl gm2_${b}_v$v.jsonl > gmem_${b}_v$v.jsonl
-    s=$(python3 - $b $v <<'PY2'
+    if [ -s pg2_$k.jsonl ]; then gen pg2_$k.jsonl gm2_${k}_v$v.jsonl $((sd + 2)) --ckpt mem.pt; else : > gm2_${k}_v$v.jsonl; fi
+    cat gm1_${k}_v$v.jsonl gm2_${k}_v$v.jsonl > gmem_${k}_v$v.jsonl
+    s=$(python3 - $k $v <<'PY2'
 import json, sys; sys.path.insert(0, '.')
 from sp_mathcheck import correct
 b, v = sys.argv[1], sys.argv[2]; ok = lambda r: '</think>' in r['text'] and correct(r)
@@ -88,7 +89,7 @@ print(f"{len(G)} problems ({sum(len(g['samples']) > 4 for g in G)} filled to 12)
       f"mixed groups {mixed}, all wrong {allbad} (with a right guide {sum(1 for g, x in zip(G, rs) if sum(x) == 0 and g['guide'])})")
 PY2
 )
-    put grp_b${b}_v$v.jsonl $COL/s$SHARD/g${G}_b${b}_v$v.jsonl
+    put grp_b${k}_v$v.jsonl $COL/s$SHARD/g${G}_b${b}_v$v.jsonl
     b=$((b + 1)); echo $b > $BF
     echo "[kc] grpo pass $PASS G$G block $b/$NB ($(( ($(date +%s) - t0) / 60 )) min, memory weights v$v): $s"
     [ -n "$ONE" ] && exit 0
