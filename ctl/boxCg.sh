@@ -1,124 +1,54 @@
 #!/bin/bash
-# Collector Cg: an extra GRPO rollout worker (the user: as many updates as possible) on the far half of shard 1 (from block 60).
-# that work). Serial 1: GPU empty?, bf16 matmul speed, model download time - one [pr] RESULT line. COLLECT=1 (a later serial)
-# starts ctl/kvc_job.sh with this box's shard.
-# serial 2: two-stage sampling (4 draws, then 8 more only where the 4 were mixed) - the running block finishes first
-# (STOP_KC), then the current kvc_job.sh carries on.
-# serial 3: after the running block, one evaluation of the newest weights (60 problems, seed 3; ctl/kve_job.sh) - the
-# trainer's seed-1 scores (41, 34, 36) disagree with the rising training-problem accuracy - then collecting again.
-# serial 4: new code (the trainer's weights now carry fp32 LoRA adapters; the rollout loads them from the checkpoint) -
-# after the running block, fetch sp_qwen3.py / kvc_job.sh again and carry on.
-# serial 5: pass 1 of the pool is nearly used up (Cg finished its range and sat idle) - after the running block, pass 2:
-# the whole pool reshuffled, 6 shards, this box shard 5.
-# serial 9: fresh problems instead of pass 2 (the user: problems once each) - after the running block, ctl/grpo_pool2.jsonl
-# (4498 unused problems, tools/build_grpo_pool2.py) in 6 shards, this box shard 5, under dpo_col_g/n2/.
-# serial 12: was v19 (the first round with Adam's state carried over) a step back? After the running block, the 60 problems
-# with v20 (hub commit 7caa4c5d6b) at seed 2 (ctl/kvx_job.sh), then back to grpo_pool2 shard 5.
-SER=12; COLLECT=1; SHARD=1; NSHARD=4; MODE=grpo
-if [ -f /root/.boxc_serial ] && [ "$(cat /root/.boxc_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
-echo $SER > /root/.boxc_serial
+# Interruptible GRPO rollout worker (the user: a long run - spend the money better). An interruptible box is paused when
+# outbid and started again later: its onstart runs ctl.sh again, which runs this script again, so nothing here is guarded by
+# a one-time flag - every run (re)starts the worker loop unless it is already running. The worker loop keeps ctl/kvc_job.sh
+# going on grpo_pool2 shard 5 of 6 (dpo_col_g/n2/): on its first start it begins two blocks after the last one on the
+# hub for the shard (the block the replaced box may still be running is skipped); afterwards kvc_job's own block counter
+# (kcg_n2_block, on this box's disk) carries on. Touch /root/w/PAUSE_W to hold it.
+# serial 1: first start. serial 2: streams / token budget from /root/w/kvc_rb, kvc_tb (default 12 / 16000). serial 3: problems
+# per block from /root/w/kvc_gbs (default 6; another size writes to dpo_col_g/n2g<size>/, carrying on after the problems done).
+SER=3; SHARD=5
+if [ -f /root/.boxw_serial ] && [ "$(cat /root/.boxw_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
+echo $SER > /root/.boxw_serial
 [ -d /venv/main/bin ] && export PATH=/venv/main/bin:$PATH
 [ -s /root/.hf_token ] || { [ -n "$HF_TOKEN" ] && printf '%s' "$HF_TOKEN" > /root/.hf_token && chmod 600 /root/.hf_token; }
 mkdir -p /root/w
 cat > /root/status.sh <<'ST'
-grep -E "^\[(pr|kc|hub)\]|Error|Traceback|out of memory" /root/w/w.log 2>/dev/null | tail -n 4 | cut -c1-300
-tail -n 1 $(ls -t /root/w/sp_*.log 2>/dev/null | head -1) 2>/dev/null | cut -c1-200
+grep -E "^\[(kc|hub|w)\]|Error|Traceback|out of memory" /root/w/w.log 2>/dev/null | tail -n 3 | cut -c1-300
+tail -n 1 $(ls -t /root/w/sp_*.log 2>/dev/null | head -1) 2>/dev/null | cut -c1-400
 nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv,noheader
 ST
 chmod +x /root/status.sh
-if [ ! -e /root/.probe ]; then touch /root/.probe
-  cat > /root/probe.sh <<'JOB'
+cat > /root/wloop.sh <<'JOB'
+SHARD=5; RAW=https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); cd /root/w
-U0=$(nvidia-smi --query-gpu=name,memory.used,memory.total --format=csv,noheader)
-echo "[pr] preflight GPU: $U0"
-python3 -m pip install -q "huggingface_hub[hf_xet]" transformers "math-verify[antlr4_13_2]" 2>&1 | grep -v -i warn | tail -1
-t0=$(date +%s); timeout 1500 python3 -c "from huggingface_hub import snapshot_download; snapshot_download('Qwen/Qwen3-1.7B')" > dl.log 2>&1; dl=$(( $(date +%s) - t0 ))
-tf=$(python3 -c "
-import torch, time
-x = torch.randn(4096, 4096, device='cuda', dtype=torch.bfloat16); y = torch.randn(4096, 4096, device='cuda', dtype=torch.bfloat16)
-for _ in range(5): x @ y
-torch.cuda.synchronize(); t = time.time()
-for _ in range(50): x @ y
-torch.cuda.synchronize(); print(round(50 * 2 * 4096**3 / (time.time() - t) / 1e12, 1))" 2>&1 | tail -1)
-echo "[pr] RESULT gpu ($U0) | model download ${dl}s | bf16 matmul ${tf} TFLOPS | $(date -u)"
+echo "[w] worker loop up, shard $SHARD of 6, $(nvidia-smi --query-gpu=name,memory.used,memory.total --format=csv,noheader) $(date -u)"
+python3 -c "import huggingface_hub" 2>/dev/null || python3 -m pip install -q "huggingface_hub[hf_xet]" 2>&1 | tail -1
+while true; do
+  if [ ! -e PAUSE_W ] && ! pgrep -f "bash /root/kvc_job.sh" > /dev/null; then
+    rm -f STOP_KC
+    G=$(cat kvc_gbs 2>/dev/null || echo 6); T=n2; [ "$G" != 6 ] && T=n2g$G   # problems per block (another size: its own output directory)
+    if [ ! -s kcg_${T}_block ]; then   # first start of this size: after every problem of the shard done so far, here or on the hub
+      st=$(python3 -c "
+import re, os; from huggingface_hub import HfApi
+done = int(open('kcg_n2_block').read()) * 6 if os.path.exists('kcg_n2_block') else 0
+for f in HfApi().list_repo_files('baya1116/hypernet-sp-distill'):
+    m = re.match(r'archive/sp3/dpo_col_g/n2(?:g(\d+))?/s$SHARD/g12_b(\d+)_v', f)
+    if m: done = max(done, (int(m.group(2)) + 1) * int(m.group(1) or 6) + (0 if os.path.exists('kcg_n2_block') else 6))
+print(-(-done // $G))" 2>/dev/null)
+      [ -n "$st" ] && echo $st > kcg_${T}_block; echo "[w] shard $SHARD, $G problems per block ($T), starts at block $(cat kcg_${T}_block 2>/dev/null)"
+    fi
+    curl -sS -o /root/kvc_job.sh "$RAW/ctl/kvc_job.sh?nocache=$(date +%s)"
+    echo "[w] kvc_job (re)started $(date -u)"
+    GBS=$G RB=$(cat kvc_rb 2>/dev/null || echo 12) TB=$(cat kvc_tb 2>/dev/null || echo 16000) POOL=grpo_pool2.jsonl TAG=$T MODE=grpo SHARD=$SHARD NSHARD=6 bash /root/kvc_job.sh >> /root/w/w.log 2>&1
+  fi
+  sleep 60
+done
 JOB
-  setsid nohup bash -c 'bash /root/probe.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
-fi
-if [ "$COLLECT" = 1 ] && [ ! -e /root/.collect_g12 ]; then touch /root/.collect_g12 /root/.collect_g /root/.collect3 /root/.collect
-  for J in $(pgrep -f "bash /root/kvc_job.sh"); do pkill -P $J; kill $J; done; sleep 3; pkill -f "sp_qwen3.py"; sleep 3
-  curl -sS -o /root/kvc_job.sh "https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl/kvc_job.sh?nocache=$(date +%s)"
-  setsid nohup bash -c "KCG_START=60 MODE=$MODE SHARD=$SHARD NSHARD=$NSHARD bash /root/kvc_job.sh >> /root/w/w.log 2>&1" > /dev/null 2>&1 < /dev/null &
-  echo "[kc] collector launched: shard $SHARD of $NSHARD $(date -u)"
-fi
-if [ ! -e /root/.graceful2 ] && [ -e /root/.collect_g12 -o -e /root/.collect_g ]; then touch /root/.graceful2
-  touch /root/w/STOP_KC
-  cat > /root/regen.sh <<'JOB'
-while pgrep -f "bash /root/kvc_job.sh" > /dev/null; do sleep 30; done
-rm -f /root/w/STOP_KC
-curl -sS -o /root/kvc_job.sh "https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl/kvc_job.sh?nocache=$(date +%s)"
-echo "[kc] two-stage sampling from here $(date -u) ($(grep -c 'G1=' /root/kvc_job.sh))"
-exec env KCG_START=60 MODE=grpo SHARD=1 NSHARD=4 bash /root/kvc_job.sh
-JOB
-  setsid nohup bash -c 'bash /root/regen.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
-fi
-if [ ! -e /root/.eval3 ]; then touch /root/.eval3
-  touch /root/w/STOP_KC
-  cat > /root/eval.sh <<'JOB'
-while pgrep -f "bash /root/kvc_job.sh" > /dev/null; do sleep 30; done
-rm -f /root/w/STOP_KC
-curl -sS -o /root/kve_job.sh "https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl/kve_job.sh?nocache=$(date +%s)"
-SEED=3 bash /root/kve_job.sh
-curl -sS -o /root/kvc_job.sh "https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl/kvc_job.sh?nocache=$(date +%s)"
-exec env MODE=grpo SHARD=1 NSHARD=4 bash /root/kvc_job.sh
-JOB
-  setsid nohup bash -c 'bash /root/eval.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
-fi
-if [ ! -e /root/.graceful3 ]; then touch /root/.graceful3
-  touch /root/w/STOP_KC
-  cat > /root/regen3.sh <<'JOB'
-while pgrep -f "bash /root/kvc_job.sh" > /dev/null; do sleep 30; done
-rm -f /root/w/STOP_KC; cd /root/w
-for _t in $(seq 60); do curl -sS -o sp_new.py "https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/tools/sp_qwen3.py?nocache=$(date +%s)"; grep -q '"--lora-lr"' sp_new.py && break; sleep 120; done; mv sp_new.py sp_qwen3.py
-curl -sS -o /root/kvc_job.sh "https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl/kvc_job.sh?nocache=$(date +%s)"
-echo "[kc] LoRA-aware code from here $(date -u)"
-exec env KCG_START=60 MODE=grpo SHARD=1 NSHARD=4 bash /root/kvc_job.sh
-JOB
-  setsid nohup bash -c 'bash /root/regen3.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
-fi
-if [ ! -e /root/.pass2 ]; then touch /root/.pass2
-  touch /root/w/STOP_KC
-  cat > /root/pass2.sh <<'JOB'
-while pgrep -f "bash /root/kvc_job.sh" > /dev/null; do sleep 30; done
-rm -f /root/w/STOP_KC; cd /root/w
-for _t in $(seq 60); do curl -sS -o /root/kvc_job.sh "https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl/kvc_job.sh?nocache=$(date +%s)"; grep -q -- "PASS=" /root/kvc_job.sh && break; sleep 120; done
-echo "[kc] pass 2, shard 5 of 6 from here $(date -u)"
-exec env PASS=2 MODE=grpo SHARD=5 NSHARD=6 bash /root/kvc_job.sh
-JOB
-  setsid nohup bash -c 'bash /root/pass2.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
-fi
-if [ ! -e /root/.pool2 ]; then touch /root/.pool2
-  touch /root/w/STOP_KC
-  cat > /root/pool2.sh <<'JOB'
-while pgrep -f "bash /root/kvc_job.sh" > /dev/null; do sleep 30; done
-rm -f /root/w/STOP_KC; cd /root/w
-for _t in $(seq 60); do curl -sS -o /root/kvc_job.sh "https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl/kvc_job.sh?nocache=$(date +%s)"; grep -q -- 'TAG=' /root/kvc_job.sh && break; sleep 120; done
-echo "[kc] fresh pool grpo_pool2, shard 5 of 6 from here $(date -u)"
-exec env POOL=grpo_pool2.jsonl TAG=n2 MODE=grpo SHARD=5 NSHARD=6 bash /root/kvc_job.sh
-JOB
-  setsid nohup bash -c 'bash /root/pool2.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
-fi
-if [ ! -e /root/.evx12 ]; then touch /root/.evx12
-  touch /root/w/STOP_KC
-  cat > /root/evx12.sh <<'JOB'
-while pgrep -f "bash /root/kvc_job.sh" > /dev/null; do sleep 30; done
-rm -f /root/w/STOP_KC; RAW=https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i
-for _t in $(seq 60); do curl -sS -o /root/kvx_job.sh "$RAW/ctl/kvx_job.sh?nocache=$(date +%s)"; grep -q -- 'evalx_' /root/kvx_job.sh && break; sleep 120; done
-for _t in $(seq 60); do curl -sS -o /root/kvc_job.sh "$RAW/ctl/kvc_job.sh?nocache=$(date +%s)"; grep -q -- 'local file key' /root/kvc_job.sh && break; sleep 120; done
-echo "[kc] eval v20 seed 2 from here $(date -u)"
-REV=7caa4c5d6b VN=v20 SEED=2 bash /root/kvx_job.sh
-echo "[kc] fresh pool grpo_pool2, shard 5 of 6 from here $(date -u)"
-exec env POOL=grpo_pool2.jsonl TAG=n2 MODE=grpo SHARD=5 NSHARD=6 bash /root/kvc_job.sh
-JOB
-  setsid nohup bash -c 'bash /root/evx12.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
-fi
+if [ -n "16" ] && [ "$(cat /root/w/kvc_rb 2>/dev/null)" != "16" ]; then   # new streams / budget: the running kvc_job stops after its block
+  echo 16 > /root/w/kvc_rb; echo 20000 > /root/w/kvc_tb; touch /root/w/STOP_KC; fi
+if [ -n "12" ] && [ "$(cat /root/w/kvc_gbs 2>/dev/null || echo 6)" != "12" ]; then echo 12 > /root/w/kvc_gbs; touch /root/w/STOP_KC; fi
+if [ ! -e /root/.wloop3 ]; then touch /root/.wloop3; pkill -f "bash /root/wloop.sh"; fi   # the loop script changed: restart it (the running kvc_job carries on)
+pgrep -f "bash /root/wloop.sh" > /dev/null || setsid nohup bash -c 'bash /root/wloop.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
+echo "[w] ctl run $(date -u)"
 # CTL-END

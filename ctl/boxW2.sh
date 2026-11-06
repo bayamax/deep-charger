@@ -45,9 +45,9 @@ print(-(-done // $G))" 2>/dev/null)
   sleep 60
 done
 JOB
-if [ -n "" ] && [ "$(cat /root/w/kvc_rb 2>/dev/null)" != "" ]; then   # new streams / budget: the running kvc_job stops after its block
-  echo  > /root/w/kvc_rb; echo  > /root/w/kvc_tb; touch /root/w/STOP_KC; fi
-if [ -n "" ] && [ "$(cat /root/w/kvc_gbs 2>/dev/null || echo 6)" != "" ]; then echo  > /root/w/kvc_gbs; touch /root/w/STOP_KC; fi
+if [ -n "16" ] && [ "$(cat /root/w/kvc_rb 2>/dev/null)" != "16" ]; then   # new streams / budget: the running kvc_job stops after its block
+  echo 16 > /root/w/kvc_rb; echo 20000 > /root/w/kvc_tb; touch /root/w/STOP_KC; fi
+if [ -n "12" ] && [ "$(cat /root/w/kvc_gbs 2>/dev/null || echo 6)" != "12" ]; then echo 12 > /root/w/kvc_gbs; touch /root/w/STOP_KC; fi
 if [ ! -e /root/.wloop3 ]; then touch /root/.wloop3; pkill -f "bash /root/wloop.sh"; fi   # the loop script changed: restart it (the running kvc_job carries on)
 pgrep -f "bash /root/wloop.sh" > /dev/null || setsid nohup bash -c 'bash /root/wloop.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
 echo "[w] ctl run $(date -u)"
