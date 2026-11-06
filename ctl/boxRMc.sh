@@ -98,7 +98,9 @@
 # (momentum alone gives +0.6 for pure-noise gradients; v19 read +0.55). The training now sketches the LoRA gradient itself
 # (--grad-sketch): even vs odd groups of a round, and each round against the last, in the round line and rounds.txt.
 # The trainer restarts after its running round (state and optimizer kept).
-SER=39
+# serial 40: the hypernet's gradient (computed even at lr 0) is sketched too - its even/odd agreement says whether unfreezing
+# it has a signal to follow; both in the round line and rounds.txt. The trainer restarts after its running round.
+SER=40
 if [ -f /root/.boxrmx_serial ] && [ "$(cat /root/.boxrmx_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxrmx_serial
 [ -d /venv/main/bin ] && export PATH=/venv/main/bin:$PATH
@@ -441,5 +443,17 @@ echo "[kg] s39: gradient sketches per round from here $(date -u)"
 cd /root/w && START=dpo_ref.pt exec bash /root/kvg_job.sh
 JOB
   setsid nohup bash -c 'bash /root/s39.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
+fi
+if [ ! -e /root/.s40gskh ]; then touch /root/.s40gskh
+  touch /root/w/STOP_KG
+  cat > /root/s40.sh <<'JOB'
+while pgrep -f "^bash /root/kvg_job.sh" > /dev/null; do sleep 30; done
+rm -f /root/w/STOP_KG
+for _t in $(seq 60); do curl -sS -o /root/kvg_job.sh "https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl/kvg_job.sh?nocache=$(date +%s)"; grep -q -- "even_h" /root/kvg_job.sh && break; sleep 120; done
+cd /root/w; for _t in $(seq 60); do curl -sS -o sp_qwen3.py "https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/tools/sp_qwen3.py?nocache=$(date +%s)"; grep -q 'GSK_P' sp_qwen3.py && break; sleep 120; done
+echo "[kg] s40: hypernet gradient sketched too from here $(date -u)"
+START=dpo_ref.pt exec bash /root/kvg_job.sh
+JOB
+  setsid nohup bash -c 'bash /root/s40.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
 fi
 # CTL-END

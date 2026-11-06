@@ -1707,17 +1707,20 @@ else:
     t0 = time.time(); K = A_ = N = 0
     GSK = None
     if a.grad_sketch and a.grpo_groups and LORA_PARAMS:
+        GSK_P = [LORA_PARAMS, [p_ for p_ in pooler.parameters() if p_.requires_grad]]   # the hypernet's gradient is there even at lr 0
         def _gsk():
+            return torch.stack([_gsk1(ps_, 1000 + 100000 * k_) for k_, ps_ in enumerate(GSK_P)])
+        def _gsk1(params, seed0):
             out = torch.zeros(1 << 20, device=dev, dtype=torch.float64)
             with torch.no_grad():
-                for i_, p_ in enumerate(LORA_PARAMS):
+                for i_, p_ in enumerate(params):
                     if p_.grad is None: continue
-                    g_ = torch.Generator(device=p_.device).manual_seed(1000 + i_)
+                    g_ = torch.Generator(device=p_.device).manual_seed(seed0 + i_)
                     idx = torch.randint(0, 1 << 20, (p_.numel(),), generator=g_, device=p_.device)
                     sg = torch.randint(0, 2, (p_.numel(),), generator=g_, device=p_.device).double() * 2 - 1
                     out.index_add_(0, idx, p_.grad.detach().flatten().double() * sg)
             return out
-        GSK = [torch.zeros(1 << 20, device=dev, dtype=torch.float64) for _ in range(3)] + [[0, 0]]
+        GSK = [torch.zeros(2, 1 << 20, device=dev, dtype=torch.float64) for _ in range(3)] + [[0, 0]]
     if a.grad_ckpt:
         llm.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False}); llm.train()
     if FTP:   # pinned frozen copies in the same order as the tuned params, for the fast swap
@@ -1796,7 +1799,8 @@ else:
         if (st + 1) % 200 == 0: save()
         if STOP["now"]: break
     if GSK is not None:
-        e_, o_ = GSK[0], GSK[1]; c_ = (e_ @ o_ / (e_.norm() * o_.norm() + 1e-30)).item()
-        torch.save({"even": e_.cpu(), "odd": o_.cpu(), "n": GSK[3]}, a.grad_sketch)
-        log(f"[sp] gradient halves: cos {c_:+.3f} (even {GSK[3][0]} groups, odd {GSK[3][1]}) -> {a.grad_sketch}")
+        cs_ = [(GSK[0][k_] @ GSK[1][k_] / (GSK[0][k_].norm() * GSK[1][k_].norm() + 1e-30)).item() for k_ in range(2)]
+        torch.save({"even": GSK[0][0].cpu(), "odd": GSK[1][0].cpu(), "even_h": GSK[0][1].cpu(), "odd_h": GSK[1][1].cpu(), "n": GSK[3],
+                    "norm": [GSK[0][k_].norm().item() + GSK[1][k_].norm().item() for k_ in range(2)]}, a.grad_sketch)
+        log(f"[sp] gradient halves: LoRA cos {cs_[0]:+.3f}, hypernet cos {cs_[1]:+.3f} (even {GSK[3][0]} groups, odd {GSK[3][1]}) -> {a.grad_sketch}")
     save(); log(f"[sp] trained {tag} -> {a.out}")

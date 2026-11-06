@@ -73,12 +73,16 @@ print(k)")
   [ -s kvg_next.pt ] && grep -q "^\[sp\] trained" run_kg_tr.log || { echo "[kg] round $rd: training FAILED"; break; }
   gq=$(python3 - $rd <<'PY2' 2>/dev/null
 import sys, os, torch   # the gradient itself, not the optimizer's steps: even vs odd groups of this round, and this round vs the last
-r = int(sys.argv[1]); a = torch.load(f'kvg_gsk_r{r}.pt'); t = a['even'] + a['odd']
+r = int(sys.argv[1]); a = torch.load(f'kvg_gsk_r{r}.pt')
 cos = lambda x, y: (x @ y / (x.norm() * y.norm() + 1e-30)).item()
-out = f"gradient halves cos {cos(a['even'], a['odd']):+.3f} ({a['n'][0]}+{a['n'][1]} groups)"
-if os.path.exists(f'kvg_gsk_r{r - 1}.pt'):
-    b = torch.load(f'kvg_gsk_r{r - 1}.pt'); out += f", vs the last round's gradient {cos(t, b['even'] + b['odd']):+.3f}"
-print(out)
+b = torch.load(f'kvg_gsk_r{r - 1}.pt') if os.path.exists(f'kvg_gsk_r{r - 1}.pt') else None
+out = []
+for nm, e, o in (("LoRA", "even", "odd"), ("hypernet", "even_h", "odd_h")):
+    if e not in a: continue
+    x = f"{nm} gradient halves cos {cos(a[e], a[o]):+.3f}"
+    if b is not None and e in b: x += f", vs the last round {cos(a[e] + a[o], b[e] + b[o]):+.3f}"
+    out.append(x)
+print(" | ".join(out) + f" ({a['n'][0]}+{a['n'][1]} groups)")
 PY2
 )
   echo "[kg] round $rd: $gq"; [ -s kvg_gsk_r$rd.pt ] && put kvg_gsk_r$rd.pt kvg/gsk_r$rd.pt > /dev/null
