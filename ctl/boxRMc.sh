@@ -105,7 +105,10 @@
 # at lr 0) from the next round; the weights before it are kept as kvg_before_hyper.pt (hub history has them too).
 # serial 42: v25 (the first round with the hypernet unfrozen) read 36/60 with 11 closed-but-wrong (5-7 before) - the guessing
 # of run 1? The hypernet is frozen again from the next round (kvg_plr 0) while v25 at seed 2 and v24 at seed 1 settle it.
-SER=42
+# serial 43: v24 (last frozen-hypernet weights) 40/60; v25 36 and 38. With v18-v24 at 37-41 (mean 39.2) the unfrozen hypernet
+# looks ~2 lower, math most (23-24 of 36 against 25-28). After its running round the trainer stops, its weights get
+# v24's hypernet back (the LoRA of the rounds since is kept), and it starts again (hypernet still frozen).
+SER=43
 if [ -f /root/.boxrmx_serial ] && [ "$(cat /root/.boxrmx_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxrmx_serial
 [ -d /venv/main/bin ] && export PATH=/venv/main/bin:$PATH
@@ -467,5 +470,20 @@ if [ ! -e /root/.s41hyper ]; then touch /root/.s41hyper
 fi
 if [ ! -e /root/.s42freeze ]; then touch /root/.s42freeze
   echo 0 > /root/w/kvg_plr; echo "[kg] s42: hypernet frozen again from the next round $(date -u)" >> /root/w/w.log
+fi
+if [ ! -e /root/.s43pool ]; then touch /root/.s43pool
+  touch /root/w/STOP_KG
+  cat > /root/s43.sh <<'JOB'
+while pgrep -f "^bash /root/kvg_job.sh" > /dev/null; do sleep 30; done
+cd /root/w && rm -f STOP_KG && cp kvg.pt kvg_before_s43.pt
+python3 -c "
+import torch
+a = torch.load('kvg.pt', map_location='cpu', weights_only=False); b = torch.load('kvg_before_hyper.pt', map_location='cpu', weights_only=False)
+d = max((a['pooler'][k].float() - b['pooler'][k].float()).abs().max().item() for k in b['pooler'])
+a['pooler'] = b['pooler']; torch.save(a, 'kvg.pt'); print('[kg] s43: hypernet set back to v24 (largest change undone', d, ')')" >> /root/w/w.log 2>&1
+echo 0 > kvg_plr
+START=dpo_ref.pt exec bash /root/kvg_job.sh
+JOB
+  setsid nohup bash -c 'bash /root/s43.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
 fi
 # CTL-END
