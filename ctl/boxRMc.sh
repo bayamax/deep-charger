@@ -100,7 +100,10 @@
 # The trainer restarts after its running round (state and optimizer kept).
 # serial 40: the hypernet's gradient (computed even at lr 0) is sketched too - its even/odd agreement says whether unfreezing
 # it has a signal to follow; both in the round line and rounds.txt. The trainer restarts after its running round.
-SER=40
+# serial 41: round 11 - the hypernet's gradient agrees across groups far more than the LoRA's (even/odd cos +0.61 against +0.12):
+# a direction worth following. The hypernet is unfrozen at lr 1e-6 (kvg_plr; Adam's state for it has been accumulating
+# at lr 0) from the next round; the weights before it are kept as kvg_before_hyper.pt (hub history has them too).
+SER=41
 if [ -f /root/.boxrmx_serial ] && [ "$(cat /root/.boxrmx_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxrmx_serial
 [ -d /venv/main/bin ] && export PATH=/venv/main/bin:$PATH
@@ -455,5 +458,9 @@ echo "[kg] s40: hypernet gradient sketched too from here $(date -u)"
 START=dpo_ref.pt exec bash /root/kvg_job.sh
 JOB
   setsid nohup bash -c 'bash /root/s40.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
+fi
+if [ ! -e /root/.s41hyper ]; then touch /root/.s41hyper
+  cd /root/w && cp kvg.pt kvg_before_hyper.pt && cat VERSION > kvg_before_hyper.version && echo 1e-6 > kvg_plr
+  echo "[kg] s41: hypernet lr 1e-6 from the next round (weights before it: v$(cat VERSION)) $(date -u)" >> /root/w/w.log
 fi
 # CTL-END
