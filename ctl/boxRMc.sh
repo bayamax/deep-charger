@@ -112,7 +112,9 @@
 # torch's load_state_dict brings back the learning rates saved with the optimizer state, so since round 6 (the first
 # carried state, saved with hypernet lr 0) every lr flag was ignored; sp_qwen3.py now puts this run's lrs back. v25's
 # 36/38 was LoRA-only noise. The hypernet is unfrozen at lr 1e-6 for real (weights before it kept as kvg_before_hyper2.pt).
-SER=44
+# serial 45: s44 left the fixed sp_qwen3.py as sp_new.py (round 15 was training) and round 16 started straight after - it
+# likely runs the old code (hypernet lr still 0). The fixed file goes in as soon as no training runs.
+SER=45
 if [ -f /root/.boxrmx_serial ] && [ "$(cat /root/.boxrmx_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxrmx_serial
 [ -d /venv/main/bin ] && export PATH=/venv/main/bin:$PATH
@@ -495,5 +497,14 @@ if [ ! -e /root/.s44hyper ]; then touch /root/.s44hyper
   pgrep -f "sp_qwen3.py train" > /dev/null || mv sp_new.py sp_qwen3.py   # a running training keeps its copy; the next own block refreshes it anyway
   cp kvg.pt kvg_before_hyper2.pt && cat VERSION > kvg_before_hyper2.version && echo 1e-6 > kvg_plr
   echo "[kg] s44: lrs now kept across the optimizer state; hypernet lr 1e-6 from the next round (weights before: v$(cat VERSION)) $(date -u)" >> /root/w/w.log
+fi
+if [ ! -e /root/.s45code ]; then touch /root/.s45code
+  cat > /root/s45.sh <<'JOB'
+cd /root/w; grep -q "keep this run's" sp_qwen3.py && { echo "[kg] s45: sp_qwen3.py already has the lr fix"; exit 0; }
+while pgrep -f "sp_qwen3.py train" > /dev/null; do sleep 20; done
+grep -q "keep this run's" sp_new.py 2>/dev/null || curl -sS -o sp_new.py "https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/tools/sp_qwen3.py?nocache=$(date +%s)"
+grep -q "keep this run's" sp_new.py && mv sp_new.py sp_qwen3.py && echo "[kg] s45: sp_qwen3.py with the lr fix in place $(date -u)"
+JOB
+  setsid nohup bash -c 'bash /root/s45.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
 fi
 # CTL-END
