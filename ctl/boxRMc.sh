@@ -120,7 +120,11 @@
 # serial 47: the credit is nearly out (the user tops it up later, maybe) - the trainer's state goes to the hub
 # (archive/sp3/kvg/state/: weights, optimizer state, round / version counters, used group files, hypernet lr) so the
 # run can carry on from it; copies first, so a training round that writes meanwhile does not tear them.
-SER=47
+# serial 48: why no gain - in 24 updates the LoRA moved ~5e-4 of the weights (a bf16 step is 4e-3) and the 60-problem answers of v30
+# differ from v18's no more than two seeds of one version do (7-9 flips against 7-10): the direction was there, the distance
+# was not. LoRA lr 1e-5 -> 5e-5, 8 groups per update instead of 16 (about 10x the movement per round for the same data),
+# hypernet lr 1e-6 -> 5e-6; read every round (kvg_loralr / kvg_accum / kvg_plr).
+SER=48
 if [ -f /root/.boxrmx_serial ] && [ "$(cat /root/.boxrmx_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxrmx_serial
 [ -d /venv/main/bin ] && export PATH=/venv/main/bin:$PATH
@@ -534,5 +538,9 @@ HfApi().upload_folder(folder_path='state_up', path_in_repo='archive/sp3/kvg/stat
 print('[kg] s47: trainer state on the hub (round', open('state_up/kvg_round').read().strip(), ', version', open('state_up/VERSION').read().strip(), ')')"
 JOB
   setsid nohup bash -c 'bash /root/s47.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
+fi
+if [ ! -e /root/.s48move ]; then touch /root/.s48move
+  cd /root/w && echo 5e-5 > kvg_loralr && echo 8 > kvg_accum && echo 5e-6 > kvg_plr
+  echo "[kg] s48: LoRA lr 5e-5, 8 groups per update, hypernet lr 5e-6 from the next round $(date -u)" >> /root/w/w.log
 fi
 # CTL-END

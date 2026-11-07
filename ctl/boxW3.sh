@@ -1,0 +1,60 @@
+#!/bin/bash
+# Interruptible GRPO rollout worker (the user: a long run - spend the money better). An interruptible box is paused when
+# outbid and started again later: its onstart runs ctl.sh again, which runs this script again, so nothing here is guarded by
+# a one-time flag - every run (re)starts the worker loop unless it is already running. The worker loop keeps ctl/kvc_job.sh
+# going on grpo_pool2 shard 3 of 6 (dpo_col_g/n2/): on its first start it begins two blocks after the last one on the
+# hub for the shard (the block the replaced box may still be running is skipped); afterwards kvc_job's own block counter
+# (kcg_n2_block, on this box's disk) carries on. Touch /root/w/PAUSE_W to hold it.
+# serial 1: first start. serial 2: streams / token budget from /root/w/kvc_rb, kvc_tb (default 12 / 16000). serial 3: problems
+# per block from /root/w/kvc_gbs (default 6; another size writes to dpo_col_g/n2g<size>/, carrying on after the problems done).
+# serial 4: GUIDE from /root/w/kvc_guide (2: a raw-window guide for the problems whose first draws all failed).
+# serial 5: the pool from /root/w/kvc_pool (grpo_pool3.jsonl: the weak areas only, output under dpo_col_g/n3*/).
+SER=5; SHARD=3
+if [ -f /root/.boxw_serial ] && [ "$(cat /root/.boxw_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
+echo $SER > /root/.boxw_serial
+[ -d /venv/main/bin ] && export PATH=/venv/main/bin:$PATH
+[ -s /root/.hf_token ] || { [ -n "$HF_TOKEN" ] && printf '%s' "$HF_TOKEN" > /root/.hf_token && chmod 600 /root/.hf_token; }
+mkdir -p /root/w
+cat > /root/status.sh <<'ST'
+grep -E "^\[(kc|hub|w)\]|Error|Traceback|out of memory" /root/w/w.log 2>/dev/null | tail -n 3 | cut -c1-300
+tail -n 1 $(ls -t /root/w/sp_*.log 2>/dev/null | head -1) 2>/dev/null | cut -c1-400
+nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv,noheader
+ST
+chmod +x /root/status.sh
+cat > /root/wloop.sh <<'JOB'
+SHARD=3; RAW=https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); cd /root/w
+echo "[w] worker loop up, shard $SHARD of 6, $(nvidia-smi --query-gpu=name,memory.used,memory.total --format=csv,noheader) $(date -u)"
+python3 -c "import huggingface_hub" 2>/dev/null || python3 -m pip install -q "huggingface_hub[hf_xet]" 2>&1 | tail -1
+while true; do
+  if [ ! -e PAUSE_W ] && ! pgrep -f "bash /root/kvc_job.sh" > /dev/null; then
+    rm -f STOP_KC
+    POOLF=$(cat kvc_pool 2>/dev/null || echo grpo_pool2.jsonl); PF=n2; [ "$POOLF" = grpo_pool3.jsonl ] && PF=n3
+    G=$(cat kvc_gbs 2>/dev/null || echo 6); T=$PF; [ "$G" != 6 ] && T=${PF}g$G   # problems per block (another size: its own output directory)
+    if [ ! -s kcg_${T}_block ]; then   # first start of this pool and size: after every problem of the shard done so far, here or on the hub
+      st=$(python3 -c "
+import re, os; from huggingface_hub import HfApi
+loc = '$PF' == 'n2' and os.path.exists('kcg_n2_block')
+done = int(open('kcg_n2_block').read()) * 6 if loc else 0
+for f in HfApi().list_repo_files('baya1116/hypernet-sp-distill'):
+    m = re.match(r'archive/sp3/dpo_col_g/$PF(?:g(\d+))?/s$SHARD/g12_b(\d+)_v', f)
+    if m: done = max(done, (int(m.group(2)) + 1) * int(m.group(1) or 6) + (0 if loc else int(m.group(1) or 6)))
+print(-(-done // $G))" 2>/dev/null)
+      [ -n "$st" ] && echo $st > kcg_${T}_block; echo "[w] shard $SHARD of $POOLF, $G problems per block ($T), starts at block $(cat kcg_${T}_block 2>/dev/null)"
+    fi
+    curl -sS -o /root/kvc_job.sh "$RAW/ctl/kvc_job.sh?nocache=$(date +%s)"
+    echo "[w] kvc_job (re)started $(date -u)"
+    GUIDE=$(cat kvc_guide 2>/dev/null || echo 0) GBS=$G RB=$(cat kvc_rb 2>/dev/null || echo 12) TB=$(cat kvc_tb 2>/dev/null || echo 16000) POOL=$POOLF TAG=$T MODE=grpo SHARD=$SHARD NSHARD=6 bash /root/kvc_job.sh >> /root/w/w.log 2>&1
+  fi
+  sleep 60
+done
+JOB
+if [ -n "16" ] && [ "$(cat /root/w/kvc_rb 2>/dev/null)" != "16" ]; then   # new streams / budget: the running kvc_job stops after its block
+  echo 16 > /root/w/kvc_rb; echo 20000 > /root/w/kvc_tb; touch /root/w/STOP_KC; fi
+if [ -n "12" ] && [ "$(cat /root/w/kvc_gbs 2>/dev/null || echo 6)" != "12" ]; then echo 12 > /root/w/kvc_gbs; touch /root/w/STOP_KC; fi
+if [ -n "2" ] && [ "$(cat /root/w/kvc_guide 2>/dev/null || echo 0)" != "2" ]; then echo 2 > /root/w/kvc_guide; touch /root/w/STOP_KC; fi
+if [ -n "grpo_pool3.jsonl" ] && [ "$(cat /root/w/kvc_pool 2>/dev/null || echo grpo_pool2.jsonl)" != "grpo_pool3.jsonl" ]; then echo grpo_pool3.jsonl > /root/w/kvc_pool; touch /root/w/STOP_KC; fi
+if [ ! -e /root/.wloop5 ]; then touch /root/.wloop5; pkill -f "bash /root/wloop.sh"; fi   # the loop script changed: restart it (the running kvc_job carries on)
+pgrep -f "bash /root/wloop.sh" > /dev/null || setsid nohup bash -c 'bash /root/wloop.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
+echo "[w] ctl run $(date -u)"
+# CTL-END
