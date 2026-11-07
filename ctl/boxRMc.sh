@@ -129,7 +129,9 @@
 # 5e-5 with momentum building. Now: the running training is stopped, the weights go back to v32 (hub commit 6631be0426)
 # and are published as v35, the optimizer state is dropped (its momentum points to the collapse), every group drawn so
 # far is marked used (v33 / v34 drew from the collapsing policy), LoRA lr 2e-5, hypernet lr 1e-6, 8 groups per update.
-SER=49
+# serial 50: the workers finish their running blocks with v34 (the collapsed weights): for the next 3 hours every group file
+# drawn with v33 or v34 that reaches the hub is marked used as it arrives.
+SER=50
 if [ -f /root/.boxrmx_serial ] && [ "$(cat /root/.boxrmx_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxrmx_serial
 [ -d /venv/main/bin ] && export PATH=/venv/main/bin:$PATH
@@ -568,5 +570,18 @@ echo "[kg] s49: back to v32's weights, published as v35; optimizer state dropped
 START=dpo_ref.pt exec bash /root/kvg_job.sh
 JOB
   setsid nohup bash -c 'bash /root/s49.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
+fi
+if [ ! -e /root/.s50skip ]; then touch /root/.s50skip
+  cat > /root/s50.sh <<'JOB'
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token); cd /root/w
+for _i in $(seq 90); do
+  python3 -c "
+import re; from huggingface_hub import HfApi
+used = set(open('used_groups.txt').read().split())
+new = [f for f in HfApi().list_repo_files('baya1116/hypernet-sp-distill') if f.startswith('archive/sp3/dpo_col_g/') and re.search(r'_v3[34]\.jsonl$', f) and f not in used]
+if new: open('used_groups.txt', 'a').write('\n'.join(new) + '\n'); print('[kg] s50: skipped', len(new), 'group files drawn with v33/v34')" 2>/dev/null
+  sleep 120; done
+JOB
+  setsid nohup bash -c 'bash /root/s50.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
 fi
 # CTL-END
