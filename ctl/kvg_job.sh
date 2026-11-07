@@ -23,6 +23,10 @@ if [ ! -s kvg.pt ]; then   # the starting weights go out first, so the rollout w
   put kvg.pt spKVF_latest.pt && put VERSION kvf/VERSION; fi
 v0=$(cat kvg_v0 2>/dev/null || echo $v0)
 echo "[kg] ready $(date -u) | grpo-groups in the script: $(grep -c '"--grpo-groups"' sp_qwen3.py) | start ${START:-kvf.pt} (version $v0) | $GT"
+ev60() {   # ev60 <round> <version>: the 60 problems at seed 1 with kvg.pt
+  o=kvg_v$2_s1.jsonl; rm -f $o   # (an older run's file of the same name was appended to once)
+  python3 sp_qwen3.py rollout --traces rl_eval60.jsonl $M --ckpt kvg.pt --max-len 12288 --roll-batch 48 --grpo-tok-budget 60000 --seed 1 --roll-out $o --log $LG > run_kggen.log 2>&1
+  put $o kvg/$o; echo "[kg] round $1 (weights v$2) seed 1: $(ok60 $o | awk '{print $1 "/60 correct, closed " $2}')"; put $LG kvg/kvg.log; }
 ok60() { python3 -c "
 import json, sys; sys.path.insert(0, '.')
 from sp_mathcheck import correct
@@ -36,6 +40,7 @@ sk() {   # sk <ckpt> <version>: the weights' sketch (parameter-movement tracking
 moves() { python3 param_sketch.py report $(ls sk_v*.pt | sort -t v -k2 -n) 2>&1 | sed 's/^/[kg] params /'; }
 moves
 touch used_groups.txt
+if [ -e kvg_eval_now ] && [ -s kvg.pt ]; then rm -f kvg_eval_now; ev60 $(cat kvg_round 2>/dev/null || echo 0) $(cat VERSION); fi
 while [ ! -e STOP_KG ]; do
   V0=$v0 GMIN=$GMIN CUR=$(cat VERSION) python3 - <<'PY' > newg_list.txt
 import os, re
@@ -63,7 +68,8 @@ for l in open('newg.jsonl'):
 print(k)")
   if [ $n -lt $NEWG ] || [ $ninf -lt $NEWINF ]; then   # a round needs NEWINF informative groups (one full update), not just NEWG problems   # meanwhile one rollout block of its own shard
     curl -sS -o kvc_job.sh "$RAW/ctl/kvc_job.sh?nocache=$(date +%s)"
-    MODE=grpo SHARD=$((NSH - 1)) NSHARD=$NSH ONE=1 RB=48 TB=60000 bash kvc_job.sh | grep "^\[kc\] grpo" | sed 's/^\[kc\]/[kg] own/' || sleep 600
+    OWN="SHARD=$((NSH - 1)) NSHARD=$NSH RB=48 TB=60000"; [ -s kvg_own ] && OWN=$(cat kvg_own)   # kvg_own: e.g. the weak-area pool, a shard of its own
+    env $OWN MODE=grpo ONE=1 bash kvc_job.sh | grep "^\[kc\] grpo" | sed 's/^\[kc\]/[kg] own/' || sleep 600
     continue; fi
   rd=$((rd + 1)); cat newg_list.txt >> used_groups.txt; cp newg.jsonl kvg_groups_r$rd.jsonl
   cp kvg.pt kvg_prev.pt
@@ -93,9 +99,8 @@ PY2
   { echo "round $rd -> v$v $(date -u +%H:%MZ) | $(grep '\[sp\] grpo groups' run_kg_tr.log | tail -1 | cut -d: -f2-) | $(grep -E '\[sp\] train .*grpo group' run_kg_tr.log | tail -1 | grep -oP 'mean reward [0-9.]+') | $gq"
     python3 param_sketch.py report $(ls sk_v*.pt | sort -t v -k2 -n) 2>&1 | grep "^\[lora\]" | sed 's/^/  /'; } >> kvg_rounds.txt
   put kvg_rounds.txt kvg/rounds.txt > /dev/null   # the container log drops lines; the round summaries live here too
+  EVERY=$(cat kvg_every 2>/dev/null || echo $EVERY)
   if [ $((rd % EVERY)) != 0 ]; then echo "[kg] round $rd (weights v$v) published"; continue; fi
-  o=kvg_v${v}_s1.jsonl; rm -f $o   # (an older run's file of the same name was appended to once)
-  python3 sp_qwen3.py rollout --traces rl_eval60.jsonl $M --ckpt kvg.pt --max-len 12288 --roll-batch 48 --grpo-tok-budget 60000 --seed 1 --roll-out $o --log $LG > run_kggen.log 2>&1
-  put $o kvg/$o; echo "[kg] round $rd (weights v$v) seed 1: $(ok60 $o | awk '{print $1 "/60 correct, closed " $2}')"; put $LG kvg/kvg.log
+  ev60 $rd $v
 done
 echo "[kg] JOB_DONE $(date -u)"

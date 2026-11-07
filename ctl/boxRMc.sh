@@ -131,7 +131,12 @@
 # far is marked used (v33 / v34 drew from the collapsing policy), LoRA lr 2e-5, hypernet lr 1e-6, 8 groups per update.
 # serial 50: the workers finish their running blocks with v34 (the collapsed weights): for the next 3 hours every group file
 # drawn with v33 or v34 that reaches the hub is marked used as it arrives.
-SER=50
+# serial 51: the user sleeps; the cheap 3090 must last until the morning (~02:00Z), the credit (2.34$ at 17:31Z) does not pay
+# for the six 3060s that long. At 18:50Z the workers are deleted (from the controller) and this box carries on alone: its own
+# rollouts on the weak-area pool (shard 5, 12 problems a block, raw-window guides), a round at 8 informative groups (one
+# update), the 60 problems after every round. The trainer restarts at 18:50Z (its own rollout killed; a training round is
+# never interrupted).
+SER=51
 if [ -f /root/.boxrmx_serial ] && [ "$(cat /root/.boxrmx_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxrmx_serial
 [ -d /venv/main/bin ] && export PATH=/venv/main/bin:$PATH
@@ -583,5 +588,24 @@ if new: open('used_groups.txt', 'a').write('\n'.join(new) + '\n'); print('[kg] s
   sleep 120; done
 JOB
   setsid nohup bash -c 'bash /root/s50.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
+fi
+if [ ! -e /root/.s51alone ]; then touch /root/.s51alone
+  cat > /root/s51.sh <<'JOB'
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token); cd /root/w
+while [ $(date -u +%s) -lt $(date -u -d "2026-11-07 18:50:00" +%s) ]; do sleep 60; done
+st=$(python3 -c "
+import re; from huggingface_hub import HfApi
+b = [int(re.search(r'/g12_b(\d+)_v', f).group(1)) for f in HfApi().list_repo_files('baya1116/hypernet-sp-distill') if f.startswith('archive/sp3/dpo_col_g/n3g12/s5/')]
+print(max(b) + 2 if b else 0)" 2>/dev/null); [ -n "$st" ] && echo $st > kcg_n3g12_block
+echo "POOL=grpo_pool3.jsonl TAG=n3g12 GBS=12 GUIDE=2 SHARD=5 NSHARD=6 RB=40 TB=60000" > kvg_own
+echo 8 > kvg_newinf; echo 24 > kvg_newg; echo 1 > kvg_every
+touch STOP_KG; pkill -f "sp_qwen3.py rollout"
+echo "[kg] s51: alone from here - own rollouts on grpo_pool3 shard 5 from block $(cat kcg_n3g12_block 2>/dev/null), a round at 8 informative groups, the 60 problems every round $(date -u)"
+while pgrep -f "^bash /root/kvg_job.sh" > /dev/null; do sleep 30; done
+rm -f STOP_KG
+for _t in $(seq 60); do curl -sS -o /root/kvg_job.sh "https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl/kvg_job.sh?nocache=$(date +%s)"; grep -q -- "kvg_own" /root/kvg_job.sh && break; sleep 120; done
+START=dpo_ref.pt exec bash /root/kvg_job.sh
+JOB
+  setsid nohup bash -c 'bash /root/s51.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
 fi
 # CTL-END
