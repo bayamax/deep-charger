@@ -8,7 +8,8 @@
 # serial 1: first start. serial 2: streams / token budget from /root/w/kvc_rb, kvc_tb (default 12 / 16000). serial 3: problems
 # per block from /root/w/kvc_gbs (default 6; another size writes to dpo_col_g/n2g<size>/, carrying on after the problems done).
 # serial 4: GUIDE from /root/w/kvc_guide (2: a raw-window guide for the problems whose first draws all failed).
-SER=4; SHARD=5
+# serial 5: the pool from /root/w/kvc_pool (grpo_pool3.jsonl: the weak areas only, output under dpo_col_g/n3*/).
+SER=5; SHARD=5
 if [ -f /root/.boxw_serial ] && [ "$(cat /root/.boxw_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxw_serial
 [ -d /venv/main/bin ] && export PATH=/venv/main/bin:$PATH
@@ -28,20 +29,22 @@ python3 -c "import huggingface_hub" 2>/dev/null || python3 -m pip install -q "hu
 while true; do
   if [ ! -e PAUSE_W ] && ! pgrep -f "bash /root/kvc_job.sh" > /dev/null; then
     rm -f STOP_KC
-    G=$(cat kvc_gbs 2>/dev/null || echo 6); T=n2; [ "$G" != 6 ] && T=n2g$G   # problems per block (another size: its own output directory)
-    if [ ! -s kcg_${T}_block ]; then   # first start of this size: after every problem of the shard done so far, here or on the hub
+    POOLF=$(cat kvc_pool 2>/dev/null || echo grpo_pool2.jsonl); PF=n2; [ "$POOLF" = grpo_pool3.jsonl ] && PF=n3
+    G=$(cat kvc_gbs 2>/dev/null || echo 6); T=$PF; [ "$G" != 6 ] && T=${PF}g$G   # problems per block (another size: its own output directory)
+    if [ ! -s kcg_${T}_block ]; then   # first start of this pool and size: after every problem of the shard done so far, here or on the hub
       st=$(python3 -c "
 import re, os; from huggingface_hub import HfApi
-done = int(open('kcg_n2_block').read()) * 6 if os.path.exists('kcg_n2_block') else 0
+loc = '$PF' == 'n2' and os.path.exists('kcg_n2_block')
+done = int(open('kcg_n2_block').read()) * 6 if loc else 0
 for f in HfApi().list_repo_files('baya1116/hypernet-sp-distill'):
-    m = re.match(r'archive/sp3/dpo_col_g/n2(?:g(\d+))?/s$SHARD/g12_b(\d+)_v', f)
-    if m: done = max(done, (int(m.group(2)) + 1) * int(m.group(1) or 6) + (0 if os.path.exists('kcg_n2_block') else 6))
+    m = re.match(r'archive/sp3/dpo_col_g/$PF(?:g(\d+))?/s$SHARD/g12_b(\d+)_v', f)
+    if m: done = max(done, (int(m.group(2)) + 1) * int(m.group(1) or 6) + (0 if loc else int(m.group(1) or 6)))
 print(-(-done // $G))" 2>/dev/null)
-      [ -n "$st" ] && echo $st > kcg_${T}_block; echo "[w] shard $SHARD, $G problems per block ($T), starts at block $(cat kcg_${T}_block 2>/dev/null)"
+      [ -n "$st" ] && echo $st > kcg_${T}_block; echo "[w] shard $SHARD of $POOLF, $G problems per block ($T), starts at block $(cat kcg_${T}_block 2>/dev/null)"
     fi
     curl -sS -o /root/kvc_job.sh "$RAW/ctl/kvc_job.sh?nocache=$(date +%s)"
     echo "[w] kvc_job (re)started $(date -u)"
-    GUIDE=$(cat kvc_guide 2>/dev/null || echo 0) GBS=$G RB=$(cat kvc_rb 2>/dev/null || echo 12) TB=$(cat kvc_tb 2>/dev/null || echo 16000) POOL=grpo_pool2.jsonl TAG=$T MODE=grpo SHARD=$SHARD NSHARD=6 bash /root/kvc_job.sh >> /root/w/w.log 2>&1
+    GUIDE=$(cat kvc_guide 2>/dev/null || echo 0) GBS=$G RB=$(cat kvc_rb 2>/dev/null || echo 12) TB=$(cat kvc_tb 2>/dev/null || echo 16000) POOL=$POOLF TAG=$T MODE=grpo SHARD=$SHARD NSHARD=6 bash /root/kvc_job.sh >> /root/w/w.log 2>&1
   fi
   sleep 60
 done
@@ -50,7 +53,8 @@ if [ -n "16" ] && [ "$(cat /root/w/kvc_rb 2>/dev/null)" != "16" ]; then   # new 
   echo 16 > /root/w/kvc_rb; echo 20000 > /root/w/kvc_tb; touch /root/w/STOP_KC; fi
 if [ -n "12" ] && [ "$(cat /root/w/kvc_gbs 2>/dev/null || echo 6)" != "12" ]; then echo 12 > /root/w/kvc_gbs; touch /root/w/STOP_KC; fi
 if [ -n "2" ] && [ "$(cat /root/w/kvc_guide 2>/dev/null || echo 0)" != "2" ]; then echo 2 > /root/w/kvc_guide; touch /root/w/STOP_KC; fi
-if [ ! -e /root/.wloop4 ]; then touch /root/.wloop4; pkill -f "bash /root/wloop.sh"; fi   # the loop script changed: restart it (the running kvc_job carries on)
+if [ -n "grpo_pool3.jsonl" ] && [ "$(cat /root/w/kvc_pool 2>/dev/null || echo grpo_pool2.jsonl)" != "grpo_pool3.jsonl" ]; then echo grpo_pool3.jsonl > /root/w/kvc_pool; touch /root/w/STOP_KC; fi
+if [ ! -e /root/.wloop5 ]; then touch /root/.wloop5; pkill -f "bash /root/wloop.sh"; fi   # the loop script changed: restart it (the running kvc_job carries on)
 pgrep -f "bash /root/wloop.sh" > /dev/null || setsid nohup bash -c 'bash /root/wloop.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
 echo "[w] ctl run $(date -u)"
 # CTL-END
