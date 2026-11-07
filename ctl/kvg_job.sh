@@ -58,6 +58,7 @@ from sp_mathcheck import correct
 k = 0
 for l in open('newg.jsonl'):
     g = json.loads(l); r = [('</think>' in t and correct({'text': t, 'gold': g['gold']})) for t in g['samples']]
+    gd = g.get('guide'); r += [bool(gd) and '</think>' in gd and correct({'text': gd, 'gold': g['gold']})] if gd else []
     k += 0 < sum(r) < len(r)
 print(k)")
   if [ $n -lt $NEWG ] || [ $ninf -lt $NEWINF ]; then   # a round needs NEWINF informative groups (one full update), not just NEWG problems   # meanwhile one rollout block of its own shard

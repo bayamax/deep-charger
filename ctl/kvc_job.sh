@@ -68,7 +68,11 @@ R = {}
 for l in open(f'gm1_{b}_v{v}.jsonl'): r = json.loads(l); R.setdefault(r['id'], []).append(ok(r))
 P = [l for l in open(f'p_{b}.jsonl') if 0 < sum(R.get(json.loads(l)['id'], [])) < G1]
 open(f'pg2_{b}.jsonl', 'w').writelines(l for l in P for _ in range(G - G1))
+open(f'pw_{b}.jsonl', 'w').writelines(l for l in open(f'p_{b}.jsonl') if json.loads(l)['id'] in R and sum(R[json.loads(l)['id']]) == 0)
 PY2
+    # GUIDE=2 (the user: train hardest where the memory fails): the problems whose G1 draws all failed get one raw-window draw
+    # (the original model, no memory); a right one joins the group as a guide with reward 1, so the group carries a signal
+    if [ "$GUIDE" = 2 ] && [ -s pw_$k.jsonl ]; then gen pw_$k.jsonl graw_$k.jsonl $((sd + 3)) --ckpt ref.pt --no-sp; fi
     if [ -s pg2_$k.jsonl ]; then gen pg2_$k.jsonl gm2_${k}_v$v.jsonl $((sd + 2)) --ckpt mem.pt; else : > gm2_${k}_v$v.jsonl; fi
     cat gm1_${k}_v$v.jsonl gm2_${k}_v$v.jsonl > gmem_${k}_v$v.jsonl
     s=$(python3 - $k $v <<'PY2'

@@ -7,7 +7,8 @@
 # (kcg_n2_block, on this box's disk) carries on. Touch /root/w/PAUSE_W to hold it.
 # serial 1: first start. serial 2: streams / token budget from /root/w/kvc_rb, kvc_tb (default 12 / 16000). serial 3: problems
 # per block from /root/w/kvc_gbs (default 6; another size writes to dpo_col_g/n2g<size>/, carrying on after the problems done).
-SER=3; SHARD=1
+# serial 4: GUIDE from /root/w/kvc_guide (2: a raw-window guide for the problems whose first draws all failed).
+SER=4; SHARD=1
 if [ -f /root/.boxw_serial ] && [ "$(cat /root/.boxw_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxw_serial
 [ -d /venv/main/bin ] && export PATH=/venv/main/bin:$PATH
@@ -40,7 +41,7 @@ print(-(-done // $G))" 2>/dev/null)
     fi
     curl -sS -o /root/kvc_job.sh "$RAW/ctl/kvc_job.sh?nocache=$(date +%s)"
     echo "[w] kvc_job (re)started $(date -u)"
-    GBS=$G RB=$(cat kvc_rb 2>/dev/null || echo 12) TB=$(cat kvc_tb 2>/dev/null || echo 16000) POOL=grpo_pool2.jsonl TAG=$T MODE=grpo SHARD=$SHARD NSHARD=6 bash /root/kvc_job.sh >> /root/w/w.log 2>&1
+    GUIDE=$(cat kvc_guide 2>/dev/null || echo 0) GBS=$G RB=$(cat kvc_rb 2>/dev/null || echo 12) TB=$(cat kvc_tb 2>/dev/null || echo 16000) POOL=grpo_pool2.jsonl TAG=$T MODE=grpo SHARD=$SHARD NSHARD=6 bash /root/kvc_job.sh >> /root/w/w.log 2>&1
   fi
   sleep 60
 done
@@ -48,7 +49,8 @@ JOB
 if [ -n "16" ] && [ "$(cat /root/w/kvc_rb 2>/dev/null)" != "16" ]; then   # new streams / budget: the running kvc_job stops after its block
   echo 16 > /root/w/kvc_rb; echo 20000 > /root/w/kvc_tb; touch /root/w/STOP_KC; fi
 if [ -n "12" ] && [ "$(cat /root/w/kvc_gbs 2>/dev/null || echo 6)" != "12" ]; then echo 12 > /root/w/kvc_gbs; touch /root/w/STOP_KC; fi
-if [ ! -e /root/.wloop3 ]; then touch /root/.wloop3; pkill -f "bash /root/wloop.sh"; fi   # the loop script changed: restart it (the running kvc_job carries on)
+if [ -n "2" ] && [ "$(cat /root/w/kvc_guide 2>/dev/null || echo 0)" != "2" ]; then echo 2 > /root/w/kvc_guide; touch /root/w/STOP_KC; fi
+if [ ! -e /root/.wloop4 ]; then touch /root/.wloop4; pkill -f "bash /root/wloop.sh"; fi   # the loop script changed: restart it (the running kvc_job carries on)
 pgrep -f "bash /root/wloop.sh" > /dev/null || setsid nohup bash -c 'bash /root/wloop.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
 echo "[w] ctl run $(date -u)"
 # CTL-END

@@ -114,7 +114,10 @@
 # 36/38 was LoRA-only noise. The hypernet is unfrozen at lr 1e-6 for real (weights before it kept as kvg_before_hyper2.pt).
 # serial 45: s44 left the fixed sp_qwen3.py as sp_new.py (round 15 was training) and round 16 started straight after - it
 # likely runs the old code (hypernet lr still 0). The fixed file goes in as soon as no training runs.
-SER=45
+# serial 46: the user - train hardest where the memory fails (raw window right, memory wrong), hypernet unfrozen. Workers
+# give the problems whose first 4 memory draws all failed one raw-window draw as a guide (GUIDE=2); the gate now counts
+# a group made informative by its guide. The trainer restarts after its running round (state, lrs and hypernet lr kept).
+SER=46
 if [ -f /root/.boxrmx_serial ] && [ "$(cat /root/.boxrmx_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxrmx_serial
 [ -d /venv/main/bin ] && export PATH=/venv/main/bin:$PATH
@@ -506,5 +509,16 @@ grep -q "keep this run's" sp_new.py 2>/dev/null || curl -sS -o sp_new.py "https:
 grep -q "keep this run's" sp_new.py && mv sp_new.py sp_qwen3.py && echo "[kg] s45: sp_qwen3.py with the lr fix in place $(date -u)"
 JOB
   setsid nohup bash -c 'bash /root/s45.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
+fi
+if [ ! -e /root/.s46guide ]; then touch /root/.s46guide
+  touch /root/w/STOP_KG
+  cat > /root/s46.sh <<'JOB'
+while pgrep -f "^bash /root/kvg_job.sh" > /dev/null; do sleep 30; done
+rm -f /root/w/STOP_KG
+for _t in $(seq 60); do curl -sS -o /root/kvg_job.sh "https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl/kvg_job.sh?nocache=$(date +%s)"; grep -q -- "gd = g.get('guide')" /root/kvg_job.sh && break; sleep 120; done
+echo "[kg] s46: guide-aware gate from here (hypernet lr $(cat /root/w/kvg_plr)) $(date -u)"
+cd /root/w && START=dpo_ref.pt exec bash /root/kvg_job.sh
+JOB
+  setsid nohup bash -c 'bash /root/s46.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
 fi
 # CTL-END
