@@ -136,7 +136,9 @@
 # rollouts on the weak-area pool (shard 5, 12 problems a block, raw-window guides), a round at 8 informative groups (one
 # update), the 60 problems after every round. The trainer restarts at 18:50Z (its own rollout killed; a training round is
 # never interrupted).
-SER=51
+# serial 52: v37 read 41/60 (the best so far, with v22) - its state goes to the hub (archive/sp3/kvg/state/) so the run can
+# carry on from it after the credit; the trainer is not disturbed.
+SER=52
 if [ -f /root/.boxrmx_serial ] && [ "$(cat /root/.boxrmx_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxrmx_serial
 [ -d /venv/main/bin ] && export PATH=/venv/main/bin:$PATH
@@ -607,5 +609,16 @@ for _t in $(seq 60); do curl -sS -o /root/kvg_job.sh "https://raw.githubusercont
 START=dpo_ref.pt exec bash /root/kvg_job.sh
 JOB
   setsid nohup bash -c 'bash /root/s51.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
+fi
+if [ ! -e /root/.s52state ]; then touch /root/.s52state
+  cat > /root/s52.sh <<'JOB'
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token); cd /root/w; rm -rf state_up; mkdir -p state_up
+for f in kvg.pt kvg_opt.pt kvg_round kvg_v0 VERSION used_groups.txt kvg_plr kvg_loralr kvg_accum kvg_newinf kvg_newg kvg_every kvg_own kvg_rounds.txt kcg_n3g12_block; do [ -e $f ] && cp $f state_up/; done
+python3 -c "
+from huggingface_hub import HfApi
+HfApi().upload_folder(folder_path='state_up', path_in_repo='archive/sp3/kvg/state', repo_id='baya1116/hypernet-sp-distill')
+print('[kg] s52: trainer state on the hub (round', open('state_up/kvg_round').read().strip(), ', version', open('state_up/VERSION').read().strip(), ')')"
+JOB
+  setsid nohup bash -c 'bash /root/s52.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
 fi
 # CTL-END
