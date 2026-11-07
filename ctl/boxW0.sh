@@ -57,4 +57,15 @@ if [ -n "grpo_pool3.jsonl" ] && [ "$(cat /root/w/kvc_pool 2>/dev/null || echo gr
 if [ ! -e /root/.wloop5 ]; then touch /root/.wloop5; pkill -f "bash /root/wloop.sh"; fi   # the loop script changed: restart it (the running kvc_job carries on)
 pgrep -f "bash /root/wloop.sh" > /dev/null || setsid nohup bash -c 'bash /root/wloop.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
 echo "[w] ctl run $(date -u)"
+if [ ! -e /root/.evx30 ]; then touch /root/.evx30 /root/w/PAUSE_W   # v30 on the 60 problems, part 0 of 6, now; the block resumes after it
+  for J in $(pgrep -f "bash /root/kvc_job.sh"); do pkill -P $J; kill $J; done
+  cat > /root/evx30.sh <<'JOB'
+sleep 15; RAW=https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i
+for _t in $(seq 20); do curl -sS -o /root/kvx_job.sh "$RAW/ctl/kvx_job.sh?nocache=$(date +%s)"; grep -q NPART /root/kvx_job.sh && break; sleep 30; done
+echo "[kc] eval v30 part 0 of 6 from here $(date -u)"
+REV=33c9a3a3ab VN=v30 SEED=1 PART=0 NPART=6 RB=12 TB=16000 bash /root/kvx_job.sh
+rm -f /root/w/PAUSE_W
+JOB
+  setsid nohup bash -c 'bash /root/evx30.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
+fi
 # CTL-END

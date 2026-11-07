@@ -12,8 +12,12 @@ rs = open('rl_eval120.jsonl').readlines(); open('rl_eval60.jsonl', 'w').writelin
 import shutil, sys; from huggingface_hub import hf_hub_download as d
 shutil.copy(d('$R', 'archive/sp3/spKVF_latest.pt', revision='$REV', local_dir='evx_dl'), 'evx_$VN.pt'); shutil.rmtree('evx_dl')"
 M="--S 32 --heads 8 --layers 3 --ffn 2048 --rw 1024 --C 128 --maxd 0 --kv-mem --kv-rank 512"
-o=evalx_${VN}_s$SEED.jsonl
-python3 sp_qwen3.py rollout --traces rl_eval60.jsonl $M --ckpt evx_$VN.pt --max-len 12288 --roll-batch ${RB:-12} --grpo-tok-budget ${TB:-16000} --seed $SEED --roll-out $o --log sp_kvx.log > run_kvx.log 2>&1
+o=evalx_${VN}_s$SEED.jsonl; EV=rl_eval60.jsonl
+if [ -n "$NPART" ]; then   # one part of the 60 (problems i % NPART == PART), several workers in parallel
+  python3 -c "
+L = open('rl_eval60.jsonl').readlines(); open('ev_part.jsonl', 'w').writelines(l for i, l in enumerate(L) if i % $NPART == $PART)"
+  EV=ev_part.jsonl; o=evalx_${VN}_s${SEED}_p${PART}of$NPART.jsonl; fi
+python3 sp_qwen3.py rollout --traces $EV $M --ckpt evx_$VN.pt --max-len 12288 --roll-batch ${RB:-12} --grpo-tok-budget ${TB:-16000} --seed $SEED --roll-out $o --log sp_kvx.log > run_kvx.log 2>&1
 put $o kvg/$o; rm -f evx_$VN.pt
 echo "[kc] eval $VN seed $SEED: $(python3 -c "
 import json, sys; sys.path.insert(0, '.')
