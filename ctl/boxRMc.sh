@@ -117,7 +117,10 @@
 # serial 46: the user - train hardest where the memory fails (raw window right, memory wrong), hypernet unfrozen. Workers
 # give the problems whose first 4 memory draws all failed one raw-window draw as a guide (GUIDE=2); the gate now counts
 # a group made informative by its guide. The trainer restarts after its running round (state, lrs and hypernet lr kept).
-SER=46
+# serial 47: the credit is nearly out (the user tops it up later, maybe) - the trainer's state goes to the hub
+# (archive/sp3/kvg/state/: weights, optimizer state, round / version counters, used group files, hypernet lr) so the
+# run can carry on from it; copies first, so a training round that writes meanwhile does not tear them.
+SER=47
 if [ -f /root/.boxrmx_serial ] && [ "$(cat /root/.boxrmx_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxrmx_serial
 [ -d /venv/main/bin ] && export PATH=/venv/main/bin:$PATH
@@ -520,5 +523,16 @@ echo "[kg] s46: guide-aware gate from here (hypernet lr $(cat /root/w/kvg_plr)) 
 cd /root/w && START=dpo_ref.pt exec bash /root/kvg_job.sh
 JOB
   setsid nohup bash -c 'bash /root/s46.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
+fi
+if [ ! -e /root/.s47state ]; then touch /root/.s47state
+  cat > /root/s47.sh <<'JOB'
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token); cd /root/w; mkdir -p state_up
+for f in kvg.pt kvg_opt.pt kvg_round kvg_v0 VERSION used_groups.txt kvg_plr kvg_rounds.txt; do [ -e $f ] && cp $f state_up/; done
+python3 -c "
+from huggingface_hub import HfApi
+HfApi().upload_folder(folder_path='state_up', path_in_repo='archive/sp3/kvg/state', repo_id='baya1116/hypernet-sp-distill')
+print('[kg] s47: trainer state on the hub (round', open('state_up/kvg_round').read().strip(), ', version', open('state_up/VERSION').read().strip(), ')')"
+JOB
+  setsid nohup bash -c 'bash /root/s47.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
 fi
 # CTL-END
