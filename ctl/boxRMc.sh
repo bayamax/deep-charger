@@ -124,7 +124,12 @@
 # differ from v18's no more than two seeds of one version do (7-9 flips against 7-10): the direction was there, the distance
 # was not. LoRA lr 1e-5 -> 5e-5, 8 groups per update instead of 16 (about 10x the movement per round for the same data),
 # hypernet lr 1e-6 -> 5e-6; read every round (kvg_loralr / kvg_accum / kvg_plr).
-SER=48
+# serial 49: collapse. v34 read 22/60 with 37 closed-but-wrong and 1 unclosed (v31: 38 / 11 / 12); in training v33 already
+# closed 89% with 32% closed-but-wrong (v32: 69% / 14%) - the "close now" direction (gradient halves +0.93) won at LoRA lr
+# 5e-5 with momentum building. Now: the running training is stopped, the weights go back to v32 (hub commit 6631be0426)
+# and are published as v35, the optimizer state is dropped (its momentum points to the collapse), every group drawn so
+# far is marked used (v33 / v34 drew from the collapsing policy), LoRA lr 2e-5, hypernet lr 1e-6, 8 groups per update.
+SER=49
 if [ -f /root/.boxrmx_serial ] && [ "$(cat /root/.boxrmx_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxrmx_serial
 [ -d /venv/main/bin ] && export PATH=/venv/main/bin:$PATH
@@ -542,5 +547,26 @@ fi
 if [ ! -e /root/.s48move ]; then touch /root/.s48move
   cd /root/w && echo 5e-5 > kvg_loralr && echo 8 > kvg_accum && echo 5e-6 > kvg_plr
   echo "[kg] s48: LoRA lr 5e-5, 8 groups per update, hypernet lr 5e-6 from the next round $(date -u)" >> /root/w/w.log
+fi
+if [ ! -e /root/.s49revert ]; then touch /root/.s49revert
+  touch /root/w/STOP_KG; pkill -f "bash /root/kvg_job.sh"; sleep 2; pkill -f "sp_qwen3.py"; sleep 5
+  cat > /root/s49.sh <<'JOB'
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token); cd /root/w
+R=baya1116/hypernet-sp-distill
+mkdir -p collapse_v34 && cp kvg.pt collapse_v34/ 2>/dev/null; mv kvg_opt.pt collapse_v34/ 2>/dev/null
+python3 -c "
+import shutil; from huggingface_hub import hf_hub_download as d
+shutil.copy(d('$R', 'archive/sp3/spKVF_latest.pt', revision='6631be0426', local_dir='rv_dl'), 'kvg.pt'); shutil.rmtree('rv_dl')" || { echo "[kg] s49: download of v32 FAILED"; exit 1; }
+cp kvg.pt kvg_prev.pt; cp kvg.pt kvf.pt; echo 22 > kvg_round; echo 35 > VERSION
+python3 -c "
+from huggingface_hub import HfApi
+fs = [f for f in HfApi().list_repo_files('$R') if f.startswith('archive/sp3/dpo_col_g/')]
+open('used_groups.txt', 'a').write('\n'.join(fs) + '\n'); print(len(fs))" > s49_used.txt
+for _i in 1 2 3; do python3 -c "from huggingface_hub import HfApi; a=HfApi(); a.upload_file(path_or_fileobj='kvg.pt', path_in_repo='archive/sp3/spKVF_latest.pt', repo_id='$R'); a.upload_file(path_or_fileobj='VERSION', path_in_repo='archive/sp3/kvf/VERSION', repo_id='$R')" && break; sleep 30; done
+echo 2e-5 > kvg_loralr; echo 1e-6 > kvg_plr; echo 8 > kvg_accum; rm -f STOP_KG
+echo "[kg] s49: back to v32's weights, published as v35; optimizer state dropped; $(cat s49_used.txt) group files marked used; LoRA lr 2e-5, hypernet lr 1e-6 $(date -u)"
+START=dpo_ref.pt exec bash /root/kvg_job.sh
+JOB
+  setsid nohup bash -c 'bash /root/s49.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
 fi
 # CTL-END
