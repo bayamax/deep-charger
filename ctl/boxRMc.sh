@@ -148,7 +148,10 @@
 # serial 56: the slide - 60 problems v38 44, v39 44 / 40, v40 43 / 39, v41 40 (seed 1 / seed 2), training answers closed 81% and
 # closed-but-wrong 21% from v39 on (v38: 75% / 17%). Back to v38 (hub commit c6cb73969e), published as v42; the optimizer
 # state is dropped; the groups drawn with v40 / v41 are marked used; LoRA lr 1e-5, hypernet 1e-6, 8 groups per update.
-SER=56
+# serial 57: the lr follows the accuracy (the user): kvg_job's auto_lr after every round's eval - a new best is kept, a slide
+# (E <= best-4 or closed-but-wrong > 28%) goes back to the best with the lr halved, a drift (> 22% / closed > 82%) halves
+# the lr, a clean round (< 18%, < 78%, E >= best-1) raises it x1.25; 2.5e-6..2e-5. The best starts as v42 (= v38, 44/60).
+SER=57
 if [ -f /root/.boxrmx_serial ] && [ "$(cat /root/.boxrmx_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxrmx_serial
 [ -d /venv/main/bin ] && export PATH=/venv/main/bin:$PATH
@@ -674,5 +677,16 @@ if new: open('used_groups.txt', 'a').write('\n'.join(new) + '\n'); print('[kg] s
   sleep 120; done
 JOB
   setsid nohup bash -c 'bash /root/s56b.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
+fi
+if [ ! -e /root/.s57auto ]; then touch /root/.s57auto
+  cd /root/w && cp kvg.pt kvg_best.pt && echo 44 > kvg_best_score && echo 42 > kvg_best_v && touch kvg_auto && touch STOP_KG
+  cat > /root/s57.sh <<'JOB'
+while pgrep -f "^bash /root/kvg_job.sh" > /dev/null; do sleep 30; done
+cd /root/w; rm -f STOP_KG
+for _t in $(seq 60); do curl -sS -o /root/kvg_job.sh "https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl/kvg_job.sh?nocache=$(date +%s)"; grep -q -- "auto_lr" /root/kvg_job.sh && break; sleep 120; done
+echo "[kg] s57: the lr follows the accuracy from here (best v42 = v38, 44/60) $(date -u)"
+START=dpo_ref.pt exec bash /root/kvg_job.sh
+JOB
+  setsid nohup bash -c 'bash /root/s57.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
 fi
 # CTL-END

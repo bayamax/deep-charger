@@ -27,6 +27,45 @@ ev60() {   # ev60 <round> <version>: the 60 problems at seed 1 with kvg.pt
   o=kvg_v$2_s1.jsonl; rm -f $o   # (an older run's file of the same name was appended to once)
   python3 sp_qwen3.py rollout --traces rl_eval60.jsonl $M --ckpt kvg.pt --max-len 12288 --roll-batch 48 --grpo-tok-budget 60000 --seed 1 --roll-out $o --log $LG > run_kggen.log 2>&1
   put $o kvg/$o; echo "[kg] round $1 (weights v$2) seed 1: $(ok60 $o | awk '{print $1 "/60 correct, closed " $2}')"; put $LG kvg/kvg.log; }
+auto_lr() {   # auto_lr <round> <version> (the user: tune the lr to the accuracy as we go). After the round's eval, from E = the 60
+  # problems, W = closed-but-wrong and C = closed on the round's own groups (first 4 draws; the policy that drew them is the
+  # one evaluated): a new best E is kept as kvg_best.pt; E <= best-4 or W > 28% -> back to the best, lr halved, optimizer
+  # state dropped, the versions since skipped; W > 22% or C > 82% -> lr halved; W < 18%, C < 78%, E >= best-1 -> lr x1.25.
+  # lr within [2.5e-6, 2e-5]. Decisions in kvg_auto.txt (hub kvg/auto.txt).
+  local act; act=$(python3 - $1 $2 <<'PY3'
+import json, sys, os; sys.path.insert(0, '.')
+from sp_mathcheck import correct
+rd, v = int(sys.argv[1]), int(sys.argv[2])
+rs = [json.loads(l) for l in open(f'kvg_v{v}_s1.jsonl')]; E = sum(correct(r) for r in rs)
+n = cl = cw = 0
+for l in open(f'kvg_groups_r{rd}.jsonl'):
+    g = json.loads(l)
+    for t in g['samples'][:4]:
+        c = '</think>' in t; ok = c and correct({'text': t, 'gold': g['gold']}); n += 1; cl += c; cw += c and not ok
+W, C = cw / max(n, 1), cl / max(n, 1)
+lr = float(open('kvg_loralr').read()) if os.path.exists('kvg_loralr') else 1e-5
+best = float(open('kvg_best_score').read()) if os.path.exists('kvg_best_score') else -1
+act = 'keep'; new = lr
+if E > best or not os.path.exists('kvg_best.pt'):
+    best = E; open('kvg_best_score', 'w').write(str(E)); open('kvg_best_v', 'w').write(str(v)); act = 'new best'
+if E <= best - 4 or W > 0.28: act = 'revert'; new = max(lr / 2, 2.5e-6)
+elif W > 0.22 or C > 0.82: act = 'halve'; new = max(lr / 2, 2.5e-6)
+elif W < 0.18 and C < 0.78 and E >= best - 1: act = 'raise' if act == 'keep' else act + '+raise'; new = min(lr * 1.25, 2e-5)
+open('kvg_loralr', 'w').write(f'{new:g}')
+line = f"round {rd} v{v}: E {E}/60 best {best:g} (v{open('kvg_best_v').read().strip()}) | W {100*W:.0f}% C {100*C:.0f}% ({n//4} problems) | lr {lr:g} -> {new:g} | {act}"
+open('kvg_auto.txt', 'a').write(line + '\n'); print(act + '|' + line)
+PY3
+)
+  echo "[kg] auto: ${act#*|}"; put kvg_auto.txt kvg/auto.txt > /dev/null
+  case "${act%%|*}" in
+    *"new best"*) cp kvg.pt kvg_best.pt ;;
+    revert)
+      bv=$(cat kvg_best_v); cp kvg_best.pt kvg.pt; cp kvg.pt kvf.pt; rm -f kvg_opt.pt; cp kvg.pt kvg_prev.pt
+      seq $((bv + 1)) $v | tr '\n' ' ' >> kvg_skip_versions; echo >> kvg_skip_versions
+      rd=$((rd + 1)); echo $rd > kvg_round; v=$((v0 + rd)); echo $v > VERSION
+      put kvg.pt spKVF_latest.pt && put VERSION kvf/VERSION; sk kvg.pt $v
+      echo "[kg] auto: back to the best (v$bv) as v$v, optimizer state dropped, versions $((bv + 1))-$((v - 1)) skipped" ;;
+  esac; }
 ok60() { python3 -c "
 import json, sys; sys.path.insert(0, '.')
 from sp_mathcheck import correct
@@ -51,7 +90,9 @@ gmin = int(os.environ.get('GMIN', '0'))
 def g_(f):   # group size from the file name (g12_b..); the first G=4 files carry none
     m = re.search(r'/g(\d+)_b', f); return int(m.group(1)) if m else 4
 lo = max(v0, int(os.environ.get('CUR', v0)) - 1)   # this run's weights, at most one version stale (asynchronous workers)
-print('\n'.join(sorted(f for f in fs if int(re.search(r'_v(\d+)\.jsonl$', f).group(1)) >= lo and g_(f) >= gmin)))
+skip = set(int(x) for x in open('kvg_skip_versions').read().split()) if os.path.exists('kvg_skip_versions') else set()   # versions reverted from
+print('\n'.join(sorted(f for f in fs if int(re.search(r'_v(\d+)\.jsonl$', f).group(1)) >= lo and g_(f) >= gmin
+                       and int(re.search(r'_v(\d+)\.jsonl$', f).group(1)) not in skip)))
 PY
   : > newg.jsonl
   for f in $(cat newg_list.txt); do curl -sSfL -H "Authorization: Bearer $HF_TOKEN" "$H/$f" >> newg.jsonl 2>/dev/null; done
@@ -102,5 +143,6 @@ PY2
   EVERY=$(cat kvg_every 2>/dev/null || echo $EVERY)
   if [ $((rd % EVERY)) != 0 ]; then echo "[kg] round $rd (weights v$v) published"; continue; fi
   ev60 $rd $v
+  [ -e kvg_auto ] && auto_lr $rd $v
 done
 echo "[kg] JOB_DONE $(date -u)"
