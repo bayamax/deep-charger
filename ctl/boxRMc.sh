@@ -154,7 +154,10 @@
 # serial 58: steady steps from v38 (the user): auto_lr raises by x1.1 at most and never above 1e-5, and judges the eval on the
 # two-seed mean when the workers' seed-2 parts are on the hub (they evaluate every new version, 15 problems each). The
 # trainer restarts after its running round to take the new kvg_job.sh.
-SER=58
+# serial 59: s57's restart (10:22Z) removed the STOP_KG that s58 had set, so the trainer runs s57's kvg_job (lr x1.25, cap 2e-5,
+# one seed) and s58's waiter is still waiting. STOP_KG again: after round 30 the s58 waiter takes over with the steady
+# kvg_job; the lr file is put back to 1e-5 at that moment.
+SER=59
 if [ -f /root/.boxrmx_serial ] && [ "$(cat /root/.boxrmx_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxrmx_serial
 [ -d /venv/main/bin ] && export PATH=/venv/main/bin:$PATH
@@ -702,5 +705,13 @@ echo "[kg] s58: steady auto lr (x1.1, cap 1e-5, two-seed eval) from here $(date 
 START=dpo_ref.pt exec bash /root/kvg_job.sh
 JOB
   setsid nohup bash -c 'bash /root/s58.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
+fi
+if [ ! -e /root/.s59stop ]; then touch /root/.s59stop
+  touch /root/w/STOP_KG
+  cat > /root/s59.sh <<'JOB'
+while pgrep -f "^bash /root/kvg_job.sh" > /dev/null; do sleep 15; done
+echo 1e-5 > /root/w/kvg_loralr; echo "[kg] s59: trainer stopped after its round; lr 1e-5; the steady kvg_job (s58) takes over $(date -u)"
+JOB
+  setsid nohup bash -c 'bash /root/s59.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
 fi
 # CTL-END
