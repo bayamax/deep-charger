@@ -138,7 +138,8 @@
 # never interrupted).
 # serial 52: v37 read 41/60 (the best so far, with v22) - its state goes to the hub (archive/sp3/kvg/state/) so the run can
 # carry on from it after the credit; the trainer is not disturbed.
-SER=52
+# serial 53: v38 read 44/60 - above the raw window's 42 (seed 1). Its state goes to the hub (archive/sp3/kvg/state/).
+SER=53
 if [ -f /root/.boxrmx_serial ] && [ "$(cat /root/.boxrmx_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxrmx_serial
 [ -d /venv/main/bin ] && export PATH=/venv/main/bin:$PATH
@@ -620,5 +621,9 @@ HfApi().upload_folder(folder_path='state_up', path_in_repo='archive/sp3/kvg/stat
 print('[kg] s52: trainer state on the hub (round', open('state_up/kvg_round').read().strip(), ', version', open('state_up/VERSION').read().strip(), ')')"
 JOB
   setsid nohup bash -c 'bash /root/s52.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
+fi
+if [ ! -e /root/.s53state ]; then touch /root/.s53state
+  sed 's/s52:/s53:/' /root/s52.sh > /root/s53.sh
+  setsid nohup bash -c 'bash /root/s53.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
 fi
 # CTL-END
