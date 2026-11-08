@@ -57,4 +57,17 @@ if [ -n "grpo_pool3.jsonl" ] && [ "$(cat /root/w/kvc_pool 2>/dev/null || echo gr
 if [ ! -e /root/.wloop5 ]; then touch /root/.wloop5; pkill -f "bash /root/wloop.sh"; fi   # the loop script changed: restart it (the running kvc_job carries on)
 pgrep -f "bash /root/wloop.sh" > /dev/null || setsid nohup bash -c 'bash /root/wloop.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
 echo "[w] ctl run $(date -u)"
-# CTL-END
+if [ ! -e /root/.evx3940 ]; then touch /root/.evx3940   # the user: pin the strength down first - v39 and v40 at seed 2, part 0 of 4 each, then the pool
+  cat > /root/evx3940.sh <<'JOB'
+while ! grep -q "\[kc\] ready" /root/w/w.log 2>/dev/null; do sleep 20; done   # kvc_job has fetched the code, the model and ref.pt
+touch /root/w/PAUSE_W; for J in $(pgrep -f "bash /root/kvc_job.sh"); do pkill -P $J; kill $J; done; sleep 5; pkill -f "sp_qwen3.py rollout"
+RAW=https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i
+for _t in $(seq 20); do curl -sS -o /root/kvx_job.sh "$RAW/ctl/kvx_job.sh?nocache=$(date +%s)"; grep -q NPART /root/kvx_job.sh && break; sleep 30; done
+echo "[kc] eval v39 / v40 seed 2 part 0 of 4 from here $(date -u)"
+REV=fcbc015f37 VN=v39 SEED=2 PART=0 NPART=4 RB=12 TB=16000 bash /root/kvx_job.sh
+REV=f7a4505b3d VN=v40 SEED=2 PART=0 NPART=4 RB=12 TB=16000 bash /root/kvx_job.sh
+rm -f /root/w/PAUSE_W
+JOB
+  setsid nohup bash -c 'bash /root/evx3940.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
+fi
+# CTL-END\n
