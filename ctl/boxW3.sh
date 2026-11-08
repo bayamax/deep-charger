@@ -10,7 +10,9 @@
 # serial 4: GUIDE from /root/w/kvc_guide (2: a raw-window guide for the problems whose first draws all failed).
 # serial 5: the pool from /root/w/kvc_pool (grpo_pool3.jsonl: the weak areas only, output under dpo_col_g/n3*/).
 # serial 6: one block per kvc_job run; before each block, a new trainer version is evaluated at seed 2 (my 15 of the 60).
-SER=6; SHARD=3
+# serial 7: the running kvc_job of serial 5 never ends (no ONE), so the new loop never got its turn: STOP_KC once, it stops
+# after its block and the loop takes over (one block per run, a new version evaluated first).
+SER=7; SHARD=3
 if [ -f /root/.boxw_serial ] && [ "$(cat /root/.boxw_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxw_serial
 [ -d /venv/main/bin ] && export PATH=/venv/main/bin:$PATH
@@ -69,7 +71,8 @@ if [ -n "16" ] && [ "$(cat /root/w/kvc_rb 2>/dev/null)" != "16" ]; then   # new 
 if [ -n "12" ] && [ "$(cat /root/w/kvc_gbs 2>/dev/null || echo 6)" != "12" ]; then echo 12 > /root/w/kvc_gbs; touch /root/w/STOP_KC; fi
 if [ -n "2" ] && [ "$(cat /root/w/kvc_guide 2>/dev/null || echo 0)" != "2" ]; then echo 2 > /root/w/kvc_guide; touch /root/w/STOP_KC; fi
 if [ -n "grpo_pool3.jsonl" ] && [ "$(cat /root/w/kvc_pool 2>/dev/null || echo grpo_pool2.jsonl)" != "grpo_pool3.jsonl" ]; then echo grpo_pool3.jsonl > /root/w/kvc_pool; touch /root/w/STOP_KC; fi
-if [ ! -e /root/.wloop6 ]; then touch /root/.wloop6; pkill -f "bash /root/wloop.sh"; fi   # the loop script changed: restart it (the running kvc_job carries on)
+if [ ! -e /root/.wloop6 ]; then touch /root/.wloop6; pkill -f "bash /root/wloop.sh"; fi
+if [ ! -e /root/.stop7 ]; then touch /root/.stop7; pgrep -f "bash /root/kvc_job.sh" > /dev/null && touch /root/w/STOP_KC; fi   # the loop script changed: restart it (the running kvc_job carries on)
 pgrep -f "bash /root/wloop.sh" > /dev/null || setsid nohup bash -c 'bash /root/wloop.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
 echo "[w] ctl run $(date -u)"
 # CTL-END
