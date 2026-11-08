@@ -139,7 +139,10 @@
 # serial 52: v37 read 41/60 (the best so far, with v22) - its state goes to the hub (archive/sp3/kvg/state/) so the run can
 # carry on from it after the credit; the trainer is not disturbed.
 # serial 53: v38 read 44/60 - above the raw window's 42 (seed 1). Its state goes to the hub (archive/sp3/kvg/state/).
-SER=53
+# serial 54: the last top-up (the user). From v38 (44/60): LoRA lr 1.5e-5 (a little below the 2e-5 that got here, the
+# push toward closing is strong), hypernet 1e-6, 8 groups per update, rounds at 8 informative groups, the 60 problems
+# every round; four 3060 workers on shards 0-3 of the weak-area pool, this box keeps shard 5. Read every round.
+SER=54
 if [ -f /root/.boxrmx_serial ] && [ "$(cat /root/.boxrmx_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxrmx_serial
 [ -d /venv/main/bin ] && export PATH=/venv/main/bin:$PATH
@@ -625,5 +628,9 @@ fi
 if [ ! -e /root/.s53state ]; then touch /root/.s53state
   sed 's/s52:/s53:/' /root/s52.sh > /root/s53.sh
   setsid nohup bash -c 'bash /root/s53.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
+fi
+if [ ! -e /root/.s54last ]; then touch /root/.s54last
+  cd /root/w && echo 1.5e-5 > kvg_loralr && echo 1e-6 > kvg_plr && echo 8 > kvg_accum && echo 8 > kvg_newinf && echo 24 > kvg_newg && echo 1 > kvg_every
+  echo "[kg] s54: LoRA lr 1.5e-5 from the next round; 4 workers coming $(date -u)" >> /root/w/w.log
 fi
 # CTL-END
