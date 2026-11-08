@@ -70,4 +70,4 @@ rm -f /root/w/PAUSE_W
 JOB
   setsid nohup bash -c 'bash /root/evx3940.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
 fi
-# CTL-END\n
+# CTL-END
