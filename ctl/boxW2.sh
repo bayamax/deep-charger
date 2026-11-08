@@ -70,4 +70,13 @@ rm -f /root/w/PAUSE_W
 JOB
   setsid nohup bash -c 'bash /root/evx3940.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
 fi
+if [ ! -e /root/.evx38 ]; then touch /root/.evx38 /root/w/PAUSE_W   # v38 at seed 2, part 2 of 4 (pin v38's strength), then the pool
+  for J in $(pgrep -f "bash /root/kvc_job.sh"); do pkill -P $J; kill $J; done; sleep 5; pkill -f "sp_qwen3.py rollout"
+  cat > /root/evx38.sh <<'JOB'
+sleep 10; echo "[kc] eval v38 seed 2 part 2 of 4 from here $(date -u)"
+REV=c6cb73969e VN=v38 SEED=2 PART=2 NPART=4 RB=12 TB=16000 bash /root/kvx_job.sh
+rm -f /root/w/PAUSE_W
+JOB
+  setsid nohup bash -c 'bash /root/evx38.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
+fi
 # CTL-END

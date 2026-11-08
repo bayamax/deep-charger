@@ -145,7 +145,10 @@
 # serial 55: the closing push is building again - training answers closed 75% / 81% / 81% and closed-but-wrong 17% / 21% / 26%
 # for v38 / v39 / v40 (v33, before the collapse: 87% / 30%). v39 at seed 2 read 40/60 (seed 1 44). LoRA lr 1.5e-5 -> 1e-5;
 # a revert to v38 / v39 follows if v41 keeps climbing.
-SER=55
+# serial 56: the slide - 60 problems v38 44, v39 44 / 40, v40 43 / 39, v41 40 (seed 1 / seed 2), training answers closed 81% and
+# closed-but-wrong 21% from v39 on (v38: 75% / 17%). Back to v38 (hub commit c6cb73969e), published as v42; the optimizer
+# state is dropped; the groups drawn with v40 / v41 are marked used; LoRA lr 1e-5, hypernet 1e-6, 8 groups per update.
+SER=56
 if [ -f /root/.boxrmx_serial ] && [ "$(cat /root/.boxrmx_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxrmx_serial
 [ -d /venv/main/bin ] && export PATH=/venv/main/bin:$PATH
@@ -638,5 +641,38 @@ if [ ! -e /root/.s54last ]; then touch /root/.s54last
 fi
 if [ ! -e /root/.s55lr ]; then touch /root/.s55lr
   echo 1e-5 > /root/w/kvg_loralr; echo "[kg] s55: LoRA lr 1e-5 from the next round $(date -u)" >> /root/w/w.log
+fi
+if [ ! -e /root/.s56revert ]; then touch /root/.s56revert
+  touch /root/w/STOP_KG; pkill -f "bash /root/kvg_job.sh"; sleep 2; pkill -f "sp_qwen3.py"; sleep 5
+  cat > /root/s56.sh <<'JOB'
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token); cd /root/w
+R=baya1116/hypernet-sp-distill
+mkdir -p slide_v41 && cp kvg.pt slide_v41/ 2>/dev/null; mv kvg_opt.pt slide_v41/ 2>/dev/null
+python3 -c "
+import shutil; from huggingface_hub import hf_hub_download as d
+shutil.copy(d('$R', 'archive/sp3/spKVF_latest.pt', revision='c6cb73969e', local_dir='rv_dl'), 'kvg.pt'); shutil.rmtree('rv_dl')" || { echo "[kg] s56: download of v38 FAILED"; exit 1; }
+cp kvg.pt kvg_prev.pt; cp kvg.pt kvf.pt; echo 29 > kvg_round; echo 42 > VERSION
+python3 -c "
+import re; from huggingface_hub import HfApi
+used = set(open('used_groups.txt').read().split())
+fs = [f for f in HfApi().list_repo_files('$R') if f.startswith('archive/sp3/dpo_col_g/') and re.search(r'_v4[01]\.jsonl$', f) and f not in used]
+open('used_groups.txt', 'a').write('\n'.join(fs) + '\n'); print(len(fs))" > s56_used.txt
+for _i in 1 2 3; do python3 -c "from huggingface_hub import HfApi; a=HfApi(); a.upload_file(path_or_fileobj='kvg.pt', path_in_repo='archive/sp3/spKVF_latest.pt', repo_id='$R'); a.upload_file(path_or_fileobj='VERSION', path_in_repo='archive/sp3/kvf/VERSION', repo_id='$R')" && break; sleep 30; done
+echo 1e-5 > kvg_loralr; echo 1e-6 > kvg_plr; echo 8 > kvg_accum; rm -f STOP_KG
+echo "[kg] s56: back to v38's weights, published as v42; optimizer state dropped; $(cat s56_used.txt) group files (v40/v41) marked used; LoRA lr 1e-5 $(date -u)"
+START=dpo_ref.pt exec bash /root/kvg_job.sh
+JOB
+  setsid nohup bash -c 'bash /root/s56.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
+  cat > /root/s56b.sh <<'JOB'
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token); cd /root/w
+for _i in $(seq 60); do
+  python3 -c "
+import re; from huggingface_hub import HfApi
+used = set(open('used_groups.txt').read().split())
+new = [f for f in HfApi().list_repo_files('baya1116/hypernet-sp-distill') if f.startswith('archive/sp3/dpo_col_g/') and re.search(r'_v4[01]\.jsonl$', f) and f not in used]
+if new: open('used_groups.txt', 'a').write('\n'.join(new) + '\n'); print('[kg] s56: skipped', len(new), 'group files drawn with v40/v41')" 2>/dev/null
+  sleep 120; done
+JOB
+  setsid nohup bash -c 'bash /root/s56b.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
 fi
 # CTL-END
