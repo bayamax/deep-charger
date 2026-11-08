@@ -142,7 +142,10 @@
 # serial 54: the last top-up (the user). From v38 (44/60): LoRA lr 1.5e-5 (a little below the 2e-5 that got here, the
 # push toward closing is strong), hypernet 1e-6, 8 groups per update, rounds at 8 informative groups, the 60 problems
 # every round; four 3060 workers on shards 0-3 of the weak-area pool, this box keeps shard 5. Read every round.
-SER=54
+# serial 55: the closing push is building again - training answers closed 75% / 81% / 81% and closed-but-wrong 17% / 21% / 26%
+# for v38 / v39 / v40 (v33, before the collapse: 87% / 30%). v39 at seed 2 read 40/60 (seed 1 44). LoRA lr 1.5e-5 -> 1e-5;
+# a revert to v38 / v39 follows if v41 keeps climbing.
+SER=55
 if [ -f /root/.boxrmx_serial ] && [ "$(cat /root/.boxrmx_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxrmx_serial
 [ -d /venv/main/bin ] && export PATH=/venv/main/bin:$PATH
@@ -632,5 +635,8 @@ fi
 if [ ! -e /root/.s54last ]; then touch /root/.s54last
   cd /root/w && echo 1.5e-5 > kvg_loralr && echo 1e-6 > kvg_plr && echo 8 > kvg_accum && echo 8 > kvg_newinf && echo 24 > kvg_newg && echo 1 > kvg_every
   echo "[kg] s54: LoRA lr 1.5e-5 from the next round; 4 workers coming $(date -u)" >> /root/w/w.log
+fi
+if [ ! -e /root/.s55lr ]; then touch /root/.s55lr
+  echo 1e-5 > /root/w/kvg_loralr; echo "[kg] s55: LoRA lr 1e-5 from the next round $(date -u)" >> /root/w/w.log
 fi
 # CTL-END
