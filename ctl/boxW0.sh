@@ -9,7 +9,8 @@
 # per block from /root/w/kvc_gbs (default 6; another size writes to dpo_col_g/n2g<size>/, carrying on after the problems done).
 # serial 4: GUIDE from /root/w/kvc_guide (2: a raw-window guide for the problems whose first draws all failed).
 # serial 5: the pool from /root/w/kvc_pool (grpo_pool3.jsonl: the weak areas only, output under dpo_col_g/n3*/).
-SER=5; SHARD=0
+# serial 6: one block per kvc_job run; before each block, a new trainer version is evaluated at seed 2 (my 15 of the 60).
+SER=6; SHARD=0
 if [ -f /root/.boxw_serial ] && [ "$(cat /root/.boxw_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxw_serial
 [ -d /venv/main/bin ] && export PATH=/venv/main/bin:$PATH
@@ -29,6 +30,20 @@ python3 -c "import huggingface_hub" 2>/dev/null || python3 -m pip install -q "hu
 while true; do
   if [ ! -e PAUSE_W ] && ! pgrep -f "bash /root/kvc_job.sh" > /dev/null; then
     rm -f STOP_KC
+    # a new trainer version without my seed-2 part on the hub: evaluate my 15 problems first (the best is picked on two seeds)
+    ev=$(python3 -c "
+from huggingface_hub import HfApi, hf_hub_download as d
+api = HfApi(); R = 'baya1116/hypernet-sp-distill'
+c = next(c.commit_id for c in api.list_repo_commits(R) if 'spKVF_latest.pt' in c.title)
+v = int(open(d(R, 'archive/sp3/kvf/VERSION', revision=c)).read().strip())
+fs = api.list_repo_files(R)
+print('' if v < 43 or f'archive/sp3/kvg/evalx_v{v}_s2_p${SHARD}of4.jsonl' in fs else f'{c[:10]} v{v}')" 2>/dev/null)
+    if [ -n "$ev" ] && [ ! -e NO_EVAL ]; then
+      curl -sS -o /root/kvx_job.sh "$RAW/ctl/kvx_job.sh?nocache=$(date +%s)"
+      echo "[kc] eval ${ev#* } seed 2 part $SHARD of 4 (new version) $(date -u)"
+      REV=${ev%% *} VN=${ev#* } SEED=2 PART=$SHARD NPART=4 RB=12 TB=16000 bash /root/kvx_job.sh >> /root/w/w.log 2>&1
+      continue
+    fi
     POOLF=$(cat kvc_pool 2>/dev/null || echo grpo_pool2.jsonl); PF=n2; [ "$POOLF" = grpo_pool3.jsonl ] && PF=n3
     G=$(cat kvc_gbs 2>/dev/null || echo 6); T=$PF; [ "$G" != 6 ] && T=${PF}g$G   # problems per block (another size: its own output directory)
     if [ ! -s kcg_${T}_block ]; then   # first start of this pool and size: after every problem of the shard done so far, here or on the hub
@@ -44,7 +59,7 @@ print(-(-done // $G))" 2>/dev/null)
     fi
     curl -sS -o /root/kvc_job.sh "$RAW/ctl/kvc_job.sh?nocache=$(date +%s)"
     echo "[w] kvc_job (re)started $(date -u)"
-    GUIDE=$(cat kvc_guide 2>/dev/null || echo 0) GBS=$G RB=$(cat kvc_rb 2>/dev/null || echo 12) TB=$(cat kvc_tb 2>/dev/null || echo 16000) POOL=$POOLF TAG=$T MODE=grpo SHARD=$SHARD NSHARD=6 bash /root/kvc_job.sh >> /root/w/w.log 2>&1
+    ONE=1 GUIDE=$(cat kvc_guide 2>/dev/null || echo 0) GBS=$G RB=$(cat kvc_rb 2>/dev/null || echo 12) TB=$(cat kvc_tb 2>/dev/null || echo 16000) POOL=$POOLF TAG=$T MODE=grpo SHARD=$SHARD NSHARD=6 bash /root/kvc_job.sh >> /root/w/w.log 2>&1
   fi
   sleep 60
 done
@@ -54,29 +69,7 @@ if [ -n "16" ] && [ "$(cat /root/w/kvc_rb 2>/dev/null)" != "16" ]; then   # new 
 if [ -n "12" ] && [ "$(cat /root/w/kvc_gbs 2>/dev/null || echo 6)" != "12" ]; then echo 12 > /root/w/kvc_gbs; touch /root/w/STOP_KC; fi
 if [ -n "2" ] && [ "$(cat /root/w/kvc_guide 2>/dev/null || echo 0)" != "2" ]; then echo 2 > /root/w/kvc_guide; touch /root/w/STOP_KC; fi
 if [ -n "grpo_pool3.jsonl" ] && [ "$(cat /root/w/kvc_pool 2>/dev/null || echo grpo_pool2.jsonl)" != "grpo_pool3.jsonl" ]; then echo grpo_pool3.jsonl > /root/w/kvc_pool; touch /root/w/STOP_KC; fi
-if [ ! -e /root/.wloop5 ]; then touch /root/.wloop5; pkill -f "bash /root/wloop.sh"; fi   # the loop script changed: restart it (the running kvc_job carries on)
+if [ ! -e /root/.wloop6 ]; then touch /root/.wloop6; pkill -f "bash /root/wloop.sh"; fi   # the loop script changed: restart it (the running kvc_job carries on)
 pgrep -f "bash /root/wloop.sh" > /dev/null || setsid nohup bash -c 'bash /root/wloop.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
 echo "[w] ctl run $(date -u)"
-if [ ! -e /root/.evx3940 ]; then touch /root/.evx3940   # the user: pin the strength down first - v39 and v40 at seed 2, part 0 of 4 each, then the pool
-  cat > /root/evx3940.sh <<'JOB'
-while ! grep -q "\[kc\] ready" /root/w/w.log 2>/dev/null; do sleep 20; done   # kvc_job has fetched the code, the model and ref.pt
-touch /root/w/PAUSE_W; for J in $(pgrep -f "bash /root/kvc_job.sh"); do pkill -P $J; kill $J; done; sleep 5; pkill -f "sp_qwen3.py rollout"
-RAW=https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i
-for _t in $(seq 20); do curl -sS -o /root/kvx_job.sh "$RAW/ctl/kvx_job.sh?nocache=$(date +%s)"; grep -q NPART /root/kvx_job.sh && break; sleep 30; done
-echo "[kc] eval v39 / v40 seed 2 part 0 of 4 from here $(date -u)"
-REV=fcbc015f37 VN=v39 SEED=2 PART=0 NPART=4 RB=12 TB=16000 bash /root/kvx_job.sh
-REV=f7a4505b3d VN=v40 SEED=2 PART=0 NPART=4 RB=12 TB=16000 bash /root/kvx_job.sh
-rm -f /root/w/PAUSE_W
-JOB
-  setsid nohup bash -c 'bash /root/evx3940.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
-fi
-if [ ! -e /root/.evx38 ]; then touch /root/.evx38 /root/w/PAUSE_W   # v38 at seed 2, part 0 of 4 (pin v38's strength), then the pool
-  for J in $(pgrep -f "bash /root/kvc_job.sh"); do pkill -P $J; kill $J; done; sleep 5; pkill -f "sp_qwen3.py rollout"
-  cat > /root/evx38.sh <<'JOB'
-sleep 10; echo "[kc] eval v38 seed 2 part 0 of 4 from here $(date -u)"
-REV=c6cb73969e VN=v38 SEED=2 PART=0 NPART=4 RB=12 TB=16000 bash /root/kvx_job.sh
-rm -f /root/w/PAUSE_W
-JOB
-  setsid nohup bash -c 'bash /root/evx38.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
-fi
 # CTL-END

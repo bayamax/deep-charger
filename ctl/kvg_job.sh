@@ -30,13 +30,23 @@ ev60() {   # ev60 <round> <version>: the 60 problems at seed 1 with kvg.pt
 auto_lr() {   # auto_lr <round> <version> (the user: tune the lr to the accuracy as we go). After the round's eval, from E = the 60
   # problems, W = closed-but-wrong and C = closed on the round's own groups (first 4 draws; the policy that drew them is the
   # one evaluated): a new best E is kept as kvg_best.pt; E <= best-4 or W > 28% -> back to the best, lr halved, optimizer
-  # state dropped, the versions since skipped; W > 22% or C > 82% -> lr halved; W < 18%, C < 78%, E >= best-1 -> lr x1.25.
-  # lr within [2.5e-6, 2e-5]. Decisions in kvg_auto.txt (hub kvg/auto.txt).
+  # state dropped, the versions since skipped; W > 22% or C > 82% -> lr halved; W < 18%, C < 78%, E >= best-1 -> lr x1.1 (never
+  # above 1e-5: steady steps, the user). E = the two-seed mean when the workers' seed-2 parts are on the hub (waited up to 40 min). Decisions in kvg_auto.txt (hub kvg/auto.txt).
   local act; act=$(python3 - $1 $2 <<'PY3'
 import json, sys, os; sys.path.insert(0, '.')
 from sp_mathcheck import correct
 rd, v = int(sys.argv[1]), int(sys.argv[2])
-rs = [json.loads(l) for l in open(f'kvg_v{v}_s1.jsonl')]; E = sum(correct(r) for r in rs)
+rs = [json.loads(l) for l in open(f'kvg_v{v}_s1.jsonl')]; E1 = sum(correct(r) for r in rs); E = E1; E2 = None
+try:   # seed 2 from the workers (4 parts of 15), waited for up to 40 min: the best is chosen on the two-seed mean
+    import time
+    from huggingface_hub import HfApi, hf_hub_download as d
+    for _ in range(9):
+        ps = [f for f in HfApi().list_repo_files('baya1116/hypernet-sp-distill') if f'/evalx_v{v}_s2_p' in f]
+        if len(ps) >= 4: break
+        time.sleep(300)
+    if len(ps) >= 4:
+        E2 = sum(correct(json.loads(l)) for f in ps for l in open(d('baya1116/hypernet-sp-distill', f))); E = (E1 + E2) / 2
+except Exception as e_: pass
 n = cl = cw = 0
 for l in open(f'kvg_groups_r{rd}.jsonl'):
     g = json.loads(l)
@@ -50,9 +60,9 @@ if E > best or not os.path.exists('kvg_best.pt'):
     best = E; open('kvg_best_score', 'w').write(str(E)); open('kvg_best_v', 'w').write(str(v)); act = 'new best'
 if E <= best - 4 or W > 0.28: act = 'revert'; new = max(lr / 2, 2.5e-6)
 elif W > 0.22 or C > 0.82: act = 'halve'; new = max(lr / 2, 2.5e-6)
-elif W < 0.18 and C < 0.78 and E >= best - 1: act = 'raise' if act == 'keep' else act + '+raise'; new = min(lr * 1.25, 2e-5)
+elif W < 0.18 and C < 0.78 and E >= best - 1: act = 'raise' if act == 'keep' else act + '+raise'; new = min(lr * 1.1, 1e-5)   # steady: a small step, never above 1e-5
 open('kvg_loralr', 'w').write(f'{new:g}')
-line = f"round {rd} v{v}: E {E}/60 best {best:g} (v{open('kvg_best_v').read().strip()}) | W {100*W:.0f}% C {100*C:.0f}% ({n//4} problems) | lr {lr:g} -> {new:g} | {act}"
+line = f"round {rd} v{v}: E {E:g}/60 (seeds {E1}/{E2}) best {best:g} (v{open('kvg_best_v').read().strip()}) | W {100*W:.0f}% C {100*C:.0f}% ({n//4} problems) | lr {lr:g} -> {new:g} | {act}"
 open('kvg_auto.txt', 'a').write(line + '\n'); print(act + '|' + line)
 PY3
 )

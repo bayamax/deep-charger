@@ -151,7 +151,10 @@
 # serial 57: the lr follows the accuracy (the user): kvg_job's auto_lr after every round's eval - a new best is kept, a slide
 # (E <= best-4 or closed-but-wrong > 28%) goes back to the best with the lr halved, a drift (> 22% / closed > 82%) halves
 # the lr, a clean round (< 18%, < 78%, E >= best-1) raises it x1.25; 2.5e-6..2e-5. The best starts as v42 (= v38, 44/60).
-SER=57
+# serial 58: steady steps from v38 (the user): auto_lr raises by x1.1 at most and never above 1e-5, and judges the eval on the
+# two-seed mean when the workers' seed-2 parts are on the hub (they evaluate every new version, 15 problems each). The
+# trainer restarts after its running round to take the new kvg_job.sh.
+SER=58
 if [ -f /root/.boxrmx_serial ] && [ "$(cat /root/.boxrmx_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxrmx_serial
 [ -d /venv/main/bin ] && export PATH=/venv/main/bin:$PATH
@@ -688,5 +691,16 @@ echo "[kg] s57: the lr follows the accuracy from here (best v42 = v38, 44/60) $(
 START=dpo_ref.pt exec bash /root/kvg_job.sh
 JOB
   setsid nohup bash -c 'bash /root/s57.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
+fi
+if [ ! -e /root/.s58steady ]; then touch /root/.s58steady
+  touch /root/w/STOP_KG
+  cat > /root/s58.sh <<'JOB'
+while pgrep -f "^bash /root/kvg_job.sh" > /dev/null; do sleep 30; done
+cd /root/w; rm -f STOP_KG; [ -s kvg_best.pt ] || { cp kvg.pt kvg_best.pt; echo 44 > kvg_best_score; echo 42 > kvg_best_v; }; touch kvg_auto
+for _t in $(seq 60); do curl -sS -o /root/kvg_job.sh "https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl/kvg_job.sh?nocache=$(date +%s)"; grep -q -- "two-seed mean" /root/kvg_job.sh && break; sleep 120; done
+echo "[kg] s58: steady auto lr (x1.1, cap 1e-5, two-seed eval) from here $(date -u)"
+START=dpo_ref.pt exec bash /root/kvg_job.sh
+JOB
+  setsid nohup bash -c 'bash /root/s58.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
 fi
 # CTL-END
