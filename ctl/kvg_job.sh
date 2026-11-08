@@ -40,10 +40,7 @@ rs = [json.loads(l) for l in open(f'kvg_v{v}_s1.jsonl')]; E1 = sum(correct(r) fo
 try:   # seed 2 from the workers (4 parts of 15), waited for up to 40 min: the best is chosen on the two-seed mean
     import time
     from huggingface_hub import HfApi, hf_hub_download as d
-    for _ in range(9):
-        ps = [f for f in HfApi().list_repo_files('baya1116/hypernet-sp-distill') if f'/evalx_v{v}_s2_p' in f]
-        if len(ps) >= 4: break
-        time.sleep(300)
+    ps = [f for f in HfApi().list_repo_files('baya1116/hypernet-sp-distill') if f'/evalx_v{v}_s2_p' in f]
     if len(ps) >= 4:
         E2 = sum(correct(json.loads(l)) for f in ps for l in open(d('baya1116/hypernet-sp-distill', f))); E = (E1 + E2) / 2
 except Exception as e_: pass
@@ -58,8 +55,11 @@ best = float(open('kvg_best_score').read()) if os.path.exists('kvg_best_score') 
 act = 'keep'; new = lr
 if E > best or not os.path.exists('kvg_best.pt'):
     best = E; open('kvg_best_score', 'w').write(str(E)); open('kvg_best_v', 'w').write(str(v)); act = 'new best'
-if E <= best - 4 or W > 0.28: act = 'revert'; new = max(lr / 2, 2.5e-6)
+lastE = float(open('kvg_last_E').read()) if os.path.exists('kvg_last_E') else 99; open('kvg_last_E', 'w').write(str(E))
+low = E <= best - 4
+if W > 0.28 or (low and (W > 0.22 or C > 0.82 or lastE <= best - 3)): act = 'revert'; new = max(lr / 2, 2.5e-6)
 elif W > 0.22 or C > 0.82: act = 'halve'; new = max(lr / 2, 2.5e-6)
+elif low: act = 'watch'   # one low eval alone: noise until a second one
 elif W < 0.18 and C < 0.78 and E >= best - 1: act = 'raise' if act == 'keep' else act + '+raise'; new = min(lr * 1.1, 1e-5)   # steady: a small step, never above 1e-5
 open('kvg_loralr', 'w').write(f'{new:g}')
 line = f"round {rd} v{v}: E {E:g}/60 (seeds {E1}/{E2}) best {best:g} (v{open('kvg_best_v').read().strip()}) | W {100*W:.0f}% C {100*C:.0f}% ({n//4} problems) | lr {lr:g} -> {new:g} | {act}"
@@ -67,6 +67,7 @@ open('kvg_auto.txt', 'a').write(line + '\n'); print(act + '|' + line)
 PY3
 )
   echo "[kg] auto: ${act#*|}"; put kvg_auto.txt kvg/auto.txt > /dev/null
+  local rv=0
   case "${act%%|*}" in
     *"new best"*) cp kvg.pt kvg_best.pt ;;
     revert)
@@ -74,8 +75,8 @@ PY3
       seq $((bv + 1)) $v | tr '\n' ' ' >> kvg_skip_versions; echo >> kvg_skip_versions
       rd=$((rd + 1)); echo $rd > kvg_round; v=$((v0 + rd)); echo $v > VERSION
       put kvg.pt spKVF_latest.pt && put VERSION kvf/VERSION; sk kvg.pt $v
-      echo "[kg] auto: back to the best (v$bv) as v$v, optimizer state dropped, versions $((bv + 1))-$((v - 1)) skipped" ;;
-  esac; }
+      echo "[kg] auto: back to the best (v$bv) as v$v, optimizer state dropped, versions $((bv + 1))-$((v - 1)) skipped"; rv=1 ;;
+  esac; return $rv; }
 ok60() { python3 -c "
 import json, sys; sys.path.insert(0, '.')
 from sp_mathcheck import correct
@@ -122,6 +123,10 @@ print(k)")
     OWN="SHARD=$((NSH - 1)) NSHARD=$NSH RB=48 TB=60000"; [ -s kvg_own ] && OWN=$(cat kvg_own)   # kvg_own: e.g. the weak-area pool, a shard of its own
     env $OWN MODE=grpo ONE=1 bash kvc_job.sh | grep "^\[kc\] grpo" | sed 's/^\[kc\]/[kg] own/' || sleep 600
     continue; fi
+  if [ -e kvg_auto ] && [ -s kvg_pending_auto ]; then
+    pa=$(cat kvg_pending_auto); rm -f kvg_pending_auto
+    auto_lr $pa || continue   # a revert: the groups just gathered were drawn with a version now skipped - gate again
+  fi
   rd=$((rd + 1)); cat newg_list.txt >> used_groups.txt; cp newg.jsonl kvg_groups_r$rd.jsonl
   cp kvg.pt kvg_prev.pt
   GT=$(gt); echo "[kg] round $rd flags: $GT"
@@ -153,6 +158,6 @@ PY2
   EVERY=$(cat kvg_every 2>/dev/null || echo $EVERY)
   if [ $((rd % EVERY)) != 0 ]; then echo "[kg] round $rd (weights v$v) published"; continue; fi
   ev60 $rd $v
-  [ -e kvg_auto ] && auto_lr $rd $v
+  [ -e kvg_auto ] && echo "$rd $v" > kvg_pending_auto   # judged when the next round is about to start (the workers' seed 2 has had time to arrive)
 done
 echo "[kg] JOB_DONE $(date -u)"

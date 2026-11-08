@@ -157,7 +157,11 @@
 # serial 59: s57's restart (10:22Z) removed the STOP_KG that s58 had set, so the trainer runs s57's kvg_job (lr x1.25, cap 2e-5,
 # one seed) and s58's waiter is still waiting. STOP_KG again: after round 30 the s58 waiter takes over with the steady
 # kvg_job; the lr file is put back to 1e-5 at that moment.
-SER=59
+# serial 60: auto_lr reverted on one low eval (v45 40/60, no drift in its answers: closed-but-wrong 21%) and halved the lr - too
+# twitchy for 60 problems (sd ~3.6), and the workers' seed 2 arrived after its 40-minute wait. Now the judgement is made
+# when the next round is about to start (seed 2 has had time), one low eval alone is "watch", a revert needs W > 28% or a low
+# eval with drift or two low evals in a row. The lr goes back to 1e-5; the trainer restarts after its running round.
+SER=60
 if [ -f /root/.boxrmx_serial ] && [ "$(cat /root/.boxrmx_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxrmx_serial
 [ -d /venv/main/bin ] && export PATH=/venv/main/bin:$PATH
@@ -713,5 +717,16 @@ while pgrep -f "^bash /root/kvg_job.sh" > /dev/null; do sleep 15; done
 echo 1e-5 > /root/w/kvg_loralr; echo "[kg] s59: trainer stopped after its round; lr 1e-5; the steady kvg_job (s58) takes over $(date -u)"
 JOB
   setsid nohup bash -c 'bash /root/s59.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
+fi
+if [ ! -e /root/.s60soft ]; then touch /root/.s60soft
+  touch /root/w/STOP_KG
+  cat > /root/s60.sh <<'JOB'
+while pgrep -f "^bash /root/kvg_job.sh" > /dev/null; do sleep 30; done
+cd /root/w; rm -f STOP_KG kvg_pending_auto; echo 1e-5 > kvg_loralr
+for _t in $(seq 60); do curl -sS -o /root/kvg_job.sh "https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl/kvg_job.sh?nocache=$(date +%s)"; grep -q -- "kvg_pending_auto" /root/kvg_job.sh && break; sleep 120; done
+echo "[kg] s60: softer auto lr (judged at the next round's start, one low eval = watch), lr 1e-5 $(date -u)"
+START=dpo_ref.pt exec bash /root/kvg_job.sh
+JOB
+  setsid nohup bash -c 'bash /root/s60.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
 fi
 # CTL-END
