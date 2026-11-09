@@ -52,8 +52,8 @@ import json, sys; [sys.stdout.write(l) for l in open('rm_held.jsonl') if json.lo
 mprof() {   # mprof <ckpt> <label>: the pooler's mass, the importance and the effective mass with the prior over the 60 problems' v38 texts
   python3 sp_qwen3.py massprof --traces kvg_v38_s1.jsonl $M $AP --ckpt $1 --max-len 12288 --log $LG > run_kp_mp.log 2>&1
   grep -E "massprof (importance|effective) .*distant (2048|4096)|massprof distant (2048|4096)|massprof importance top|Error|Traceback" run_kp_mp.log | cut -c1-400 | sed "s/^\[sp\]/[kp] $2/"; }
-ev60() {   # ev60 <ckpt> <seed> <label>
-  o=kvp_$3_s$2.jsonl; rm -f $o
+ev60() {   # ev60 <ckpt> <seed> <label>  (the label may hold spaces: they leave the file name)
+  o=kvp_$(echo "$3" | tr -d " ")_s$2.jsonl; rm -f $o
   python3 sp_qwen3.py rollout --traces rl_eval60.jsonl $M $AP --ckpt $1 --max-len 12288 --roll-batch 48 --grpo-tok-budget 60000 --seed $2 --roll-out $o --log $LG > run_kpgen.log 2>&1
   grep -E "Error|Traceback" run_kpgen.log | tail -1 | sed "s/^/[kp] $3 gen: /"; put $o kvp/$o > /dev/null
   echo "[kp] $3 seed $2: $(score $o) (v38 plain: 44 / 41, raw window 42 / 44) $(date -u)"; }
@@ -64,6 +64,8 @@ if [ ! -e kvp_base_done ]; then
   mprof kvp.pt "baseline v38"; touch kvp_base_done
 fi
 seg=$(cat kvp_seg 2>/dev/null || echo 0)
+# PRE_EV=<ckpt>:<label>: one 60-problem run at seed 1 before the loop (the segment-2 run of 07:55 fell to the file-name bug above)
+[ -n "$PRE_EV" ] && ev60 "${PRE_EV%%:*}" 1 "${PRE_EV##*:}"
 while [ ! -e STOP_KP ]; do seg=$((seg + 1)); t0=$(date +%s); x="--const-lr"; [ $seg = 1 ] && x=""
   CK=kvp.pt; [ -s kvp.pt ] || CK=""   # FROM=base: segment 1 starts a new pooler on the original model
   python3 sp_qwen3.py train --traces rm_pool.jsonl --skip $(( ((seg - 1) * 600) % 9600 )) --n 600 --max-len 8192 $M $AP --chunks-per-trace 16 --accum 8 --lr $LR $x --lora-lr 0 ${CK:+--ckpt $CK} --seed $((100 + seg)) --out kvp_next.pt --log $LG > run_kp.log 2>&1

@@ -208,7 +208,11 @@
 # serial 75: the baseline massprof says the prior at A=1 does not move v38's pooler - its own logits keep half the effective
 # mass on 17 tokens (the model's importance itself is flat: 616 tokens for half at distant 2048). Rather than fight the collapsed
 # logits, the user's plan as stated: a new pooler from the base model with the prior (FROM=base), read against the kvm curve.
-SER=75
+# serial 76: the segment-2 run of the 60 problems never ran - ev60's file name held the label's space ('kvp_segment 2_s1.jsonl'
+# split into two arguments; the score step then opened 'kvp_segment'). The job's loop body is already parsed by bash, so
+# the fix needs a restart: the current checkpoint is copied aside, STOP_KP ends the loop after the running segment, and the
+# fixed script starts again (PRE_EV: the copied checkpoint's 60 problems at seed 1 first, then segment 4 onwards as before).
+SER=76
 if [ -f /root/.boxrmx_serial ] && [ "$(cat /root/.boxrmx_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxrmx_serial
 [ -d /venv/main/bin ] && export PATH=/venv/main/bin:$PATH
@@ -993,5 +997,17 @@ echo "[kp] s75: a new pooler from the base model with the prior (kvm's recipe), 
 FROM=base exec bash /root/kvp_job.sh
 JOB
   setsid nohup bash -c 'bash /root/s75.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
+fi
+if [ ! -e /root/.s76evfix ]; then touch /root/.s76evfix
+  cat > /root/s76.sh <<'JOB'
+cd /root/w; RAW=https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i
+n=$(cat kvp_seg 2>/dev/null || echo 0); cp kvp.pt kvp_seg$n.pt; touch STOP_KP
+echo "[kp] s76: 60-problem run fixed (file-name bug); kvp.pt = segment $n copied to kvp_seg$n.pt, the loop stops after the running segment and restarts with the fix $(date -u)"
+while pgrep -f "bash /root/kvp_job.sh" > /dev/null; do sleep 60; done
+for _t in $(seq 60); do curl -sS -o /root/kvp_job.sh "$RAW/ctl/kvp_job.sh?nocache=$(date +%s)"; grep -q "PRE_EV" /root/kvp_job.sh && break; sleep 120; done
+rm -f STOP_KP; echo "[kp] s76: restart from $(cat kvp_seg) segments, first the 60 problems of segment $n $(date -u)"
+PRE_EV=kvp_seg$n.pt:segment$n FROM=base exec bash /root/kvp_job.sh
+JOB
+  setsid nohup bash -c 'bash /root/s76.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
 fi
 # CTL-END
