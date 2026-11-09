@@ -5,7 +5,8 @@
 # token ids included (--roll-lp), and every 2nd version its share of the 60 problems at seed 1 as kvq/ev_v<v>_p0.jsonl.
 # The trainer (ctl/kvq_job.sh WORKERS=3) trains on the gen parts and scores the ev parts. Same memory settings as the
 # trainer: the model's attention as the prior, the pooler's logits capped at 1.0. Touch /root/w/PAUSE_G to hold.
-SER=1; SHARD=0; NW=3
+# serial 2: the image has no transformers - installed; the loop is restarted once for the new script.
+SER=2; SHARD=0; NW=3
 if [ -f /root/.boxkq_serial ] && [ "$(cat /root/.boxkq_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxkq_serial
 [ -d /venv/main/bin ] && export PATH=/venv/main/bin:$PATH
@@ -23,6 +24,7 @@ RAW=https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sh
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True; cd /root/w
 echo "[g] worker $SHARD of $NW up, $(nvidia-smi --query-gpu=name,memory.total --format=csv,noheader) $(date -u)"
 python3 -c "import huggingface_hub" 2>/dev/null || python3 -m pip install -q "huggingface_hub[hf_xet]" 2>&1 | tail -1
+python3 -c "import transformers" 2>/dev/null || { python3 -m pip install -q transformers 2>&1 | tail -1; echo "[g] transformers $(python3 -c 'import transformers; print(transformers.__version__)') installed"; }
 hls() { python3 -c "from huggingface_hub import HfApi; print('\n'.join(f[12:] for f in HfApi().list_repo_files('$R') if f.startswith('archive/sp3/kvq/')))" 2>/dev/null; }
 hget() { curl -sSfL -H "Authorization: Bearer $HF_TOKEN" -o "$2" "$H/archive/sp3/$1?x=$(date +%s)"; }
 put() { for _i in 1 2 3 4 5; do python3 -c "import sys; from huggingface_hub import HfApi; HfApi().upload_file(path_or_fileobj=sys.argv[1], path_in_repo='archive/sp3/'+sys.argv[2], repo_id='$R')" "$1" "$2" > put.err 2>&1 && return 0; sleep 60; done; echo "[g] upload of $2 FAILED"; }
@@ -64,6 +66,7 @@ L = open('rl_eval60.jsonl').readlines(); open('ev_in.jsonl', 'w').writelines(l f
   else sleep 60; fi
 done
 JOB
+if [ ! -e /root/.gloop2 ]; then touch /root/.gloop2; pkill -f "bash /root/gloop.sh"; pkill -f "sp_qwen3.py"; sleep 3; fi
 pgrep -f "bash /root/gloop.sh" > /dev/null || setsid nohup bash -c 'bash /root/gloop.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
 echo "[g] ctl run $(date -u)"
 # CTL-END
