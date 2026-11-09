@@ -276,7 +276,9 @@
 # move little and consistently (a function a pooler could follow)? Runs in the GPU's idle windows, the trainer waits for it.
 # serial 98: the side checks (my validation of the 128-token measure) were holding the GPU ahead of the chained oracle - stopped;
 # the chained oracle and the content checks go first, the side checks restart after them.
-SER=98
+# serial 99: the user - synthesis is abandoned (every pooler was a constant prefix); the on-policy job and the side checks stop,
+# the generation workers are destroyed. Next: a fixed KV budget of REAL entries chosen by the model's own attention, no training.
+SER=99
 if [ -f /root/.boxrmx_serial ] && [ "$(cat /root/.boxrmx_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxrmx_serial
 [ -d /venv/main/bin ] && export PATH=/venv/main/bin:$PATH
@@ -1391,5 +1393,9 @@ cd /root/w; until grep -q "\[kp\] s97 done" w.log && grep -q "\[kp\] s96 done" w
 echo "[kp] s98: oracle and content checks done - the side checks resume in the idle windows $(date -u)"; bash /root/s84.sh
 JOB
   setsid nohup bash -c 'bash /root/s98.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
+fi
+if [ ! -e /root/.s99stop ]; then touch /root/.s99stop
+  cd /root/w; touch STOP_KQ; pkill -f "bash /root/s98.sh"; pkill -f "bash /root/s95.sh"; pkill -f "bash /root/s84.sh"; pkill -f "bash /root/kvq_job.sh"; sleep 2; pkill -f "sp_gk.py"; pkill -f "sp_qwen3.py"
+  echo "[kp] s99: synthesis abandoned - on-policy job, side checks stopped; the GPU is free for the fixed-budget KV runs $(date -u)"
 fi
 # CTL-END
