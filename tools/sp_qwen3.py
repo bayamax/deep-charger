@@ -1598,6 +1598,7 @@ if a.mode == "massprof":   # where the pooler's attention mass sits over a long 
     pooler.eval(); Ks = [256, 512, 1024, 2048, 4096]; cov = _c.defaultdict(list); need = _c.defaultdict(list); n_ = _c.Counter()
     tokmass = _c.Counter(); tokcnt = _c.Counter(); totmass = 0.0   # which tokens carry the mass (share of the total, over all texts at nd=2048)
     posmass = _c.Counter()   # and where they sit
+    top20 = _c.Counter(); top20pos = _c.Counter()   # the tokens at the 20 heaviest positions of each text (the ~20 that carry half the mass)
     with torch.no_grad():
         for r in rows:
             ids_ = tok.encode(r["text"], add_special_tokens=False)
@@ -1609,6 +1610,8 @@ if a.mode == "massprof":   # where the pooler's attention mass sits over a long 
                     sh_ = (m_ / m_.sum()).tolist(); totmass += 1.0
                     for t_, w_ in zip(ids_[:nd], sh_): tokmass[t_] += w_; tokcnt[t_] += 1
                     for (lo_, hi_) in ((0, 4), (4, 16), (16, 64), (64, 256), (256, 1024), (1024, 2048)): posmass[(lo_, hi_)] += sum(sh_[lo_:hi_])
+                    for p_ in m_.topk(20).indices.tolist():
+                        top20[tok.decode([ids_[p_]])] += 1; top20pos[min(p_ // 256, 7)] += 1
                 for k in Ks:
                     if k < nd: cov[(nd, k)].append(c_[k - 1].item())
                 for p_ in (0.5, 0.8, 0.9, 0.95): need[(nd, p_)].append(int((c_ < p_).sum().item()) + 1)
@@ -1622,6 +1625,8 @@ if a.mode == "massprof":   # where the pooler's attention mass sits over a long 
         log("[sp] massprof top tokens by mass (share of a text's mass, mean over texts at distant 2048; count = occurrences in the 2048): "
             + " | ".join(f"{tok.decode([t_])!r} {100 * w_ / totmass:.1f}% (x{tokcnt[t_] / totmass:.0f})" for t_, w_ in top))
         log("[sp] massprof mass by position in the distant 2048: " + " | ".join(f"{lo_}-{hi_}: {100 * posmass[(lo_, hi_)] / totmass:.1f}%" for (lo_, hi_) in sorted(posmass)))
+        log("[sp] massprof the 20 heaviest positions per text - tokens: " + " | ".join(f"{t_!r} x{c_}" for t_, c_ in top20.most_common(16))
+            + " || by 256-token block: " + " ".join(f"{k_}: {v_}" for k_, v_ in sorted(top20pos.items())))
     sys.exit(0)
 if a.mode == "profile":
     pooler.eval(); acc = {}

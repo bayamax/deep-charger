@@ -182,7 +182,10 @@
 # serial 67: the sink test joins the pending one-off job: v38 on the 60 problems with the 24 highest-mass distant tokens
 # dropped before pooling (--drop-top 24). If the mass sits on sinks, this should not hurt; if it helps, the pooler was
 # looking at the wrong tokens.
-SER=67
+# serial 68: by token type the mass goes to spaces, commas and digits (6% / 3.8% / 3.7%, over 80-140 occurrences each) and
+# to single tokens such as <think> (3.4% on one position): the heaviest positions still need naming. massprof now lists the
+# tokens at the 20 heaviest positions of each text and their position; queued with the drop-top eval.
+SER=68
 if [ -f /root/.boxrmx_serial ] && [ "$(cat /root/.boxrmx_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxrmx_serial
 [ -d /venv/main/bin ] && export PATH=/venv/main/bin:$PATH
@@ -861,5 +864,16 @@ from sp_mathcheck import correct
 rs = [json.loads(l) for l in open('$o')]; print(f'{sum(correct(r) for r in rs)}/{len(rs)} correct, closed {sum(\"</think>\" in r[\"text\"] for r in rs)}')") (v38 plain: 44 / 41, maxd2816: 44) $(date -u)"
 EX
   echo "[kg] s67: the --drop-top 24 eval of v38 queued in $F $(date -u)" >> /root/w/w.log
+fi
+if [ ! -e /root/.s68top ]; then touch /root/.s68top
+  [ -e /root/w/kvg_extra.running ] && F=/root/w/kvg_extra_next || F=/root/w/kvg_extra
+  cat >> $F <<'EX'
+cd /root/w; RAW=https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i
+curl -sS -o sp_new.py "$RAW/tools/sp_qwen3.py?nocache=$(date +%s)"; grep -q 'heaviest positions' sp_new.py && mv sp_new.py sp_qwen3.py
+M="--S 32 --heads 8 --layers 3 --ffn 2048 --rw 1024 --C 128 --maxd 0 --kv-mem --kv-rank 512"
+python3 sp_qwen3.py massprof --traces mp_in.jsonl $M --ckpt kvg_best.pt --max-len 12288 --log sp_kvg.log > run_mp3.log 2>&1
+grep -E "by position|heaviest|Error|Traceback" run_mp3.log | tail -3 | sed 's/^\[sp\]/[kg]/' | cut -c1-900
+EX
+  echo "[kg] s68: massprof (heaviest positions) queued in $F $(date -u)" >> /root/w/w.log
 fi
 # CTL-END
