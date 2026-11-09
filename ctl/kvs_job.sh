@@ -22,13 +22,13 @@ print('[ks] held-out', len(L[:${NH:-8}]), 'traces, training', len(rs[:${NT:-24}]
 echo "[ks] ready $(date -u) | kvsel in the script: $(grep -c 'def kvsel_trace' sp_ks.py) | $M | budgets ${BS:-512,1024}"
 if [ ! -s kvsel_held.pt ]; then t0=$(date +%s)
   python3 sp_ks.py kvsel --traces kvs_held.jsonl --max-len 8192 $M --kvsel-budgets ${BS:-512,1024} --kvsel-every 4 --kvsel-abl 8 \
-    --kvsel-rules recent,random,cum,mean,ema0.9,ema0.98,last,abl --kvsel-dump kvsel_held.pt --log sp_kvs.log > run_kvs.log 2>&1
+    --kvsel-rules recent,random,cum,mean,ema0.9,ema0.98,last,abl,fut --kvsel-dump kvsel_held.pt --log sp_kvs.log > run_kvs.log 2>&1
   grep -E "^\[sp\] kvsel S|Error|Traceback" run_kvs.log | tail -2 | cut -c1-1600 | sed 's/^\[sp\]/[ks] held-out/'
   echo "[ks] phase 1 done ($(( $(date +%s) - t0 )) s) $(date -u)"; put kvsel_held.pt kvs/kvsel_held.pt; put sp_kvs.log kvs/kvs.log
 fi
 if [ ! -s kvsel_train.pt ]; then t0=$(date +%s)
   python3 sp_ks.py kvsel --traces kvs_train.jsonl --max-len 8192 $M --kvsel-budgets 512 --kvsel-every 6 --kvsel-abl 16 \
-    --kvsel-rules recent,mean,abl --kvsel-layerwise 0 --kvsel-dump kvsel_train.pt --log sp_kvs.log > run_kvs2.log 2>&1
+    --kvsel-rules recent,mean,ema0.9,abl,fut --kvsel-layerwise 0 --kvsel-dump kvsel_train.pt --log sp_kvs.log > run_kvs2.log 2>&1
   grep -E "^\[sp\] kvsel S|Error|Traceback" run_kvs2.log | tail -2 | cut -c1-600 | sed 's/^\[sp\]/[ks] training set/'
   echo "[ks] phase 2 done ($(( $(date +%s) - t0 )) s) $(date -u)"; put kvsel_train.pt kvs/kvsel_train.pt; put sp_kvs.log kvs/kvs.log
 fi

@@ -291,7 +291,11 @@
 # then the 60 problems with the selector and with EMA 0.9 (B=512). Status lines show [kt].
 # serial 106: B=2048 ran out of memory beside the KL harness (6.5 GB) - the remaining 60-problem runs use 16 streams: the window
 # alone at 1536 and 2048, B=512 at seed 2, then B=2048 again.
-SER=106
+# serial 107: the first harness positions say the marginal ablation label selects WORSE than EMA attention (redundant entries
+# look cheap one at a time) - the label of a learned selector is now the attention an entry will receive from the next 4 chunks
+# ('fut'; also an oracle rule in the harness). Phase 2 of the harness restarts with it once phase 1 is done; the selector job is
+# refreshed (two selectors, fut and abl labels; the 60 problems with whichever scores lower on held-out).
+SER=107
 if [ -f /root/.boxrmx_serial ] && [ "$(cat /root/.boxrmx_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxrmx_serial
 [ -d /venv/main/bin ] && export PATH=/venv/main/bin:$PATH
@@ -1477,5 +1481,21 @@ echo "[kk] s106: 16 streams - window alone 1536, 2048; B=512 seed 2; B=2048 $(da
 RB=16 RW=1536 BS="0" bash /root/kvk_job.sh; RB=16 RW=2048 BS="0" bash /root/kvk_job.sh; RB=16 SEED=2 BS="512" bash /root/kvk_job.sh; RB=16 BS="2048" bash /root/kvk_job.sh
 JOB
   setsid nohup bash -c 'bash /root/s106.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
+fi
+if [ ! -e /root/.s107fut ]; then touch /root/.s107fut
+  pkill -f "bash /root/s105.sh"; pkill -f "bash /root/kvt_job.sh"
+  cat > /root/s107.sh <<'JOB'
+cd /root/w; RAW=https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i
+for _t in $(seq 60); do curl -sS -o sp_new.py "$RAW/tools/sp_qwen3.py?nocache=$(date +%s)"; grep -q '"fut": fut' sp_new.py && break; sleep 120; done
+for _t in $(seq 60); do curl -sS -o /root/kvs_new.sh "$RAW/ctl/kvs_job.sh?nocache=$(date +%s)"; grep -q "abl,fut" /root/kvs_new.sh && break; sleep 120; done
+for _t in $(seq 60); do curl -sS -o /root/kvt_job.sh "$RAW/ctl/kvt_job.sh?nocache=$(date +%s)"; grep -q "kvsel_fut" /root/kvt_job.sh && break; sleep 120; done
+until grep -q "\[ks\] phase 1 done" w.log; do sleep 60; done
+pkill -f "bash /root/kvs_job.sh"; pkill -f "bash /root/s104.sh"; sleep 1; pkill -f "sp_ks.py"; sleep 3; rm -f kvsel_train.pt
+cp sp_new.py sp_ks.py; mv /root/kvs_new.sh /root/kvs_job.sh
+echo "[ks] s107: phase 2 restarts with the future-attention label $(date -u)"
+setsid nohup bash -c 'bash /root/kvs_job.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
+sleep 5; exec bash /root/kvt_job.sh
+JOB
+  setsid nohup bash -c 'bash /root/s107.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
 fi
 # CTL-END

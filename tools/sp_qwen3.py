@@ -1046,6 +1046,11 @@ def kvsel_trace(ids, P):
                 dec = lam ** torch.arange(mb - 1, -1, -1, device=dev).float(); w[f"ema{lam}"] = (dec[:, None] * R).sum(0)
             return w
         Ssum = scores(Rs); Slay = {li: scores(Rl[li]) for li in ATT_L} if a.kvsel_layerwise else {}
+        fut = torch.zeros(nold, device=dev)   # the attention the older entries WILL receive from the next 4 chunks (an oracle rule, and a label)
+        for m in range(mb, min(mb + 4, nck)):
+            for li in ATT_L:
+                v = att[m].get(li)
+                if v is not None: fut += v[P:P + nold]
         grad_imp = None
         if "grad" in rules:   # first-order sensitivity of the chunk's loss to each entry's values, full cache (the KL-based label)
             cur = c1 - c0; pc = DynamicCache(); sc_ = []; win = torch.arange(c0 - a.rw, c0 - 1, device=dev)
@@ -1078,7 +1083,7 @@ def kvsel_trace(ids, P):
                 feat = {"sum": torch.stack([Ssum[k] for k in ("cum", "mean", "last", "ema0.9", "ema0.98")] + [Rs.max(0).values], 1),
                         "layer": torch.stack([torch.stack([Slay[li][k] for k in ("cum", "mean", "last", "ema0.9", "ema0.98")], 1) for li in ATT_L], 1) if Slay else None,
                         "nobs": nobs, "age": (mb - born).float(), "rel": older.float() / c0, "tok": a_ids[0, :nold].clone(), "vnorm": vn, "knorm": kn,
-                        "grad": grad_imp, "abl": abl_imp, "c0": c0, "P": P, "full_kl": full_kl, "window_kl": win_kl}
+                        "grad": grad_imp, "abl": abl_imp, "fut": fut, "c0": c0, "P": P, "full_kl": full_kl, "window_kl": win_kl}
                 DUMPS.append({k: (v.cpu() if torch.is_tensor(v) else v) for k, v in feat.items()})
         for B in budgets:
             for r in rules:
@@ -1086,6 +1091,7 @@ def kvsel_trace(ids, P):
                 elif r == "random": top = older[torch.randperm(nold, generator=g, device=dev)[:B]].sort().values
                 elif r == "grad": top = grad_imp.topk(B).indices.sort().values if grad_imp is not None else None
                 elif r == "abl": top = abl_imp.topk(B).indices.sort().values if abl_imp is not None else None
+                elif r == "fut": top = fut.topk(B).indices.sort().values
                 elif r.startswith("mlp:"):
                     from kvsel_feat import numeric
                     vn = torch.stack([full[li][1][0, :, P:P + nold].norm(dim=-1).mean(0) for li in range(NL)], 1)

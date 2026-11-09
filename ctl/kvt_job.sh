@@ -17,23 +17,24 @@ for f in tools/kvsel_feat.py tools/kvsel_train.py; do curl -sS -o $(basename $f)
 for _t in $(seq 60); do curl -sS -o sp_kt.py "$RAW/tools/sp_qwen3.py?nocache=$(date +%s)"; grep -q "kv-select" sp_kt.py && break; sleep 120; done
 until [ -s kvsel_train.pt ] && grep -q "\[ks\] JOB_DONE" w.log; do sleep 120; done
 M="--rw 1024 --C 128 --maxd 0 --att-layers 8-19"
-if [ ! -s kvsel_mlp.pt ]; then t0=$(date +%s)
-  python3 kvsel_train.py kvsel_train.pt kvsel_mlp.pt --epochs ${EP:-30} --B 512 --block 16 > run_kt_train.log 2>&1
-  echo "[kt] selector trained ($(( $(date +%s) - t0 )) s): $(grep -E '^epoch|positions' run_kt_train.log | tail -2 | tr '\n' ' ' | cut -c1-400)"; put kvsel_mlp.pt kvs/kvsel_mlp.pt
-fi
+for lb in fut abl; do [ -s kvsel_$lb.pt ] && continue; t0=$(date +%s)
+  python3 kvsel_train.py kvsel_train.pt kvsel_$lb.pt --label $lb --epochs ${EP:-30} --B 512 --block 16 > run_kt_train_$lb.log 2>&1
+  echo "[kt] selector ($lb label) trained ($(( $(date +%s) - t0 )) s): $(grep -E '^epoch|positions' run_kt_train_$lb.log | tail -2 | tr '\n' ' ' | cut -c1-400)"; put kvsel_$lb.pt kvs/kvsel_$lb.pt
+done
 if ! grep -q "\[kt\] held-out" w.log; then
   python3 sp_kt.py kvsel --traces kvs_held.jsonl --max-len 8192 $M --kvsel-budgets 512,1024 --kvsel-every 4 --kvsel-layerwise 0 \
-    --kvsel-rules recent,mean,ema0.9,ema0.98,mlp:kvsel_mlp.pt --log sp_kvt.log > run_kt_eval.log 2>&1
+    --kvsel-rules recent,mean,ema0.9,ema0.98,fut,mlp:kvsel_fut.pt,mlp:kvsel_abl.pt --log sp_kvt.log > run_kt_eval.log 2>&1
   echo "[kt] held-out $(grep -E '^\[sp\] kvsel S|Error|Traceback' run_kt_eval.log | tail -1 | sed 's/^\[sp\] kvsel [^:]*: //' | cut -c1-900)"
 fi
-for spec in "mlp:--kv-select mlp:kvsel_mlp.pt" "ema09:--kv-select ema0.9"; do n=${spec%%:*}; fl=${spec#*:}
+best=$(grep "\[kt\] held-out" w.log | tail -1 | grep -oE "mlp:kvsel_(fut|abl).pt B=512 [0-9.]+" | sort -k3 -n | head -1 | grep -oE "kvsel_(fut|abl).pt"); best=${best:-kvsel_fut.pt}
+for spec in "mlp:--kv-select mlp:$best" "ema09:--kv-select ema0.9"; do n=${spec%%:*}; fl=${spec#*:}
   o=kvk_b512_${n}_s1.jsonl; [ -s $o ] && continue
   until ! pgrep -f "sp_qwen3.py rollout" > /dev/null && ! pgrep -f "sp_kt.py rollout" > /dev/null; do sleep 60; done
   t0=$(date +%s); rm -f $o.part
   python3 sp_kt.py rollout --traces rl_eval60.jsonl --no-sp --kv-evict --kv-keep 512 --kv-keep-path $fl --att-layers 8-19 --rw 1024 --C 128 --maxd 0 --max-len 12288 \
     --roll-batch 24 --kv-budget 90000 --seed 1 --roll-out $o.part --log sp_kvt.log > run_kt_$n.log 2>&1
   if [ -s $o.part ]; then mv $o.part $o; put $o kvk/$o
-    echo "[kt] B=512 $n seed 1: $(score $o) ($(( $(date +%s) - t0 )) s) | refs: mean rule 45, raw window 42 / 44, v38 44 / 41 $(date -u)"
+    echo "[kt] B=512 $n${best:+ ($best)} seed 1: $(score $o) ($(( $(date +%s) - t0 )) s) | refs: mean rule 45, raw window 42 / 44, v38 44 / 41 $(date -u)"
   else echo "[kt] B=512 $n seed 1 FAILED: $(grep -E 'Error' run_kt_$n.log | tail -1 | cut -c1-200)"; fi
 done
 echo "[kt] JOB_DONE $(date -u)"
