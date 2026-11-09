@@ -161,7 +161,13 @@
 # twitchy for 60 problems (sd ~3.6), and the workers' seed 2 arrived after its 40-minute wait. Now the judgement is made
 # when the next round is about to start (seed 2 has had time), one low eval alone is "watch", a revert needs W > 28% or a low
 # eval with drift or two low evals in a row. The lr goes back to 1e-5; the trainer restarts after its running round.
-SER=60
+# serial 61: alone on this box, the LLM frozen (the user). The memory loses where the reasoning is long (the raw window's
+# right answers there: 16.9k chars against 5.7k elsewhere) and loses by answering wrong (MATH 4: closed-but-wrong 2.5/12
+# against the raw window's 0): the pooled past misleads, and the hypernet has moved 3e-4 of itself at lr 1e-6. After the
+# running round: state + best to the hub; v38 with --fifo 2048 on the 60 (does dropping the far past help?); then from v38
+# with LoRA lr 0, hypernet lr 1e-5, closed-but-wrong rewarded -0.1, the 60 problems every 2nd round, the controller
+# steering the hypernet lr.
+SER=61
 if [ -f /root/.boxrmx_serial ] && [ "$(cat /root/.boxrmx_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxrmx_serial
 [ -d /venv/main/bin ] && export PATH=/venv/main/bin:$PATH
@@ -728,5 +734,36 @@ echo "[kg] s60: softer auto lr (judged at the next round's start, one low eval =
 START=dpo_ref.pt exec bash /root/kvg_job.sh
 JOB
   setsid nohup bash -c 'bash /root/s60.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
+fi
+if [ ! -e /root/.s61hyper ]; then touch /root/.s61hyper
+  touch /root/w/STOP_KG
+  cat > /root/s61.sh <<'JOB'
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token); cd /root/w; R=baya1116/hypernet-sp-distill
+while pgrep -f "^bash /root/kvg_job.sh" > /dev/null; do sleep 30; done
+rm -f STOP_KG kvg_pending_auto; rm -rf state_up; mkdir -p state_up
+for f in kvg.pt kvg_opt.pt kvg_round kvg_v0 VERSION used_groups.txt kvg_plr kvg_loralr kvg_accum kvg_newinf kvg_newg kvg_every kvg_own kvg_rounds.txt kvg_best.pt kvg_best_score kvg_best_v kvg_auto.txt kvg_skip_versions kvg_last_E; do [ -e $f ] && cp $f state_up/; done
+python3 -c "
+from huggingface_hub import HfApi; a = HfApi()
+a.upload_folder(folder_path='state_up', path_in_repo='archive/sp3/kvg/state', repo_id='$R')
+a.upload_file(path_or_fileobj='kvg_best.pt', path_in_repo='archive/sp3/final/spKVF_best_v38.pt', repo_id='$R')
+print('[kg] s61: state (round', open('state_up/kvg_round').read().strip(), ', v' + open('state_up/VERSION').read().strip() + ') and the best (v38) on the hub')"
+M="--S 32 --heads 8 --layers 3 --ffn 2048 --rw 1024 --C 128 --maxd 0 --kv-mem --kv-rank 512"
+o=evalx_v38_fifo2048_s1.jsonl; rm -f $o
+python3 sp_qwen3.py rollout --traces rl_eval60.jsonl $M --fifo 2048 --ckpt kvg_best.pt --max-len 12288 --roll-batch 48 --grpo-tok-budget 60000 --seed 1 --roll-out $o --log sp_kvg.log > run_fifo.log 2>&1
+python3 -c "from huggingface_hub import HfApi; HfApi().upload_file(path_or_fileobj='$o', path_in_repo='archive/sp3/kvg/$o', repo_id='$R')"
+echo "[kg] eval v38 fifo2048 seed 1: $(python3 -c "
+import json, sys; sys.path.insert(0, '.')
+from sp_mathcheck import correct
+rs = [json.loads(l) for l in open('$o')]; print(f'{sum(correct(r) for r in rs)}/60 correct, closed {sum(\"</think>\" in r[\"text\"] for r in rs)}')") (v38 plain: 44 / 41) $(date -u)"
+cp kvg_best.pt kvg.pt; cp kvg.pt kvf.pt; rm -f kvg_opt.pt; cp kvg.pt kvg_prev.pt
+rd=$(cat kvg_round); v=$(cat VERSION); bv=$(cat kvg_best_v); seq $((bv + 1)) $v | tr '\n' ' ' >> kvg_skip_versions; echo >> kvg_skip_versions
+rd=$((rd + 1)); echo $rd > kvg_round; v=$(( $(cat kvg_v0) + rd )); echo $v > VERSION
+for _i in 1 2 3; do python3 -c "from huggingface_hub import HfApi; a=HfApi(); a.upload_file(path_or_fileobj='kvg.pt', path_in_repo='archive/sp3/spKVF_latest.pt', repo_id='$R'); a.upload_file(path_or_fileobj='VERSION', path_in_repo='archive/sp3/kvf/VERSION', repo_id='$R')" && break; sleep 30; done
+echo 0 > kvg_loralr; echo 1e-5 > kvg_plr; echo -0.1 > kvg_wrong; echo 2 > kvg_every; echo 8 > kvg_newinf; echo 24 > kvg_newg; echo $v > kvg_best_v
+for _t in $(seq 60); do curl -sS -o /root/kvg_job.sh "https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl/kvg_job.sh?nocache=$(date +%s)"; grep -q -- "steers the hypernet" /root/kvg_job.sh && break; sleep 120; done
+echo "[kg] s61: from v38 as v$v - LoRA frozen, hypernet lr 1e-5, closed-but-wrong -0.1, eval every 2nd round $(date -u)"
+START=dpo_ref.pt exec bash /root/kvg_job.sh
+JOB
+  setsid nohup bash -c 'bash /root/s61.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
 fi
 # CTL-END

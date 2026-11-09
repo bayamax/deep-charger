@@ -51,18 +51,21 @@ for l in open(f'kvg_groups_r{rd}.jsonl'):
         c = '</think>' in t; ok = c and correct({'text': t, 'gold': g['gold']}); n += 1; cl += c; cw += c and not ok
 W, C = cw / max(n, 1), cl / max(n, 1)
 lr = float(open('kvg_loralr').read()) if os.path.exists('kvg_loralr') else 1e-5
+tgt, lo_, hi_ = 'kvg_loralr', 2.5e-6, 1e-5
+if lr == 0:   # the LLM frozen: the controller steers the hypernet's lr instead
+    tgt, lo_, hi_ = 'kvg_plr', 5e-7, 2e-5; lr = float(open('kvg_plr').read()) if os.path.exists('kvg_plr') else 1e-5
 best = float(open('kvg_best_score').read()) if os.path.exists('kvg_best_score') else -1
 act = 'keep'; new = lr
 if E > best or not os.path.exists('kvg_best.pt'):
     best = E; open('kvg_best_score', 'w').write(str(E)); open('kvg_best_v', 'w').write(str(v)); act = 'new best'
 lastE = float(open('kvg_last_E').read()) if os.path.exists('kvg_last_E') else 99; open('kvg_last_E', 'w').write(str(E))
 low = E <= best - 4
-if W > 0.28 or (low and (W > 0.22 or C > 0.82 or lastE <= best - 3)): act = 'revert'; new = max(lr / 2, 2.5e-6)
-elif W > 0.22 or C > 0.82: act = 'halve'; new = max(lr / 2, 2.5e-6)
+if W > 0.28 or (low and (W > 0.22 or C > 0.82 or lastE <= best - 3)): act = 'revert'; new = max(lr / 2, lo_)
+elif W > 0.22 or C > 0.82: act = 'halve'; new = max(lr / 2, lo_)
 elif low: act = 'watch'   # one low eval alone: noise until a second one
-elif W < 0.18 and C < 0.78 and E >= best - 1: act = 'raise' if act == 'keep' else act + '+raise'; new = min(lr * 1.1, 1e-5)   # steady: a small step, never above 1e-5
-open('kvg_loralr', 'w').write(f'{new:g}')
-line = f"round {rd} v{v}: E {E:g}/60 (seeds {E1}/{E2}) best {best:g} (v{open('kvg_best_v').read().strip()}) | W {100*W:.0f}% C {100*C:.0f}% ({n//4} problems) | lr {lr:g} -> {new:g} | {act}"
+elif W < 0.18 and C < 0.78 and E >= best - 1: act = 'raise' if act == 'keep' else act + '+raise'; new = min(lr * 1.1, hi_)   # steady: a small step, never above the cap
+open(tgt, 'w').write(f'{new:g}')
+line = f"round {rd} v{v}: E {E:g}/60 (seeds {E1}/{E2}) best {best:g} (v{open('kvg_best_v').read().strip()}) | W {100*W:.0f}% C {100*C:.0f}% ({n//4} problems) | {tgt[4:]} {lr:g} -> {new:g} | {act}"
 open('kvg_auto.txt', 'a').write(line + '\n'); print(act + '|' + line)
 PY3
 )
