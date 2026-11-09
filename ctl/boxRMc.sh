@@ -190,7 +190,10 @@
 # attention logits over the distant buffer; the first two generated tokens (<think>, newline) count as the model's own
 # sinks and are zeroed. One-off job: v38 on the 60 with --att-prior 1.0 (no retraining yet - does the LLM already read
 # the re-aimed memory?).
-SER=69
+# serial 70: round 37 failed loading a .pt ("unexpected pos": a file cut short) and the loop exited, leaving the GPU idle
+# with three one-off jobs queued. Report disk space and which file is broken, mend it (a bad optimizer state is dropped,
+# bad weights come back from the hub), restart the loop: the queued jobs run first, then the rounds.
+SER=70
 if [ -f /root/.boxrmx_serial ] && [ "$(cat /root/.boxrmx_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxrmx_serial
 [ -d /venv/main/bin ] && export PATH=/venv/main/bin:$PATH
@@ -898,5 +901,30 @@ from sp_mathcheck import correct
 rs = [json.loads(l) for l in open('$o')]; print(f'{sum(correct(r) for r in rs)}/{len(rs)} correct, closed {sum(\"</think>\" in r[\"text\"] for r in rs)}')") (v38 plain: 44 / 41) $(date -u)"
 EX
   echo "[kg] s69: the --att-prior 1.0 eval of v38 queued in $F $(date -u)" >> /root/w/w.log
+fi
+if [ ! -e /root/.s70mend ]; then touch /root/.s70mend
+  cat > /root/s70.sh <<'JOB'
+cd /root/w; export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token)
+echo "[kg] s70: disk $(df -h /root | tail -1 | awk '{print $4" free of "$2}') | traceback: $(grep -B3 "unexpected pos" run_kg_tr.log | grep -oE 'File "[^"]+", line [0-9]+|torch.load[^)]*' | tail -2 | tr '\n' ' ')"
+python3 - <<'PYM' | sed 's/^/[kg] s70: /'
+import os, torch, shutil
+from huggingface_hub import hf_hub_download as d
+R = 'baya1116/hypernet-sp-distill'
+for f in ['kvg.pt', 'kvg_prev.pt', 'kvg_opt.pt', 'kvg_best.pt', 'dpo_ref.pt']:
+    if not os.path.exists(f): print(f, 'missing'); continue
+    try: torch.load(f, map_location='cpu', weights_only=False); print(f, os.path.getsize(f) >> 20, 'MB ok')
+    except Exception as e:
+        print(f, os.path.getsize(f) >> 20, 'MB BROKEN:', str(e)[:80])
+        if f == 'kvg_opt.pt': os.remove(f); print('kvg_opt.pt dropped (Adam restarts for the hypernet)')
+        if f in ('kvg.pt', 'kvg_prev.pt'): shutil.copy(d(R, 'archive/sp3/spKVF_latest.pt', local_dir='mend_dl'), f); print(f, 'restored from the hub')
+        if f == 'kvg_best.pt': shutil.copy(d(R, 'archive/sp3/final/spKVF_best_v38.pt', local_dir='mend_dl'), f); print(f, 'restored from the hub')
+shutil.rmtree('mend_dl', ignore_errors=True)
+PYM
+rm -f STOP_KG
+curl -sS -o /root/kvg_job.sh "https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl/kvg_job.sh?nocache=$(date +%s)"
+echo "[kg] s70: loop restarted, queued one-off jobs first: $(grep -c "^o=" kvg_extra 2>/dev/null) $(date -u)"
+START=dpo_ref.pt exec bash /root/kvg_job.sh
+JOB
+  pgrep -f "^bash /root/kvg_job.sh" > /dev/null || setsid nohup bash -c 'bash /root/s70.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
 fi
 # CTL-END
