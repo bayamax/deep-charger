@@ -221,7 +221,11 @@
 # at segment 2 (39) and segment 4 without the cap (31), kvm (35) - math, competition and MMLU-Pro held-out traces, 3 chunks
 # each. It runs beside the training (another copy of the script), one state at a time, only while a segment has >= 250
 # traces to go, so it never meets the 60-problem run.
-SER=78
+# serial 79: the user - score the whole text the student wrote, in one pass: each state's own 60-problem generations are read
+# by the full-context teacher and by that state (its memory rebuilt chunk by chunk from its own text, as when it wrote it),
+# reverse KL(student || teacher) over the full length. Seven generation files with known scores: v38 44, the new pooler at
+# segment 2 39 and segment 4 31, kvm 35 and 37, the raw window 1024 alone 36 and 37. After serial 78, with the same guard.
+SER=79
 if [ -f /root/.boxrmx_serial ] && [ "$(cat /root/.boxrmx_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxrmx_serial
 [ -d /venv/main/bin ] && export PATH=/venv/main/bin:$PATH
@@ -1051,5 +1055,29 @@ from huggingface_hub import HfApi; HfApi().upload_file(path_or_fileobj='gk.txt',
 echo "[kp] s78 done $(date -u)"
 JOB
   setsid nohup bash -c 'bash /root/s78.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
+fi
+if [ ! -e /root/.s79own ]; then touch /root/.s79own
+  cat > /root/s79.sh <<'JOB'
+cd /root/w; export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+R=baya1116/hypernet-sp-distill; H=https://huggingface.co/$R/resolve/main
+while pgrep -f "bash /root/s78.sh" > /dev/null; do sleep 60; done
+M="--S 32 --heads 8 --layers 3 --ffn 2048 --rw 1024 --C 128 --maxd 0 --kv-mem --kv-rank 512"; AP="--att-prior 1.0 --att-layers 8-19"
+mkdir -p own; for f in kvg/kvg_v38_s1 kvp/kvp_segment2_s1 kvp/kvp_segment4_s1 kvm/kvm_mem_s1 kvm/kvm_mem_s2 dg/gen_raw1024 dg/gen_raw1024_s3; do
+  [ -s own/${f#*/}.jsonl ] || curl -sSfL -H "Authorization: Bearer $HF_TOKEN" -o own/${f#*/}.jsonl "$H/archive/sp3/$f.jsonl"; done
+echo "[kp] s79: each state reads its own 60-problem texts (full length), teacher vs student $(date -u)"
+ok() { pgrep -f "sp_qwen3.py train" > /dev/null || return 1; n=$(grep -oP "trace \K[0-9]+(?=/600)" run_kp.log 2>/dev/null | tail -1); [ "${n:-0}" -le 350 ]; }
+for spec in "v38 (44)|kvg_v38_s1|--ckpt kvg_best.pt" "new pooler segment 2 (39)|kvp_segment2_s1|--ckpt kvp_seg2.pt $AP" \
+            "new pooler segment 4, no cap (31)|kvp_segment4_s1|--ckpt kvp_nocap/kvp_seg4.pt $AP" "kvm seed 1 (35)|kvm_mem_s1|--ckpt kvm.pt" \
+            "kvm seed 2 (37)|kvm_mem_s2|--ckpt kvm.pt" "raw window (36)|gen_raw1024|--no-sp" "raw window seed 3 (37)|gen_raw1024_s3|--no-sp"; do
+  lb=${spec%%|*}; r=${spec#*|}; fn=${r%%|*}; fl=${r#*|}
+  until ok; do sleep 60; done
+  python3 sp_gk.py eval --traces own/$fn.jsonl --max-len 12288 $M $fl --log sp_gk.log > run_own.log 2>&1
+  echo "[kp] own $lb: $(grep -E "\[sp\] eval|Error" run_own.log | tail -1 | sed 's/^\[sp\] eval [^:]*: //' | cut -c1-300) $(date -u)"
+done
+grep "\[kp\] \(gk\|own\)" /root/w/w.log > gk.txt; python3 -c "
+from huggingface_hub import HfApi; HfApi().upload_file(path_or_fileobj='gk.txt', path_in_repo='archive/sp3/kvp/gk.txt', repo_id='$R')" > /dev/null 2>&1
+echo "[kp] s79 done $(date -u)"
+JOB
+  setsid nohup bash -c 'bash /root/s79.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
 fi
 # CTL-END
