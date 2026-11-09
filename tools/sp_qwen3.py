@@ -499,6 +499,48 @@ def update_buffer(kept, absorbed, src, nd_end, feat=None, imp=None, src_imp=None
     return (kept, absorbed) if imp is None and src_imp is None else (kept, absorbed, imp)
 
 
+ATT_L = []   # --att-prior / --evict-by model: the decoder layers whose attention is the importance
+if a.att_prior > 0 or a.evict_by == "model":
+    _lo, _hi = (int(x) for x in a.att_layers.split("-")); ATT_L = list(range(_lo, _hi + 1))
+ATTLOG = [False]   # the one-time log of the importance on a first distant buffer
+ATTREC = {"rows": 0, "acc": {}}   # teacher-forced passes: per hooked layer, the attention the block's last `rows` query rows paid to each key
+
+
+def _att_hook(mod, args, kwargs, out):
+    """forward hook on the attention of layers ATT_L: recomputes this layer's attention of the block's last ATTREC['rows'] query
+    rows over every key (prompt, memory, window and chunk; causal inside the block), summed over heads and rows - what the
+    rollout reads from the eager attentions of its decode steps. Written per layer (gradient checkpointing runs a layer twice)."""
+    rows = ATTREC["rows"]
+    if not rows: return
+    from transformers.models.qwen3.modeling_qwen3 import apply_rotary_pos_emb, repeat_kv
+    h = kwargs["hidden_states"] if "hidden_states" in kwargs else args[0]
+    cos, sin = kwargs["position_embeddings"] if "position_embeddings" in kwargs else args[1]
+    cache = kwargs.get("past_key_values")
+    if cache is None: return
+    with torch.no_grad():
+        B, nb = h.shape[:2]
+        q = mod.q_norm(mod.q_proj(h[:, -rows:]).view(B, rows, -1, mod.head_dim)).transpose(1, 2)
+        q, _ = apply_rotary_pos_emb(q, q, cos[:, -rows:], sin[:, -rows:])
+        kb = mod.k_norm(mod.k_proj(h).view(B, nb, -1, mod.head_dim)).transpose(1, 2)
+        _, kb = apply_rotary_pos_emb(kb, kb, cos, sin)
+        kc = kv_of(cache, mod.layer_idx)[0]   # a frozen PrefixCache holds the prefix only; a DynamicCache the prefix and this block
+        pre = kc if getattr(cache, "frozen", False) else kc[:, :, :kc.size(2) - nb]
+        k = repeat_kv(torch.cat([pre, kb], 2), q.size(1) // kb.size(1))
+        sc = (q.float() @ k.float().transpose(-1, -2)) * mod.scaling   # (B, heads, rows, keys)
+        L = k.size(2); t = torch.arange(L, device=h.device)
+        sc.masked_fill_((t[None, :] > (L - rows + torch.arange(rows, device=h.device))[:, None])[None, None], float("-inf"))
+        ATTREC["acc"][mod.layer_idx] = sc.softmax(-1).sum(1).sum(1)[0]
+
+
+def att_take():
+    """the hooked layers' sums (keys,) since the last att_take, then reset"""
+    acc = ATTREC["acc"]; ATTREC["acc"] = {}; ATTREC["rows"] = 0
+    return sum(acc.values()) if acc else None
+
+
+for _li in ATT_L: llm.model.layers[_li].self_attn.register_forward_hook(_att_hook, with_kwargs=True)
+
+
 def kv_of(cache, li):
     if hasattr(cache, "layers"): return cache.layers[li].keys, cache.layers[li].values
     return cache.key_cache[li], cache.value_cache[li]
@@ -633,13 +675,19 @@ def run_trace(ids, P, train, ref_h=None):
             feat = lambda k: hs[k[0]][None]; src = torch.arange(La, device=dev)[None]
     kept = torch.zeros(1, 0, dtype=torch.long, device=dev); absorbed = 0
     K = A_ = N = 0.0
-    for c0 in range(first, La, a.C):
+    use_att = bool(ATT_L)   # the model's attention importance of each answer token, recorded chunk by chunk as in the rollout
+    if use_att: impT = torch.zeros(La, device=dev); kimp = torch.zeros(1, 0, device=dev)
+    for c0 in range(0 if use_att else first, La, a.C):
         c1 = min(c0 + a.C, La); cur = c1 - c0
         if cur < 4: break
         R = min(c0, a.rw); nd_end = c0 - R
-        kept, absorbed = update_buffer(kept, absorbed, src, nd_end, feat)
-        if c0 not in pick: continue
-        with torch.set_grad_enabled(train):
+        if use_att:
+            si = impT[None].clone(); si[:, :2] = 0   # the answer's first tokens (<think>, a newline) are the model's own sinks
+            kept, absorbed, kimp = update_buffer(kept, absorbed, src, nd_end, feat, imp=kimp, src_imp=si)
+        else: kept, absorbed = update_buffer(kept, absorbed, src, nd_end, feat)
+        imp_only = c0 < first or c0 not in pick   # importance only: no loss, no gradient
+        if imp_only and not use_att: continue
+        with torch.set_grad_enabled(train and not imp_only):
             pn = pin_of(a_ids[0], c0 - R)
             parts = [embed(torch.tensor([pn], device=dev)).to(dt)] if pn else []
             if not a.no_sp and not a.kv_mem: parts.append(slot(kept, feat))
@@ -647,15 +695,25 @@ def run_trace(ids, P, train, ref_h=None):
             nb = block.size(1)
             cache = DynamicCache(); off = P
             if a.kv_mem and not a.no_sp and kept.size(1) > 0:   # prompt KV + the memory's per-layer KV, then the block
-                sp = pooler(feat(kept) if feat else embed(kept).float())
+                sp = pooler(feat(kept) if feat else embed(kept).float(), kpm=att_bias(kimp) if use_att else None)
+                if use_att and not ATTLOG[0]:
+                    ATTLOG[0] = True; sh = kimp[0].clamp(min=0); sh = sh / sh.sum().clamp(min=1e-9); bb = att_bias(kimp)
+                    log(f"[sp] att-prior {a.att_prior} (train): first distant buffer {sh.numel()} tokens, importance share of the top 20 "
+                        f"{sh.topk(min(20, sh.numel())).values.sum().item():.2f}, zero-importance tokens {(sh == 0).sum().item()}, "
+                        f"bias range {bb.min().item():+.2f}..{bb.max().item():+.2f}")
                 mem = kv_memory(sp, torch.arange(P, P + a.S, device=dev)[None])
                 for li, (k_, v_) in enumerate(pkv): cache.update(torch.cat([k_, mem[li][0]], 2), torch.cat([v_, mem[li][1]], 2), li)
                 off = P + a.S
             else:
                 for li, (k_, v_) in enumerate(pkv): cache.update(k_, v_, li)
             pos = torch.arange(off, off + nb, device=dev)[None]
+            if use_att: ATTREC["rows"] = cur
             o = llm(inputs_embeds=block, attention_mask=torch.ones(1, off + nb, device=dev), past_key_values=cache,
-                    position_ids=pos, cache_position=pos[0], use_cache=True, logits_to_keep=cur + 1)
+                    position_ids=pos, cache_position=pos[0], use_cache=True, logits_to_keep=1 if imp_only else cur + 1)
+            if use_att:
+                w_ = att_take(); npin = len(pn)
+                impT[c0 - R:c1] += w_[off + npin:off + npin + R + cur]
+            if imp_only: continue
             # kept rows: the last window token + the chunk's tokens but its last -> they predict answer tokens c0 .. c1-1
             sl = F.log_softmax(o.logits[0, :cur].float(), -1)
             tr = teacher_rows(ref_h[c0 - first:c1 - first])     # teacher row j predicts answer token first + j
@@ -703,24 +761,31 @@ def seq_logp_kv(ids, P, coef=None, temp=1.0):
         pkv = [tuple(t for t in kv_of(pc, li)) for li in range(NL)]
     llm.train(was)
     kept = torch.zeros(1, 0, dtype=torch.long, device=dev); absorbed = 0; tot = 0.0; n = 0
+    use_att = bool(ATT_L)
+    if use_att: impT = torch.zeros(La, device=dev); kimp = torch.zeros(1, 0, device=dev)
     for c0 in range(0, La, a.C):
         c1 = min(c0 + a.C, La); R = min(c0, a.rw); lo = c0 - R
-        kept, absorbed = update_buffer(kept, absorbed, a_ids, lo)
+        if use_att:
+            si = impT[None].clone(); si[:, :2] = 0
+            kept, absorbed, kimp = update_buffer(kept, absorbed, a_ids, lo, imp=kimp, src_imp=si)
+        else: kept, absorbed = update_buffer(kept, absorbed, a_ids, lo)
         use = kept.size(1) > 0 and not a.no_sp; t0 = c0 if c0 > 0 else 1
         if c1 - t0 < 1: continue
         trn = coef is not None and (use or a.ft_layers > 0 or bool(LORA_PARAMS))   # no memory yet: nothing to train here unless the model itself is tuned
         with torch.set_grad_enabled(trn):
             cache = PrefixCache(); off = P
             if use:
-                mem = kv_memory(pooler(embed(kept).float()), torch.arange(P, P + a.S, device=dev)[None])
+                mem = kv_memory(pooler(embed(kept).float(), kpm=att_bias(kimp) if use_att else None), torch.arange(P, P + a.S, device=dev)[None])
                 for li, (k_, v_) in enumerate(pkv): cache.update(torch.cat([k_, mem[li][0]], 2), torch.cat([v_, mem[li][1]], 2), li)
                 off = P + a.S
             else:
                 for li, (k_, v_) in enumerate(pkv): cache.update(k_, v_, li)
             cache.frozen = True
             blk = a_ids[:, lo:c1 - 1]; nb = blk.size(1); pos = torch.arange(off, off + nb, device=dev)[None]
+            if use_att: ATTREC["rows"] = nb if c0 == 0 else c1 - c0   # this chunk's rows and the last of the one before: each token a query once
             hs = llm.model(inputs_embeds=embed(blk).to(dt), attention_mask=torch.ones(1, off + nb, device=dev), past_key_values=cache,
                            position_ids=pos, cache_position=pos[0], use_cache=True).last_hidden_state[0]
+            if use_att: impT[lo:c1 - 1] += att_take()[off:off + nb]
             h0 = t0 - lo - 1   # block row r predicts answer token lo + r + 1
             lp = F.log_softmax(llm.lm_head(hs[h0:h0 + c1 - t0]).float() / temp, -1).gather(1, a_ids[0, t0:c1, None]).sum()
             if trn: (coef * lp).backward()
@@ -1289,7 +1354,6 @@ def rollout_kv(prompts, nslot):
 
 PARA_END_L = None
 PWN = [0, 0]   # --para-window: openings sampled from the masked twin, all sampled steps
-ATTLOG = [False]
 
 
 RT = {"prompt": 0.0, "memory": 0.0, "window": 0.0, "decode": 0.0, "chunks": 0, "streams": 0, "wtok": 0, "ptok": 0}   # where rollout_kvmem's time goes
@@ -1313,7 +1377,6 @@ def rollout_kvmem(prompts, nslot):
     gen = [[] for _ in prompts]; ended = [False] * len(prompts); kept = [None] * len(prompts); absorbed = [0] * len(prompts)
     use_att = a.att_prior > 0 or a.evict_by == "model"   # the model's attention on each generated token, while it sits in the window
     if use_att:
-        lo_, hi_ = (int(x) for x in a.att_layers.split("-")); ATT_L = list(range(lo_, hi_ + 1))
         impT = [torch.zeros(0, device=dev) for _ in prompts]; kimp = [None] * len(prompts)
         assert TW == 1, "--att-prior with the masked twin is not implemented"
     while todo or act:
