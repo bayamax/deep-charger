@@ -240,7 +240,9 @@
 # serial 84: the side checks (serials 78-79) waited on the distillation job's trace counter, which the on-policy job never
 # advances - they now run whenever no sp_qwen3 / oracle process holds the GPU (the on-policy job waits for them before each of
 # its steps), skipping the states already measured; the whole-text check reads 30 of each state's 60 texts.
-SER=84
+# serial 85: the user - the oracle first. The running on-policy round is killed (its generation so far is lost, ~40 min), the
+# oracle runs now, the side checks after it, the on-policy job resumes after those (round 2 from kvq.pt = round 1's weights).
+SER=85
 if [ -f /root/.boxrmx_serial ] && [ "$(cat /root/.boxrmx_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxrmx_serial
 [ -d /venv/main/bin ] && export PATH=/venv/main/bin:$PATH
@@ -1172,5 +1174,24 @@ from huggingface_hub import HfApi; HfApi().upload_file(path_or_fileobj='gk.txt',
 echo "[kp] s84 done $(date -u)"
 JOB
   setsid nohup bash -c 'bash /root/s84.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
+fi
+if [ ! -e /root/.s85now ]; then touch /root/.s85now
+  cat > /root/s85.sh <<'JOB'
+cd /root/w; export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+RAW=https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i; R=baya1116/hypernet-sp-distill
+touch STOP_KQ; pkill -f "bash /root/s82.sh"; pkill -f "bash /root/s84.sh"; pkill -f "bash /root/kvq_job.sh"; sleep 2
+pkill -f "sp_qwen3.py rollout"; pkill -f "sp_qwen3.py train"; pkill -f "sp_gk.py"; sleep 10
+echo "[kp] s85: oracle first - the on-policy round in progress is dropped $(date -u)"
+for _t in $(seq 60); do curl -sS -o sp_or.py "$RAW/tools/sp_qwen3.py?nocache=$(date +%s)"; grep -q "def oracle_trace" sp_or.py && break; sleep 120; done
+[ -s or_in.jsonl ] || { head -n 6 held_math.jsonl > or_in.jsonl; head -n 6 held_comp.jsonl >> or_in.jsonl; }
+M="--S 32 --heads 8 --layers 3 --ffn 2048 --rw 1024 --C 128 --maxd 0 --kv-mem --kv-rank 512"; AP="--att-prior 1.0 --att-layers 8-19 --att-cap 1.0"
+python3 sp_or.py oracle --traces or_in.jsonl --max-len 6144 $M $AP --ckpt kvp_seg2.pt --oracle-steps 200 --oracle-lr 1e-3 --log sp_or.log > run_or.log 2>&1
+grep -E "^\[sp\] oracle|Error|Traceback" run_or.log | cut -c1-600 | sed 's/^\[sp\]/[kp]/'
+python3 -c "from huggingface_hub import HfApi; HfApi().upload_file(path_or_fileobj='sp_or.log', path_in_repo='archive/sp3/kvp/oracle.log', repo_id='$R')" > /dev/null 2>&1
+echo "[kp] s85: oracle done - the side checks, then the on-policy job $(date -u)"
+rm -f /root/.s84idle; bash /root/s84.sh; rm -f STOP_KQ
+exec bash /root/kvq_job.sh
+JOB
+  setsid nohup bash -c 'bash /root/s85.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
 fi
 # CTL-END
