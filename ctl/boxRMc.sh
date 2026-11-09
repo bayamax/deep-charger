@@ -303,6 +303,9 @@
 # KL (0.057 vs 0.050; the future-attention oracle it was fit to sits at 0.023). Remaining runs, one chain, 16 streams: after the
 # running B=512 seed 2 - the window alone 1536 at seed 2 (its pair), EMA 0.98 per layer B=512 (the best rule in KL), then
 # B=2048; the selector's and the single-set EMA 0.98 60-problem runs are dropped (one negative is enough - the user).
+# serial 109 result: B=2048 47, window alone 1536 at seed 2 45, EMA 0.98 per layer B=512 42 (the best rule in KL, the worst on the
+# 60 problems). At an equal total, selection (45 / 45) and the window alone (47 / 45) are the same within seed noise; the box is
+# stopped (22:57Z; its files stay, every result is on the hub under archive/sp3/kvk/).
 SER=109
 if [ -f /root/.boxrmx_serial ] && [ "$(cat /root/.boxrmx_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxrmx_serial
