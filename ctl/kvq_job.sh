@@ -22,7 +22,7 @@ put() { for _i in 1 2 3 4 5; do python3 -c "import sys; from huggingface_hub imp
 for _t in $(seq 60); do curl -sS -o sp_new.py "$RAW/tools/sp_qwen3.py?nocache=$(date +%s)"; grep -q "def gen_chunk" sp_new.py && { mv sp_new.py sp_qwen3.py; break; }; sleep 120; done
 curl -sS -o sp_mathcheck.py "$RAW/tools/sp_mathcheck.py?nocache=$(date +%s)"
 LG=/root/w/sp_kvq.log; LR=${LR:-1e-4}; W=${W:-0.5}; NP=${NP:-48}; CAP=${CAP:-1.0}; EVERY=${EVERY:-2}; NW=${WORKERS:-$(cat kvq_workers 2>/dev/null || echo 0)}
-hls() { python3 -c "from huggingface_hub import HfApi; print('\n'.join(f[12:] for f in HfApi().list_repo_files('$R') if f.startswith('archive/sp3/kvq/')))" 2>/dev/null; }
+hls() { python3 -c "from huggingface_hub import HfApi; print('\n'.join(f[16:] for f in HfApi().list_repo_files('$R') if f.startswith('archive/sp3/kvq/')))" 2>/dev/null; }
 hget() { curl -sSfL -H "Authorization: Bearer $HF_TOKEN" -o "$2" "$H/archive/sp3/$1?x=$(date +%s)"; }
 hdel() { python3 -c "from huggingface_hub import HfApi; HfApi().delete_file('archive/sp3/$1', repo_id='$R')" > /dev/null 2>&1; }
 publish() {   # the weights after $1 rounds, for the workers: the file first, VERSION last (a worker reads VERSION, then the file)

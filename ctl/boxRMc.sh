@@ -255,7 +255,10 @@
 # serial 89: serial 85 removed serial 84's marker before running it, so the next ctl run started a second copy of the side
 # checks beside the oracle run (GPU shared, the oracle slowed). The stray copy is stopped; serial 88 runs the checks later.
 # (serial 88 shrunk before it ran: 2 chains, pooler-seeded only, 120 steps - about 10 minutes instead of an hour.)
-SER=91
+# serial 92: serial 88's body was written before it was shrunk (the marker kept the old text), so the long run started at 15:24 -
+# killed; the one-chain horizon oracle (~5 min) runs instead, then the side checks, then the on-policy job resumes. The hub
+# listing bug (kvq/ prefix) is fixed in the job and the workers.
+SER=92
 if [ -f /root/.boxrmx_serial ] && [ "$(cat /root/.boxrmx_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxrmx_serial
 [ -d /venv/main/bin ] && export PATH=/venv/main/bin:$PATH
@@ -1260,5 +1263,24 @@ JOB
 fi
 if [ ! -e /root/.s89stray ]; then touch /root/.s89stray /root/.s84idle
   pkill -f "bash /root/s84.sh"; sleep 1; pkill -f "sp_gk.py"; echo "[kp] s89: the stray side-check copy stopped; the oracle run has the GPU $(date -u)"
+fi
+if [ ! -e /root/.s92one ]; then touch /root/.s92one
+  cat > /root/s92.sh <<'JOB'
+cd /root/w; export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+RAW=https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i; R=baya1116/hypernet-sp-distill
+pkill -f "bash /root/s88.sh"; pkill -f "bash /root/s87.sh"; pkill -f "bash /root/s84.sh"; pkill -f "bash /root/kvq_job.sh"; sleep 2; pkill -f "sp_or3.py"; pkill -f "sp_gk.py"; pkill -f "sp_qwen3.py"; sleep 5; touch STOP_KQ
+for _t in $(seq 60); do curl -sS -o sp_or3.py "$RAW/tools/sp_qwen3.py?nocache=$(date +%s)"; grep -q "oracle-random" sp_or3.py && break; sleep 120; done
+for _t in $(seq 60); do curl -sS -o /root/kvq_new.sh "$RAW/ctl/kvq_job.sh?nocache=$(date +%s)"; grep -q "f\[16:\]" /root/kvq_new.sh && { mv /root/kvq_new.sh /root/kvq_job.sh; break; }; sleep 120; done
+head -n 1 held_math.jsonl > oh_in.jsonl
+M="--S 32 --heads 8 --layers 3 --ffn 2048 --rw 1024 --C 128 --maxd 0 --kv-mem --kv-rank 512"; AP="--att-prior 1.0 --att-layers 8-19 --att-cap 1.0"
+echo "[kp] s92: one-chain horizon oracle (fit on the next 4 chunks, scored on the 2 after, 4 consecutive positions, pooler-seeded, 120 steps) $(date -u)"
+python3 sp_or3.py oracle --traces oh_in.jsonl --max-len 6144 $M $AP --ckpt kvp_seg2.pt --oracle-steps 120 --oracle-lr 1e-3 --oracle-horizon 4 --oracle-run 4 --oracle-random 0 --log sp_oh1.log > run_oh1.log 2>&1
+grep -E "^\[sp\] oracle|Error|Traceback" run_oh1.log | cut -c1-900 | sed 's/^\[sp\]/[kp]/'
+python3 -c "from huggingface_hub import HfApi; HfApi().upload_file(path_or_fileobj='sp_oh1.log', path_in_repo='archive/sp3/kvp/oracle_h4_one.log', repo_id='$R')" > /dev/null 2>&1
+echo "[kp] s92 done - the side checks, then the on-policy job (workers) $(date -u)"
+bash /root/s84.sh; rm -f STOP_KQ
+exec bash /root/kvq_job.sh
+JOB
+  setsid nohup bash -c 'bash /root/s92.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
 fi
 # CTL-END
