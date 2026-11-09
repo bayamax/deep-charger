@@ -306,14 +306,18 @@
 # serial 109 result: B=2048 47, window alone 1536 at seed 2 45, EMA 0.98 per layer B=512 42 (the best rule in KL, the worst on the
 # 60 problems). At an equal total, selection (45 / 45) and the window alone (47 / 45) are the same within seed noise; the box is
 # stopped (22:57Z; its files stay, every result is on the hub under archive/sp3/kvk/).
-SER=109
+# serial 110: the user - evaluate on varied problems, multi-turn too. The 60-problem eval pinned the problem statement, so it
+# never needed far memory; ctl/mt_job.sh runs the long-range eval (ctl/mt_eval.jsonl, 160 rows, only a system turn pinned) for
+# window 1024 + B=512 by mean attention, the window alone at 1536, full context, the window alone at 1024, window 1024 + B=1024,
+# the window alone at 2048. Status lines show [mt].
+SER=110
 if [ -f /root/.boxrmx_serial ] && [ "$(cat /root/.boxrmx_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxrmx_serial
 [ -d /venv/main/bin ] && export PATH=/venv/main/bin:$PATH
 [ -s /root/.hf_token ] || { [ -n "$HF_TOKEN" ] && printf '%s' "$HF_TOKEN" > /root/.hf_token && chmod 600 /root/.hf_token; }
 mkdir -p /root/w
 cat > /root/status.sh <<'ST'
-grep -E "^\[(pr|rm|kv|kr|kp|kq|kk|ks|kw|kt|kd|ko|ki|kf|kg|hub)\]|Error|Traceback|out of memory" /root/w/w.log 2>/dev/null | tail -n 6 | cut -c1-600
+grep -E "^\[(mt|pr|rm|kv|kr|kp|kq|kk|ks|kw|kt|kd|ko|ki|kf|kg|hub)\]|Error|Traceback|out of memory" /root/w/w.log 2>/dev/null | tail -n 6 | cut -c1-600
 tail -n 1 $(ls -t /root/w/sp_*.log 2>/dev/null | head -1) 2>/dev/null | cut -c1-250
 nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv,noheader
 ST
@@ -1532,5 +1536,13 @@ RB=16 BS="2048" bash /root/kvk_job.sh
 echo "[kk] s109 chain done $(date -u)"
 JOB
   setsid nohup bash -c 'bash /root/s109.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
+fi
+if [ ! -e /root/.s110mt ]; then touch /root/.s110mt
+  cat > /root/s110.sh <<'JOB'
+cd /root/w; RAW=https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i
+for _t in $(seq 60); do curl -sS -o /root/mt_job.sh "$RAW/ctl/mt_job.sh?nocache=$(date +%s)"; grep -q "CONDS" /root/mt_job.sh && break; sleep 120; done
+CONDS="k512:1024:512 w1536:1536:0 full:16384:0 w1024:1024:0 k1024:1024:1024 w2048:2048:0" exec bash /root/mt_job.sh
+JOB
+  setsid nohup bash -c 'bash /root/s110.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
 fi
 # CTL-END

@@ -1840,6 +1840,8 @@ def rollout_kvkeep(prompts, nslot):
     cache = None; pad = []; cols = []; lastlog = None; IMP = CNT = None   # per row: left padding, the answer index of each cached answer entry; (B, Ln) attention received / steps observed
     ST = None   # (6, B, Ln) chunk-level statistics per cached column: cumulative, last chunk, EMA 0.9, EMA 0.98, max over chunks, chunks observed; CH: this chunk's sum
     CH = None; sel_model = kvsel_model(a.kv_select[4:]) if a.kv_select.startswith("mlp:") else None
+    IM_END = tok.convert_tokens_to_ids("<|im_end|>")
+    MTQ = {j: list(MT[j][0][0]) for j in MT}; MTI = {j: 0 for j in MT}; MTS = {j: 0 for j in MT}   # forced turns: queue, turn index, turn start
     if sel_model is not None:
         sys.path.insert(0, os.path.dirname(os.path.abspath(__file__))); from kvsel_feat import numeric as _numeric
     per = lambda j: len(prompts[j]) + a.kv_keep + min(a.rw, a.max_len) + a.C
@@ -1903,8 +1905,16 @@ def rollout_kvkeep(prompts, nslot):
             if a.roll_lp: lpn = F.log_softmax(lastlog, -1).gather(1, nx_t[:, None])[:, 0].tolist()
             for r, j in enumerate(act):
                 if fin[r]: continue
-                if nx[r] in stop: fin[r] = True; ended[j] = True; continue
-                gen[j].append(nx[r])
+                t_ = nx[r]; forced = False
+                if j in MT:   # a multi-turn row: user turns enter the stream as forced tokens (evictable like the answer)
+                    if MTQ[j]:
+                        t_ = MTQ[j].pop(0); forced = True
+                        if not MTQ[j]: MTS[j] = len(gen[j]) + 1
+                    elif t_ in stop or len(gen[j]) - MTS[j] >= MT[j][1][MTI[j]]:   # the turn ended (or hit its cap): next user turn
+                        if MTI[j] + 1 < len(MT[j][0]): MTI[j] += 1; MTQ[j] = list(MT[j][0][MTI[j]]); t_ = IM_END; forced = True
+                        else: fin[r] = True; ended[j] = t_ in stop; continue
+                if not forced and t_ in stop: fin[r] = True; ended[j] = True; continue
+                gen[j].append(t_)
                 if a.roll_lp: LPG.setdefault(j, []).append(lpn[r])
                 if len(gen[j]) >= a.max_len: fin[r] = True
             if all(fin): break
@@ -2040,6 +2050,7 @@ PARA_END_L = None
 PWN = [0, 0]   # --para-window: openings sampled from the masked twin, all sampled steps
 
 
+MT = {}   # rollout: multi-turn rows, prompt index -> (forced token segments per user turn, token cap per assistant turn)
 RT = {"prompt": 0.0, "memory": 0.0, "window": 0.0, "decode": 0.0, "chunks": 0, "streams": 0, "wtok": 0, "ptok": 0}   # where rollout_kvmem's time goes
 
 
@@ -2489,10 +2500,19 @@ elif a.mode == "rollout":
         for i in range(0, len(rows), step_):
             rb = rows[i:i + step_]
             pr_ = [tok.encode(r["prompt"], add_special_tokens=False) for r in rb]
+            MT.clear()
+            for k_, r in enumerate(rb):   # rows with "turns": only "prompt" (a short system turn) is pinned, every user turn is forced
+                if "turns" not in r: continue
+                assert a.kv_evict and not a.kv_layerwise and (a.kv_keep > 0 or a.kv_keep_path), "multi-turn rows need --kv-evict --kv-keep(-path)"
+                ts = r["turns"]; segs = [tok.encode(f"<|im_start|>user\n{ts[0]}<|im_end|>\n<|im_start|>assistant\n", add_special_tokens=False)]
+                segs += [tok.encode(f"\n<|im_start|>user\n{t}<|im_end|>\n<|im_start|>assistant\n", add_special_tokens=False) for t in ts[1:]]
+                MT[k_] = (segs, r.get("caps", [a.max_len] * len(ts)))
             LPG.clear()
             gens = rollout_kvmem(pr_, a.roll_batch)[0] if a.kv_mem else (rollout_kvlayer if a.kv_layerwise else rollout_kvkeep if (a.kv_keep > 0 or a.kv_keep_path) else rollout_kv)(pr_, a.roll_batch)[0] if a.kv_evict else rollout_cb(pr_, a.roll_batch)[0] if a.roll_cb else rollout(pr_)
             for k_, (r, g) in enumerate(zip(rb, gens)):
                 rec = {"src": r.get("src", ""), "id": r.get("id", ""), "gold": r.get("gold", ""), "prompt": r["prompt"], "text": tok.decode(g)}
+                for f_ in ("task", "golds"):
+                    if f_ in r: rec[f_] = r[f_]
                 if a.roll_lp: rec["ids"] = g; rec["lp"] = [round(x, 5) for x in LPG.get(k_, [])]
                 fo.write(json.dumps(rec) + "\n"); n_tok += len(g)
             fo.flush()
