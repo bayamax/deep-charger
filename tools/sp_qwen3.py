@@ -64,6 +64,13 @@ ap.add_argument("--sn-win-plateau", type=float, default=0.0, help="spnext curric
 ap.add_argument("--sn-win-block", type=int, default=4, help="spnext plateau rule: logs (25 traces each) per compared block")
 ap.add_argument("--sn-win-max", type=int, default=800, help="spnext curriculum with --sn-win-plateau: most traces at one w")
 ap.add_argument("--sn-t0", type=int, default=16, help="spnext: first answer position trained")
+ap.add_argument("--gen-kl", type=int, default=0, help="eval: also let the student WRITE the next --gen-len tokens itself (deployment sampling) "
+                "from its state at G evenly spaced chunk starts per trace, the full-context teacher reading the true text up to the chunk "
+                "start and then the student's tokens; KL per position on the student's own path (teacher forcing never shows the "
+                "student its own mistakes). Only those G chunks are scored, teacher-forced too")
+ap.add_argument("--gen-len", type=int, default=128, help="--gen-kl: tokens the student writes per chunk")
+ap.add_argument("--gen-force", action="store_true", help="--gen-kl check: feed the true text instead of samples (the per-position KL "
+                "must then equal the teacher-forced KL of the chunk)")
 ap.add_argument("--score-from", type=int, default=0, help="count only answer tokens at index >= this (a common region when rw differs)")
 ap.add_argument("--pe-rev", action="store_true", help="pooler positions counted from the NEWEST buffer token (0 = the token "
                "just before the window / the predicted position) instead of from the oldest - saved in the checkpoint")
@@ -690,6 +697,59 @@ def ctl_target(tr, pkv, block, P, cur, prev=None):
     return out
 
 
+GEN = {"c": 0, "n": 0, "fk": 0.0, "rk": 0.0, "nll": 0.0, "bins": [[0.0, 0] for _ in range(3)], "eos": 0}   # --gen-kl totals
+
+
+@torch.no_grad()
+def gen_chunk(cache, keep, s0, t0, tc, tlen, seed, force=None):
+    """--gen-kl: the student writes a.gen_len tokens from its state at a chunk start (cache cropped to prompt + memory + raw
+    window, s0 its distribution for the first token); the teacher's cache tc holds the true text, of which the first tlen
+    positions are used, then it reads the student's tokens (t0: its distribution for the first one). Adds to GEN."""
+    full = cache; cache = DynamicCache()   # the first `keep` positions (a new cache: crop() changed meaning across versions)
+    for li in range(NL):
+        k_, v_ = kv_of(full, li); cache.update(k_[:, :, :keep], v_[:, :, :keep], li)
+    del full; torch.manual_seed(seed & 0x7FFFFFFF)
+    ss, toks, s_ = [s0], [], s0
+    for j in range(a.gen_len):
+        t_ = force[j:j + 1] if force is not None else sample_tok(s_[None])
+        toks.append(t_)
+        if j == a.gen_len - 1 or (force is None and int(t_) == tok.eos_token_id) or (force is not None and j + 1 >= force.numel()): break
+        pos = torch.tensor([[keep + j]], device=dev)
+        o = llm(inputs_embeds=embed(t_[None]).to(dt), attention_mask=torch.ones(1, keep + j + 1, device=dev), past_key_values=cache,
+                position_ids=pos, cache_position=pos[0], use_cache=True)
+        s_ = F.log_softmax(o.logits[0, -1].float(), -1); ss.append(s_)
+    g = torch.cat(toks); sl = torch.stack(ss); n = g.numel()
+    tl = [t0[None]]
+    if n > 1:
+        tcache = DynamicCache()
+        for li in range(NL):
+            k_, v_ = kv_of(tc, li); tcache.update(k_[:, :, :tlen], v_[:, :, :tlen], li)
+        on = LORA["on"]; LORA["on"] = False
+        try:
+            with _Frozen():
+                pos = torch.arange(tlen, tlen + n - 1, device=dev)[None]
+                ot = llm(input_ids=g[None, :-1], past_key_values=tcache, position_ids=pos, cache_position=pos[0], use_cache=True)
+        finally:
+            LORA["on"] = on
+        tl.append(F.log_softmax(ot.logits[0].float(), -1))
+    tl = torch.cat(tl)
+    fk = (tl.exp() * (tl - sl)).sum(-1); rk = (sl.exp() * (sl - tl)).sum(-1)
+    GEN["c"] += 1; GEN["n"] += n; GEN["fk"] += fk.sum().item(); GEN["rk"] += rk.sum().item()
+    GEN["nll"] -= tl.gather(1, g[:, None]).sum().item(); GEN["eos"] += int(n < a.gen_len)
+    for b, (lo, hi) in enumerate([(0, 32), (32, 64), (64, 10 ** 9)]):
+        GEN["bins"][b][0] += fk[lo:hi].sum().item(); GEN["bins"][b][1] += fk[lo:hi].numel()
+    return fk
+
+
+def gen_report():
+    if not GEN["c"]: return ""
+    c, n, b = GEN["c"], max(GEN["n"], 1), GEN["bins"]
+    return (f" | gen{a.gen_len} ({c} chunks, {'true text' if a.gen_force else f'temp {a.temp}'}): KL summed per chunk {GEN['fk'] / c:.2f} "
+            f"(per token {GEN['fk'] / n:.4f}; by position 0-31 {b[0][0] / max(b[0][1], 1):.4f} 32-63 {b[1][0] / max(b[1][1], 1):.4f} "
+            f"64+ {b[2][0] / max(b[2][1], 1):.4f}) reverse {GEN['rk'] / c:.2f} | teacher NLL of the student's tokens {GEN['nll'] / n:.3f}"
+            f" | ended early {GEN['eos']}")
+
+
 def run_trace(ids, P, train, ref_h=None):
     """teacher-forced SP-evict over one trace: returns (sum KL, sum top-1 agree, n tokens) on tokens past the window."""
     T = min(len(ids), P + a.max_len)
@@ -702,6 +762,15 @@ def run_trace(ids, P, train, ref_h=None):
     pick = set(c0s)
     if train and a.chunks_per_trace and len(c0s) > a.chunks_per_trace:
         pick = set(random.sample(c0s, a.chunks_per_trace))
+    gen = not train and a.gen_kl > 0
+    if gen:   # G evenly spaced chunk starts, the same for every checkpoint; the teacher's cache of the true text, once
+        ng = min(a.gen_kl, len(c0s)); pick = {c0s[int((i + 0.5) * len(c0s) / ng)] for i in range(ng)}
+        on = LORA["on"]; LORA["on"] = False
+        try:
+            with torch.no_grad(), _Frozen():
+                tc = DynamicCache(); llm.model(input_ids=ids[None, :T], past_key_values=tc, use_cache=True)
+        finally:
+            LORA["on"] = on
     with torch.no_grad():
         pc = DynamicCache(); llm(input_ids=ids[None, :P], past_key_values=pc, use_cache=True)
         pkv = [tuple(t for t in kv_of(pc, li)) for li in range(NL)]
@@ -760,6 +829,10 @@ def run_trace(ids, P, train, ref_h=None):
             rk = (sl.exp() * (sl - tr)).sum(-1)
             RKL[0] += rk.sum().item(); RKL[1] += rk.numel()
             if train: (((1 - a.rkl_weight) * kl + a.rkl_weight * rk).sum() / 1000.0).backward()
+            if gen:
+                gk = gen_chunk(cache, off + nb - cur, sl[0], tr[0], tc, P + c0, int(ids[P:P + 8].sum()) * 1009 + c0,
+                               a_ids[0, c0:c1] if a.gen_force else None)
+                if a.gen_force: GEN.setdefault("diff", []).append((gk - kl[:gk.numel()]).abs().max().item())
         if c0 >= a.score_from:
             K += kl.sum().item(); A_ += (sl.argmax(-1) == tr.argmax(-1)).float().sum().item(); N += kl.numel()
             if DUMP is not None and not train:
@@ -1863,7 +1936,8 @@ elif a.mode == "eval":
         torch.save([torch.cat(x) if x else torch.zeros(0, 7) for x in DUMP], a.dump)
     log(f"[sp] eval {tag} {os.path.basename(a.ckpt) or 'untrained'}: {len(data)} traces {int(N)} tokens  KL {K / max(N, 1):.4f}  "
         f"top1 agree {100 * A_ / max(N, 1):.2f}%  reverse KL {RKL[0] / max(RKL[1], 1):.4f}  ({time.time() - t0:.0f}s)"
-        + (" | by position (0, 1-7, 8-63, 64+): " + " ".join(f"{v[0] / max(v[1], 1):.4f}" for v in WTPOS) if (a.win_teacher or a.rmt) else ""))
+        + (" | by position (0, 1-7, 8-63, 64+): " + " ".join(f"{v[0] / max(v[1], 1):.4f}" for v in WTPOS) if (a.win_teacher or a.rmt) else "")
+        + gen_report() + (f" | forced vs teacher-forced max diff {max(GEN['diff']):.2e}" if GEN.get("diff") else ""))
     if a.end_stat:
         e = ENDST; log(f"[sp] end-stat {tag}: mean p(</think>) teacher {e['pt'] / max(e['n'], 1):.3e} student {e['ps'] / max(e['n'], 1):.3e} | "
                        f"at the {e['k']} real ends: log p teacher {e['lt'] / max(e['k'], 1):.3f} student {e['ls'] / max(e['k'], 1):.3f} | "

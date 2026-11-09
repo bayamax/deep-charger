@@ -215,7 +215,13 @@
 # serial 77: segment 4 collapsed again under the prior alone (effective mass 50% on 46 tokens, 31/60; segment 2 was 349 tokens,
 # 39/60; KL on kvm's curve both times) - the pooler's own logits are now bounded (--att-cap 1.0) and the run restarts from the
 # segment-2 weights (kvp_seg2.pt), the 60 problems after every segment. Segments 3-4 without the cap are parked in kvp_nocap/.
-SER=77
+# serial 78: the user - the held-out KL is teacher-forced (each of a chunk's 128 tokens sees the true text before it), so it
+# never sees the student's own drift; score the chunk the student WRITES itself (sp_qwen3.py eval --gen-kl). First check the
+# measure against the 60 problems on the states whose score is known: the raw window (42 / 44), v38 (44 / 41), the new pooler
+# at segment 2 (39) and segment 4 without the cap (31), kvm (35) - math, competition and MMLU-Pro held-out traces, 3 chunks
+# each. It runs beside the training (another copy of the script), one state at a time, only while a segment has >= 250
+# traces to go, so it never meets the 60-problem run.
+SER=78
 if [ -f /root/.boxrmx_serial ] && [ "$(cat /root/.boxrmx_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxrmx_serial
 [ -d /venv/main/bin ] && export PATH=/venv/main/bin:$PATH
@@ -1023,5 +1029,27 @@ echo "[kp] s77: pooler logits capped at 1.0 under the prior; restart from the se
 CAP=1.0 EVERY=1 PRE_MP="kvp.pt:segment 2 cap1" FROM=base exec bash /root/kvp_job.sh
 JOB
   setsid nohup bash -c 'bash /root/s77.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
+fi
+if [ ! -e /root/.s78gk ]; then touch /root/.s78gk
+  cat > /root/s78.sh <<'JOB'
+cd /root/w; export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+RAW=https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i; R=baya1116/hypernet-sp-distill
+for _t in $(seq 60); do curl -sS -o sp_gk.py "$RAW/tools/sp_qwen3.py?nocache=$(date +%s)"; grep -q "def gen_chunk" sp_gk.py && break; sleep 120; done
+cat held_math.jsonl held_comp.jsonl held_mc.jsonl > gk_held.jsonl
+M="--S 32 --heads 8 --layers 3 --ffn 2048 --rw 1024 --C 128 --maxd 0 --kv-mem --kv-rank 512"; AP="--att-prior 1.0 --att-layers 8-19"
+echo "[kp] s78: the student writes its chunk (--gen-kl 3, 128 tokens) on $(wc -l < gk_held.jsonl) held-out traces, beside the training $(date -u)"
+ok() { pgrep -f "sp_qwen3.py train" > /dev/null || return 1; n=$(grep -oP "trace \K[0-9]+(?=/600)" run_kp.log 2>/dev/null | tail -1); [ "${n:-0}" -le 350 ]; }
+for spec in "raw window (60 problems 42 / 44)|--no-sp" "kvm segment 8 (35)|--ckpt kvm.pt" "new pooler segment 2 (39)|--ckpt kvp_seg2.pt $AP" \
+            "new pooler segment 4, no cap (31)|--ckpt kvp_nocap/kvp_seg4.pt $AP" "v38 (44 / 41)|--ckpt kvg_best.pt"; do
+  lb=${spec%%|*}; fl=${spec#*|}
+  until ok; do sleep 60; done
+  python3 sp_gk.py eval --traces gk_held.jsonl --max-len 6144 $M $fl --gen-kl 3 --gen-len 128 --seed 7 --log sp_gk.log > run_gk.log 2>&1
+  echo "[kp] gk $lb: $(grep -E "\[sp\] eval|Error" run_gk.log | tail -1 | sed 's/^\[sp\] eval [^:]*: //' | cut -c1-420) $(date -u)"
+done
+grep "\[kp\] gk" /root/w/w.log > gk.txt; python3 -c "
+from huggingface_hub import HfApi; HfApi().upload_file(path_or_fileobj='gk.txt', path_in_repo='archive/sp3/kvp/gk.txt', repo_id='$R')" > /dev/null 2>&1
+echo "[kp] s78 done $(date -u)"
+JOB
+  setsid nohup bash -c 'bash /root/s78.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
 fi
 # CTL-END
