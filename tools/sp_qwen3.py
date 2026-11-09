@@ -89,6 +89,8 @@ ap.add_argument("--end-train", action="store_true", help="--par: also train shor
                 "block), and always one block holding the end of the thought")
 ap.add_argument("--end-weight", type=float, default=1.0, help="--par: KL weight of the rows from 32 tokens before </think> "
                 "to 8 after")
+ap.add_argument("--drop-top", type=int, default=0, help="distant buffer: drop the N tokens with the MOST pooling mass before pooling (0 = off). "
+                "The mass sits on ~20 tokens whatever the length; if they are sinks (punctuation, digits), dropping them should force it onto content")
 ap.add_argument("--fifo", type=int, default=0, help="distant buffer: keep only the newest N tokens (oldest dropped first) - "
                 "caps the compression ratio without a learned selection; mass eviction (--maxd) still applies on top if set")
 ap.add_argument("--par-deploy", action="store_true", help="--par: score only the rows the deployment loop scores - in the block "
@@ -470,6 +472,10 @@ def update_buffer(kept, absorbed, src, nd_end, feat=None):
         if a.maxd and kept.size(1) > a.maxd:
             _, mass = pooler.forward_with_mass(feat(kept) if feat else embed(kept).float())
             kept = evict_topk(kept, mass, a.maxd)
+        if a.drop_top and kept.size(1) > a.drop_top + 64:
+            _, mass = pooler.forward_with_mass(feat(kept) if feat else embed(kept).float())
+            keep_ = torch.ones_like(mass, dtype=torch.bool); keep_.scatter_(1, mass.topk(a.drop_top, dim=1).indices, False)
+            kept = kept[keep_].view(1, -1)
     return kept, absorbed
 
 
@@ -1591,6 +1597,7 @@ if a.mode == "massprof":   # where the pooler's attention mass sits over a long 
     import collections as _c
     pooler.eval(); Ks = [256, 512, 1024, 2048, 4096]; cov = _c.defaultdict(list); need = _c.defaultdict(list); n_ = _c.Counter()
     tokmass = _c.Counter(); tokcnt = _c.Counter(); totmass = 0.0   # which tokens carry the mass (share of the total, over all texts at nd=2048)
+    posmass = _c.Counter()   # and where they sit
     with torch.no_grad():
         for r in rows:
             ids_ = tok.encode(r["text"], add_special_tokens=False)
@@ -1601,6 +1608,7 @@ if a.mode == "massprof":   # where the pooler's attention mass sits over a long 
                 if nd == 2048:
                     sh_ = (m_ / m_.sum()).tolist(); totmass += 1.0
                     for t_, w_ in zip(ids_[:nd], sh_): tokmass[t_] += w_; tokcnt[t_] += 1
+                    for (lo_, hi_) in ((0, 4), (4, 16), (16, 64), (64, 256), (256, 1024), (1024, 2048)): posmass[(lo_, hi_)] += sum(sh_[lo_:hi_])
                 for k in Ks:
                     if k < nd: cov[(nd, k)].append(c_[k - 1].item())
                 for p_ in (0.5, 0.8, 0.9, 0.95): need[(nd, p_)].append(int((c_ < p_).sum().item()) + 1)
@@ -1613,7 +1621,7 @@ if a.mode == "massprof":   # where the pooler's attention mass sits over a long 
         top = tokmass.most_common(12)
         log("[sp] massprof top tokens by mass (share of a text's mass, mean over texts at distant 2048; count = occurrences in the 2048): "
             + " | ".join(f"{tok.decode([t_])!r} {100 * w_ / totmass:.1f}% (x{tokcnt[t_] / totmass:.0f})" for t_, w_ in top))
-        pos = _c.defaultdict(float)   # mass by position bucket (first 64 tokens of the distant past, the rest in quarters)
+        log("[sp] massprof mass by position in the distant 2048: " + " | ".join(f"{lo_}-{hi_}: {100 * posmass[(lo_, hi_)] / totmass:.1f}%" for (lo_, hi_) in sorted(posmass)))
     sys.exit(0)
 if a.mode == "profile":
     pooler.eval(); acc = {}
