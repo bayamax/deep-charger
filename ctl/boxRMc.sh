@@ -170,7 +170,9 @@
 # serial 62: the --fifo 2048 eval wrote nothing (0/60) - its log tail goes to the container log to see why.
 # serial 63: the --fifo eval ran out of memory - something else held 22 GB (the restarting trainer). kvg_job now runs a one-off
 # job from kvg_extra between rounds, with the GPU free: the --fifo 2048 eval of v38 goes there. Restart after the running round.
-SER=63
+# serial 64: eviction by attention mass (the user: what the pooler does not attend to can go), not FIFO: the one-off eval of
+# v38 uses --maxd 2048 (the 2048 distant tokens with the most pooling mass are kept, the rest dropped).
+SER=64
 if [ -f /root/.boxrmx_serial ] && [ "$(cat /root/.boxrmx_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxrmx_serial
 [ -d /venv/main/bin ] && export PATH=/venv/main/bin:$PATH
@@ -794,5 +796,9 @@ echo "[kg] s63: restarting with the one-off job hook (the fifo eval first) $(dat
 START=dpo_ref.pt exec bash /root/kvg_job.sh
 JOB
   setsid nohup bash -c 'bash /root/s63.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
+fi
+if [ ! -e /root/.s64mass ]; then touch /root/.s64mass
+  [ -e /root/w/kvg_extra.running ] || sed -i 's/--fifo 2048/--maxd 2048/; s/fifo2048/maxd2048/g; s/fifo eval/maxd eval/' /root/w/kvg_extra 2>/dev/null
+  echo "[kg] s64: the one-off eval of v38 now with --maxd 2048 (attention-mass eviction) $(grep -c maxd2048 /root/w/kvg_extra 2>/dev/null)" >> /root/w/w.log
 fi
 # CTL-END
