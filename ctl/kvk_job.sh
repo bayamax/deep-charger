@@ -20,12 +20,12 @@ print(f'{sum(correct(r) for r in rs)}/{len(rs)} correct, closed {sum(\"</think>\
 SEED=${SEED:-1}; RW=${RW:-1024}
 echo "[kk] ready $(date -u) | kv-keep in the script: $(grep -c 'def rollout_kvkeep' sp_qwen3.py) | budgets ${BS:-512 0 2048} | rw $RW | seed $SEED"
 for B in ${BS:-512 0 2048}; do
-  o=kvk_b${B}_s$SEED.jsonl; [ -s $o ] && { echo "[kk] B=$B seed $SEED already: $(score $o)"; continue; }
+  o=kvk_b${B}_rw${RW}_s$SEED.jsonl; [ "$RW" = 1024 ] && o=kvk_b${B}_s$SEED.jsonl; [ -s $o ] && { echo "[kk] B=$B seed $SEED already: $(score $o)"; continue; }
   t0=$(date +%s); rm -f $o.part
   python3 sp_qwen3.py rollout --traces rl_eval60.jsonl --no-sp --kv-evict --kv-keep $B --kv-keep-path --att-layers 8-19 --rw $RW --C 128 --maxd 0 --max-len 12288 \
     --roll-batch ${RB:-24} --kv-budget 90000 --seed $SEED --roll-out $o.part --log sp_kvk.log > run_kvk.log 2>&1
   if [ -s $o.part ]; then mv $o.part $o; put $o kvk/$o
-    echo "[kk] B=$B seed $SEED: $(score $o) ($(( $(date +%s) - t0 )) s; $(grep -oE 'kv-keep [0-9]+: .*' sp_kvk.log | tail -1 | cut -c1-120)) | refs: raw window 42 / 44, v38 44 / 41, full context ~50 $(date -u)"
+    echo "[kk] B=$B rw $RW seed $SEED: $(score $o) ($(( $(date +%s) - t0 )) s; $(grep -oE 'kv-keep [0-9]+: .*' sp_kvk.log | tail -1 | cut -c1-120)) | refs: raw window 42 / 44, v38 44 / 41, full context ~50 $(date -u)"
   else echo "[kk] B=$B seed $SEED FAILED: $(grep -E 'Error|error' run_kvk.log | tail -1 | cut -c1-200)"; fi
   [ -e STOP_KK ] && break
 done
