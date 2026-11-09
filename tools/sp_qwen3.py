@@ -1732,6 +1732,10 @@ def rollout_kvkeep(prompts, nslot):
                     K[r, :, pad[r]:] = ok[b].index_select(1, srcs[r]); V[r, :, pad[r]:] = ov[b].index_select(1, srcs[r])
                     if li == 0: IMPn[r, pad[r]:] = IMP[b, srcs[r]]; CNTn[r, pad[r]:] = CNT[b, srcs[r]]
             nc.update(K, V, li)
+            if cache is not None:   # the old layer is not needed any more: free it (the rebuild otherwise holds two full caches)
+                if hasattr(cache, "layers"): cache.layers[li].keys = cache.layers[li].values = None
+                else: cache.key_cache[li] = cache.value_cache[li] = None
+            del ok, ov
         cache = nc; IMP, CNT = IMPn, CNTn; del newkv
         lastlog = torch.stack([lastlog[b] if b is not None else newlog[j] for (j, b, _, _, _) in keep])
         cols = [[cols[b][i] for i in idx] if b is not None else [] for (j, b, _, _, idx) in keep]

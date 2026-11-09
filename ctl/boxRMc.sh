@@ -280,7 +280,8 @@
 # the generation workers are destroyed. Next: a fixed KV budget of REAL entries chosen by the model's own attention, no training.
 # serial 100: the fixed KV budget of real entries (ctl/kvk_job.sh): the 60 problems at seed 1 with --kv-keep 512, then 0 (the
 # window alone in the same code path), then 2048; no training. Also the status lines show [kk].
-SER=100
+# serial 101: B=512 ran out of memory with 48 streams - 24 streams, and the rebuild frees each old layer as it is copied; restart.
+SER=101
 if [ -f /root/.boxrmx_serial ] && [ "$(cat /root/.boxrmx_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxrmx_serial
 [ -d /venv/main/bin ] && export PATH=/venv/main/bin:$PATH
@@ -1410,5 +1411,15 @@ for _t in $(seq 60); do curl -sS -o /root/kvk_job.sh "$RAW/ctl/kvk_job.sh?nocach
 rm -f STOP_KK; exec bash /root/kvk_job.sh
 JOB
   setsid nohup bash -c 'bash /root/s100.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
+fi
+if [ ! -e /root/.s101oom ]; then touch /root/.s101oom
+  cat > /root/s101.sh <<'JOB'
+cd /root/w; RAW=https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i
+pkill -f "bash /root/kvk_job.sh"; pkill -f "bash /root/s100.sh"; sleep 1; pkill -f "sp_qwen3.py"; sleep 5
+for _t in $(seq 60); do curl -sS -o sp_new.py "$RAW/tools/sp_qwen3.py?nocache=$(date +%s)"; grep -q "the old layer is not needed" sp_new.py && { mv sp_new.py sp_qwen3.py; break; }; sleep 120; done
+for _t in $(seq 60); do curl -sS -o /root/kvk_job.sh "$RAW/ctl/kvk_job.sh?nocache=$(date +%s)"; grep -q "RB:-24" /root/kvk_job.sh && break; sleep 120; done
+echo "[kk] s101: restart with 24 streams $(date -u)"; rm -f STOP_KK; exec bash /root/kvk_job.sh
+JOB
+  setsid nohup bash -c 'bash /root/s101.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
 fi
 # CTL-END
