@@ -160,6 +160,11 @@ ap.add_argument("--kv-evict", action="store_true", help="rollout: plain KV-cache
                 "past in view) and at their true positions - instead of re-prefilling the window from scratch (no SP). With a huge rw "
                 "it is full KV with the same sampling code")
 ap.add_argument("--kv-budget", type=int, default=150000, help="--kv-evict: cap on streams x (prompt + kept window + C) cached tokens")
+ap.add_argument("--kv-keep", type=int, default=0, help="--kv-evict: a fixed budget of OLDER entries kept beside the newest rw: every C tokens "
+                "each stream keeps its prompt, its newest rw answer entries and the --kv-keep older entries the model attended most (the "
+                "attention each cached key received from the generated tokens, layers --att-layers, all heads, per step it was cached), "
+                "as computed and at their true positions - a bounded REAL KV cache chosen by the model's own attention, no training")
+ap.add_argument("--kv-keep-path", action="store_true", help="--kv-evict: use the --kv-keep code path even with --kv-keep 0 (a check)")
 ap.add_argument("--win-teacher", action="store_true", help="train/eval: the SP REPLACES the raw window - teacher = the model reading "
                 "[prompt | the last rw answer tokens before chunk start c0 | the chunk] (the raw-window loop, nothing it does not "
                 "also hand the student), student = [prompt | SP(those same rw tokens) | the chunk]; KL on the chunk's tokens. A "
@@ -539,7 +544,7 @@ def update_buffer(kept, absorbed, src, nd_end, feat=None, imp=None, src_imp=None
 
 
 ATT_L = []   # --att-prior / --evict-by model: the decoder layers whose attention is the importance
-if a.att_prior > 0 or a.evict_by == "model":
+if a.att_prior > 0 or a.evict_by == "model" or a.kv_keep > 0:
     _lo, _hi = (int(x) for x in a.att_layers.split("-")); ATT_L = list(range(_lo, _hi + 1))
 ATTLOG = [False]   # the one-time log of the importance on a first distant buffer
 ATTREC = {"rows": 0, "acc": {}}   # teacher-forced passes: per hooked layer, the attention the block's last `rows` query rows paid to each key
@@ -568,13 +573,19 @@ def _att_hook(mod, args, kwargs, out):
         sc = (q.float() @ k.float().transpose(-1, -2)) * mod.scaling   # (B, heads, rows, keys)
         L = k.size(2); t = torch.arange(L, device=h.device)
         sc.masked_fill_((t[None, :] > (L - rows + torch.arange(rows, device=h.device))[:, None])[None, None], float("-inf"))
-        ATTREC["acc"][mod.layer_idx] = sc.softmax(-1).sum(1).sum(1)[0]
+        am = kwargs.get("attention_mask")   # left padding / finished rows in a batch: the model's own 4-d mask
+        if am is not None and am.dim() == 4 and am.size(-1) >= L and am.size(-2) >= rows:
+            am = am[:, :, -rows:, :L]
+            if am.dtype == torch.bool: sc.masked_fill_(~am, float("-inf"))
+            else: sc = sc + am.to(sc.dtype)
+        ATTREC["acc"][mod.layer_idx] = sc.softmax(-1).nan_to_num(0.0).sum(1).sum(1)   # (B, keys)
 
 
 def att_take():
-    """the hooked layers' sums (keys,) since the last att_take, then reset"""
+    """the hooked layers' sums since the last att_take, then reset: (keys,) for a single row, (B, keys) for a batch"""
     acc = ATTREC["acc"]; ATTREC["acc"] = {}; ATTREC["rows"] = 0
-    return sum(acc.values()) if acc else None
+    if not acc: return None
+    x = sum(acc.values()); return x[0] if x.size(0) == 1 else x
 
 
 for _li in ATT_L: llm.model.layers[_li].self_attn.register_forward_hook(_att_hook, with_kwargs=True)
@@ -1678,6 +1689,93 @@ def rollout_kv(prompts, nslot):
     return gen, ended
 
 
+@torch.no_grad()
+def rollout_kvkeep(prompts, nslot):
+    """--kv-evict --kv-keep B (the user: a fixed KV budget of real entries, no synthesis): rollout_kv, but every C tokens each
+    stream keeps its prompt, its newest rw answer entries AND the B older answer entries the model attended most - the attention
+    each cached key received from the generated tokens (layers ATT_L, all heads, the forward hook), divided by the steps it
+    was cached - all as computed, at their true positions. Returns (generated token lists, ended flags)."""
+    stop = {i for i in [tok.eos_token_id, tok.convert_tokens_to_ids("<|im_end|>"), tok.convert_tokens_to_ids("<|endoftext|>")] if i is not None and i >= 0}
+    todo = list(range(len(prompts)))[::-1]; act = []
+    gen = [[] for _ in prompts]; ended = [False] * len(prompts)
+    cache = None; pad = []; cols = []; lastlog = None; IMP = CNT = None   # per row: left padding, the answer index of each cached answer entry; (B, Ln) attention received / steps observed
+    per = lambda j: len(prompts[j]) + a.kv_keep + min(a.rw, a.max_len) + a.C
+    KEEPLOG = [0, 0, 0]   # kept older entries: how many, their mean age in chunks, rebuilds
+    while todo or act:
+        new = []
+        while todo and len(act) + len(new) < nslot and (len(act) + len(new) + 1) * max(per(x) for x in act + new + [todo[-1]]) <= a.kv_budget:
+            new.append(todo.pop())
+        newkv, newlog = {}, {}
+        for j in new:
+            pc = DynamicCache(); o = llm(input_ids=torch.tensor([prompts[j]], device=dev), past_key_values=pc, use_cache=True, logits_to_keep=1)
+            newkv[j] = [kv_of(pc, li) for li in range(NL)]; newlog[j] = o.logits[0, -1].float()
+        keep = []   # (j, old row, old pad, P, the old row's answer-entry indices to keep)
+        for b, j in enumerate(act):
+            P = len(prompts[j]); n = len(cols[b]); k = min(a.rw, n); older = list(range(n - k)); newest = list(range(n - k, n))
+            if a.kv_keep <= 0: older = []
+            elif len(older) > a.kv_keep:
+                base = pad[b] + P; score = IMP[b, base:base + n - k] / CNT[b, base:base + n - k].clamp(min=1)
+                older = score.topk(a.kv_keep).indices.sort().values.tolist()
+            if older: KEEPLOG[0] += len(older); KEEPLOG[1] += sum(len(gen[j]) - cols[b][i] for i in older) / len(older) / a.C; KEEPLOG[2] += 1
+            keep.append((j, b, pad[b], P, older + newest))
+        for j in new: keep.append((j, None, 0, len(prompts[j]), []))
+        Ln = max(P + len(idx) for (_, _, _, P, idx) in keep); B = len(keep); pad = [Ln - (P + len(idx)) for (_, _, _, P, idx) in keep]
+        nc = DynamicCache(); IMPn = torch.zeros(B, Ln, device=dev); CNTn = torch.zeros(B, Ln, device=dev)
+        srcs = [torch.tensor(list(range(p0, p0 + P)) + [p0 + P + i for i in idx], device=dev, dtype=torch.long) if b is not None else None for (j, b, p0, P, idx) in keep]
+        for li in range(NL):
+            ref = kv_of(cache, li)[0] if cache is not None else newkv[new[0]][li][0]
+            K = torch.zeros((B, ref.size(1), Ln, ref.size(3)), device=dev, dtype=ref.dtype); V = torch.zeros_like(K)
+            ok, ov = kv_of(cache, li) if cache is not None else (None, None)
+            for r, (j, b, p0, P, idx) in enumerate(keep):
+                if b is None: K[r, :, pad[r]:], V[r, :, pad[r]:] = newkv[j][li][0][0], newkv[j][li][1][0]
+                else:
+                    K[r, :, pad[r]:] = ok[b].index_select(1, srcs[r]); V[r, :, pad[r]:] = ov[b].index_select(1, srcs[r])
+                    if li == 0: IMPn[r, pad[r]:] = IMP[b, srcs[r]]; CNTn[r, pad[r]:] = CNT[b, srcs[r]]
+            nc.update(K, V, li)
+        cache = nc; IMP, CNT = IMPn, CNTn; del newkv
+        lastlog = torch.stack([lastlog[b] if b is not None else newlog[j] for (j, b, _, _, _) in keep])
+        cols = [[cols[b][i] for i in idx] if b is not None else [] for (j, b, _, _, idx) in keep]
+        act = [j for (j, _, _, _, _) in keep]
+        amask = torch.zeros((B, Ln), device=dev, dtype=torch.long)
+        for r in range(B): amask[r, pad[r]:] = 1
+        fin = [False] * B
+        for _ in range(a.C):
+            nx_t = sample_tok(lastlog); nx = nx_t.tolist()
+            if a.roll_lp: lpn = F.log_softmax(lastlog, -1).gather(1, nx_t[:, None])[:, 0].tolist()
+            for r, j in enumerate(act):
+                if fin[r]: continue
+                if nx[r] in stop: fin[r] = True; ended[j] = True; continue
+                gen[j].append(nx[r])
+                if a.roll_lp: LPG.setdefault(j, []).append(lpn[r])
+                if len(gen[j]) >= a.max_len: fin[r] = True
+            if all(fin): break
+            amask = torch.cat([amask, torch.ones((B, 1), device=dev, dtype=torch.long)], 1)
+            pos = torch.tensor([[len(prompts[j]) + max(len(gen[j]) - 1, 0)] for j in act], device=dev)
+            ATTREC["rows"] = 1
+            o = llm(input_ids=torch.tensor([[gen[j][-1] if gen[j] else 0] for j in act], device=dev), attention_mask=amask,
+                    position_ids=pos, past_key_values=cache, use_cache=True, logits_to_keep=1)
+            lastlog = o.logits[:, -1].float()
+            w = att_take()
+            IMP = torch.cat([IMP, torch.zeros(B, 1, device=dev)], 1); CNT = torch.cat([CNT, torch.zeros(B, 1, device=dev)], 1)
+            if w is not None:
+                if w.dim() == 1: w = w[None]
+                live = torch.tensor([0.0 if f else 1.0 for f in fin], device=dev)[:, None]
+                IMP += w * live; CNT += amask.float() * live
+            for r, j in enumerate(act): cols[r].append(len(gen[j]) - 1)   # the new entry (a finished row's dummy leaves with it)
+        keep_rows = [r for r in range(B) if not fin[r]]
+        if len(keep_rows) < B:
+            sel = torch.tensor(keep_rows, device=dev, dtype=torch.long)
+            if keep_rows:
+                c2 = DynamicCache()
+                for li in range(NL):
+                    k_, v_ = kv_of(cache, li); c2.update(k_.index_select(0, sel), v_.index_select(0, sel), li)
+                cache = c2; lastlog = lastlog.index_select(0, sel); IMP = IMP.index_select(0, sel); CNT = CNT.index_select(0, sel)
+            else: cache = None; lastlog = None; IMP = CNT = None
+            act = [act[r] for r in keep_rows]; pad = [pad[r] for r in keep_rows]; cols = [cols[r] for r in keep_rows]
+    if KEEPLOG[2]: log(f"[sp] kv-keep {a.kv_keep}: {KEEPLOG[2]} rebuilds kept {KEEPLOG[0] / KEEPLOG[2]:.0f} older entries each, mean age {KEEPLOG[1] / KEEPLOG[2]:.1f} chunks")
+    return gen, ended
+
+
 PARA_END_L = None
 PWN = [0, 0]   # --para-window: openings sampled from the masked twin, all sampled steps
 
@@ -2132,7 +2230,7 @@ elif a.mode == "rollout":
             rb = rows[i:i + step_]
             pr_ = [tok.encode(r["prompt"], add_special_tokens=False) for r in rb]
             LPG.clear()
-            gens = rollout_kvmem(pr_, a.roll_batch)[0] if a.kv_mem else rollout_kv(pr_, a.roll_batch)[0] if a.kv_evict else rollout_cb(pr_, a.roll_batch)[0] if a.roll_cb else rollout(pr_)
+            gens = rollout_kvmem(pr_, a.roll_batch)[0] if a.kv_mem else (rollout_kvkeep if (a.kv_keep > 0 or a.kv_keep_path) else rollout_kv)(pr_, a.roll_batch)[0] if a.kv_evict else rollout_cb(pr_, a.roll_batch)[0] if a.roll_cb else rollout(pr_)
             for k_, (r, g) in enumerate(zip(rb, gens)):
                 rec = {"src": r.get("src", ""), "id": r.get("id", ""), "gold": r.get("gold", ""), "prompt": r["prompt"], "text": tok.decode(g)}
                 if a.roll_lp: rec["ids"] = g; rec["lp"] = [round(x, 5) for x in LPG.get(k_, [])]

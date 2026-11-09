@@ -278,14 +278,16 @@
 # the chained oracle and the content checks go first, the side checks restart after them.
 # serial 99: the user - synthesis is abandoned (every pooler was a constant prefix); the on-policy job and the side checks stop,
 # the generation workers are destroyed. Next: a fixed KV budget of REAL entries chosen by the model's own attention, no training.
-SER=99
+# serial 100: the fixed KV budget of real entries (ctl/kvk_job.sh): the 60 problems at seed 1 with --kv-keep 512, then 0 (the
+# window alone in the same code path), then 2048; no training. Also the status lines show [kk].
+SER=100
 if [ -f /root/.boxrmx_serial ] && [ "$(cat /root/.boxrmx_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxrmx_serial
 [ -d /venv/main/bin ] && export PATH=/venv/main/bin:$PATH
 [ -s /root/.hf_token ] || { [ -n "$HF_TOKEN" ] && printf '%s' "$HF_TOKEN" > /root/.hf_token && chmod 600 /root/.hf_token; }
 mkdir -p /root/w
 cat > /root/status.sh <<'ST'
-grep -E "^\[(pr|rm|kv|kr|kp|kq|kw|kt|kd|ko|ki|kf|kg|hub)\]|Error|Traceback|out of memory" /root/w/w.log 2>/dev/null | tail -n 6 | cut -c1-600
+grep -E "^\[(pr|rm|kv|kr|kp|kq|kk|kw|kt|kd|ko|ki|kf|kg|hub)\]|Error|Traceback|out of memory" /root/w/w.log 2>/dev/null | tail -n 6 | cut -c1-600
 tail -n 1 $(ls -t /root/w/sp_*.log 2>/dev/null | head -1) 2>/dev/null | cut -c1-250
 nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv,noheader
 ST
@@ -1397,5 +1399,16 @@ fi
 if [ ! -e /root/.s99stop ]; then touch /root/.s99stop
   cd /root/w; touch STOP_KQ; pkill -f "bash /root/s98.sh"; pkill -f "bash /root/s95.sh"; pkill -f "bash /root/s84.sh"; pkill -f "bash /root/kvq_job.sh"; sleep 2; pkill -f "sp_gk.py"; pkill -f "sp_qwen3.py"
   echo "[kp] s99: synthesis abandoned - on-policy job, side checks stopped; the GPU is free for the fixed-budget KV runs $(date -u)"
+fi
+if [ ! -e /root/.s100kvk ]; then touch /root/.s100kvk
+  sed -i 's/\^\\\[k\[gcpq\]\\\]/^\\[k[gcpqk]\\]/' /root/wlog.sh; pkill -f "bash /root/wlog.sh"
+  setsid nohup bash -c 'bash /root/wlog.sh > /dev/null 2>&1' > /dev/null 2>&1 < /dev/null &
+  cat > /root/s100.sh <<'JOB'
+cd /root/w; RAW=https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i
+pkill -f "bash /root/kvq_job.sh"; pkill -f "bash /root/s84.sh"; pkill -f "bash /root/s98.sh"; sleep 1; pkill -f "sp_gk.py"; pkill -f "sp_qwen3.py"; sleep 5
+for _t in $(seq 60); do curl -sS -o /root/kvk_job.sh "$RAW/ctl/kvk_job.sh?nocache=$(date +%s)"; grep -q "kv-keep-path" /root/kvk_job.sh && break; sleep 120; done
+rm -f STOP_KK; exec bash /root/kvk_job.sh
+JOB
+  setsid nohup bash -c 'bash /root/s100.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
 fi
 # CTL-END
