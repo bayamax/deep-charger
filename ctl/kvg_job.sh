@@ -95,7 +95,7 @@ moves
 touch used_groups.txt
 if [ -e kvg_eval_now ] && [ -s kvg.pt ]; then rm -f kvg_eval_now; ev60 $(cat kvg_round 2>/dev/null || echo 0) $(cat VERSION); fi
 while [ ! -e STOP_KG ]; do
-  if [ -s kvg_extra ]; then mv kvg_extra kvg_extra.running; bash kvg_extra.running; rm -f kvg_extra.running; fi   # a one-off job between rounds (an eval with other flags), GPU free
+  if [ -s kvg_extra ]; then mv kvg_extra kvg_extra.running; bash kvg_extra.running; rm -f kvg_extra.running; [ -s kvg_extra_next ] && mv kvg_extra_next kvg_extra; fi   # one-off jobs between rounds (evals with other flags), GPU free
   V0=$v0 GMIN=$GMIN CUR=$(cat VERSION) python3 - <<'PY' > newg_list.txt
 import os, re
 from huggingface_hub import HfApi

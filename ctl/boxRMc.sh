@@ -179,7 +179,10 @@
 # serial 66: the mass profile says half of the pooling mass sits on ~20 tokens of the distant past, 70% on the top 256,
 # whatever its length - the pooler attends to a handful of tokens. Which ones? massprof now names them; a one-off job
 # runs it (seconds) between rounds.
-SER=66
+# serial 67: the sink test joins the pending one-off job: v38 on the 60 problems with the 24 highest-mass distant tokens
+# dropped before pooling (--drop-top 24). If the mass sits on sinks, this should not hurt; if it helps, the pooler was
+# looking at the wrong tokens.
+SER=67
 if [ -f /root/.boxrmx_serial ] && [ "$(cat /root/.boxrmx_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxrmx_serial
 [ -d /venv/main/bin ] && export PATH=/venv/main/bin:$PATH
@@ -840,5 +843,23 @@ python3 sp_qwen3.py massprof --traces mp_in.jsonl $M --ckpt kvg_best.pt --max-le
 grep -E "top tokens|Error|Traceback" run_mp2.log | tail -2 | sed 's/^\[sp\]/[kg]/' | cut -c1-900
 EX
   echo "[kg] s66: one-off job - which tokens carry the pooling mass $(date -u)" >> /root/w/w.log
+fi
+if [ ! -e /root/.s67drop ]; then touch /root/.s67drop
+  [ -e /root/w/kvg_extra.running ] && F=/root/w/kvg_extra_next || F=/root/w/kvg_extra
+  cat >> $F <<'EX'
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token); cd /root/w; R=baya1116/hypernet-sp-distill
+RAW=https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i
+curl -sS -o sp_new.py "$RAW/tools/sp_qwen3.py?nocache=$(date +%s)"; grep -q '"--drop-top"' sp_new.py && mv sp_new.py sp_qwen3.py
+M="--S 32 --heads 8 --layers 3 --ffn 2048 --rw 1024 --C 128 --maxd 0 --kv-mem --kv-rank 512"
+o=evalx_v38_droptop24_s1.jsonl; rm -f $o
+python3 sp_qwen3.py rollout --traces rl_eval60.jsonl $M --drop-top 24 --ckpt kvg_best.pt --max-len 12288 --roll-batch 48 --grpo-tok-budget 60000 --seed 1 --roll-out $o --log sp_kvg.log > run_drop.log 2>&1
+grep -E "Error|Traceback" run_drop.log | tail -1 | cut -c1-200 | sed 's/^/[kg] drop-top eval: /'
+python3 -c "from huggingface_hub import HfApi; HfApi().upload_file(path_or_fileobj='$o', path_in_repo='archive/sp3/kvg/$o', repo_id='$R')"
+echo "[kg] eval v38 drop-top24 seed 1: $(python3 -c "
+import json, sys; sys.path.insert(0, '.')
+from sp_mathcheck import correct
+rs = [json.loads(l) for l in open('$o')]; print(f'{sum(correct(r) for r in rs)}/{len(rs)} correct, closed {sum(\"</think>\" in r[\"text\"] for r in rs)}')") (v38 plain: 44 / 41, maxd2816: 44) $(date -u)"
+EX
+  echo "[kg] s67: the --drop-top 24 eval of v38 queued in $F $(date -u)" >> /root/w/w.log
 fi
 # CTL-END
