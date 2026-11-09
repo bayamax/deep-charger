@@ -198,7 +198,11 @@
 # serial 72: 3.6G free is not enough for a round's saves. The old experiments' leftovers go (the GRPO runs before the kvg
 # lineage, the DPO round-1 full model that dpo_ref.pt supersedes, the RMT final that the hub holds as spRMF_latest.pt,
 # the v34/v41 analysis dirs whose conclusions are in the notes). Also: is the KV-memory distillation data still here?
-SER=72
+# serial 73: the pivot (the user: if the pooler sits in the attention-sink valley, leave the current RL and retrain the pooler
+# from the base with the model's attention put into its attention mass). Once the queued one-off jobs are done, the RL loop
+# (v49 lineage, hypernet-only) is stopped and ctl/kvp_job.sh starts: pooler retraining from v38 with --att-prior 1.0, LLM
+# frozen. The hub w.log copy carries [kp] lines too.
+SER=73
 if [ -f /root/.boxrmx_serial ] && [ "$(cat /root/.boxrmx_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxrmx_serial
 [ -d /venv/main/bin ] && export PATH=/venv/main/bin:$PATH
@@ -944,5 +948,21 @@ fi
 if [ ! -e /root/.s72disk ]; then touch /root/.s72disk
   cd /root/w; rm -rf grpo_run1 grpo_run2_pre grpo_run2_v3start kvf_round1.pt kvf_prev.pt rmf_next.pt rmf.pt slide_v41 collapse_v34 state_up
   echo "[kg] s72: $(df -h /root | tail -1 | awk '{print $4" free"}') | distillation data: $(ls -la rm_pool.jsonl rm_held.jsonl kvm.pt 2>&1 | awk '{print $NF, $5}' | tr '\n' ' ') | one-offs left: $(grep -c "^o=" kvg_extra 2>/dev/null) running: $(ls kvg_extra.running 2>/dev/null) $(date -u)"
+fi
+if [ ! -e /root/.s73pivot ]; then touch /root/.s73pivot
+  sed -i 's/\^\\\[k\[gc\]\\\]/^\\[k[gcp]\\]/' /root/wlog.sh; pkill -f "bash /root/wlog.sh"
+  setsid nohup bash -c 'bash /root/wlog.sh > /dev/null 2>&1' > /dev/null 2>&1 < /dev/null &
+  cat > /root/s73.sh <<'JOB'
+cd /root/w; RAW=https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i
+while [ -e kvg_extra.running ] || [ -s kvg_extra ]; do sleep 60; done   # the one-off jobs (drop-top eval, massprof, att-prior eval) finish first
+touch STOP_KG
+for J in $(pgrep -f "^bash /root/kvg_job.sh") $(pgrep -f "bash /root/s70.sh") $(pgrep -f "bash kvc_job.sh"); do pkill -P $J; kill $J; done; sleep 3
+pkill -f "sp_qwen3.py rollout"; pkill -f "sp_qwen3.py train"; sleep 10
+echo "[kp] s73: the RL loop stopped (round $(cat kvg_round), v$(cat VERSION)) - on to the pooler retraining with the model's attention as the prior $(date -u)"
+for _t in $(seq 60); do curl -sS -o /root/kvp_job.sh "$RAW/ctl/kvp_job.sh?nocache=$(date +%s)"; grep -q "mprof" /root/kvp_job.sh && break; sleep 120; done
+exec bash /root/kvp_job.sh
+JOB
+  pgrep -f "bash /root/s73.sh" > /dev/null || setsid nohup bash -c 'bash /root/s73.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
+  echo "[kp] s73: waiting for the one-off jobs, then the pivot $(date -u)" >> /root/w/w.log
 fi
 # CTL-END
