@@ -176,7 +176,10 @@
 # pooler's attention mass sits over long rollouts (share on the top-k, tokens for 50/80/90/95%); the one-off job runs it on
 # the v38 / v47 eval texts, takes the median tokens-for-90% at a distant past of 4096 (rounded up to 256, within 512..4096)
 # as --maxd, and evaluates v38 with it.
-SER=65
+# serial 66: the mass profile says half of the pooling mass sits on ~20 tokens of the distant past, 70% on the top 256,
+# whatever its length - the pooler attends to a handful of tokens. Which ones? massprof now names them; a one-off job
+# runs it (seconds) between rounds.
+SER=66
 if [ -f /root/.boxrmx_serial ] && [ "$(cat /root/.boxrmx_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxrmx_serial
 [ -d /venv/main/bin ] && export PATH=/venv/main/bin:$PATH
@@ -827,5 +830,15 @@ from sp_mathcheck import correct
 rs = [json.loads(l) for l in open('$o')]; print(f'{sum(correct(r) for r in rs)}/{len(rs)} correct, closed {sum(\"</think>\" in r[\"text\"] for r in rs)}')") (v38 plain: 44 / 41) $(date -u)"
 EX
   echo "[kg] s65: the one-off job now measures the mass profile first and picks --maxd from it $(date -u)" >> /root/w/w.log
+fi
+if [ ! -e /root/.s66tok ]; then touch /root/.s66tok
+  [ -e /root/w/kvg_extra.running ] || cat > /root/w/kvg_extra <<'EX'
+cd /root/w; RAW=https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i
+curl -sS -o sp_new.py "$RAW/tools/sp_qwen3.py?nocache=$(date +%s)"; grep -q 'top tokens by mass' sp_new.py && mv sp_new.py sp_qwen3.py
+M="--S 32 --heads 8 --layers 3 --ffn 2048 --rw 1024 --C 128 --maxd 0 --kv-mem --kv-rank 512"
+python3 sp_qwen3.py massprof --traces mp_in.jsonl $M --ckpt kvg_best.pt --max-len 12288 --log sp_kvg.log > run_mp2.log 2>&1
+grep -E "top tokens|Error|Traceback" run_mp2.log | tail -2 | sed 's/^\[sp\]/[kg]/' | cut -c1-900
+EX
+  echo "[kg] s66: one-off job - which tokens carry the pooling mass $(date -u)" >> /root/w/w.log
 fi
 # CTL-END

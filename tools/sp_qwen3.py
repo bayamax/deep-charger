@@ -1590,6 +1590,7 @@ if a.mode == "massprof":   # where the pooler's attention mass sits over a long 
     # number of tokens that carry 50 / 80 / 90 / 95% of it. Seconds per text.
     import collections as _c
     pooler.eval(); Ks = [256, 512, 1024, 2048, 4096]; cov = _c.defaultdict(list); need = _c.defaultdict(list); n_ = _c.Counter()
+    tokmass = _c.Counter(); tokcnt = _c.Counter(); totmass = 0.0   # which tokens carry the mass (share of the total, over all texts at nd=2048)
     with torch.no_grad():
         for r in rows:
             ids_ = tok.encode(r["text"], add_special_tokens=False)
@@ -1597,6 +1598,9 @@ if a.mode == "massprof":   # where the pooler's attention mass sits over a long 
                 if len(ids_) < nd + a.rw: continue
                 _, m_ = pooler.forward_with_mass(embed(torch.tensor([ids_[:nd]], device=dev)).float()); m_ = m_[0].float()
                 s_ = m_.sort(descending=True).values; c_ = s_.cumsum(0) / s_.sum(); n_[nd] += 1
+                if nd == 2048:
+                    sh_ = (m_ / m_.sum()).tolist(); totmass += 1.0
+                    for t_, w_ in zip(ids_[:nd], sh_): tokmass[t_] += w_; tokcnt[t_] += 1
                 for k in Ks:
                     if k < nd: cov[(nd, k)].append(c_[k - 1].item())
                 for p_ in (0.5, 0.8, 0.9, 0.95): need[(nd, p_)].append(int((c_ < p_).sum().item()) + 1)
@@ -1605,6 +1609,11 @@ if a.mode == "massprof":   # where the pooler's attention mass sits over a long 
         if not n_[nd]: continue
         log(f"[sp] massprof distant {nd} ({n_[nd]} texts): mass on the top " + " ".join(f"{k}: {100 * med(cov[(nd, k)]):.0f}%" for k in Ks if k < nd)
             + " | tokens for " + " ".join(f"{int(100 * p_)}%: {med(need[(nd, p_)])}" for p_ in (0.5, 0.8, 0.9, 0.95)) + " (medians)")
+    if totmass:
+        top = tokmass.most_common(12)
+        log("[sp] massprof top tokens by mass (share of a text's mass, mean over texts at distant 2048; count = occurrences in the 2048): "
+            + " | ".join(f"{tok.decode([t_])!r} {100 * w_ / totmass:.1f}% (x{tokcnt[t_] / totmass:.0f})" for t_, w_ in top))
+        pos = _c.defaultdict(float)   # mass by position bucket (first 64 tokens of the distant past, the rest in quarters)
     sys.exit(0)
 if a.mode == "profile":
     pooler.eval(); acc = {}
