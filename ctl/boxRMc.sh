@@ -195,7 +195,10 @@
 # bad weights come back from the hub), restart the loop: the queued jobs run first, then the rounds.
 # serial 71: the disk is full (456K of 50G): that is what cut kvg_opt.pt short. Report what fills it, remove what the hub
 # already holds (gradient sketches, downloaded copies, the state upload dirs, caches, cores, logs over 300 MB), report again.
-SER=71
+# serial 72: 3.6G free is not enough for a round's saves. The old experiments' leftovers go (the GRPO runs before the kvg
+# lineage, the DPO round-1 full model that dpo_ref.pt supersedes, the RMT final that the hub holds as spRMF_latest.pt,
+# the v34/v41 analysis dirs whose conclusions are in the notes). Also: is the KV-memory distillation data still here?
+SER=72
 if [ -f /root/.boxrmx_serial ] && [ "$(cat /root/.boxrmx_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxrmx_serial
 [ -d /venv/main/bin ] && export PATH=/venv/main/bin:$PATH
@@ -937,5 +940,9 @@ if [ ! -e /root/.s71disk ]; then touch /root/.s71disk
   rm -rf /root/.cache/huggingface/hub/models--baya1116--* /root/.cache/huggingface/hub/.locks/models--baya1116--* 2>/dev/null
   for f in $(find /root/w /root -maxdepth 2 -name "*.log" -size +300M 2>/dev/null); do tail -c 50000000 $f > $f.tmp && mv $f.tmp $f; done
   echo "[kg] s71: after: $(df -h /root | tail -1 | awk '{print $4" free"}') $(date -u)"
+fi
+if [ ! -e /root/.s72disk ]; then touch /root/.s72disk
+  cd /root/w; rm -rf grpo_run1 grpo_run2_pre grpo_run2_v3start kvf_round1.pt kvf_prev.pt rmf_next.pt rmf.pt slide_v41 collapse_v34 state_up
+  echo "[kg] s72: $(df -h /root | tail -1 | awk '{print $4" free"}') | distillation data: $(ls -la rm_pool.jsonl rm_held.jsonl kvm.pt 2>&1 | awk '{print $NF, $5}' | tr '\n' ' ') | one-offs left: $(grep -c "^o=" kvg_extra 2>/dev/null) running: $(ls kvg_extra.running 2>/dev/null) $(date -u)"
 fi
 # CTL-END
