@@ -30,6 +30,8 @@ ap.add_argument("--oracle-pos", default="0.5,0.85", help="oracle: positions per 
 ap.add_argument("--oracle-horizon", type=int, default=0, help="oracle: fit the slots on the next K chunks jointly (the raw window fixed at the "
                 "position, the block growing to K chunks, so nothing is missing) and score them on the 2 chunks after those - a chunk-sized fit "
                 "encodes the chunk's own text and is worse than the pooler one chunk later; a summary must carry further")
+ap.add_argument("--oracle-content", type=int, default=0, help="oracle (horizon mode): also measure how much the pooler's output depends on its "
+                "input - cosine to its output on the same tokens shuffled, and on another trace's tokens (the first trace of the file, or the second)")
 ap.add_argument("--oracle-random", type=int, default=1, help="oracle: 0 skips the random-seeded reference fit (half the time; its fields repeat the pooler's)")
 ap.add_argument("--oracle-run", type=int, default=0, help="oracle: instead, this many CONSECUTIVE chunk starts from the trace's middle - how the "
                 "pooler-seeded optima of one chain of thought relate to each other (cosine, the correction's direction, the previous "
@@ -931,6 +933,19 @@ def oracle_h_trace(ids, P):
         cosf = lambda x, y: F.cosine_similarity(x, y, dim=-1).mean().item()
         ent = {"c0": c0, "nd": int(nd_end), "window": klw, "pooler": kl0, "pooler_fit": klfit0, "seeded_fit": hA[-1], "random_fit": hB[-1],
                "seeded": tA, "random": tB, "cos": cosf(spA, sp0), "cosB": cosf(spB, sp0), "cosAB": cosf(spA, spB)}
+        if a.oracle_content:   # does the pooler's output depend on what it reads?
+            with torch.no_grad():
+                perm = torch.randperm(kept.size(1), generator=g, device=dev)
+                sp_sh = pooler(embed(kept[:, perm]).float(), kpm=att_bias(kimp[:, perm]) if use_att else None)
+                oth = OTHER[1] if OTHER_KEY[0] == ids[P:P + 8].tolist() else OTHER[0]
+                o_ids = oth[:kept.size(1)].to(dev)[None]
+                sp_ot = pooler(embed(o_ids).float(), kpm=att_bias(kimp[:, :o_ids.size(1)]) if use_att else None)
+                ent["cos_shuffled"] = cosf(sp0, sp_sh); ent["cos_other"] = cosf(sp0, sp_ot)
+                tsh, tot_ = test(sp_sh), test(sp_ot)
+                ent["kl_shuffled"] = tsh; ent["kl_other"] = tot_
+        if "cos_shuffled" in ent:
+            log(f"[sp] oracle-content pos {c0} (distant {nd_end}): the pooler's output vs the same tokens shuffled: cos {ent['cos_shuffled']:.3f} (KL on the held-out chunks "
+                f"{ent['kl_shuffled']:.4f} vs {kl0:.4f}), vs another trace's tokens: cos {ent['cos_other']:.3f} (KL {ent['kl_other']:.4f}), window-only {klw:.4f}")
         msg = (f"[sp] oracle-h{K} pos {c0} (distant {nd_end}): fit on {fitN} tokens: pooler {klfit0:.4f} seeded {' > '.join(str(x) for x in hA)} random {hB[-1]:.4f}"
                f" | the 2 chunks after: window-only {klw:.4f} pooler {kl0:.4f} seeded optimum {tA:.4f} random optimum {tB:.4f}"
                f" | cos to the pooler's output: seeded {ent['cos']:.3f} random {ent['cosB']:.3f}, between optima {ent['cosAB']:.3f}")
@@ -2125,6 +2140,8 @@ elif a.mode == "rollout":
 elif a.mode == "oracle":
     pooler.eval(); t0 = time.time()
     for p_ in pooler.parameters(): p_.requires_grad_(False)
+    OTHER = [data[0][0][data[0][1]:], data[1][0][data[1][1]:] if len(data) > 1 else data[0][0][data[0][1]:]]   # --oracle-content: answer tokens of two traces
+    OTHER_KEY = [data[0][0][data[0][1]:data[0][1] + 8].tolist()]
     for ids, P in data: (oracle_h_trace if a.oracle_horizon > 0 else oracle_trace)(ids, P)
     if ORC and a.oracle_horizon > 0:
         import statistics as st_
@@ -2133,6 +2150,7 @@ elif a.mode == "oracle":
             f"median KL on the fitted {a.oracle_horizon} chunks: pooler {m_('pooler_fit'):.4f} seeded {m_('seeded_fit'):.4f} random {m_('random_fit'):.4f} | "
             f"on the 2 chunks after (held out): window-only {m_('window'):.4f} pooler {m_('pooler'):.4f} seeded optimum {m_('seeded'):.4f} random optimum "
             f"{m_('random'):.4f} | median cos to the pooler's output: seeded {m_('cos'):.3f} random {m_('cosB'):.3f}, between optima {m_('cosAB'):.3f}"
+            + (f" | content: pooler output vs shuffled tokens cos {m_('cos_shuffled'):.3f} (KL {m_('kl_shuffled'):.4f}), vs another trace cos {m_('cos_other'):.3f} (KL {m_('kl_other'):.4f})" if "cos_shuffled" in ORC[0] else "")
             + (f" | neighbours ({len(pairs)} pairs): cos pooler {st_.median(p['cos_pooler'] for p in pairs):.3f} seeded optima "
                f"{st_.median(p['cos_seeded'] for p in pairs):.3f} random optima {st_.median(p['cos_random'] for p in pairs):.3f} corrections "
                f"{st_.median(p['cos_corr'] for p in pairs):.3f}; the previous position's optima on these held-out chunks: seeded "

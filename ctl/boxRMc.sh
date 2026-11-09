@@ -260,7 +260,12 @@
 # listing bug (kvq/ prefix) is fixed in the job and the workers.
 # serial 93: the one-chain run landed on a short trace (distant 128-256 tokens, window-only KL 0.007: nothing to summarise) - the
 # longest held-out math trace instead, 4 consecutive positions from its middle (distant ~2500+), pooler-seeded, 120 steps.
-SER=93
+# serial 94: the hole in the pooler-seeded test (the user): if the pooler's output carries little, the seed pins nothing and the
+# neighbour statistics say nothing. Two fixes in one run on the longest math trace: (1) the pooler's content dependence - its
+# output on the same tokens shuffled and on another trace's tokens (cosine, held-out KL); (2) a longer horizon (8 chunks = 1024
+# tokens) with BOTH seeds: if the data pins the solution, the two optima agree (cos) whatever the seed, and the neighbour
+# correlation of such optima is the test of a lawful summary, independent of the pooler.
+SER=94
 if [ -f /root/.boxrmx_serial ] && [ "$(cat /root/.boxrmx_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxrmx_serial
 [ -d /venv/main/bin ] && export PATH=/venv/main/bin:$PATH
@@ -1303,5 +1308,27 @@ bash /root/s84.sh; rm -f STOP_KQ
 exec bash /root/kvq_job.sh
 JOB
   setsid nohup bash -c 'bash /root/s93.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
+fi
+if [ ! -e /root/.s94pin ]; then touch /root/.s94pin
+  cat > /root/s94.sh <<'JOB'
+cd /root/w; export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+RAW=https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i; R=baya1116/hypernet-sp-distill
+while pgrep -f "sp_or3.py oracle" > /dev/null; do sleep 20; done
+pkill -f "bash /root/s93.sh"; pkill -f "bash /root/s92.sh"; pkill -f "bash /root/s84.sh"; pkill -f "bash /root/kvq_job.sh"; sleep 2; pkill -f "sp_gk.py"; pkill -f "sp_qwen3.py"; sleep 5; touch STOP_KQ
+for _t in $(seq 60); do curl -sS -o sp_or4.py "$RAW/tools/sp_qwen3.py?nocache=$(date +%s)"; grep -q "oracle-content" sp_or4.py && break; sleep 120; done
+[ -s oh_long.jsonl ] || python3 -c "
+import json; L = open('held_math.jsonl').readlines(); L.sort(key=lambda l: -len(json.loads(l)['text'])); open('oh_long.jsonl', 'w').write(L[0])"
+python3 -c "
+import json; L = open('held_math.jsonl').readlines(); L.sort(key=lambda l: -len(json.loads(l)['text'])); open('oh_long2.jsonl', 'w').writelines(L[:2])"
+M="--S 32 --heads 8 --layers 3 --ffn 2048 --rw 1024 --C 128 --maxd 0 --kv-mem --kv-rank 512"; AP="--att-prior 1.0 --att-layers 8-19 --att-cap 1.0"
+echo "[kp] s94: horizon 8 (1024 tokens) with both seeds + the pooler's content dependence, longest math trace, 4 consecutive positions $(date -u)"
+python3 sp_or4.py oracle --traces oh_long2.jsonl --n 1 --max-len 8192 $M $AP --ckpt kvp_seg2.pt --oracle-steps 120 --oracle-lr 1e-3 --oracle-horizon 8 --oracle-run 4 --oracle-random 1 --oracle-content 1 --log sp_oh3.log > run_oh3.log 2>&1
+grep -E "^\[sp\] oracle|Error|Traceback" run_oh3.log | cut -c1-1000 | sed 's/^\[sp\]/[kp]/'
+python3 -c "from huggingface_hub import HfApi; HfApi().upload_file(path_or_fileobj='sp_oh3.log', path_in_repo='archive/sp3/kvp/oracle_h8_long.log', repo_id='$R')" > /dev/null 2>&1
+echo "[kp] s94 done - the side checks, then the on-policy job (workers) $(date -u)"
+bash /root/s84.sh; rm -f STOP_KQ
+exec bash /root/kvq_job.sh
+JOB
+  setsid nohup bash -c 'bash /root/s94.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
 fi
 # CTL-END
