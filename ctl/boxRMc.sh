@@ -289,7 +289,9 @@
 # training dump for the learned selector. Beside the 60-problem runs (another process; ~6 GB). Status lines show [ks].
 # serial 105: option 5 unattended (ctl/kvt_job.sh): after the harness dumps, train the selector, score it on the held-out traces,
 # then the 60 problems with the selector and with EMA 0.9 (B=512). Status lines show [kt].
-SER=105
+# serial 106: B=2048 ran out of memory beside the KL harness (6.5 GB) - the remaining 60-problem runs use 16 streams: the window
+# alone at 1536 and 2048, B=512 at seed 2, then B=2048 again.
+SER=106
 if [ -f /root/.boxrmx_serial ] && [ "$(cat /root/.boxrmx_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxrmx_serial
 [ -d /venv/main/bin ] && export PATH=/venv/main/bin:$PATH
@@ -1464,5 +1466,16 @@ for _t in $(seq 60); do curl -sS -o /root/kvt_job.sh "$RAW/ctl/kvt_job.sh?nocach
 exec bash /root/kvt_job.sh
 JOB
   setsid nohup bash -c 'bash /root/s105.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
+fi
+if [ ! -e /root/.s106rb16 ]; then touch /root/.s106rb16
+  pkill -f "bash /root/s103.sh"; sleep 1; pkill -f "bash /root/kvk_job.sh"; sleep 1; pkill -f "sp_qwen3.py rollout"; sleep 3
+  cat > /root/s106.sh <<'JOB'
+cd /root/w; RAW=https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i
+for _t in $(seq 60); do curl -sS -o /root/kvk_job.sh "$RAW/ctl/kvk_job.sh?nocache=$(date +%s)"; grep -q 'rw\${RW}' /root/kvk_job.sh && break; sleep 120; done
+rm -f kvk_b0_rw1536_s1.jsonl.part kvk_b0_rw2048_s1.jsonl.part
+echo "[kk] s106: 16 streams - window alone 1536, 2048; B=512 seed 2; B=2048 $(date -u)"
+RB=16 RW=1536 BS="0" bash /root/kvk_job.sh; RB=16 RW=2048 BS="0" bash /root/kvk_job.sh; RB=16 SEED=2 BS="512" bash /root/kvk_job.sh; RB=16 BS="2048" bash /root/kvk_job.sh
+JOB
+  setsid nohup bash -c 'bash /root/s106.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
 fi
 # CTL-END
