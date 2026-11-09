@@ -167,7 +167,8 @@
 # running round: state + best to the hub; v38 with --fifo 2048 on the 60 (does dropping the far past help?); then from v38
 # with LoRA lr 0, hypernet lr 1e-5, closed-but-wrong rewarded -0.1, the 60 problems every 2nd round, the controller
 # steering the hypernet lr.
-SER=61
+# serial 62: the --fifo 2048 eval wrote nothing (0/60) - its log tail goes to the container log to see why.
+SER=62
 if [ -f /root/.boxrmx_serial ] && [ "$(cat /root/.boxrmx_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxrmx_serial
 [ -d /venv/main/bin ] && export PATH=/venv/main/bin:$PATH
@@ -765,5 +766,8 @@ echo "[kg] s61: from v38 as v$v - LoRA frozen, hypernet lr 1e-5, closed-but-wron
 START=dpo_ref.pt exec bash /root/kvg_job.sh
 JOB
   setsid nohup bash -c 'bash /root/s61.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
+fi
+if [ ! -e /root/.s62log ]; then touch /root/.s62log
+  { echo "[kg] s62: run_fifo.log tail:"; grep -E "Error|Traceback|error" /root/w/run_fifo.log | head -3 | cut -c1-300; tail -n 4 /root/w/run_fifo.log | cut -c1-300; } >> /root/w/w.log 2>&1
 fi
 # CTL-END
