@@ -541,6 +541,27 @@ def att_take():
 for _li in ATT_L: llm.model.layers[_li].self_attn.register_forward_hook(_att_hook, with_kwargs=True)
 
 
+@torch.no_grad()
+def importance_of(ids, P):
+    """--att-prior profiling: the importance of the answer tokens ids[P:] from window-only deployment forwards (prompt + raw
+    window + chunk, no memory slots) with the hooks - the rollout's quantity up to the memory's share of the keys"""
+    a_ids = torch.tensor([ids[P:]], device=dev); La = a_ids.size(1)
+    pc = DynamicCache(); llm(input_ids=torch.tensor([ids[:P]], device=dev), past_key_values=pc, use_cache=True)
+    pkv = [tuple(kv_of(pc, li)) for li in range(NL)]
+    imp = torch.zeros(La, device=dev)
+    for c0 in range(0, La, a.C):
+        c1 = min(c0 + a.C, La); R = min(c0, a.rw)
+        cache = DynamicCache()
+        for li, (k_, v_) in enumerate(pkv): cache.update(k_, v_, li)
+        blk = a_ids[:, c0 - R:c1]; nb = blk.size(1); pos = torch.arange(P, P + nb, device=dev)[None]
+        ATTREC["rows"] = c1 - c0
+        llm.model(inputs_embeds=embed(blk).to(dt), attention_mask=torch.ones(1, P + nb, device=dev), past_key_values=cache,
+                  position_ids=pos, cache_position=pos[0], use_cache=True)
+        imp[c0 - R:c1] += att_take()[P:P + nb]
+    imp[:2] = 0
+    return imp
+
+
 def kv_of(cache, li):
     if hasattr(cache, "layers"): return cache.layers[li].keys, cache.layers[li].values
     return cache.key_cache[li], cache.value_cache[li]
@@ -1708,13 +1729,29 @@ if a.mode == "massprof":   # where the pooler's attention mass sits over a long 
     tokmass = _c.Counter(); tokcnt = _c.Counter(); totmass = 0.0   # which tokens carry the mass (share of the total, over all texts at nd=2048)
     posmass = _c.Counter()   # and where they sit
     top20 = _c.Counter(); top20pos = _c.Counter()   # the tokens at the 20 heaviest positions of each text (the ~20 that carry half the mass)
+    cov2 = {k_: _c.defaultdict(list) for k_ in ("importance", "effective")}; need2 = {k_: _c.defaultdict(list) for k_ in cov2}
+    tokmass2 = _c.Counter(); tot2 = 0.0   # --att-prior: the model's attention importance itself, and the pooler's mass with the prior added
     with torch.no_grad():
         for r in rows:
             ids_ = tok.encode(r["text"], add_special_tokens=False)
+            imp_ = None
+            if ATT_L and len(ids_) >= 1024 + a.rw:
+                pr_ = tok.encode(r["prompt"], add_special_tokens=False); imp_ = importance_of(pr_ + ids_, len(pr_))
             for nd in (1024, 2048, 4096, 8192):
                 if len(ids_) < nd + a.rw: continue
-                _, m_ = pooler.forward_with_mass(embed(torch.tensor([ids_[:nd]], device=dev)).float()); m_ = m_[0].float()
+                emb_ = embed(torch.tensor([ids_[:nd]], device=dev)).float()
+                _, m_ = pooler.forward_with_mass(emb_); m_ = m_[0].float()
                 s_ = m_.sort(descending=True).values; c_ = s_.cumsum(0) / s_.sum(); n_[nd] += 1
+                if imp_ is not None:
+                    _, me_ = pooler.forward_with_mass(emb_, att_bias(imp_[None, :nd]))
+                    for nm_, x_ in (("importance", imp_[:nd]), ("effective", me_[0].float())):
+                        sx_ = x_.sort(descending=True).values; cx_ = sx_.cumsum(0) / sx_.sum().clamp(min=1e-9)
+                        for k in Ks:
+                            if k < nd: cov2[nm_][(nd, k)].append(cx_[k - 1].item())
+                        for p_ in (0.5, 0.8, 0.9, 0.95): need2[nm_][(nd, p_)].append(int((cx_ < p_).sum().item()) + 1)
+                    if nd == 2048:
+                        shi_ = (imp_[:nd] / imp_[:nd].sum().clamp(min=1e-9)).tolist(); tot2 += 1.0
+                        for t_, w_ in zip(ids_[:nd], shi_): tokmass2[t_] += w_
                 if nd == 2048:
                     sh_ = (m_ / m_.sum()).tolist(); totmass += 1.0
                     for t_, w_ in zip(ids_[:nd], sh_): tokmass[t_] += w_; tokcnt[t_] += 1
@@ -1736,6 +1773,15 @@ if a.mode == "massprof":   # where the pooler's attention mass sits over a long 
         log("[sp] massprof mass by position in the distant 2048: " + " | ".join(f"{lo_}-{hi_}: {100 * posmass[(lo_, hi_)] / totmass:.1f}%" for (lo_, hi_) in sorted(posmass)))
         log("[sp] massprof the 20 heaviest positions per text - tokens: " + " | ".join(f"{t_!r} x{c_}" for t_, c_ in top20.most_common(16))
             + " || by 256-token block: " + " ".join(f"{k_}: {v_}" for k_, v_ in sorted(top20pos.items())))
+    for nm_ in cov2:
+        for nd in (1024, 2048, 4096, 8192):
+            if not need2[nm_][(nd, 0.5)]: continue
+            log(f"[sp] massprof {nm_} (att-prior {a.att_prior}, layers {a.att_layers}) distant {nd} ({len(need2[nm_][(nd, 0.5)])} texts): mass on the top "
+                + " ".join(f"{k}: {100 * med(cov2[nm_][(nd, k)]):.0f}%" for k in Ks if k < nd)
+                + " | tokens for " + " ".join(f"{int(100 * p_)}%: {med(need2[nm_][(nd, p_)])}" for p_ in (0.5, 0.8, 0.9, 0.95)) + " (medians)")
+    if tot2:
+        log("[sp] massprof importance top tokens (share of a text's importance, mean over texts at distant 2048): "
+            + " | ".join(f"{tok.decode([t_])!r} {100 * w_ / tot2:.1f}%" for t_, w_ in tokmass2.most_common(12)))
     sys.exit(0)
 if a.mode == "profile":
     pooler.eval(); acc = {}
