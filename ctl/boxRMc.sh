@@ -237,7 +237,10 @@
 # round (STOP_KQ), the oracle runs (~40 min), the job resumes.
 # serial 83: the on-policy job's 'correct' read 0/48 - the pool rows carry no gold answer. The job now scores agreement with the
 # teacher's own boxed answer and rebuilds its prompt file (same order); the box's copy of the job is refreshed before s82's resume.
-SER=83
+# serial 84: the side checks (serials 78-79) waited on the distillation job's trace counter, which the on-policy job never
+# advances - they now run whenever no sp_qwen3 / oracle process holds the GPU (the on-policy job waits for them before each of
+# its steps), skipping the states already measured; the whole-text check reads 30 of each state's 60 texts.
+SER=84
 if [ -f /root/.boxrmx_serial ] && [ "$(cat /root/.boxrmx_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxrmx_serial
 [ -d /venv/main/bin ] && export PATH=/venv/main/bin:$PATH
@@ -1134,5 +1137,40 @@ for _t in $(seq 60); do curl -sS -o /root/kvq_new.sh "$RAW/ctl/kvq_job.sh?nocach
 echo "[kp] s83: the on-policy job scores agreement with the teacher's answer from its next start (the 0/48 was the missing gold) $(date -u)"
 JOB
   setsid nohup bash -c 'bash /root/s83.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
+fi
+if [ ! -e /root/.s84idle ]; then touch /root/.s84idle
+  pkill -f "bash /root/s78.sh"; pkill -f "bash /root/s79.sh"
+  cat > /root/s84.sh <<'JOB'
+cd /root/w; export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+RAW=https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i; R=baya1116/hypernet-sp-distill; H=https://huggingface.co/$R/resolve/main
+for _t in $(seq 60); do curl -sS -o /root/kvq_new.sh "$RAW/ctl/kvq_job.sh?nocache=$(date +%s)"; grep -q "quiet before training" /root/kvq_new.sh && { mv /root/kvq_new.sh /root/kvq_job.sh; break; }; sleep 120; done
+[ -s sp_gk.py ] && grep -q "def gen_chunk" sp_gk.py || curl -sS -o sp_gk.py "$RAW/tools/sp_qwen3.py?nocache=$(date +%s)"
+[ -s gk_held.jsonl ] || cat held_math.jsonl held_comp.jsonl held_mc.jsonl > gk_held.jsonl
+M="--S 32 --heads 8 --layers 3 --ffn 2048 --rw 1024 --C 128 --maxd 0 --kv-mem --kv-rank 512"; AP="--att-prior 1.0 --att-layers 8-19"
+idle() { ! pgrep -f "sp_qwen3.py" > /dev/null && ! pgrep -f "sp_or.py" > /dev/null; }
+echo "[kp] s84: side checks run when the GPU is idle $(date -u)"
+for spec in "raw window (60 problems 42 / 44)|--no-sp" "kvm segment 8 (35)|--ckpt kvm.pt" "new pooler segment 2 (39)|--ckpt kvp_seg2.pt $AP" \
+            "new pooler segment 4, no cap (31)|--ckpt kvp_nocap/kvp_seg4.pt $AP" "v38 (44 / 41)|--ckpt kvg_best.pt"; do
+  lb=${spec%%|*}; fl=${spec#*|}; grep -qF "[kp] gk $lb:" w.log && continue
+  until idle; do sleep 45; done
+  python3 sp_gk.py eval --traces gk_held.jsonl --max-len 6144 $M $fl --gen-kl 3 --gen-len 128 --seed 7 --log sp_gk.log > run_gk.log 2>&1
+  echo "[kp] gk $lb: $(grep -E "\[sp\] eval|Error" run_gk.log | tail -1 | sed 's/^\[sp\] eval [^:]*: //' | cut -c1-420) $(date -u)"
+done
+mkdir -p own; for f in kvg/kvg_v38_s1 kvp/kvp_segment2_s1 kvp/kvp_segment4_s1 kvm/kvm_mem_s1 kvm/kvm_mem_s2 dg/gen_raw1024 dg/gen_raw1024_s3; do
+  [ -s own/${f#*/}.jsonl ] || curl -sSfL -H "Authorization: Bearer $HF_TOKEN" -o own/${f#*/}.jsonl "$H/archive/sp3/$f.jsonl"
+  [ -s own/${f#*/}_30.jsonl ] || awk 'NR % 2 == 1' own/${f#*/}.jsonl > own/${f#*/}_30.jsonl; done
+for spec in "v38 (44)|kvg_v38_s1|--ckpt kvg_best.pt" "new pooler segment 2 (39)|kvp_segment2_s1|--ckpt kvp_seg2.pt $AP" \
+            "new pooler segment 4, no cap (31)|kvp_segment4_s1|--ckpt kvp_nocap/kvp_seg4.pt $AP" "kvm seed 1 (35)|kvm_mem_s1|--ckpt kvm.pt" \
+            "kvm seed 2 (37)|kvm_mem_s2|--ckpt kvm.pt" "raw window (36)|gen_raw1024|--no-sp" "raw window seed 3 (37)|gen_raw1024_s3|--no-sp"; do
+  lb=${spec%%|*}; r=${spec#*|}; fn=${r%%|*}; fl=${r#*|}; grep -qF "[kp] own $lb:" w.log && continue
+  until idle; do sleep 45; done
+  python3 sp_gk.py eval --traces own/${fn}_30.jsonl --max-len 12288 $M $fl --log sp_gk.log > run_own.log 2>&1
+  echo "[kp] own $lb: $(grep -E "\[sp\] eval|Error" run_own.log | tail -1 | sed 's/^\[sp\] eval [^:]*: //' | cut -c1-300) $(date -u)"
+done
+grep "\[kp\] \(gk\|own\)" w.log > gk.txt; python3 -c "
+from huggingface_hub import HfApi; HfApi().upload_file(path_or_fileobj='gk.txt', path_in_repo='archive/sp3/kvp/gk.txt', repo_id='$R')" > /dev/null 2>&1
+echo "[kp] s84 done $(date -u)"
+JOB
+  setsid nohup bash -c 'bash /root/s84.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
 fi
 # CTL-END

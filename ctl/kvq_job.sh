@@ -53,7 +53,7 @@ open('kvq_in.jsonl', 'w').writelines(L[i:i + $NP]); print(len(L[i:i + $NP]))" > 
   quiet; rm -f kvq_gen.jsonl
   python3 sp_qwen3.py rollout --traces kvq_in.jsonl $M $AP --ckpt kvq.pt --max-len 12288 --roll-batch 48 --grpo-tok-budget 60000 --roll-lp --seed $((500 + rd)) --roll-out kvq_gen.jsonl --log $LG > run_kq_gen.log 2>&1
   [ -s kvq_gen.jsonl ] || { echo "[kq] round $rd: generation FAILED: $(grep -E 'Error' run_kq_gen.log | tail -1 | cut -c1-200)"; break; }
-  t1=$(date +%s); g="$(score kvq_gen.jsonl)"
+  t1=$(date +%s); g="$(score kvq_gen.jsonl)"; quiet   # quiet before training too: the side checks start whenever the GPU is idle
   python3 sp_qwen3.py train --traces kvq_gen.jsonl --max-len 12288 $M $AP --rkl-weight $W --chunks-per-trace 32 --accum 8 --lr $LR --const-lr --lora-lr 0 --ckpt kvq.pt --seed $((600 + rd)) --out kvq_next.pt --log $LG > run_kq.log 2>&1
   if [ -s kvq_next.pt ] && grep -q "^\[sp\] trained" run_kq.log; then mv kvq_next.pt kvq.pt; echo $rd > kvq_round
   else echo "[kq] round $rd: training FAILED: $(grep -E 'Error' run_kq.log | tail -1 | cut -c1-200)"; break; fi
