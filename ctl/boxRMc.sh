@@ -267,7 +267,10 @@
 # correlation of such optima is the test of a lawful summary, independent of the pooler.
 # serial 95: version 1's texts are all on the hub, so the on-policy job resumes right after serial 94's oracle; the side checks
 # run in the background in the GPU's idle windows (the trainer waits for the workers most of a round) instead of first.
-SER=95
+# serial 96: the pooler's output does not depend on what it reads (cos 1.000 to its output on shuffled tokens and on another
+# trace's tokens, held-out KL unchanged) - the distilled memory is a constant prefix. Is that true of the earlier poolers too
+# (kvm, v38's, the capped segment 3)? The same content check on each, a minute apiece, in the GPU's idle windows.
+SER=96
 if [ -f /root/.boxrmx_serial ] && [ "$(cat /root/.boxrmx_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxrmx_serial
 [ -d /venv/main/bin ] && export PATH=/venv/main/bin:$PATH
@@ -1343,5 +1346,20 @@ setsid nohup bash -c 'sleep 120; bash /root/s84.sh >> /root/w/w.log 2>&1' > /dev
 exec bash /root/kvq_job.sh
 JOB
   setsid nohup bash -c 'bash /root/s95.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
+fi
+if [ ! -e /root/.s96content ]; then touch /root/.s96content
+  cat > /root/s96.sh <<'JOB'
+cd /root/w; export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+cp sp_or4.py sp_gk.py   # the trainer waits for sp_gk.py before each step
+M="--S 32 --heads 8 --layers 3 --ffn 2048 --rw 1024 --C 128 --maxd 0 --kv-mem --kv-rank 512"; AP="--att-prior 1.0 --att-layers 8-19 --att-cap 1.0"
+for spec in "kvm segment 8|--ckpt kvm.pt" "v38|--ckpt kvg_best.pt" "capped segment 3|--ckpt kvp.pt $AP" "on-policy round 1|--ckpt kvq.pt $AP"; do
+  lb=${spec%%|*}; fl=${spec#*|}
+  until ! pgrep -f "sp_qwen3.py" > /dev/null && ! pgrep -f "sp_gk.py" > /dev/null; do sleep 30; done
+  python3 sp_gk.py oracle --traces oh_long2.jsonl --n 1 --max-len 8192 $M $fl --oracle-steps 2 --oracle-horizon 8 --oracle-run 3 --oracle-random 0 --oracle-content 1 --log sp_oc.log > run_oc.log 2>&1
+  echo "[kp] content $lb: $(grep -E "oracle-content|Error" run_oc.log | sed 's/^\[sp\] oracle-content //' | cut -c1-300 | tr '\n' ' ')"
+done
+echo "[kp] s96 done $(date -u)"
+JOB
+  setsid nohup bash -c 'bash /root/s96.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
 fi
 # CTL-END
