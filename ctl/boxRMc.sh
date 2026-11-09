@@ -265,7 +265,9 @@
 # output on the same tokens shuffled and on another trace's tokens (cosine, held-out KL); (2) a longer horizon (8 chunks = 1024
 # tokens) with BOTH seeds: if the data pins the solution, the two optima agree (cos) whatever the seed, and the neighbour
 # correlation of such optima is the test of a lawful summary, independent of the pooler.
-SER=94
+# serial 95: version 1's texts are all on the hub, so the on-policy job resumes right after serial 94's oracle; the side checks
+# run in the background in the GPU's idle windows (the trainer waits for the workers most of a round) instead of first.
+SER=95
 if [ -f /root/.boxrmx_serial ] && [ "$(cat /root/.boxrmx_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxrmx_serial
 [ -d /venv/main/bin ] && export PATH=/venv/main/bin:$PATH
@@ -1330,5 +1332,16 @@ bash /root/s84.sh; rm -f STOP_KQ
 exec bash /root/kvq_job.sh
 JOB
   setsid nohup bash -c 'bash /root/s94.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
+fi
+if [ ! -e /root/.s95resume ]; then touch /root/.s95resume
+  cat > /root/s95.sh <<'JOB'
+cd /root/w
+while pgrep -f "sp_or4.py oracle" > /dev/null; do sleep 15; done
+pkill -f "bash /root/s94.sh"; pkill -f "bash /root/s84.sh"; sleep 2; pkill -f "sp_gk.py"; sleep 3
+rm -f STOP_KQ; echo "[kq] s95: the on-policy job resumes now (WORKERS=$(cat kvq_workers)); the side checks run in the idle windows $(date -u)"
+setsid nohup bash -c 'sleep 120; bash /root/s84.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
+exec bash /root/kvq_job.sh
+JOB
+  setsid nohup bash -c 'bash /root/s95.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
 fi
 # CTL-END
