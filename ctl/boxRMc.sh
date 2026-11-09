@@ -202,7 +202,10 @@
 # from the base with the model's attention put into its attention mass). Once the queued one-off jobs are done, the RL loop
 # (v49 lineage, hypernet-only) is stopped and ctl/kvp_job.sh starts: pooler retraining from v38 with --att-prior 1.0, LLM
 # frozen. The hub w.log copy carries [kp] lines too.
-SER=73
+# serial 74: kvp_job started 'from 2 segments' - an older job (the ctl-para segments) left kvp_seg, kvp_hist and maybe kvp.pt
+# behind, so the start may not be v38 and the plateau rule would read old numbers. Check kvp.pt against kvg_best.pt; reset
+# the counters (and the weights and baselines if they differ) and restart from segment 1.
+SER=74
 if [ -f /root/.boxrmx_serial ] && [ "$(cat /root/.boxrmx_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxrmx_serial
 [ -d /venv/main/bin ] && export PATH=/venv/main/bin:$PATH
@@ -964,5 +967,17 @@ exec bash /root/kvp_job.sh
 JOB
   pgrep -f "bash /root/s73.sh" > /dev/null || setsid nohup bash -c 'bash /root/s73.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
   echo "[kp] s73: waiting for the one-off jobs, then the pivot $(date -u)" >> /root/w/w.log
+fi
+if [ ! -e /root/.s74reset ]; then touch /root/.s74reset
+  cat > /root/s74.sh <<'JOB'
+cd /root/w; touch STOP_KP
+pkill -f "bash /root/kvp_job.sh"; sleep 2; pkill -f "sp_qwen3.py train"; pkill -f "sp_qwen3.py eval"; pkill -f "sp_qwen3.py massprof"; pkill -f "sp_qwen3.py rollout"; sleep 10
+a=$(md5sum < kvp.pt); b=$(md5sum < kvg_best.pt)
+if [ "$a" = "$b" ]; then echo "[kp] s74: kvp.pt is v38 (same md5) - counters reset (old kvp_seg $(cat kvp_seg), hist $(tr '\n' ' ' < kvp_hist 2>/dev/null)), baselines kept, restart from segment 1 $(date -u)"
+else echo "[kp] s74: kvp.pt was NOT v38 (an older job's) - weights, counters and baselines reset, restart from segment 1 $(date -u)"; rm -f kvp.pt kvp_base_done; fi
+rm -f kvp_seg kvp_hist kvp_next.pt STOP_KP
+exec bash /root/kvp_job.sh
+JOB
+  setsid nohup bash -c 'bash /root/s74.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
 fi
 # CTL-END
