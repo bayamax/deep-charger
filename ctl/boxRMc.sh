@@ -283,7 +283,9 @@
 # serial 101: B=512 ran out of memory with 48 streams - 24 streams, and the rebuild frees each old layer as it is copied; restart.
 # serial 102: B=512 (mean attention, window 1024) read 45/60 - above the raw window (42 / 44) and v38 (44 / 41). After the current
 # budgets (0, 2048): the equal-total baseline, the window alone at 1536 and 2048 (no selection), then B=512 at seed 2.
-SER=102
+# serial 103: serial 102 ran the box's old copy of kvk_job.sh (file names without the window size: the 1536 run would have been
+# skipped as 'already done') - the script is fetched first.
+SER=103
 if [ -f /root/.boxrmx_serial ] && [ "$(cat /root/.boxrmx_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxrmx_serial
 [ -d /venv/main/bin ] && export PATH=/venv/main/bin:$PATH
@@ -1431,5 +1433,16 @@ echo "[kk] s102: equal-total baselines (window alone 1536, 2048), then B=512 at 
 RW=1536 BS="0" bash /root/kvk_job.sh; RW=2048 BS="0" bash /root/kvk_job.sh; SEED=2 BS="512" bash /root/kvk_job.sh
 JOB
   setsid nohup bash -c 'bash /root/s102.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
+fi
+if [ ! -e /root/.s103fetch ]; then touch /root/.s103fetch
+  pkill -f "bash /root/s102.sh"
+  cat > /root/s103.sh <<'JOB'
+cd /root/w; RAW=https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i
+until grep -q "\[kk\] JOB_DONE" w.log && ! pgrep -f "bash /root/kvk_job.sh" > /dev/null; do sleep 60; done
+for _t in $(seq 60); do curl -sS -o /root/kvk_job.sh "$RAW/ctl/kvk_job.sh?nocache=$(date +%s)"; grep -q 'rw\${RW}' /root/kvk_job.sh && break; sleep 120; done
+echo "[kk] s103: equal-total baselines (window alone 1536, 2048), then B=512 at seed 2 $(date -u)"
+RW=1536 BS="0" bash /root/kvk_job.sh; RW=2048 BS="0" bash /root/kvk_job.sh; SEED=2 BS="512" bash /root/kvk_job.sh
+JOB
+  setsid nohup bash -c 'bash /root/s103.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
 fi
 # CTL-END
