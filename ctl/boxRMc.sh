@@ -229,14 +229,15 @@
 # segment 3 has its 60 problems, the distillation on the teacher's texts stops and the pooler trains on its own texts
 # (48 fresh problems per round, loss 0.5 KL(teacher || student) + 0.5 KL(student || teacher) on the student's path), from the
 # capped segment 3 if it kept 39 or more, else from segment 2 (39); the cap stays on.
-SER=80
+# serial 81: the status lines and the hub's wlog copy did not show the on-policy job's [kq] lines - both include them now.
+SER=81
 if [ -f /root/.boxrmx_serial ] && [ "$(cat /root/.boxrmx_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxrmx_serial
 [ -d /venv/main/bin ] && export PATH=/venv/main/bin:$PATH
 [ -s /root/.hf_token ] || { [ -n "$HF_TOKEN" ] && printf '%s' "$HF_TOKEN" > /root/.hf_token && chmod 600 /root/.hf_token; }
 mkdir -p /root/w
 cat > /root/status.sh <<'ST'
-grep -E "^\[(pr|rm|kv|kr|kp|kw|kt|kd|ko|ki|kf|kg|hub)\]|Error|Traceback|out of memory" /root/w/w.log 2>/dev/null | tail -n 6 | cut -c1-600
+grep -E "^\[(pr|rm|kv|kr|kp|kq|kw|kt|kd|ko|ki|kf|kg|hub)\]|Error|Traceback|out of memory" /root/w/w.log 2>/dev/null | tail -n 6 | cut -c1-600
 tail -n 1 $(ls -t /root/w/sp_*.log 2>/dev/null | head -1) 2>/dev/null | cut -c1-250
 nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv,noheader
 ST
@@ -1095,5 +1096,10 @@ echo "[kq] s80: the capped segment 3 scored ${n:-?}/60 - on-policy distillation 
 START=$st CAP=1.0 W=0.5 exec bash /root/kvq_job.sh
 JOB
   setsid nohup bash -c 'bash /root/s80.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
+fi
+if [ ! -e /root/.s81kq ]; then touch /root/.s81kq
+  sed -i 's/\^\\\[k\[gcp\]\\\]/^\\[k[gcpq]\\]/' /root/wlog.sh; pkill -f "bash /root/wlog.sh"
+  setsid nohup bash -c 'bash /root/wlog.sh > /dev/null 2>&1' > /dev/null 2>&1 < /dev/null &
+  grep -E "^\[kq\]" /root/w/w.log | tail -n 5 | sed 's/^/[kp] s81 sees: /'
 fi
 # CTL-END
