@@ -225,7 +225,11 @@
 # by the full-context teacher and by that state (its memory rebuilt chunk by chunk from its own text, as when it wrote it),
 # reverse KL(student || teacher) over the full length. Seven generation files with known scores: v38 44, the new pooler at
 # segment 2 39 and segment 4 31, kvm 35 and 37, the raw window 1024 alone 36 and 37. After serial 78, with the same guard.
-SER=79
+# serial 80: the user - make the whole-text measure the loss: on-policy distillation (ctl/kvq_job.sh). Once the capped run's
+# segment 3 has its 60 problems, the distillation on the teacher's texts stops and the pooler trains on its own texts
+# (48 fresh problems per round, loss 0.5 KL(teacher || student) + 0.5 KL(student || teacher) on the student's path), from the
+# capped segment 3 if it kept 39 or more, else from segment 2 (39); the cap stays on.
+SER=80
 if [ -f /root/.boxrmx_serial ] && [ "$(cat /root/.boxrmx_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxrmx_serial
 [ -d /venv/main/bin ] && export PATH=/venv/main/bin:$PATH
@@ -1079,5 +1083,17 @@ from huggingface_hub import HfApi; HfApi().upload_file(path_or_fileobj='gk.txt',
 echo "[kp] s79 done $(date -u)"
 JOB
   setsid nohup bash -c 'bash /root/s79.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
+fi
+if [ ! -e /root/.s80kq ]; then touch /root/.s80kq
+  cat > /root/s80.sh <<'JOB'
+cd /root/w; RAW=https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i
+for _t in $(seq 240); do n=$(grep -oP "^\[kp\] segment 3 seed 1: \K[0-9]+(?=/60)" w.log | tail -1); [ -n "$n" ] && break; sleep 60; done
+st=kvp_seg2.pt; [ -n "$n" ] && [ "$n" -ge 39 ] && { cp kvp.pt kvp_cap_seg3.pt; st=kvp_cap_seg3.pt; }
+touch STOP_KP; pkill -f "bash /root/kvp_job.sh"; pkill -f "bash /root/s77.sh"; sleep 2; pkill -f "sp_qwen3.py train"; pkill -f "sp_qwen3.py eval"; pkill -f "sp_qwen3.py massprof"; pkill -f "sp_qwen3.py rollout"; sleep 10
+for _t in $(seq 60); do curl -sS -o /root/kvq_job.sh "$RAW/ctl/kvq_job.sh?nocache=$(date +%s)"; grep -q "kvq_round" /root/kvq_job.sh && break; sleep 120; done
+echo "[kq] s80: the capped segment 3 scored ${n:-?}/60 - on-policy distillation from $st $(date -u)"
+START=$st CAP=1.0 W=0.5 exec bash /root/kvq_job.sh
+JOB
+  setsid nohup bash -c 'bash /root/s80.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
 fi
 # CTL-END
