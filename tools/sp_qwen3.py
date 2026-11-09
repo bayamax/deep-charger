@@ -170,6 +170,8 @@ ap.add_argument("--kv-keep", type=int, default=0, help="--kv-evict: a fixed budg
                 "each stream keeps its prompt, its newest rw answer entries and the --kv-keep older entries the model attended most (the "
                 "attention each cached key received from the generated tokens, layers --att-layers, all heads, per step it was cached), "
                 "as computed and at their true positions - a bounded REAL KV cache chosen by the model's own attention, no training")
+ap.add_argument("--kv-select", default="mean", help="--kv-keep: how the older entries are ranked - mean (attention received per step cached), cum, "
+                "ema0.9, ema0.98, last (the last chunk), or mlp:<path> (the learned selector of tools/kvsel_train.py on the same features)")
 ap.add_argument("--kv-keep-path", action="store_true", help="--kv-evict: use the --kv-keep code path even with --kv-keep 0 (a check)")
 ap.add_argument("--win-teacher", action="store_true", help="train/eval: the SP REPLACES the raw window - teacher = the model reading "
                 "[prompt | the last rw answer tokens before chunk start c0 | the chunk] (the raw-window loop, nothing it does not "
@@ -989,7 +991,8 @@ SELS = {}   # kvsel rule mlp:<path>: the learned selectors, loaded once
 def kvsel_model(path):
     if path not in SELS:
         sys.path.insert(0, os.path.dirname(os.path.abspath(__file__))); from kvsel_feat import Selector
-        ck = torch.load(path, map_location=dev); m = Selector(ck["vocab"], mu=ck["mu"], sd=ck["sd"]).to(dev); m.load_state_dict(ck["state"]); m.eval(); SELS[path] = m
+        rs_ = torch.get_rng_state(); ck = torch.load(path, map_location=dev)   # the layers' init must not move the sampling RNG
+        m = Selector(ck["vocab"], mu=ck["mu"], sd=ck["sd"]).to(dev); m.load_state_dict(ck["state"]); m.eval(); SELS[path] = m; torch.set_rng_state(rs_)
     return SELS[path]
 DUMPS = []   # kvsel --kvsel-dump: one dict per position
 
@@ -1826,6 +1829,10 @@ def rollout_kvkeep(prompts, nslot):
     todo = list(range(len(prompts)))[::-1]; act = []
     gen = [[] for _ in prompts]; ended = [False] * len(prompts)
     cache = None; pad = []; cols = []; lastlog = None; IMP = CNT = None   # per row: left padding, the answer index of each cached answer entry; (B, Ln) attention received / steps observed
+    ST = None   # (6, B, Ln) chunk-level statistics per cached column: cumulative, last chunk, EMA 0.9, EMA 0.98, max over chunks, chunks observed; CH: this chunk's sum
+    CH = None; sel_model = kvsel_model(a.kv_select[4:]) if a.kv_select.startswith("mlp:") else None
+    if sel_model is not None:
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__))); from kvsel_feat import numeric as _numeric
     per = lambda j: len(prompts[j]) + a.kv_keep + min(a.rw, a.max_len) + a.C
     KEEPLOG = [0, 0, 0]   # kept older entries: how many, their mean age in chunks, rebuilds
     while todo or act:
@@ -1841,13 +1848,25 @@ def rollout_kvkeep(prompts, nslot):
             P = len(prompts[j]); n = len(cols[b]); k = min(a.rw, n); older = list(range(n - k)); newest = list(range(n - k, n))
             if a.kv_keep <= 0: older = []
             elif len(older) > a.kv_keep:
-                base = pad[b] + P; score = IMP[b, base:base + n - k] / CNT[b, base:base + n - k].clamp(min=1)
+                base = pad[b] + P; sl_ = slice(base, base + n - k)
+                if sel_model is not None:
+                    nob = ST[5, b, sl_].clamp(min=1)
+                    x6 = torch.stack([ST[0, b, sl_], ST[0, b, sl_] / nob, ST[1, b, sl_], ST[2, b, sl_], ST[3, b, sl_], ST[4, b, sl_]], 1)
+                    vn = torch.stack([kv_of(cache, li)[1][b, :, sl_].norm(dim=-1).mean(0) for li in range(NL)], 1)
+                    kn = torch.stack([kv_of(cache, li)[0][b, :, sl_].norm(dim=-1).mean(0) for li in range(NL)], 1)
+                    e_ = torch.tensor(cols[b][:n - k], device=dev); age = (len(gen[j]) - e_).float() / a.C
+                    score = sel_model(_numeric(x6, nob, age, e_.float() / max(len(gen[j]), 1), vn, kn), torch.tensor([gen[j][i] for i in cols[b][:n - k]], device=dev))
+                elif a.kv_select == "cum": score = ST[0, b, sl_]
+                elif a.kv_select == "ema0.9": score = ST[2, b, sl_]
+                elif a.kv_select == "ema0.98": score = ST[3, b, sl_]
+                elif a.kv_select == "last": score = ST[1, b, sl_]
+                else: score = IMP[b, sl_] / CNT[b, sl_].clamp(min=1)
                 older = score.topk(a.kv_keep).indices.sort().values.tolist()
             if older: KEEPLOG[0] += len(older); KEEPLOG[1] += sum(len(gen[j]) - cols[b][i] for i in older) / len(older) / a.C; KEEPLOG[2] += 1
             keep.append((j, b, pad[b], P, older + newest))
         for j in new: keep.append((j, None, 0, len(prompts[j]), []))
         Ln = max(P + len(idx) for (_, _, _, P, idx) in keep); B = len(keep); pad = [Ln - (P + len(idx)) for (_, _, _, P, idx) in keep]
-        nc = DynamicCache(); IMPn = torch.zeros(B, Ln, device=dev); CNTn = torch.zeros(B, Ln, device=dev)
+        nc = DynamicCache(); IMPn = torch.zeros(B, Ln, device=dev); CNTn = torch.zeros(B, Ln, device=dev); STn = torch.zeros(6, B, Ln, device=dev)
         srcs = [torch.tensor(list(range(p0, p0 + P)) + [p0 + P + i for i in idx], device=dev, dtype=torch.long) if b is not None else None for (j, b, p0, P, idx) in keep]
         for li in range(NL):
             ref = kv_of(cache, li)[0] if cache is not None else newkv[new[0]][li][0]
@@ -1857,13 +1876,13 @@ def rollout_kvkeep(prompts, nslot):
                 if b is None: K[r, :, pad[r]:], V[r, :, pad[r]:] = newkv[j][li][0][0], newkv[j][li][1][0]
                 else:
                     K[r, :, pad[r]:] = ok[b].index_select(1, srcs[r]); V[r, :, pad[r]:] = ov[b].index_select(1, srcs[r])
-                    if li == 0: IMPn[r, pad[r]:] = IMP[b, srcs[r]]; CNTn[r, pad[r]:] = CNT[b, srcs[r]]
+                    if li == 0: IMPn[r, pad[r]:] = IMP[b, srcs[r]]; CNTn[r, pad[r]:] = CNT[b, srcs[r]]; STn[:, r, pad[r]:] = ST[:, b, srcs[r]]
             nc.update(K, V, li)
             if cache is not None:   # the old layer is not needed any more: free it (the rebuild otherwise holds two full caches)
                 if hasattr(cache, "layers"): cache.layers[li].keys = cache.layers[li].values = None
                 else: cache.key_cache[li] = cache.value_cache[li] = None
             del ok, ov
-        cache = nc; IMP, CNT = IMPn, CNTn; del newkv
+        cache = nc; IMP, CNT, ST = IMPn, CNTn, STn; CH = torch.zeros(B, Ln, device=dev); del newkv
         lastlog = torch.stack([lastlog[b] if b is not None else newlog[j] for (j, b, _, _, _) in keep])
         cols = [[cols[b][i] for i in idx] if b is not None else [] for (j, b, _, _, idx) in keep]
         act = [j for (j, _, _, _, _) in keep]
@@ -1888,11 +1907,13 @@ def rollout_kvkeep(prompts, nslot):
             lastlog = o.logits[:, -1].float()
             w = att_take()
             IMP = torch.cat([IMP, torch.zeros(B, 1, device=dev)], 1); CNT = torch.cat([CNT, torch.zeros(B, 1, device=dev)], 1)
+            CH = torch.cat([CH, torch.zeros(B, 1, device=dev)], 1); ST = torch.cat([ST, torch.zeros(6, B, 1, device=dev)], 2)
             if w is not None:
                 if w.dim() == 1: w = w[None]
                 live = torch.tensor([0.0 if f else 1.0 for f in fin], device=dev)[:, None]
-                IMP += w * live; CNT += amask.float() * live
+                IMP += w * live; CNT += amask.float() * live; CH += w * live
             for r, j in enumerate(act): cols[r].append(len(gen[j]) - 1)   # the new entry (a finished row's dummy leaves with it)
+        ST[0] += CH; ST[1] = CH; ST[2] = 0.9 * ST[2] + CH; ST[3] = 0.98 * ST[3] + CH; ST[4] = torch.maximum(ST[4], CH); ST[5] += amask.float()
         keep_rows = [r for r in range(B) if not fin[r]]
         if len(keep_rows) < B:
             sel = torch.tensor(keep_rows, device=dev, dtype=torch.long)
@@ -1900,8 +1921,8 @@ def rollout_kvkeep(prompts, nslot):
                 c2 = DynamicCache()
                 for li in range(NL):
                     k_, v_ = kv_of(cache, li); c2.update(k_.index_select(0, sel), v_.index_select(0, sel), li)
-                cache = c2; lastlog = lastlog.index_select(0, sel); IMP = IMP.index_select(0, sel); CNT = CNT.index_select(0, sel)
-            else: cache = None; lastlog = None; IMP = CNT = None
+                cache = c2; lastlog = lastlog.index_select(0, sel); IMP = IMP.index_select(0, sel); CNT = CNT.index_select(0, sel); ST = ST.index_select(1, sel)
+            else: cache = None; lastlog = None; IMP = CNT = ST = None
             act = [act[r] for r in keep_rows]; pad = [pad[r] for r in keep_rows]; cols = [cols[r] for r in keep_rows]
     if KEEPLOG[2]: log(f"[sp] kv-keep {a.kv_keep}: {KEEPLOG[2]} rebuilds kept {KEEPLOG[0] / KEEPLOG[2]:.0f} older entries each, mean age {KEEPLOG[1] / KEEPLOG[2]:.1f} chunks")
     return gen, ended
