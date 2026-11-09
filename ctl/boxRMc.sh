@@ -285,14 +285,16 @@
 # budgets (0, 2048): the equal-total baseline, the window alone at 1536 and 2048 (no selection), then B=512 at seed 2.
 # serial 103: serial 102 ran the box's old copy of kvk_job.sh (file names without the window size: the 1536 run would have been
 # skipped as 'already done') - the script is fetched first.
-SER=103
+# serial 104: the KL harness (ctl/kvs_job.sh): the eviction rules and the exact ablation label on held-out traces, then the
+# training dump for the learned selector. Beside the 60-problem runs (another process; ~6 GB). Status lines show [ks].
+SER=104
 if [ -f /root/.boxrmx_serial ] && [ "$(cat /root/.boxrmx_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxrmx_serial
 [ -d /venv/main/bin ] && export PATH=/venv/main/bin:$PATH
 [ -s /root/.hf_token ] || { [ -n "$HF_TOKEN" ] && printf '%s' "$HF_TOKEN" > /root/.hf_token && chmod 600 /root/.hf_token; }
 mkdir -p /root/w
 cat > /root/status.sh <<'ST'
-grep -E "^\[(pr|rm|kv|kr|kp|kq|kk|kw|kt|kd|ko|ki|kf|kg|hub)\]|Error|Traceback|out of memory" /root/w/w.log 2>/dev/null | tail -n 6 | cut -c1-600
+grep -E "^\[(pr|rm|kv|kr|kp|kq|kk|ks|kw|kt|kd|ko|ki|kf|kg|hub)\]|Error|Traceback|out of memory" /root/w/w.log 2>/dev/null | tail -n 6 | cut -c1-600
 tail -n 1 $(ls -t /root/w/sp_*.log 2>/dev/null | head -1) 2>/dev/null | cut -c1-250
 nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv,noheader
 ST
@@ -1444,5 +1446,13 @@ echo "[kk] s103: equal-total baselines (window alone 1536, 2048), then B=512 at 
 RW=1536 BS="0" bash /root/kvk_job.sh; RW=2048 BS="0" bash /root/kvk_job.sh; SEED=2 BS="512" bash /root/kvk_job.sh
 JOB
   setsid nohup bash -c 'bash /root/s103.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
+fi
+if [ ! -e /root/.s104kvs ]; then touch /root/.s104kvs
+  cat > /root/s104.sh <<'JOB'
+cd /root/w; RAW=https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i
+for _t in $(seq 60); do curl -sS -o /root/kvs_job.sh "$RAW/ctl/kvs_job.sh?nocache=$(date +%s)"; grep -q "kvsel_train" /root/kvs_job.sh && break; sleep 120; done
+exec bash /root/kvs_job.sh
+JOB
+  setsid nohup bash -c 'bash /root/s104.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
 fi
 # CTL-END

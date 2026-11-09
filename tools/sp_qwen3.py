@@ -23,7 +23,13 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 ap = argparse.ArgumentParser()
-ap.add_argument("mode", choices=["train", "eval", "profile", "rollout", "grpo", "probe", "massprof", "oracle"])
+ap.add_argument("mode", choices=["train", "eval", "profile", "rollout", "grpo", "probe", "massprof", "oracle", "kvsel"])
+ap.add_argument("--kvsel-budgets", default="512", help="kvsel: budgets B of older entries kept beside the newest rw (comma list)")
+ap.add_argument("--kvsel-rules", default="recent,random,cum,mean,ema0.9,ema0.98,last,grad", help="kvsel: selection rules compared")
+ap.add_argument("--kvsel-every", type=int, default=4, help="kvsel: every k-th chunk boundary of a trace")
+ap.add_argument("--kvsel-dump", default="", help="kvsel: save per position the older entries' features and labels (grad, abl) to this .pt - the training set of a learned selector")
+ap.add_argument("--kvsel-abl", type=int, default=8, help="kvsel rule abl: exact ablation in blocks of this many consecutive older entries (the KL-based label, costly)")
+ap.add_argument("--kvsel-layerwise", type=int, default=1, help="kvsel: also each attention rule with a per-layer choice (each layer keeps its own top B)")
 ap.add_argument("--oracle-steps", type=int, default=200, help="oracle: Adam steps on the 32 slots themselves at each position")
 ap.add_argument("--oracle-lr", type=float, default=1e-3, help="oracle: Adam lr on the slots' pre-normalisation parameters (unit rows, so a coordinate is ~0.02)")
 ap.add_argument("--oracle-pos", default="0.5,0.85", help="oracle: positions per trace as fractions of its chunk starts")
@@ -544,7 +550,7 @@ def update_buffer(kept, absorbed, src, nd_end, feat=None, imp=None, src_imp=None
 
 
 ATT_L = []   # --att-prior / --evict-by model: the decoder layers whose attention is the importance
-if a.att_prior > 0 or a.evict_by == "model" or a.kv_keep > 0:
+if a.att_prior > 0 or a.evict_by == "model" or a.kv_keep > 0 or a.mode == "kvsel":
     _lo, _hi = (int(x) for x in a.att_layers.split("-")); ATT_L = list(range(_lo, _hi + 1))
 ATTLOG = [False]   # the one-time log of the importance on a first distant buffer
 ATTREC = {"rows": 0, "acc": {}}   # teacher-forced passes: per hooked layer, the attention the block's last `rows` query rows paid to each key
@@ -974,6 +980,112 @@ def oracle_h_trace(ids, P):
             msg += (f" | vs the previous position: cos pooler {pr_['cos_pooler']:.3f} seeded optima {pr_['cos_seeded']:.3f} (move {pr_['move']:.3f}) random optima {pr_['cos_random']:.3f}"
                     f" corrections {pr_['cos_corr']:.3f}; its optima here: seeded {kpA:.4f} random {kpB:.4f}" + (f"; the chain's start here {kl_init:.4f}" if a.oracle_chain else ""))
         log(msg); prev = (sp0, spA, spB); ORC.append(ent)
+
+
+KVS = {}   # kvsel: (rule, B) -> [KL per position]
+DUMPS = []   # kvsel --kvsel-dump: one dict per position
+
+
+def kvsel_trace(ids, P):
+    """kvsel (the user: judge the eviction rules by KL, on paper, before any generation): one full-context pass of the trace with the
+    attention each key receives from every chunk recorded per layer; then at every k-th chunk boundary each rule keeps B of the
+    older entries (answer tokens before the raw window) beside the prompt and the window, the next chunk is read on that pruned
+    cache (entries as computed in full context, true positions) and its KL to the full-context teacher is the rule's score.
+    'recent' = the window widened by B; 'grad' peeks at the chunk (first-order loss sensitivity to each entry's values: the
+    KL-based label a learned selector would be trained on) - an upper bound, not a deployable rule."""
+    T = min(len(ids), P + a.max_len); a_ids = ids[None, P:T]; La = a_ids.size(1); first = a.rw + a.C
+    nck = La // a.C
+    if nck * a.C < first + 2 * a.C: return
+    ids = ids.to(dev); a_ids = a_ids.to(dev)
+    cache = DynamicCache(); llm(input_ids=ids[None, :P], past_key_values=cache, use_cache=True, logits_to_keep=1)
+    att = []   # per chunk: {layer: (keys,)} attention received by every key from the chunk's rows
+    for m in range(nck):
+        c0, c1 = m * a.C, (m + 1) * a.C; pos = torch.arange(P + c0, P + c1, device=dev)[None]; ATTREC["rows"] = a.C
+        llm(input_ids=a_ids[:, c0:c1], past_key_values=cache, position_ids=pos, cache_position=pos[0], use_cache=True, logits_to_keep=1)
+        att.append({li: v[0].clone() for li, v in ATTREC["acc"].items()}); ATTREC["acc"] = {}; ATTREC["rows"] = 0
+    full = [tuple(kv_of(cache, li)) for li in range(NL)]; del cache
+    ref_h = teacher_hidden(ids, P + first, T)
+    budgets = [int(x) for x in a.kvsel_budgets.split(",")]; rules = a.kvsel_rules.split(",")
+    g = torch.Generator(device=dev).manual_seed(7)
+    def read(keep_by_layer, c0, c1):
+        """KL of chunk [c0, c1) read on prompt + kept older entries (per layer: a sorted LongTensor of answer indices) + window [c0-rw, c0-1)"""
+        cur = c1 - c0; pc = DynamicCache(); win = torch.arange(c0 - a.rw, c0 - 1, device=dev)
+        for li in range(NL):
+            idx = torch.cat([torch.arange(P, device=dev), P + keep_by_layer[li], P + win])
+            k_, v_ = full[li]; pc.update(k_.index_select(2, idx), v_.index_select(2, idx), li)
+        pos = torch.arange(P + c0 - 1, P + c1 - 1, device=dev)[None]
+        o = llm(input_ids=a_ids[:, c0 - 1:c1 - 1], past_key_values=pc, position_ids=pos, cache_position=pos[0], use_cache=True, logits_to_keep=cur)
+        sl = F.log_softmax(o.logits[0].float(), -1); tr = teacher_rows(ref_h[c0 - first:c1 - first])
+        return (tr.exp() * (tr - sl)).sum(-1).mean().item()
+    for mb in range(first // a.C, nck - 1, a.kvsel_every):
+        c0, c1 = mb * a.C, (mb + 1) * a.C; nold = c0 - a.rw
+        if nold < max(budgets) + a.C: continue
+        older = torch.arange(nold, device=dev)
+        # attention history of the older entries: R[m, e] from chunk m (m < mb), per layer and summed
+        Rl = {li: torch.zeros(mb, nold, device=dev) for li in ATT_L}
+        for m in range(mb):
+            for li in ATT_L:
+                v = att[m].get(li)
+                if v is not None: n_ = min(nold, v.numel() - P); Rl[li][m, :n_] = v[P:P + n_]
+        Rs = sum(Rl.values())
+        born = older // a.C; nobs = (mb - born).clamp(min=1).float()
+        def scores(R):
+            w = {"cum": R.sum(0), "mean": R.sum(0) / nobs, "last": R[-1]}
+            for lam in (0.9, 0.98):
+                dec = lam ** torch.arange(mb - 1, -1, -1, device=dev).float(); w[f"ema{lam}"] = (dec[:, None] * R).sum(0)
+            return w
+        Ssum = scores(Rs); Slay = {li: scores(Rl[li]) for li in ATT_L} if a.kvsel_layerwise else {}
+        grad_imp = None
+        if "grad" in rules:   # first-order sensitivity of the chunk's loss to each entry's values, full cache (the KL-based label)
+            cur = c1 - c0; pc = DynamicCache(); sc_ = []; win = torch.arange(c0 - a.rw, c0 - 1, device=dev)
+            idx = torch.cat([torch.arange(P, device=dev), P + older, P + win])
+            with torch.enable_grad():
+                for li in range(NL):
+                    k_, v_ = full[li]; vv = v_.index_select(2, idx); s_ = torch.ones(1, 1, vv.size(2), 1, device=dev, dtype=vv.dtype, requires_grad=True)
+                    sc_.append(s_); pc.update(k_.index_select(2, idx), vv * s_, li)
+                pos = torch.arange(P + c0 - 1, P + c1 - 1, device=dev)[None]
+                o = llm(input_ids=a_ids[:, c0 - 1:c1 - 1], past_key_values=pc, position_ids=pos, cache_position=pos[0], use_cache=True, logits_to_keep=cur)
+                nll = -F.log_softmax(o.logits[0].float(), -1).gather(1, a_ids[0, c0:c1, None]).sum()
+                nll.backward()
+            gl = {li: (-sc_[li].grad[0, 0, P:P + nold, 0]).float() for li in range(NL)}
+            grad_imp = sum(gl.values()); del pc, o, sc_
+        full_kl = read({li: older for li in range(NL)}, c0, c1); KVS.setdefault(("full", 0), []).append(full_kl)
+        win_kl = read({li: older[:0] for li in range(NL)}, c0, c1); KVS.setdefault(("window", 0), []).append(win_kl)
+        abl_imp = None
+        if "abl" in rules:   # exact: the KL after removing each block of consecutive older entries (all else kept)
+            bs = a.kvsel_abl; abl_imp = torch.zeros(nold, device=dev)
+            for b0 in range(0, nold, bs):
+                keep_ = torch.cat([older[:b0], older[b0 + bs:]])
+                abl_imp[b0:b0 + bs] = read({li: keep_ for li in range(NL)}, c0, c1) - full_kl
+        if grad_imp is not None and abl_imp is not None:
+            rk = lambda x: x.argsort().argsort().float()
+            KVS.setdefault(("spearman grad-abl", -1), []).append(torch.corrcoef(torch.stack([rk(grad_imp), rk(abl_imp)]))[0, 1].item())
+        if a.kvsel_dump:
+            with torch.no_grad():
+                vn = torch.stack([full[li][1][0, :, P:P + nold].norm(dim=-1).mean(0) for li in range(NL)], 1)   # (nold, NL) value norms
+                kn = torch.stack([full[li][0][0, :, P:P + nold].norm(dim=-1).mean(0) for li in range(NL)], 1)
+                feat = {"sum": torch.stack([Ssum[k] for k in ("cum", "mean", "last", "ema0.9", "ema0.98")] + [Rs.max(0).values], 1),
+                        "layer": torch.stack([torch.stack([Slay[li][k] for k in ("cum", "mean", "last", "ema0.9", "ema0.98")], 1) for li in ATT_L], 1) if Slay else None,
+                        "nobs": nobs, "age": (mb - born).float(), "rel": older.float() / c0, "tok": a_ids[0, :nold].clone(), "vnorm": vn, "knorm": kn,
+                        "grad": grad_imp, "abl": abl_imp, "c0": c0, "P": P, "full_kl": full_kl, "window_kl": win_kl}
+                DUMPS.append({k: (v.cpu() if torch.is_tensor(v) else v) for k, v in feat.items()})
+        for B in budgets:
+            for r in rules:
+                if r == "recent": top = older[-B:]
+                elif r == "random": top = older[torch.randperm(nold, generator=g, device=dev)[:B]].sort().values
+                elif r == "grad": top = grad_imp.topk(B).indices.sort().values if grad_imp is not None else None
+                elif r == "abl": top = abl_imp.topk(B).indices.sort().values if abl_imp is not None else None
+                else: top = Ssum[r].topk(B).indices.sort().values
+                if top is None: continue
+                KVS.setdefault((r, B), []).append(read({li: top for li in range(NL)}, c0, c1))
+                if a.kvsel_layerwise and r in ("cum", "mean", "last", "ema0.9", "ema0.98"):
+                    kb = {li: (Slay[li][r] if li in Slay else Ssum[r]).topk(B).indices.sort().values for li in range(NL)}
+                    KVS.setdefault((r + "/layer", B), []).append(read(kb, c0, c1))
+                if a.kvsel_layerwise and r == "grad" and grad_imp is not None:
+                    kb = {li: gl[li].topk(B).indices.sort().values for li in range(NL)}
+                    KVS.setdefault(("grad/layer", B), []).append(read(kb, c0, c1))
+        log(f"[sp] kvsel pos {c0} (older {nold}): full {full_kl:.4f} window {win_kl:.4f} | " + " ".join(f"{r}:{B}={KVS[(r, B)][-1]:.4f}" for B in budgets for r in rules if (r, B) in KVS)
+            + (f" | spearman grad-abl {KVS[('spearman grad-abl', -1)][-1]:.3f}" if ("spearman grad-abl", -1) in KVS else ""))
 
 
 def run_trace(ids, P, train, ref_h=None):
@@ -2244,6 +2356,15 @@ elif a.mode == "rollout":
                 + (f" | steps taken from the masked twin {100 * PWN[0] / max(PWN[1], 1):.2f}%" if (a.para_window or a.twin_minent) else "")
                 + (" | time " + " ".join(f"{k} {100 * RT[k] / max(sum(RT[x] for x in ('prompt', 'memory', 'window', 'decode')), 1e-9):.0f}%" for k in ("prompt", "memory", "window", "decode"))
                    + f" (chunks {RT['chunks']}, streams {RT['streams'] / max(RT['chunks'], 1):.1f}, prompt {RT['ptok'] / max(RT['streams'], 1):.0f} + window {RT['wtok'] / max(RT['streams'], 1):.0f} tokens re-read per stream-chunk)" if a.kv_mem else ""))
+elif a.mode == "kvsel":
+    t0 = time.time()
+    with torch.no_grad():
+        for ids, P in data: kvsel_trace(ids, P)
+    if a.kvsel_dump and DUMPS: torch.save(DUMPS, a.kvsel_dump); log(f"[sp] kvsel dump: {len(DUMPS)} positions -> {a.kvsel_dump}")
+    if KVS:
+        n_ = len(KVS[("window", 0)]); rows_ = sorted(KVS, key=lambda k: (k[1], sum(KVS[k]) / len(KVS[k])))
+        log(f"[sp] kvsel {tag}: {n_} positions in {len(data)} traces, rw {a.rw} | mean KL to the full-context teacher on the next chunk: "
+            + " | ".join(f"{r}{'' if B == 0 else ' B=' + str(B)} {sum(v) / len(v):.4f}" for (r, B), v in ((k, KVS[k]) for k in rows_)) + f" ({time.time() - t0:.0f}s)")
 elif a.mode == "oracle":
     pooler.eval(); t0 = time.time()
     for p_ in pooler.parameters(): p_.requires_grad_(False)
