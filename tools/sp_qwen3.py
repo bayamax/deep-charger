@@ -30,6 +30,7 @@ ap.add_argument("--oracle-pos", default="0.5,0.85", help="oracle: positions per 
 ap.add_argument("--oracle-horizon", type=int, default=0, help="oracle: fit the slots on the next K chunks jointly (the raw window fixed at the "
                 "position, the block growing to K chunks, so nothing is missing) and score them on the 2 chunks after those - a chunk-sized fit "
                 "encodes the chunk's own text and is worse than the pooler one chunk later; a summary must carry further")
+ap.add_argument("--oracle-random", type=int, default=1, help="oracle: 0 skips the random-seeded reference fit (half the time; its fields repeat the pooler's)")
 ap.add_argument("--oracle-run", type=int, default=0, help="oracle: instead, this many CONSECUTIVE chunk starts from the trace's middle - how the "
                 "pooler-seeded optima of one chain of thought relate to each other (cosine, the correction's direction, the previous "
                 "optimum's KL on the next chunk): a smooth target a pooler can learn, or unrelated solutions")
@@ -843,7 +844,7 @@ def oracle_trace(ids, P):
         g = torch.Generator(device=dev).manual_seed(1234 + c0)
         unit = lambda x: x / x.norm(dim=-1, keepdim=True).clamp(min=1e-6)
         spA, hA = _oracle_fit(sp0, unit(sp0.float()), pkv, P, block, cur, tr)
-        spB, hB = _oracle_fit(sp0, unit(torch.randn(sp0.shape, generator=g, device=dev)), pkv, P, block, cur, tr)
+        spB, hB = _oracle_fit(sp0, unit(torch.randn(sp0.shape, generator=g, device=dev)), pkv, P, block, cur, tr) if a.oracle_random else (sp0, [round(kl0, 4)])
         # the next chunk, the window slid, the memory kept
         n0, n1 = c1, min(c1 + a.C, La); nxt = {}
         if n1 - n0 >= 4 and n1 - first <= ref_h.size(0):
@@ -925,7 +926,7 @@ def oracle_h_trace(ids, P):
             klw = (trT.exp() * (trT - F.log_softmax(ow.logits[0, :allN].float(), -1))).sum(-1)[fitN:].mean().item(); del ow, cw
         unit = lambda x: x / x.norm(dim=-1, keepdim=True).clamp(min=1e-6); g = torch.Generator(device=dev).manual_seed(1234 + c0)
         spA, hA = _oracle_fit(sp0, unit(sp0.float()), pkv, P, blkF, fitN, trF)
-        spB, hB = _oracle_fit(sp0, unit(torch.randn(sp0.shape, generator=g, device=dev)), pkv, P, blkF, fitN, trF)
+        spB, hB = _oracle_fit(sp0, unit(torch.randn(sp0.shape, generator=g, device=dev)), pkv, P, blkF, fitN, trF) if a.oracle_random else (sp0, [round(klfit0, 4)])
         with torch.no_grad(): tA, tB = test(spA), test(spB)
         cosf = lambda x, y: F.cosine_similarity(x, y, dim=-1).mean().item()
         ent = {"c0": c0, "nd": int(nd_end), "window": klw, "pooler": kl0, "pooler_fit": klfit0, "seeded_fit": hA[-1], "random_fit": hB[-1],
