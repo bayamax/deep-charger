@@ -235,7 +235,9 @@
 # emits (and, as the reference, from random slots). How low the KL goes says what the frozen model can read out of 32
 # slots; how far the slots move says whether a pooler could reproduce that optimum. The on-policy job pauses after its
 # round (STOP_KQ), the oracle runs (~40 min), the job resumes.
-SER=82
+# serial 83: the on-policy job's 'correct' read 0/48 - the pool rows carry no gold answer. The job now scores agreement with the
+# teacher's own boxed answer and rebuilds its prompt file (same order); the box's copy of the job is refreshed before s82's resume.
+SER=83
 if [ -f /root/.boxrmx_serial ] && [ "$(cat /root/.boxrmx_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxrmx_serial
 [ -d /venv/main/bin ] && export PATH=/venv/main/bin:$PATH
@@ -1124,5 +1126,13 @@ rm -f STOP_KQ; echo "[kp] s82 done - the on-policy job resumes $(date -u)"
 exec bash /root/kvq_job.sh
 JOB
   setsid nohup bash -c 'bash /root/s82.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
+fi
+if [ ! -e /root/.s83gold ]; then touch /root/.s83gold
+  cat > /root/s83.sh <<'JOB'
+RAW=https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i
+for _t in $(seq 60); do curl -sS -o /root/kvq_new.sh "$RAW/ctl/kvq_job.sh?nocache=$(date +%s)"; grep -q "teacher's answer" /root/kvq_new.sh && { mv /root/kvq_new.sh /root/kvq_job.sh; break; }; sleep 120; done
+echo "[kp] s83: the on-policy job scores agreement with the teacher's answer from its next start (the 0/48 was the missing gold) $(date -u)"
+JOB
+  setsid nohup bash -c 'bash /root/s83.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
 fi
 # CTL-END

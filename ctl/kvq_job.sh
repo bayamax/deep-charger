@@ -20,14 +20,23 @@ LG=/root/w/sp_kvq.log; LR=${LR:-1e-4}; W=${W:-0.5}; NP=${NP:-48}; CAP=${CAP:-1.0
 M="--S 32 --heads 8 --layers 3 --ffn 2048 --rw 1024 --C 128 --maxd 0 --kv-mem --kv-rank 512"
 AP="--att-prior 1.0 --att-layers 8-19"; [ "$CAP" != 0 ] && AP="$AP --att-cap $CAP"
 [ -s kvq.pt ] || cp "${START:-kvp.pt}" kvq.pt
-if [ ! -s kvq_prompts.jsonl ]; then python3 -c "
+if [ ! -s kvq_prompts.jsonl ] || ! head -n 1 kvq_prompts.jsonl | grep -q '"gold": "[^"]'; then python3 -c "
 import json
+def boxed(t):   # the pool rows carry no gold: the teacher's own final answer stands in (so 'correct' = agrees with the teacher)
+    i = t.rfind('\\\\boxed{')
+    if i < 0: return ''
+    j = i + 7; d = 1; out = []
+    while j < len(t) and d:
+        c = t[j]; d += (c == '{') - (c == '}')
+        if d: out.append(c)
+        j += 1
+    return ''.join(out) if not d else ''
 ban = {json.loads(l)['prompt'] for l in open('rl_eval60.jsonl')}
 rs = [json.loads(l) for l in open('rm_pool.jsonl')]
 rs = [r for r in rs if r.get('src', '?').split('-')[0] in ('math', 'comp', 'mc') and r['prompt'] not in ban][::-1]   # from the end
 with open('kvq_prompts.jsonl', 'w') as f:
-    for r in rs: f.write(json.dumps({k: r.get(k, '') for k in ('src', 'id', 'gold', 'prompt')}) + '\n')
-print('[kq] prompts', len(rs))"; fi
+    for r in rs: f.write(json.dumps({'src': r.get('src', ''), 'id': r.get('id', ''), 'gold': r.get('gold') or boxed(r.get('text', '')), 'prompt': r['prompt']}) + '\n')
+print('[kq] prompts', len(rs), 'with a teacher answer', sum(1 for r in rs if r.get('gold') or boxed(r.get('text', ''))))"; fi
 score() { python3 -c "
 import json, sys; sys.path.insert(0, '.')
 from sp_mathcheck import correct
@@ -49,7 +58,7 @@ open('kvq_in.jsonl', 'w').writelines(L[i:i + $NP]); print(len(L[i:i + $NP]))" > 
   if [ -s kvq_next.pt ] && grep -q "^\[sp\] trained" run_kq.log; then mv kvq_next.pt kvq.pt; echo $rd > kvq_round
   else echo "[kq] round $rd: training FAILED: $(grep -E 'Error' run_kq.log | tail -1 | cut -c1-200)"; break; fi
   tk=$(grep -oP "KL [0-9.]+ top1 [0-9.]+% \| reverse KL [0-9.]+" run_kq.log | awk 'NR==1{f=$0} {l=$0} END{print "first " f " / last " l}')
-  echo "[kq] round $rd (generation $((t1 - t0)) s, training $(( $(date +%s) - t1 )) s, OOM skips $(grep -c 'out of memory' run_kq.log)): its own texts $g | on them $tk"
+  echo "[kq] round $rd (generation $((t1 - t0)) s, training $(( $(date +%s) - t1 )) s, OOM skips $(grep -c 'out of memory' run_kq.log)): its own texts agree with the teacher's answer $g | on them $tk"
   put kvq.pt spKVQ_latest.pt > /dev/null; cp kvq_gen.jsonl kvq_gen_r$rd.jsonl; put kvq_gen.jsonl kvq/gen_r$rd.jsonl > /dev/null; put $LG kvq/kvq.log > /dev/null
   if [ $((rd % EVERY)) = 0 ]; then
     quiet; o=kvq_r${rd}_s1.jsonl; rm -f $o; cp kvq.pt kvq_r$rd.pt
