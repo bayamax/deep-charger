@@ -298,7 +298,12 @@
 # serial 108: phase 1 of the harness (88 positions): window 0.162, widened window (+512 recent) 0.103, mean 0.053, EMA 0.98 0.050,
 # EMA 0.98 per layer 0.046, the ablation label 0.024 (headroom for a learned selector). Per-layer selection is now in the rollout
 # (--kv-layerwise); the selector job's 60-problem runs: the better selector, EMA 0.98 per layer, EMA 0.98.
-SER=108
+# serial 109: the night's numbers so far (60 problems, seed 1): window alone 1536 = 47, 2048 = 48 - at an equal total the window
+# alone (1536: 47) is above selection (1024 + 512 by mean attention: 45); and the learned selector lost to EMA 0.98 on held-out
+# KL (0.057 vs 0.050; the future-attention oracle it was fit to sits at 0.023). Remaining runs, one chain, 16 streams: after the
+# running B=512 seed 2 - the window alone 1536 at seed 2 (its pair), EMA 0.98 per layer B=512 (the best rule in KL), then
+# B=2048; the selector's and the single-set EMA 0.98 60-problem runs are dropped (one negative is enough - the user).
+SER=109
 if [ -f /root/.boxrmx_serial ] && [ "$(cat /root/.boxrmx_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxrmx_serial
 [ -d /venv/main/bin ] && export PATH=/venv/main/bin:$PATH
@@ -1510,5 +1515,19 @@ pkill -f "bash /root/s107.sh"; pkill -f "bash /root/kvt_job.sh"; sleep 1; mv /ro
 echo "[kt] s108: selector job refreshed (per-layer EMA 0.98 run added) $(date -u)"; exec bash /root/kvt_job.sh
 JOB
   setsid nohup bash -c 'bash /root/s108.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
+fi
+if [ ! -e /root/.s109chain ]; then touch /root/.s109chain
+  cat > /root/s109.sh <<'JOB'
+cd /root/w; RAW=https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i
+for _t in $(seq 60); do curl -sS -o /root/kvt_new.sh "$RAW/ctl/kvt_job.sh?nocache=$(date +%s)"; grep -q "KT_SPECS" /root/kvt_new.sh && break; sleep 120; done
+pkill -f "bash /root/s106.sh"; pkill -f "bash /root/s108.sh"; pkill -f "bash /root/kvt_job.sh"; sleep 1; mv /root/kvt_new.sh /root/kvt_job.sh
+echo "[kk] s109: after the running B=512 seed 2 - window alone 1536 at seed 2, EMA 0.98 per layer B=512, then B=2048; the selector's 60-problem run is dropped $(date -u)"
+until ! pgrep -f "bash /root/kvk_job.sh" > /dev/null && ! pgrep -f "sp_qwen3.py rollout" > /dev/null; do sleep 60; done
+RB=16 RW=1536 BS="0" SEED=2 bash /root/kvk_job.sh
+RB=16 KT_SPECS="ema098L" bash /root/kvt_job.sh
+RB=16 BS="2048" bash /root/kvk_job.sh
+echo "[kk] s109 chain done $(date -u)"
+JOB
+  setsid nohup bash -c 'bash /root/s109.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
 fi
 # CTL-END

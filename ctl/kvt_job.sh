@@ -27,14 +27,17 @@ if ! grep -q "\[kt\] held-out" w.log; then
   echo "[kt] held-out $(grep -E '^\[sp\] kvsel S|Error|Traceback' run_kt_eval.log | tail -1 | sed 's/^\[sp\] kvsel [^:]*: //' | cut -c1-900)"
 fi
 best=$(grep "\[kt\] held-out" w.log | tail -1 | grep -oE "mlp:kvsel_(fut|abl).pt B=512 [0-9.]+" | sort -k3 -n | head -1 | grep -oE "kvsel_(fut|abl).pt"); best=${best:-kvsel_fut.pt}
-for spec in "mlp:--kv-select mlp:$best" "ema098L:--kv-select ema0.98 --kv-layerwise" "ema098:--kv-select ema0.98"; do n=${spec%%:*}; fl=${spec#*:}
+# KT_SPECS picks the 60-problem runs (names: mlp, ema098L, ema098); RB the streams. Serial 109: the selector lost to EMA 0.98 on
+# held-out KL (0.057 vs 0.050), so its 60-problem run is dropped - one negative is enough (the user) - and only ema098L runs.
+spec_of() { case $1 in mlp) echo "--kv-select mlp:$best";; ema098L) echo "--kv-select ema0.98 --kv-layerwise";; ema098) echo "--kv-select ema0.98";; esac; }
+for n in ${KT_SPECS:-ema098L}; do fl=$(spec_of $n)
   o=kvk_b512_${n}_s1.jsonl; [ -s $o ] && continue
   until ! pgrep -f "sp_qwen3.py rollout" > /dev/null && ! pgrep -f "sp_kt.py rollout" > /dev/null; do sleep 60; done
   t0=$(date +%s); rm -f $o.part
   python3 sp_kt.py rollout --traces rl_eval60.jsonl --no-sp --kv-evict --kv-keep 512 --kv-keep-path $fl --att-layers 8-19 --rw 1024 --C 128 --maxd 0 --max-len 12288 \
-    --roll-batch 24 --kv-budget 90000 --seed 1 --roll-out $o.part --log sp_kvt.log > run_kt_$n.log 2>&1
+    --roll-batch ${RB:-24} --kv-budget 90000 --seed 1 --roll-out $o.part --log sp_kvt.log > run_kt_$n.log 2>&1
   if [ -s $o.part ]; then mv $o.part $o; put $o kvk/$o
-    echo "[kt] B=512 $n${best:+ ($best)} seed 1: $(score $o) ($(( $(date +%s) - t0 )) s) | refs: mean rule 45, raw window 42 / 44, v38 44 / 41 $(date -u)"
+    echo "[kt] B=512 $n rw 1024 seed 1: $(score $o) ($(( $(date +%s) - t0 )) s) | refs: mean rule 45, window alone 1024 43 / 1536 47 / 2048 48, raw window 42 / 44 $(date -u)"
   else echo "[kt] B=512 $n seed 1 FAILED: $(grep -E 'Error' run_kt_$n.log | tail -1 | cut -c1-200)"; fi
 done
 echo "[kt] JOB_DONE $(date -u)"
