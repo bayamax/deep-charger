@@ -287,7 +287,9 @@
 # skipped as 'already done') - the script is fetched first.
 # serial 104: the KL harness (ctl/kvs_job.sh): the eviction rules and the exact ablation label on held-out traces, then the
 # training dump for the learned selector. Beside the 60-problem runs (another process; ~6 GB). Status lines show [ks].
-SER=104
+# serial 105: option 5 unattended (ctl/kvt_job.sh): after the harness dumps, train the selector, score it on the held-out traces,
+# then the 60 problems with the selector and with EMA 0.9 (B=512). Status lines show [kt].
+SER=105
 if [ -f /root/.boxrmx_serial ] && [ "$(cat /root/.boxrmx_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxrmx_serial
 [ -d /venv/main/bin ] && export PATH=/venv/main/bin:$PATH
@@ -1454,5 +1456,13 @@ for _t in $(seq 60); do curl -sS -o /root/kvs_job.sh "$RAW/ctl/kvs_job.sh?nocach
 exec bash /root/kvs_job.sh
 JOB
   setsid nohup bash -c 'bash /root/s104.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
+fi
+if [ ! -e /root/.s105kvt ]; then touch /root/.s105kvt
+  cat > /root/s105.sh <<'JOB'
+cd /root/w; RAW=https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i
+for _t in $(seq 60); do curl -sS -o /root/kvt_job.sh "$RAW/ctl/kvt_job.sh?nocache=$(date +%s)"; grep -q "kvsel_mlp" /root/kvt_job.sh && break; sleep 120; done
+exec bash /root/kvt_job.sh
+JOB
+  setsid nohup bash -c 'bash /root/s105.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
 fi
 # CTL-END

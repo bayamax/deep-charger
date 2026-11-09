@@ -1,24 +1,39 @@
 #!/bin/bash
-# After the para-window decoding: the same weights (--ctl-para segment 2; plain decoding 35 / 41, para-window 37 at seed 1)
-# decoded with the memory-masked twin in two more ways, seed 1 each: --twin-minent (per token, the lower-entropy side) and
-# --twin-mix 0.5 (half the memory's logits, half the raw window's).
+# Option 5, the learned KV selector, end to end and unattended: once the KL harness (ctl/kvs_job.sh) has written its dumps,
+# train the selector on the training dump (tools/kvsel_train.py: pairwise ranking on the exact ablation labels), score it on the
+# held-out traces in the same KL harness beside the attention rules (rule mlp:kvsel_mlp.pt), then - whatever the outcome, the
+# user wants the number - the 60 problems at seed 1 with --kv-keep 512 and the selector, and with EMA 0.9 as the attention
+# counterpart (the equal-total window baselines run in ctl/kvk_job.sh). One GPU: the 60-problem runs wait for each other.
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); cd /root/w
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 R=baya1116/hypernet-sp-distill; RAW=https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i
-put() { for _i in 1 2 3 4 5; do python3 -c "import sys; from huggingface_hub import HfApi; HfApi().upload_file(path_or_fileobj=sys.argv[1], path_in_repo='archive/sp3/'+sys.argv[2], repo_id='$R')" "$1" "$2" > put.err 2>&1 && { echo "[hub] $2"; return 0; }; sleep 60; done; echo "[hub] $2 FAILED"; }
-for _t in $(seq 60); do curl -sS -o sp_qwen3.py "$RAW/tools/sp_qwen3.py?nocache=$(date +%s)"; grep -q '"--twin-minent"' sp_qwen3.py && break; sleep 120; done
-LG=/root/w/sp_kvt.log
-M="--S 32 --heads 8 --layers 3 --ffn 2048 --rw 1024 --C 128 --maxd 0 --kv-mem --kv-rank 512"
-echo "[kt] ready $(date -u) | twin options in the script: $(grep -c '"--twin-m' sp_qwen3.py) | weights: ctl-para segment $(cat kvp_seg)"
+put() { for _i in 1 2 3 4 5; do python3 -c "import sys; from huggingface_hub import HfApi; HfApi().upload_file(path_or_fileobj=sys.argv[1], path_in_repo='archive/sp3/'+sys.argv[2], repo_id='$R')" "$1" "$2" > put.err 2>&1 && return 0; sleep 60; done; echo "[kt] upload of $2 FAILED"; }
 score() { python3 -c "
 import json, sys; sys.path.insert(0, '.')
 from sp_mathcheck import correct
 rs = [json.loads(l) for l in open(sys.argv[1])]
-print('[kt] ' + sys.argv[2] + f': {sum(correct(r) for r in rs)}/{len(rs)} correct, closed {sum(\"</think>\" in r[\"text\"] for r in rs)}')" "$1" "$2"; }
-for cfg in "minent:--twin-minent" "mix05:--twin-mix 0.5"; do n=${cfg%%:*}; x=${cfg#*:}
-  [ -s kvt_${n}_s1.jsonl ] && continue
-  python3 sp_qwen3.py rollout --traces rl_eval60.jsonl $M $x --max-len 12288 --ckpt kvp.pt --roll-batch 24 --grpo-tok-budget 60000 --seed 1 --roll-out kvt_${n}_s1.jsonl --log $LG > run_ktgen.log 2>&1
-  grep -E "Error|Traceback" run_ktgen.log | tail -1 | sed "s/^/[kt] gen $n: /"; grep "steps taken from" $LG | tail -1 | grep -oP "steps taken.*" | sed "s/^/[kt] $n /"
-  score kvt_${n}_s1.jsonl "ctl-para segment $(cat kvp_seg) + $n decoding seed 1"; put kvt_${n}_s1.jsonl kvt/kvt_${n}_s1.jsonl
+print(f'{sum(correct(r) for r in rs)}/{len(rs)} correct, closed {sum(\"</think>\" in r[\"text\"] for r in rs)}')" "$1"; }
+for f in tools/kvsel_feat.py tools/kvsel_train.py; do curl -sS -o $(basename $f) "$RAW/$f?nocache=$(date +%s)"; done
+for _t in $(seq 60); do curl -sS -o sp_kt.py "$RAW/tools/sp_qwen3.py?nocache=$(date +%s)"; grep -q "kv-select" sp_kt.py && break; sleep 120; done
+until [ -s kvsel_train.pt ] && grep -q "\[ks\] JOB_DONE" w.log; do sleep 120; done
+M="--rw 1024 --C 128 --maxd 0 --att-layers 8-19"
+if [ ! -s kvsel_mlp.pt ]; then t0=$(date +%s)
+  python3 kvsel_train.py kvsel_train.pt kvsel_mlp.pt --epochs ${EP:-30} --B 512 --block 16 > run_kt_train.log 2>&1
+  echo "[kt] selector trained ($(( $(date +%s) - t0 )) s): $(grep -E '^epoch|positions' run_kt_train.log | tail -2 | tr '\n' ' ' | cut -c1-400)"; put kvsel_mlp.pt kvs/kvsel_mlp.pt
+fi
+if ! grep -q "\[kt\] held-out" w.log; then
+  python3 sp_kt.py kvsel --traces kvs_held.jsonl --max-len 8192 $M --kvsel-budgets 512,1024 --kvsel-every 4 --kvsel-layerwise 0 \
+    --kvsel-rules recent,mean,ema0.9,ema0.98,mlp:kvsel_mlp.pt --log sp_kvt.log > run_kt_eval.log 2>&1
+  echo "[kt] held-out $(grep -E '^\[sp\] kvsel S|Error|Traceback' run_kt_eval.log | tail -1 | sed 's/^\[sp\] kvsel [^:]*: //' | cut -c1-900)"
+fi
+for spec in "mlp:--kv-select mlp:kvsel_mlp.pt" "ema09:--kv-select ema0.9"; do n=${spec%%:*}; fl=${spec#*:}
+  o=kvk_b512_${n}_s1.jsonl; [ -s $o ] && continue
+  until ! pgrep -f "sp_qwen3.py rollout" > /dev/null && ! pgrep -f "sp_kt.py rollout" > /dev/null; do sleep 60; done
+  t0=$(date +%s); rm -f $o.part
+  python3 sp_kt.py rollout --traces rl_eval60.jsonl --no-sp --kv-evict --kv-keep 512 --kv-keep-path $fl --att-layers 8-19 --rw 1024 --C 128 --maxd 0 --max-len 12288 \
+    --roll-batch 24 --kv-budget 90000 --seed 1 --roll-out $o.part --log sp_kvt.log > run_kt_$n.log 2>&1
+  if [ -s $o.part ]; then mv $o.part $o; put $o kvk/$o
+    echo "[kt] B=512 $n seed 1: $(score $o) ($(( $(date +%s) - t0 )) s) | refs: mean rule 45, raw window 42 / 44, v38 44 / 41 $(date -u)"
+  else echo "[kt] B=512 $n seed 1 FAILED: $(grep -E 'Error' run_kt_$n.log | tail -1 | cut -c1-200)"; fi
 done
-put $LG kvt/kvt.log; date -u > DONE_KT; put DONE_KT kvt/DONE_KT; echo "[kt] JOB_DONE $(date -u)"
+echo "[kt] JOB_DONE $(date -u)"
