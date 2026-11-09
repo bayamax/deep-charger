@@ -983,6 +983,14 @@ def oracle_h_trace(ids, P):
 
 
 KVS = {}   # kvsel: (rule, B) -> [KL per position]
+SELS = {}   # kvsel rule mlp:<path>: the learned selectors, loaded once
+
+
+def kvsel_model(path):
+    if path not in SELS:
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__))); from kvsel_feat import Selector
+        ck = torch.load(path, map_location=dev); m = Selector(ck["vocab"], mu=ck["mu"], sd=ck["sd"]).to(dev); m.load_state_dict(ck["state"]); m.eval(); SELS[path] = m
+    return SELS[path]
 DUMPS = []   # kvsel --kvsel-dump: one dict per position
 
 
@@ -1075,6 +1083,13 @@ def kvsel_trace(ids, P):
                 elif r == "random": top = older[torch.randperm(nold, generator=g, device=dev)[:B]].sort().values
                 elif r == "grad": top = grad_imp.topk(B).indices.sort().values if grad_imp is not None else None
                 elif r == "abl": top = abl_imp.topk(B).indices.sort().values if abl_imp is not None else None
+                elif r.startswith("mlp:"):
+                    from kvsel_feat import numeric
+                    vn = torch.stack([full[li][1][0, :, P:P + nold].norm(dim=-1).mean(0) for li in range(NL)], 1)
+                    kn = torch.stack([full[li][0][0, :, P:P + nold].norm(dim=-1).mean(0) for li in range(NL)], 1)
+                    x6 = torch.stack([Ssum[k] for k in ("cum", "mean", "last", "ema0.9", "ema0.98")] + [Rs.max(0).values], 1)
+                    sc = kvsel_model(r[4:])(numeric(x6, nobs, (mb - born).float(), older.float() / c0, vn, kn), a_ids[0, :nold])
+                    top = sc.topk(B).indices.sort().values
                 else: top = Ssum[r].topk(B).indices.sort().values
                 if top is None: continue
                 KVS.setdefault((r, B), []).append(read({li: top for li in range(NL)}, c0, c1))
