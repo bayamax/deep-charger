@@ -230,7 +230,12 @@
 # (48 fresh problems per round, loss 0.5 KL(teacher || student) + 0.5 KL(student || teacher) on the student's path), from the
 # capped segment 3 if it kept 39 or more, else from segment 2 (39); the cap stays on.
 # serial 81: the status lines and the hub's wlog copy did not show the on-policy job's [kq] lines - both include them now.
-SER=81
+# serial 82: the user - an oracle seeded with the pooler's output: at 2 positions of each of 12 held-out math / competition
+# traces, the 32 slots themselves are optimised through the frozen model on the chunk's KL, starting from what the pooler
+# emits (and, as the reference, from random slots). How low the KL goes says what the frozen model can read out of 32
+# slots; how far the slots move says whether a pooler could reproduce that optimum. The on-policy job pauses after its
+# round (STOP_KQ), the oracle runs (~40 min), the job resumes.
+SER=82
 if [ -f /root/.boxrmx_serial ] && [ "$(cat /root/.boxrmx_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxrmx_serial
 [ -d /venv/main/bin ] && export PATH=/venv/main/bin:$PATH
@@ -1101,5 +1106,23 @@ if [ ! -e /root/.s81kq ]; then touch /root/.s81kq
   sed -i 's/\^\\\[k\[gcp\]\\\]/^\\[k[gcpq]\\]/' /root/wlog.sh; pkill -f "bash /root/wlog.sh"
   setsid nohup bash -c 'bash /root/wlog.sh > /dev/null 2>&1' > /dev/null 2>&1 < /dev/null &
   grep -E "^\[kq\]" /root/w/w.log | tail -n 5 | sed 's/^/[kp] s81 sees: /'
+fi
+if [ ! -e /root/.s82oracle ]; then touch /root/.s82oracle
+  cat > /root/s82.sh <<'JOB'
+cd /root/w; export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+RAW=https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i; R=baya1116/hypernet-sp-distill
+touch STOP_KQ; echo "[kp] s82: oracle seeded with the pooler's output - the on-policy job pauses after its round $(date -u)"
+while pgrep -f "bash /root/kvq_job.sh" > /dev/null; do sleep 60; done
+while pgrep -f "sp_gk.py" > /dev/null; do sleep 60; done
+for _t in $(seq 60); do curl -sS -o sp_or.py "$RAW/tools/sp_qwen3.py?nocache=$(date +%s)"; grep -q "def oracle_trace" sp_or.py && break; sleep 120; done
+head -n 6 held_math.jsonl > or_in.jsonl; head -n 6 held_comp.jsonl >> or_in.jsonl
+M="--S 32 --heads 8 --layers 3 --ffn 2048 --rw 1024 --C 128 --maxd 0 --kv-mem --kv-rank 512"; AP="--att-prior 1.0 --att-layers 8-19 --att-cap 1.0"
+python3 sp_or.py oracle --traces or_in.jsonl --max-len 6144 $M $AP --ckpt kvp_seg2.pt --oracle-steps 200 --oracle-lr 1e-3 --log sp_or.log > run_or.log 2>&1
+grep -E "^\[sp\] oracle|Error|Traceback" run_or.log | cut -c1-600 | sed 's/^\[sp\]/[kp]/'
+python3 -c "from huggingface_hub import HfApi; HfApi().upload_file(path_or_fileobj='sp_or.log', path_in_repo='archive/sp3/kvp/oracle.log', repo_id='$R')" > /dev/null 2>&1
+rm -f STOP_KQ; echo "[kp] s82 done - the on-policy job resumes $(date -u)"
+exec bash /root/kvq_job.sh
+JOB
+  setsid nohup bash -c 'bash /root/s82.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
 fi
 # CTL-END

@@ -23,7 +23,10 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 ap = argparse.ArgumentParser()
-ap.add_argument("mode", choices=["train", "eval", "profile", "rollout", "grpo", "probe", "massprof"])
+ap.add_argument("mode", choices=["train", "eval", "profile", "rollout", "grpo", "probe", "massprof", "oracle"])
+ap.add_argument("--oracle-steps", type=int, default=200, help="oracle: Adam steps on the 32 slots themselves at each position")
+ap.add_argument("--oracle-lr", type=float, default=1e-3, help="oracle: Adam lr on the slots' pre-normalisation parameters (unit rows, so a coordinate is ~0.02)")
+ap.add_argument("--oracle-pos", default="0.5,0.85", help="oracle: positions per trace as fractions of its chunk starts")
 ap.add_argument("--model", default="Qwen/Qwen3-1.7B")
 ap.add_argument("--traces", required=True)
 ap.add_argument("--n", type=int, default=0); ap.add_argument("--skip", type=int, default=0)
@@ -748,6 +751,104 @@ def gen_report():
             f"(per token {GEN['fk'] / n:.4f}; by position 0-31 {b[0][0] / max(b[0][1], 1):.4f} 32-63 {b[1][0] / max(b[1][1], 1):.4f} "
             f"64+ {b[2][0] / max(b[2][1], 1):.4f}) reverse {GEN['rk'] / c:.2f} | teacher NLL of the student's tokens {GEN['nll'] / n:.3f}"
             f" | ended early {GEN['eos']}")
+
+
+def _mem_kl(sp, pkv, P, block, cur, tr, off0):
+    """KL(teacher || student) on a chunk given the memory sp (1, S, H) placed after the prompt: the chunk's rows"""
+    mem = kv_memory(sp, torch.arange(P, P + a.S, device=dev)[None]); cache = DynamicCache()
+    for li, (k_, v_) in enumerate(pkv): cache.update(torch.cat([k_, mem[li][0]], 2), torch.cat([v_, mem[li][1]], 2), li)
+    nb = block.size(1); off = P + a.S; pos = torch.arange(off, off + nb, device=dev)[None]
+    o = llm(inputs_embeds=block, attention_mask=torch.ones(1, off + nb, device=dev), past_key_values=cache, position_ids=pos,
+            cache_position=pos[0], use_cache=True, logits_to_keep=cur + 1)
+    sl = F.log_softmax(o.logits[0, :cur].float(), -1)
+    return (tr.exp() * (tr - sl)).sum(-1)
+
+
+def _oracle_fit(sp0, z0, pkv, P, block, cur, tr):
+    """optimise the slots from z0 (pre-normalisation; sp = z / |z| x out_scale, the pooler's own output manifold) on the chunk's
+    KL; returns (sp*, KL per 25 steps)"""
+    z = z0.clone().requires_grad_(True); opt = torch.optim.Adam([z], lr=a.oracle_lr); sc = pooler.out_scale.abs().detach(); hist = []
+    for it in range(a.oracle_steps):
+        sp = z / z.norm(dim=-1, keepdim=True).clamp(min=1e-6) * sc
+        kl = _mem_kl(sp, pkv, P, block, cur, tr, 0); loss = kl.mean()
+        opt.zero_grad(set_to_none=True); loss.backward(); opt.step()
+        if it % 25 == 0: hist.append(round(loss.item(), 4))
+    with torch.no_grad():
+        sp = z / z.norm(dim=-1, keepdim=True).clamp(min=1e-6) * sc
+        hist.append(round(_mem_kl(sp, pkv, P, block, cur, tr, 0).mean().item(), 4))
+    return sp.detach(), hist
+
+
+ORC = []   # oracle: one dict per position
+
+
+def oracle_trace(ids, P):
+    """oracle (the user): at a few chunk starts, optimise the 32 memory slots THEMSELVES through the frozen model on the chunk's
+    KL - (a) seeded with the pooler's own output: how low can the KL go from where the pooler already is, and how far must
+    the slots move (a target a pooler could reproduce); (b) seeded at random: the same floor from an unrelated start, and how
+    far that optimum lies from the pooler's. Also each memory's KL on the NEXT chunk with the window slid and the memory kept
+    (the deployment would rebuild it), and the window-only KL as the reference. The slots stay on the pooler's output
+    manifold (unit rows x out_scale)."""
+    T = min(len(ids), P + a.max_len); a_ids = ids[None, P:T]; La = a_ids.size(1); first = a.rw + a.C
+    c0s = list(range(first, La - a.C, a.C))
+    if len(c0s) < 4: return
+    ids = ids.to(dev); a_ids = a_ids.to(dev)
+    with torch.no_grad():
+        ref_h = teacher_hidden(ids, P + first, T)
+        pc = DynamicCache(); llm(input_ids=ids[None, :P], past_key_values=pc, use_cache=True)
+        pkv = [tuple(t for t in kv_of(pc, li)) for li in range(NL)]
+    targets = {c0s[min(len(c0s) - 1, int(float(f) * len(c0s)))] for f in a.oracle_pos.split(",")}
+    kept = torch.zeros(1, 0, dtype=torch.long, device=dev); absorbed = 0; use_att = bool(ATT_L)
+    impT = torch.zeros(La, device=dev); kimp = torch.zeros(1, 0, device=dev)
+    for c0 in range(0, La, a.C):
+        c1 = min(c0 + a.C, La); cur = c1 - c0
+        if cur < 4: break
+        R = min(c0, a.rw); nd_end = c0 - R
+        if use_att:
+            si = impT[None].clone(); si[:, :2] = 0
+            kept, absorbed, kimp = update_buffer(kept, absorbed, a_ids, nd_end, None, imp=kimp, src_imp=si)
+        else: kept, absorbed = update_buffer(kept, absorbed, a_ids, nd_end, None)
+        hit = c0 in targets and kept.size(1) > 0
+        if not hit and not use_att: continue
+        with torch.no_grad():
+            block = torch.cat([embed(a_ids[:, c0 - R:c0]).to(dt), embed(a_ids[:, c0:c1]).to(dt)], 1); nb = block.size(1)
+            sp0 = pooler(embed(kept).float(), kpm=att_bias(kimp) if use_att else None)
+            if use_att:   # the importance, recorded as in run_trace (memory in place)
+                cache = DynamicCache(); mem = kv_memory(sp0, torch.arange(P, P + a.S, device=dev)[None]); off = P + a.S
+                for li, (k_, v_) in enumerate(pkv): cache.update(torch.cat([k_, mem[li][0]], 2), torch.cat([v_, mem[li][1]], 2), li)
+                pos = torch.arange(off, off + nb, device=dev)[None]; ATTREC["rows"] = cur
+                llm(inputs_embeds=block, attention_mask=torch.ones(1, off + nb, device=dev), past_key_values=cache, position_ids=pos,
+                    cache_position=pos[0], use_cache=True, logits_to_keep=1)
+                impT[c0 - R:c1] += att_take()[off:off + R + cur]
+        if not hit: continue
+        tr = teacher_rows(ref_h[c0 - first:c1 - first])
+        with torch.no_grad():
+            kl0 = _mem_kl(sp0, pkv, P, block, cur, tr, 0).mean().item()
+            cw = DynamicCache()   # window only
+            for li, (k_, v_) in enumerate(pkv): cw.update(k_, v_, li)
+            pos = torch.arange(P, P + nb, device=dev)[None]
+            ow = llm(inputs_embeds=block, attention_mask=torch.ones(1, P + nb, device=dev), past_key_values=cw, position_ids=pos,
+                     cache_position=pos[0], use_cache=True, logits_to_keep=cur + 1)
+            klw = (tr.exp() * (tr - F.log_softmax(ow.logits[0, :cur].float(), -1))).sum(-1).mean().item(); del ow, cw
+        g = torch.Generator(device=dev).manual_seed(1234 + c0)
+        unit = lambda x: x / x.norm(dim=-1, keepdim=True).clamp(min=1e-6)
+        spA, hA = _oracle_fit(sp0, unit(sp0.float()), pkv, P, block, cur, tr)
+        spB, hB = _oracle_fit(sp0, unit(torch.randn(sp0.shape, generator=g, device=dev)), pkv, P, block, cur, tr)
+        # the next chunk, the window slid, the memory kept
+        n0, n1 = c1, min(c1 + a.C, La); nxt = {}
+        if n1 - n0 >= 4 and n1 - first <= ref_h.size(0):
+            with torch.no_grad():
+                Rn = min(n0, a.rw); blk2 = torch.cat([embed(a_ids[:, n0 - Rn:n0]).to(dt), embed(a_ids[:, n0:n1]).to(dt)], 1)
+                tr2 = teacher_rows(ref_h[n0 - first:n1 - first])
+                for nm, sp_ in (("pooler", sp0), ("seeded", spA), ("random", spB)):
+                    nxt[nm] = round(_mem_kl(sp_, pkv, P, blk2, n1 - n0, tr2, 0).mean().item(), 4)
+        cs = F.cosine_similarity(spA, sp0, dim=-1).mean().item(); csB = F.cosine_similarity(spB, sp0, dim=-1).mean().item()
+        rel = ((spA - sp0).norm() / sp0.norm()).item(); relB = ((spB - sp0).norm() / sp0.norm()).item(); relAB = ((spA - spB).norm() / sp0.norm()).item()
+        ORC.append({"c0": c0, "nd": int(nd_end), "window": klw, "pooler": kl0, "seeded": hA[-1], "random": hB[-1], "next": nxt,
+                    "rel": rel, "cos": cs, "relB": relB, "cosB": csB, "relAB": relAB})
+        log(f"[sp] oracle pos {c0} (distant {nd_end}): KL window-only {klw:.4f} | pooler {kl0:.4f} | slots optimised from the pooler "
+            f"{' > '.join(str(x) for x in hA)} | from random {' > '.join(str(x) for x in hB)} | next chunk, memory kept: {nxt} | "
+            f"move from the pooler's output: seeded {rel:.3f} (cos {cs:.3f}), random optimum {relB:.3f} (cos {csB:.3f}), between the two optima {relAB:.3f}")
 
 
 def run_trace(ids, P, train, ref_h=None):
@@ -1927,6 +2028,19 @@ elif a.mode == "rollout":
                 + (f" | steps taken from the masked twin {100 * PWN[0] / max(PWN[1], 1):.2f}%" if (a.para_window or a.twin_minent) else "")
                 + (" | time " + " ".join(f"{k} {100 * RT[k] / max(sum(RT[x] for x in ('prompt', 'memory', 'window', 'decode')), 1e-9):.0f}%" for k in ("prompt", "memory", "window", "decode"))
                    + f" (chunks {RT['chunks']}, streams {RT['streams'] / max(RT['chunks'], 1):.1f}, prompt {RT['ptok'] / max(RT['streams'], 1):.0f} + window {RT['wtok'] / max(RT['streams'], 1):.0f} tokens re-read per stream-chunk)" if a.kv_mem else ""))
+elif a.mode == "oracle":
+    pooler.eval(); t0 = time.time()
+    for p_ in pooler.parameters(): p_.requires_grad_(False)
+    for ids, P in data: oracle_trace(ids, P)
+    if ORC:
+        import statistics as st_
+        m_ = lambda k: st_.median(r[k] for r in ORC); mn = lambda k: sum(r[k] for r in ORC) / len(ORC)
+        nx = lambda k: st_.median(r["next"][k] for r in ORC if r["next"])
+        log(f"[sp] oracle {tag} {os.path.basename(a.ckpt) or 'untrained'}: {len(ORC)} positions, {a.oracle_steps} steps | median KL: window-only "
+            f"{m_('window'):.4f} pooler {m_('pooler'):.4f} slots optimised from the pooler {m_('seeded'):.4f} from random {m_('random'):.4f} | "
+            f"next chunk, memory kept (median): pooler {nx('pooler'):.4f} seeded {nx('seeded'):.4f} random {nx('random'):.4f} | mean move from the "
+            f"pooler's output: seeded {mn('rel'):.3f} (cos {mn('cos'):.3f}), random optimum {mn('relB'):.3f} (cos {mn('cosB'):.3f}), between optima "
+            f"{mn('relAB'):.3f} ({time.time() - t0:.0f}s)")
 elif a.mode == "eval":
     pooler.eval(); t0 = time.time(); K = A_ = N = 0
     for ids, P in data:
