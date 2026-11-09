@@ -252,7 +252,9 @@
 # next one (0.069 vs 0.059), as far from the pooler's output as a random optimum (1.17 vs 1.37, cos 0.31). So the question is
 # asked properly: the slots fitted on the next 4 chunks together (--oracle-horizon 4), scored on the 2 chunks after those, 4
 # consecutive positions in each of 4 chains, neighbour statistics included. After serial 87's run, before the side checks.
-SER=88
+# serial 89: serial 85 removed serial 84's marker before running it, so the next ctl run started a second copy of the side
+# checks beside the oracle run (GPU shared, the oracle slowed). The stray copy is stopped; serial 88 runs the checks later.
+SER=89
 if [ -f /root/.boxrmx_serial ] && [ "$(cat /root/.boxrmx_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxrmx_serial
 [ -d /venv/main/bin ] && export PATH=/venv/main/bin:$PATH
@@ -1253,5 +1255,8 @@ bash /root/s84.sh; rm -f STOP_KQ
 exec bash /root/kvq_job.sh
 JOB
   setsid nohup bash -c 'bash /root/s88.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
+fi
+if [ ! -e /root/.s89stray ]; then touch /root/.s89stray /root/.s84idle
+  pkill -f "bash /root/s84.sh"; sleep 1; pkill -f "sp_gk.py"; echo "[kp] s89: the stray side-check copy stopped; the oracle run has the GPU $(date -u)"
 fi
 # CTL-END
