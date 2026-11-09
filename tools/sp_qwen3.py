@@ -89,6 +89,13 @@ ap.add_argument("--end-train", action="store_true", help="--par: also train shor
                 "block), and always one block holding the end of the thought")
 ap.add_argument("--end-weight", type=float, default=1.0, help="--par: KL weight of the rows from 32 tokens before </think> "
                 "to 8 after")
+ap.add_argument("--att-prior", type=float, default=0.0, help="the model's own attention decides where the pooler looks: while a token sits "
+                "in the raw window, the attention it receives from later queries (middle layers, summed) is recorded; once it is in the "
+                "distant buffer, att-prior x log(its share) is added to the pooler's attention logits (0 = off). The pooler's own attention "
+                "collapses onto ~20 sink tokens (spaces, commas, digits, <think>) whatever the length - this pins it to what the model read")
+ap.add_argument("--att-layers", default="8-19", help="--att-prior: decoder layers whose attention is summed (a-b inclusive)")
+ap.add_argument("--evict-by", default="pooler", choices=["pooler", "model"], help="--maxd eviction by the pooler's mass or by the model's "
+                "attention (needs --att-prior > 0 or --evict-by model to record it)")
 ap.add_argument("--drop-top", type=int, default=0, help="distant buffer: drop the N tokens with the MOST pooling mass before pooling (0 = off). "
                 "The mass sits on ~20 tokens whatever the length; if they are sinks (punctuation, digits), dropping them should force it onto content")
 ap.add_argument("--fifo", type=int, default=0, help="distant buffer: keep only the newest N tokens (oldest dropped first) - "
@@ -307,7 +314,7 @@ class AttnPoolSP(nn.Module):
     def _run(self, past_emb, want_mass, kpm=None):
         B, L = past_emb.size(0), past_emb.size(1)
         if L > 0 and self.pe_rev:   # distance from the newest real token of each row (right padding)
-            lens = (~kpm).sum(1) if kpm is not None else torch.full((B,), L, device=past_emb.device)
+            lens = (~kpm).sum(1) if kpm is not None and kpm.dtype == torch.bool else torch.full((B,), L, device=past_emb.device)
             idx = (lens[:, None] - 1 - torch.arange(L, device=past_emb.device)[None]).clamp(min=0)
             past = past_emb + self.pe(L, past_emb.device)[idx]
         elif L > 0:
@@ -318,7 +325,7 @@ class AttnPoolSP(nn.Module):
         mass = torch.zeros(B, L, device=past_emb.device) if want_mass else None
         for blk in self.blocks:
             if want_mass:
-                q, w = blk(q, past, return_w=True)
+                q, w = blk(q, past, return_w=True, kpm=kpm)
                 if w is not None: mass = mass + w.sum(dim=1)
             else:
                 q = blk(q, past, kpm=kpm)
@@ -339,7 +346,7 @@ class AttnPoolSP(nn.Module):
             q = blk.forward_prefix(q, K, V, lens)
         sp = self.ln_out(q)
         return sp / sp.norm(dim=-1, keepdim=True).clamp(min=1e-6) * self.out_scale.abs()
-    def forward_with_mass(self, past_emb): return self._run(past_emb, True)
+    def forward_with_mass(self, past_emb, kpm=None): return self._run(past_emb, True, kpm)
 
 
 with torch.no_grad():
@@ -464,19 +471,32 @@ def evict_topk(ids, mass, maxD):
     return ids.gather(1, idx)
 
 
+def att_bias(imp):
+    """(1, L) importance -> the additive bias on the pooler's attention logits (None when --att-prior is off)"""
+    if not a.att_prior or imp is None or imp.numel() == 0: return None
+    sh = imp.float().clamp(min=0) + 1e-6; sh = sh / sh.sum(dim=1, keepdim=True)
+    return a.att_prior * (sh.log() - sh.log().mean(dim=1, keepdim=True))
+
+
 @torch.no_grad()
-def update_buffer(kept, absorbed, src, nd_end, feat=None):
+def update_buffer(kept, absorbed, src, nd_end, feat=None, imp=None, src_imp=None):
+    """imp: (1, L) the model's attention importance of the kept tokens (--att-prior / --evict-by model); src_imp: (1, T) of src"""
     if nd_end > absorbed:
-        kept = torch.cat([kept, src[:, absorbed:nd_end]], 1); absorbed = nd_end
-        if a.fifo and kept.size(1) > a.fifo: kept = kept[:, -a.fifo:]
+        kept = torch.cat([kept, src[:, absorbed:nd_end]], 1)
+        if imp is not None: imp = torch.cat([imp, src_imp[:, absorbed:nd_end]], 1)
+        absorbed = nd_end
+        if a.fifo and kept.size(1) > a.fifo:
+            kept = kept[:, -a.fifo:]; imp = imp[:, -a.fifo:] if imp is not None else None
         if a.maxd and kept.size(1) > a.maxd:
-            _, mass = pooler.forward_with_mass(feat(kept) if feat else embed(kept).float())
-            kept = evict_topk(kept, mass, a.maxd)
+            if a.evict_by == "model" and imp is not None: mass = imp
+            else: _, mass = pooler.forward_with_mass(feat(kept) if feat else embed(kept).float(), att_bias(imp))
+            idx = mass.topk(a.maxd, dim=1).indices.sort(dim=1).values
+            kept = kept.gather(1, idx); imp = imp.gather(1, idx) if imp is not None else None
         if a.drop_top and kept.size(1) > a.drop_top + 64:
-            _, mass = pooler.forward_with_mass(feat(kept) if feat else embed(kept).float())
+            _, mass = pooler.forward_with_mass(feat(kept) if feat else embed(kept).float(), att_bias(imp))
             keep_ = torch.ones_like(mass, dtype=torch.bool); keep_.scatter_(1, mass.topk(a.drop_top, dim=1).indices, False)
-            kept = kept[keep_].view(1, -1)
-    return kept, absorbed
+            kept = kept[keep_].view(1, -1); imp = imp[keep_].view(1, -1) if imp is not None else None
+    return (kept, absorbed) if imp is None and src_imp is None else (kept, absorbed, imp)
 
 
 def kv_of(cache, li):
@@ -1269,6 +1289,7 @@ def rollout_kv(prompts, nslot):
 
 PARA_END_L = None
 PWN = [0, 0]   # --para-window: openings sampled from the masked twin, all sampled steps
+ATTLOG = [False]
 
 
 RT = {"prompt": 0.0, "memory": 0.0, "window": 0.0, "decode": 0.0, "chunks": 0, "streams": 0, "wtok": 0, "ptok": 0}   # where rollout_kvmem's time goes
@@ -1290,11 +1311,17 @@ def rollout_kvmem(prompts, nslot):
     if TW > 1 and PARA_END_L is None: PARA_END_L = [tok.decode([i]).endswith("\n\n") for i in range(len(tok))]
     todo = list(range(len(prompts)))[::-1]; act = []
     gen = [[] for _ in prompts]; ended = [False] * len(prompts); kept = [None] * len(prompts); absorbed = [0] * len(prompts)
+    use_att = a.att_prior > 0 or a.evict_by == "model"   # the model's attention on each generated token, while it sits in the window
+    if use_att:
+        lo_, hi_ = (int(x) for x in a.att_layers.split("-")); ATT_L = list(range(lo_, hi_ + 1))
+        impT = [torch.zeros(0, device=dev) for _ in prompts]; kimp = [None] * len(prompts)
+        assert TW == 1, "--att-prior with the masked twin is not implemented"
     while todo or act:
         full = lambda j: len(prompts[j]) + a.S + a.rw + a.C
         while todo and len(act) < nslot and (not act or not a.grpo_tok_budget
                                              or TW * (len(act) + 1) * max(full(x) for x in act + [todo[-1]]) <= a.grpo_tok_budget):
             j = todo.pop(); act.append(j); kept[j] = torch.zeros(1, 0, dtype=torch.long, device=dev)
+            if use_att: kimp[j] = torch.zeros(1, 0, device=dev)
         N = len(act); Ps = [len(prompts[j]) for j in act]; Pm = max(Ps)
         # 1) the prompts, left-padded
         pin = torch.zeros((N, Pm), dtype=torch.long, device=dev); pm = torch.zeros((N, Pm), dtype=torch.long, device=dev)
@@ -1310,11 +1337,19 @@ def rollout_kvmem(prompts, nslot):
         Rs, has = [], []
         for b, j in enumerate(act):
             c0 = len(gen[j]); R = min(c0, a.rw); nd = c0 - R
-            if nd > absorbed[j]: kept[j], absorbed[j] = update_buffer(kept[j], absorbed[j], torch.tensor([gen[j]], device=dev), nd)
+            if nd > absorbed[j]:
+                if use_att:
+                    si = impT[j][None].clone(); si[:, :2] = 0   # the first generated tokens (<think>, a newline) are the model's own sinks
+                    kept[j], absorbed[j], kimp[j] = update_buffer(kept[j], absorbed[j], torch.tensor([gen[j]], device=dev), nd, imp=kimp[j], src_imp=si)
+                else: kept[j], absorbed[j] = update_buffer(kept[j], absorbed[j], torch.tensor([gen[j]], device=dev), nd)
             Rs.append(R); has.append(kept[j].size(1) > 0 and not a.no_sp)
         mm = torch.tensor([[1 if h else 0] * a.S for h in has] + [[0] * a.S for _ in has] * (TW - 1), dtype=torch.long, device=dev)
         if any(has):
-            sp = torch.cat([pooler(embed(kept[j]).float()) if h else torch.zeros(1, a.S, H, device=dev) for j, h in zip(act, has)], 0)
+            sp = torch.cat([pooler(embed(kept[j]).float(), kpm=att_bias(kimp[j]) if use_att else None) if h else torch.zeros(1, a.S, H, device=dev) for j, h in zip(act, has)], 0)
+            if use_att and not ATTLOG[0]:   # once: what the model's attention importance looks like on the first distant buffer
+                j0 = next(j for j, h in zip(act, has) if h); sh = kimp[j0][0].clamp(min=0); sh = sh / sh.sum().clamp(min=1e-9)
+                ATTLOG[0] = True; log(f"[sp] att-prior {a.att_prior}: first distant buffer {sh.numel()} tokens, importance share of the top 20 {sh.topk(min(20, sh.numel())).values.sum().item():.2f}, "
+                                      f"zero-importance tokens {(sh == 0).sum().item()}, bias range {att_bias(kimp[j0]).min().item():+.2f}..{att_bias(kimp[j0]).max().item():+.2f}")
             mem = kv_memory(sp, torch.tensor(Ps, device=dev)[:, None] + torch.arange(a.S, device=dev)[None])
             mem = [(dup(k_), dup(v_)) for k_, v_ in mem]
             nc = DynamicCache()
@@ -1346,6 +1381,7 @@ def rollout_kvmem(prompts, nslot):
             last = plast
         t1_ = _now(); RT["window"] += t1_ - t_; t_ = t1_; RT["wtok"] += N * Wm
         nxt = dup(torch.tensor([[Ps[b] + (a.S if has[b] else 0) + Rs[b]] for b in range(N)], device=dev)); fin = [False] * N
+        if use_att: c0s = [len(gen[j]) for j in act]; W0 = Pm + a.S + Wm   # key index where this chunk's new tokens start
         for _ in range(a.C):
             if TW > 1:   # the memory-masked twin: paragraph openings / a mix / the lower-entropy side
                 lm_, lw_ = last[:N].float(), last[N:].float()
@@ -1365,12 +1401,22 @@ def rollout_kvmem(prompts, nslot):
                 if fin[b]: continue
                 if nx[b] in stop: fin[b] = True; ended[j] = True; continue
                 gen[j].append(nx[b])
+                if use_att: impT[j] = torch.cat([impT[j], torch.zeros(1, device=dev)])
                 if a.roll_lp: LPG.setdefault(j, []).append(lpn[b])
                 if len(gen[j]) >= a.max_len: fin[b] = True
             if all(fin): break
             amask = torch.cat([amask, torch.ones((TW * N, 1), device=dev, dtype=torch.long)], 1)
+            if use_att: llm.set_attn_implementation("eager")
             o = llm(input_ids=dup(torch.tensor([[gen[j][-1] if gen[j] else 0] for j in act], device=dev)), attention_mask=amask,
-                    position_ids=nxt, past_key_values=cache, use_cache=True, logits_to_keep=1)
+                    position_ids=nxt, past_key_values=cache, use_cache=True, logits_to_keep=1, output_attentions=use_att)
+            if use_att:
+                llm.set_attn_implementation("sdpa")
+                sc_ = sum(o.attentions[l_][:, :, 0, :].float().sum(1) for l_ in ATT_L)   # (N, keys): the attention the new token paid to each key
+                for b, j in enumerate(act):
+                    if fin[b]: continue
+                    R = Rs[b]; g0 = c0s[b] - R; na = len(gen[j]) - c0s[b]
+                    if R: impT[j][g0:g0 + R] += sc_[b, W0 - R:W0]
+                    if na: impT[j][c0s[b]:c0s[b] + na] += sc_[b, W0:W0 + na]
             last = o.logits[:, -1]; nxt = nxt + 1
         del cache; RT["decode"] += _now() - t_
         act = [j for b, j in enumerate(act) if not fin[b]]

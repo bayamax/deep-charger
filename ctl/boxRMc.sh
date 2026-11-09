@@ -185,7 +185,12 @@
 # serial 68: by token type the mass goes to spaces, commas and digits (6% / 3.8% / 3.7%, over 80-140 occurrences each) and
 # to single tokens such as <think> (3.4% on one position): the heaviest positions still need naming. massprof now lists the
 # tokens at the 20 heaviest positions of each text and their position; queued with the drop-top eval.
-SER=68
+# serial 69: the model's own attention decides where the pooler looks (the user's idea): --att-prior records, per generated
+# token, the attention it received from later tokens while in the window (layers 8-19) and adds log(share) to the pooler's
+# attention logits over the distant buffer; the first two generated tokens (<think>, newline) count as the model's own
+# sinks and are zeroed. One-off job: v38 on the 60 with --att-prior 1.0 (no retraining yet - does the LLM already read
+# the re-aimed memory?).
+SER=69
 if [ -f /root/.boxrmx_serial ] && [ "$(cat /root/.boxrmx_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxrmx_serial
 [ -d /venv/main/bin ] && export PATH=/venv/main/bin:$PATH
@@ -875,5 +880,23 @@ python3 sp_qwen3.py massprof --traces mp_in.jsonl $M --ckpt kvg_best.pt --max-le
 grep -E "by position|heaviest|Error|Traceback" run_mp3.log | tail -3 | sed 's/^\[sp\]/[kg]/' | cut -c1-900
 EX
   echo "[kg] s68: massprof (heaviest positions) queued in $F $(date -u)" >> /root/w/w.log
+fi
+if [ ! -e /root/.s69prior ]; then touch /root/.s69prior
+  [ -e /root/w/kvg_extra.running ] && F=/root/w/kvg_extra_next || F=/root/w/kvg_extra
+  cat >> $F <<'EX'
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token); cd /root/w; R=baya1116/hypernet-sp-distill
+RAW=https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i
+curl -sS -o sp_new.py "$RAW/tools/sp_qwen3.py?nocache=$(date +%s)"; grep -q '"--att-prior"' sp_new.py && mv sp_new.py sp_qwen3.py
+M="--S 32 --heads 8 --layers 3 --ffn 2048 --rw 1024 --C 128 --maxd 0 --kv-mem --kv-rank 512"
+o=evalx_v38_attprior1_s1.jsonl; rm -f $o
+python3 sp_qwen3.py rollout --traces rl_eval60.jsonl $M --att-prior 1.0 --ckpt kvg_best.pt --max-len 12288 --roll-batch 48 --grpo-tok-budget 60000 --seed 1 --roll-out $o --log sp_kvg.log > run_ap.log 2>&1
+grep -E "att-prior|Error|Traceback" run_ap.log | tail -2 | cut -c1-300 | sed 's/^\[sp\]/[kg]/'
+python3 -c "from huggingface_hub import HfApi; HfApi().upload_file(path_or_fileobj='$o', path_in_repo='archive/sp3/kvg/$o', repo_id='$R')"
+echo "[kg] eval v38 att-prior1 seed 1: $(python3 -c "
+import json, sys; sys.path.insert(0, '.')
+from sp_mathcheck import correct
+rs = [json.loads(l) for l in open('$o')]; print(f'{sum(correct(r) for r in rs)}/{len(rs)} correct, closed {sum(\"</think>\" in r[\"text\"] for r in rs)}')") (v38 plain: 44 / 41) $(date -u)"
+EX
+  echo "[kg] s69: the --att-prior 1.0 eval of v38 queued in $F $(date -u)" >> /root/w/w.log
 fi
 # CTL-END
