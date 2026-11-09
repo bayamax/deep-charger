@@ -244,7 +244,11 @@
 # oracle runs now, the side checks after it, the on-policy job resumes after those (round 2 from kvq.pt = round 1's weights).
 # serial 86: the user - generation on cheap boxes. The weights after round 1 and the prompt list go to the hub now (no GPU
 # needed), three ctl/boxKQ<i>.sh workers write round 2's texts meanwhile; the on-policy job resumes with WORKERS=3 and only trains.
-SER=86
+# serial 87: the user - within one chain of thought, how do the pooler-seeded optima of consecutive positions relate (cosine
+# between neighbours, the direction of the correction, the previous chunk's optimum on the next chunk)? If they are close, the
+# target is a smooth function a pooler can learn and the rest is distillation. Runs right after the first oracle (6 consecutive
+# chunk starts in each of 2 math + 2 competition traces), then the side checks, then the on-policy job resumes.
+SER=87
 if [ -f /root/.boxrmx_serial ] && [ "$(cat /root/.boxrmx_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxrmx_serial
 [ -d /venv/main/bin ] && export PATH=/venv/main/bin:$PATH
@@ -1207,5 +1211,24 @@ put kvq_prompts.jsonl kvq/prompts.jsonl; put kvq.pt kvq/kvq_v$rd.pt; echo $rd > 
 echo "[kq] s86: version $rd and $(wc -l < kvq_prompts.jsonl) prompts published for 3 workers; the job resumes with WORKERS=3 after the oracle and the side checks $(date -u)"
 JOB
   setsid nohup bash -c 'bash /root/s86.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
+fi
+if [ ! -e /root/.s87run ]; then touch /root/.s87run
+  cat > /root/s87.sh <<'JOB'
+cd /root/w; export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+RAW=https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i; R=baya1116/hypernet-sp-distill
+while pgrep -f "sp_or.py oracle" > /dev/null; do sleep 30; done   # the first oracle finishes
+pkill -f "bash /root/s85.sh"; pkill -f "bash /root/s84.sh"; pkill -f "bash /root/kvq_job.sh"; sleep 2; pkill -f "sp_gk.py"; pkill -f "sp_qwen3.py"; sleep 5; touch STOP_KQ
+for _t in $(seq 60); do curl -sS -o sp_or2.py "$RAW/tools/sp_qwen3.py?nocache=$(date +%s)"; grep -q "oracle-run" sp_or2.py && break; sleep 120; done
+head -n 2 held_math.jsonl > orun_in.jsonl; head -n 2 held_comp.jsonl >> orun_in.jsonl
+M="--S 32 --heads 8 --layers 3 --ffn 2048 --rw 1024 --C 128 --maxd 0 --kv-mem --kv-rank 512"; AP="--att-prior 1.0 --att-layers 8-19 --att-cap 1.0"
+echo "[kp] s87: oracle run - 6 consecutive positions in each of 4 chains of thought $(date -u)"
+python3 sp_or2.py oracle --traces orun_in.jsonl --max-len 6144 $M $AP --ckpt kvp_seg2.pt --oracle-steps 200 --oracle-lr 1e-3 --oracle-run 6 --log sp_orun.log > run_orun.log 2>&1
+grep -E "^\[sp\] oracle|Error|Traceback" run_orun.log | cut -c1-700 | sed 's/^\[sp\]/[kp]/'
+python3 -c "from huggingface_hub import HfApi; HfApi().upload_file(path_or_fileobj='sp_orun.log', path_in_repo='archive/sp3/kvp/oracle_run.log', repo_id='$R')" > /dev/null 2>&1
+echo "[kp] s87 done - the side checks, then the on-policy job (workers) $(date -u)"
+bash /root/s84.sh; rm -f STOP_KQ
+exec bash /root/kvq_job.sh
+JOB
+  setsid nohup bash -c 'bash /root/s87.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
 fi
 # CTL-END

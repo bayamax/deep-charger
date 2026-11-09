@@ -27,6 +27,9 @@ ap.add_argument("mode", choices=["train", "eval", "profile", "rollout", "grpo", 
 ap.add_argument("--oracle-steps", type=int, default=200, help="oracle: Adam steps on the 32 slots themselves at each position")
 ap.add_argument("--oracle-lr", type=float, default=1e-3, help="oracle: Adam lr on the slots' pre-normalisation parameters (unit rows, so a coordinate is ~0.02)")
 ap.add_argument("--oracle-pos", default="0.5,0.85", help="oracle: positions per trace as fractions of its chunk starts")
+ap.add_argument("--oracle-run", type=int, default=0, help="oracle: instead, this many CONSECUTIVE chunk starts from the trace's middle - how the "
+                "pooler-seeded optima of one chain of thought relate to each other (cosine, the correction's direction, the previous "
+                "optimum's KL on the next chunk): a smooth target a pooler can learn, or unrelated solutions")
 ap.add_argument("--model", default="Qwen/Qwen3-1.7B")
 ap.add_argument("--traces", required=True)
 ap.add_argument("--n", type=int, default=0); ap.add_argument("--skip", type=int, default=0)
@@ -797,7 +800,11 @@ def oracle_trace(ids, P):
         ref_h = teacher_hidden(ids, P + first, T)
         pc = DynamicCache(); llm(input_ids=ids[None, :P], past_key_values=pc, use_cache=True)
         pkv = [tuple(t for t in kv_of(pc, li)) for li in range(NL)]
-    targets = {c0s[min(len(c0s) - 1, int(float(f) * len(c0s)))] for f in a.oracle_pos.split(",")}
+    if a.oracle_run > 0:
+        st_ = max(0, min(len(c0s) - a.oracle_run, len(c0s) // 2)); targets = set(c0s[st_:st_ + a.oracle_run])
+    else:
+        targets = {c0s[min(len(c0s) - 1, int(float(f) * len(c0s)))] for f in a.oracle_pos.split(",")}
+    prev = None   # --oracle-run: (sp0, spA, spB) of the previous position of this trace
     kept = torch.zeros(1, 0, dtype=torch.long, device=dev); absorbed = 0; use_att = bool(ATT_L)
     impT = torch.zeros(La, device=dev); kimp = torch.zeros(1, 0, device=dev)
     for c0 in range(0, La, a.C):
@@ -844,8 +851,21 @@ def oracle_trace(ids, P):
                     nxt[nm] = round(_mem_kl(sp_, pkv, P, blk2, n1 - n0, tr2, 0).mean().item(), 4)
         cs = F.cosine_similarity(spA, sp0, dim=-1).mean().item(); csB = F.cosine_similarity(spB, sp0, dim=-1).mean().item()
         rel = ((spA - sp0).norm() / sp0.norm()).item(); relB = ((spB - sp0).norm() / sp0.norm()).item(); relAB = ((spA - spB).norm() / sp0.norm()).item()
-        ORC.append({"c0": c0, "nd": int(nd_end), "window": klw, "pooler": kl0, "seeded": hA[-1], "random": hB[-1], "next": nxt,
-                    "rel": rel, "cos": cs, "relB": relB, "cosB": csB, "relAB": relAB})
+        ent = {"c0": c0, "nd": int(nd_end), "window": klw, "pooler": kl0, "seeded": hA[-1], "random": hB[-1], "next": nxt,
+               "rel": rel, "cos": cs, "relB": relB, "cosB": csB, "relAB": relAB}
+        if a.oracle_run > 0 and prev is not None:   # this position against the previous one of the same chain of thought
+            p0, pA, pB = prev; cosf = lambda x, y: F.cosine_similarity(x, y, dim=-1).mean().item()
+            with torch.no_grad():
+                kprevA = _mem_kl(pA, pkv, P, block, cur, tr, 0).mean().item(); kprevB = _mem_kl(pB, pkv, P, block, cur, tr, 0).mean().item()
+            ent["pair"] = {"cos_pooler": cosf(sp0, p0), "cos_seeded": cosf(spA, pA), "cos_random": cosf(spB, pB),
+                           "cos_corr": F.cosine_similarity((spA - sp0).flatten(), (pA - p0).flatten(), dim=0).item(),
+                           "kl_prev_seeded": kprevA, "kl_prev_random": kprevB}
+            pr_ = ent["pair"]
+            log(f"[sp] oracle-run pos {c0} vs {c0 - a.C}: cos pooler {pr_['cos_pooler']:.3f} seeded optima {pr_['cos_seeded']:.3f} random optima "
+                f"{pr_['cos_random']:.3f} | corrections (optimum - pooler) cos {pr_['cos_corr']:.3f} | KL on this chunk: pooler {kl0:.4f} own optimum "
+                f"{hA[-1]:.4f} previous seeded optimum {kprevA:.4f} previous random optimum {kprevB:.4f} window-only {klw:.4f}")
+        if a.oracle_run > 0: prev = (sp0, spA, spB)
+        ORC.append(ent)
         log(f"[sp] oracle pos {c0} (distant {nd_end}): KL window-only {klw:.4f} | pooler {kl0:.4f} | slots optimised from the pooler "
             f"{' > '.join(str(x) for x in hA)} | from random {' > '.join(str(x) for x in hB)} | next chunk, memory kept: {nxt} | "
             f"move from the pooler's output: seeded {rel:.3f} (cos {cs:.3f}), random optimum {relB:.3f} (cos {csB:.3f}), between the two optima {relAB:.3f}")
@@ -2041,6 +2061,13 @@ elif a.mode == "oracle":
             f"next chunk, memory kept (median): pooler {nx('pooler'):.4f} seeded {nx('seeded'):.4f} random {nx('random'):.4f} | mean move from the "
             f"pooler's output: seeded {mn('rel'):.3f} (cos {mn('cos'):.3f}), random optimum {mn('relB'):.3f} (cos {mn('cosB'):.3f}), between optima "
             f"{mn('relAB'):.3f} ({time.time() - t0:.0f}s)")
+        pairs = [r["pair"] for r in ORC if "pair" in r]
+        if pairs:
+            md = lambda k: st_.median(p_[k] for p_ in pairs); mp = lambda k: st_.median(r[k] for r in ORC if "pair" in r)
+            log(f"[sp] oracle-run {tag}: {len(pairs)} consecutive pairs ({a.C} tokens apart) in {len(data)} chains | median cosine between neighbours: pooler "
+                f"outputs {md('cos_pooler'):.3f} seeded optima {md('cos_seeded'):.3f} random optima {md('cos_random'):.3f} | corrections "
+                f"{md('cos_corr'):.3f} | median KL on a chunk: pooler {mp('pooler'):.4f} own optimum {mp('seeded'):.4f} the previous chunk's seeded "
+                f"optimum {md('kl_prev_seeded'):.4f} its random optimum {md('kl_prev_random'):.4f} window-only {mp('window'):.4f}")
 elif a.mode == "eval":
     pooler.eval(); t0 = time.time(); K = A_ = N = 0
     for ids, P in data:
