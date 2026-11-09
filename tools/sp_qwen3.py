@@ -172,6 +172,9 @@ ap.add_argument("--kv-keep", type=int, default=0, help="--kv-evict: a fixed budg
                 "as computed and at their true positions - a bounded REAL KV cache chosen by the model's own attention, no training")
 ap.add_argument("--kv-select", default="mean", help="--kv-keep: how the older entries are ranked - mean (attention received per step cached), cum, "
                 "ema0.9, ema0.98, last (the last chunk), or mlp:<path> (the learned selector of tools/kvsel_train.py on the same features)")
+ap.add_argument("--kv-layerwise", action="store_true", help="--kv-keep: each hooked layer (--att-layers) keeps its own top-B older entries by its own attention "
+                "statistic (--kv-select mean / cum / ema0.9 / ema0.98 / last); the other layers keep the set chosen by the summed statistic. "
+                "The harness read a per-layer choice ~10% lower in KL")
 ap.add_argument("--kv-keep-path", action="store_true", help="--kv-evict: use the --kv-keep code path even with --kv-keep 0 (a check)")
 ap.add_argument("--win-teacher", action="store_true", help="train/eval: the SP REPLACES the raw window - teacher = the model reading "
                 "[prompt | the last rw answer tokens before chunk start c0 | the chunk] (the raw-window loop, nothing it does not "
@@ -1934,6 +1937,105 @@ def rollout_kvkeep(prompts, nslot):
     return gen, ended
 
 
+@torch.no_grad()
+def rollout_kvlayer(prompts, nslot):
+    """--kv-evict --kv-keep B --kv-layerwise: rollout_kvkeep with a per-layer choice - every hooked layer ranks the older entries by
+    its OWN attention statistic and keeps its own B; the other layers keep the set of the summed statistic. All layers keep the same
+    number of entries per stream, so the cache stays rectangular and one mask serves every layer. Groups: 'sum' and each hooked
+    layer; per group its own column -> answer-index map and chunk statistics (cumulative, last chunk, EMA 0.9, EMA 0.98, max, chunks)."""
+    stop = {i for i in [tok.eos_token_id, tok.convert_tokens_to_ids("<|im_end|>"), tok.convert_tokens_to_ids("<|endoftext|>")] if i is not None and i >= 0}
+    groups = ["sum"] + list(ATT_L); grp = lambda li: li if li in ATT_L else "sum"
+    todo = list(range(len(prompts)))[::-1]; act = []
+    gen = [[] for _ in prompts]; ended = [False] * len(prompts)
+    cache = None; pad = []; lastlog = None
+    cols = {g: [] for g in groups}; ST = {g: None for g in groups}; CH = {g: None for g in groups}
+    per = lambda j: len(prompts[j]) + a.kv_keep + min(a.rw, a.max_len) + a.C
+    sidx = {"mean": None, "cum": 0, "last": 1, "ema0.9": 2, "ema0.98": 3}[a.kv_select if a.kv_select in ("mean", "cum", "last", "ema0.9", "ema0.98") else "mean"]
+    while todo or act:
+        new = []
+        while todo and len(act) + len(new) < nslot and (len(act) + len(new) + 1) * max(per(x) for x in act + new + [todo[-1]]) <= a.kv_budget:
+            new.append(todo.pop())
+        newkv, newlog = {}, {}
+        for j in new:
+            pc = DynamicCache(); o = llm(input_ids=torch.tensor([prompts[j]], device=dev), past_key_values=pc, use_cache=True, logits_to_keep=1)
+            newkv[j] = [kv_of(pc, li) for li in range(NL)]; newlog[j] = o.logits[0, -1].float()
+        keep = []   # (j, old row, old pad, P, {group: indices of the old row's answer columns to keep})
+        for b, j in enumerate(act):
+            P = len(prompts[j]); n = len(cols["sum"][b]); k = min(a.rw, n); sel = {}
+            for g in groups:
+                older = list(range(n - k)); newest = list(range(n - k, n))
+                if a.kv_keep <= 0: older = []
+                elif len(older) > a.kv_keep:
+                    base = pad[b] + P; sl_ = slice(base, base + n - k); st = ST[g]
+                    score = st[0, b, sl_] / st[5, b, sl_].clamp(min=1) if sidx is None else st[sidx, b, sl_]
+                    older = score.topk(a.kv_keep).indices.sort().values.tolist()
+                sel[g] = older + newest
+            keep.append((j, b, pad[b], P, sel))
+        for j in new: keep.append((j, None, 0, len(prompts[j]), {g: [] for g in groups}))
+        Ln = max(P + len(sel["sum"]) for (_, _, _, P, sel) in keep); B = len(keep); pad = [Ln - (P + len(sel["sum"])) for (_, _, _, P, sel) in keep]
+        nc = DynamicCache(); STn = {g: torch.zeros(6, B, Ln, device=dev) for g in groups}
+        srcs = {g: [torch.tensor(list(range(p0, p0 + P)) + [p0 + P + i for i in sel[g]], device=dev, dtype=torch.long) if b is not None else None for (j, b, p0, P, sel) in keep] for g in groups}
+        for li in range(NL):
+            g = grp(li); ref = kv_of(cache, li)[0] if cache is not None else newkv[new[0]][li][0]
+            K = torch.zeros((B, ref.size(1), Ln, ref.size(3)), device=dev, dtype=ref.dtype); V = torch.zeros_like(K)
+            ok, ov = kv_of(cache, li) if cache is not None else (None, None)
+            for r, (j, b, p0, P, sel) in enumerate(keep):
+                if b is None: K[r, :, pad[r]:], V[r, :, pad[r]:] = newkv[j][li][0][0], newkv[j][li][1][0]
+                else: K[r, :, pad[r]:] = ok[b].index_select(1, srcs[g][r]); V[r, :, pad[r]:] = ov[b].index_select(1, srcs[g][r])
+            nc.update(K, V, li)
+            if cache is not None:
+                if hasattr(cache, "layers"): cache.layers[li].keys = cache.layers[li].values = None
+                else: cache.key_cache[li] = cache.value_cache[li] = None
+            del ok, ov
+        for g in groups:
+            for r, (j, b, p0, P, sel) in enumerate(keep):
+                if b is not None: STn[g][:, r, pad[r]:] = ST[g][:, b, srcs[g][r]]
+            cols[g] = [[cols[g][b][i] for i in sel[g]] if b is not None else [] for (j, b, _, _, sel) in keep]
+            CH[g] = torch.zeros(B, Ln, device=dev)
+        cache = nc; ST = STn; del newkv
+        lastlog = torch.stack([lastlog[b] if b is not None else newlog[j] for (j, b, _, _, _) in keep])
+        act = [j for (j, _, _, _, _) in keep]
+        amask = torch.zeros((B, Ln), device=dev, dtype=torch.long)
+        for r in range(B): amask[r, pad[r]:] = 1
+        fin = [False] * B
+        for _ in range(a.C):
+            nx_t = sample_tok(lastlog); nx = nx_t.tolist()
+            if a.roll_lp: lpn = F.log_softmax(lastlog, -1).gather(1, nx_t[:, None])[:, 0].tolist()
+            for r, j in enumerate(act):
+                if fin[r]: continue
+                if nx[r] in stop: fin[r] = True; ended[j] = True; continue
+                gen[j].append(nx[r])
+                if a.roll_lp: LPG.setdefault(j, []).append(lpn[r])
+                if len(gen[j]) >= a.max_len: fin[r] = True
+            if all(fin): break
+            amask = torch.cat([amask, torch.ones((B, 1), device=dev, dtype=torch.long)], 1)
+            pos = torch.tensor([[len(prompts[j]) + max(len(gen[j]) - 1, 0)] for j in act], device=dev)
+            ATTREC["rows"] = 1
+            o = llm(input_ids=torch.tensor([[gen[j][-1] if gen[j] else 0] for j in act], device=dev), attention_mask=amask,
+                    position_ids=pos, past_key_values=cache, use_cache=True, logits_to_keep=1)
+            lastlog = o.logits[:, -1].float()
+            acc = ATTREC["acc"]; ATTREC["acc"] = {}; ATTREC["rows"] = 0
+            live = torch.tensor([0.0 if f else 1.0 for f in fin], device=dev)[:, None]
+            for g in groups:
+                CH[g] = torch.cat([CH[g], torch.zeros(B, 1, device=dev)], 1); ST[g] = torch.cat([ST[g], torch.zeros(6, B, 1, device=dev)], 2)
+                w = sum(acc.values()) if g == "sum" else acc.get(g)
+                if w is not None: CH[g] += w * live
+                for r, j in enumerate(act): cols[g][r].append(len(gen[j]) - 1)
+        for g in groups:
+            st = ST[g]; st[0] += CH[g]; st[1] = CH[g]; st[2] = 0.9 * st[2] + CH[g]; st[3] = 0.98 * st[3] + CH[g]; st[4] = torch.maximum(st[4], CH[g]); st[5] += amask.float()
+        keep_rows = [r for r in range(B) if not fin[r]]
+        if len(keep_rows) < B:
+            sel_ = torch.tensor(keep_rows, device=dev, dtype=torch.long)
+            if keep_rows:
+                c2 = DynamicCache()
+                for li in range(NL):
+                    k_, v_ = kv_of(cache, li); c2.update(k_.index_select(0, sel_), v_.index_select(0, sel_), li)
+                cache = c2; lastlog = lastlog.index_select(0, sel_); ST = {g: ST[g].index_select(1, sel_) for g in groups}
+            else: cache = None; lastlog = None; ST = {g: None for g in groups}
+            act = [act[r] for r in keep_rows]; pad = [pad[r] for r in keep_rows]; cols = {g: [cols[g][r] for r in keep_rows] for g in groups}
+    return gen, ended
+
+
 PARA_END_L = None
 PWN = [0, 0]   # --para-window: openings sampled from the masked twin, all sampled steps
 
@@ -2388,7 +2490,7 @@ elif a.mode == "rollout":
             rb = rows[i:i + step_]
             pr_ = [tok.encode(r["prompt"], add_special_tokens=False) for r in rb]
             LPG.clear()
-            gens = rollout_kvmem(pr_, a.roll_batch)[0] if a.kv_mem else (rollout_kvkeep if (a.kv_keep > 0 or a.kv_keep_path) else rollout_kv)(pr_, a.roll_batch)[0] if a.kv_evict else rollout_cb(pr_, a.roll_batch)[0] if a.roll_cb else rollout(pr_)
+            gens = rollout_kvmem(pr_, a.roll_batch)[0] if a.kv_mem else (rollout_kvlayer if a.kv_layerwise else rollout_kvkeep if (a.kv_keep > 0 or a.kv_keep_path) else rollout_kv)(pr_, a.roll_batch)[0] if a.kv_evict else rollout_cb(pr_, a.roll_batch)[0] if a.roll_cb else rollout(pr_)
             for k_, (r, g) in enumerate(zip(rb, gens)):
                 rec = {"src": r.get("src", ""), "id": r.get("id", ""), "gold": r.get("gold", ""), "prompt": r["prompt"], "text": tok.decode(g)}
                 if a.roll_lp: rec["ids"] = g; rec["lp"] = [round(x, 5) for x in LPG.get(k_, [])]

@@ -295,7 +295,10 @@
 # look cheap one at a time) - the label of a learned selector is now the attention an entry will receive from the next 4 chunks
 # ('fut'; also an oracle rule in the harness). Phase 2 of the harness restarts with it once phase 1 is done; the selector job is
 # refreshed (two selectors, fut and abl labels; the 60 problems with whichever scores lower on held-out).
-SER=107
+# serial 108: phase 1 of the harness (88 positions): window 0.162, widened window (+512 recent) 0.103, mean 0.053, EMA 0.98 0.050,
+# EMA 0.98 per layer 0.046, the ablation label 0.024 (headroom for a learned selector). Per-layer selection is now in the rollout
+# (--kv-layerwise); the selector job's 60-problem runs: the better selector, EMA 0.98 per layer, EMA 0.98.
+SER=108
 if [ -f /root/.boxrmx_serial ] && [ "$(cat /root/.boxrmx_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxrmx_serial
 [ -d /venv/main/bin ] && export PATH=/venv/main/bin:$PATH
@@ -1497,5 +1500,15 @@ setsid nohup bash -c 'bash /root/kvs_job.sh >> /root/w/w.log 2>&1' > /dev/null 2
 sleep 5; exec bash /root/kvt_job.sh
 JOB
   setsid nohup bash -c 'bash /root/s107.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
+fi
+if [ ! -e /root/.s108lw ]; then touch /root/.s108lw
+  cat > /root/s108.sh <<'JOB'
+cd /root/w; RAW=https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i
+for _t in $(seq 60); do curl -sS -o /root/kvt_new.sh "$RAW/ctl/kvt_job.sh?nocache=$(date +%s)"; grep -q "ema098L" /root/kvt_new.sh && break; sleep 120; done
+for _t in $(seq 60); do curl -sS -o sp_lw.py "$RAW/tools/sp_qwen3.py?nocache=$(date +%s)"; grep -q "def rollout_kvlayer" sp_lw.py && break; sleep 120; done
+pkill -f "bash /root/s107.sh"; pkill -f "bash /root/kvt_job.sh"; sleep 1; mv /root/kvt_new.sh /root/kvt_job.sh; cp sp_lw.py sp_kt.py
+echo "[kt] s108: selector job refreshed (per-layer EMA 0.98 run added) $(date -u)"; exec bash /root/kvt_job.sh
+JOB
+  setsid nohup bash -c 'bash /root/s108.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
 fi
 # CTL-END

@@ -2,8 +2,8 @@
 # Option 5, the learned KV selector, end to end and unattended: once the KL harness (ctl/kvs_job.sh) has written its dumps,
 # train the selector on the training dump (tools/kvsel_train.py: pairwise ranking on the exact ablation labels), score it on the
 # held-out traces in the same KL harness beside the attention rules (rule mlp:kvsel_mlp.pt), then - whatever the outcome, the
-# user wants the number - the 60 problems at seed 1 with --kv-keep 512 and the selector, and with EMA 0.9 as the attention
-# counterpart (the equal-total window baselines run in ctl/kvk_job.sh). One GPU: the 60-problem runs wait for each other.
+# user wants the number - the 60 problems at seed 1 with --kv-keep 512 and the selector, with the harness's best attention
+# rule (EMA 0.98, each layer its own choice) and with EMA 0.98 single-set (the equal-total window baselines run in ctl/kvk_job.sh). One GPU: the 60-problem runs wait for each other.
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); cd /root/w
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 R=baya1116/hypernet-sp-distill; RAW=https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i
@@ -27,7 +27,7 @@ if ! grep -q "\[kt\] held-out" w.log; then
   echo "[kt] held-out $(grep -E '^\[sp\] kvsel S|Error|Traceback' run_kt_eval.log | tail -1 | sed 's/^\[sp\] kvsel [^:]*: //' | cut -c1-900)"
 fi
 best=$(grep "\[kt\] held-out" w.log | tail -1 | grep -oE "mlp:kvsel_(fut|abl).pt B=512 [0-9.]+" | sort -k3 -n | head -1 | grep -oE "kvsel_(fut|abl).pt"); best=${best:-kvsel_fut.pt}
-for spec in "mlp:--kv-select mlp:$best" "ema09:--kv-select ema0.9"; do n=${spec%%:*}; fl=${spec#*:}
+for spec in "mlp:--kv-select mlp:$best" "ema098L:--kv-select ema0.98 --kv-layerwise" "ema098:--kv-select ema0.98"; do n=${spec%%:*}; fl=${spec#*:}
   o=kvk_b512_${n}_s1.jsonl; [ -s $o ] && continue
   until ! pgrep -f "sp_qwen3.py rollout" > /dev/null && ! pgrep -f "sp_kt.py rollout" > /dev/null; do sleep 60; done
   t0=$(date +%s); rm -f $o.part
