@@ -94,6 +94,7 @@ ap.add_argument("--att-prior", type=float, default=0.0, help="the model's own at
                 "distant buffer, att-prior x log(its share) is added to the pooler's attention logits (0 = off). The pooler's own attention "
                 "collapses onto ~20 sink tokens (spaces, commas, digits, <think>) whatever the length - this pins it to what the model read")
 ap.add_argument("--att-layers", default="8-19", help="--att-prior: decoder layers whose attention is summed (a-b inclusive)")
+ap.add_argument("--att-cap", type=float, default=0.0, help="--att-prior: bound the pooler's own attention logits to +-cap (cap x tanh(logit / cap)) before the prior is added, so the pooler can move a token's weight at most e^(2 cap) relative to the model's attention and cannot collapse onto a few tokens again (0 = unbounded)")
 ap.add_argument("--evict-by", default="pooler", choices=["pooler", "model"], help="--maxd eviction by the pooler's mass or by the model's "
                 "attention (needs --att-prior > 0 or --evict-by model to record it)")
 ap.add_argument("--drop-top", type=int, default=0, help="distant buffer: drop the N tokens with the MOST pooling mass before pooling (0 = off). "
@@ -267,11 +268,27 @@ class Block(nn.Module):
         w = None
         if past is not None and past.size(1) > 0:
             kn = self.lnk(past)
-            a_, w = self.cross(self.lnq1(q), kn, kn, need_weights=return_w, key_padding_mask=kpm)
+            if kpm is not None and kpm.dtype != torch.bool and a.att_cap > 0:
+                a_, w = self.capped_cross(self.lnq1(q), kn, kpm, return_w)
+            else:
+                a_, w = self.cross(self.lnq1(q), kn, kn, need_weights=return_w, key_padding_mask=kpm)
             q = q + a_
         s, _ = self.selfa(self.lnq2(q), self.lnq2(q), self.lnq2(q), need_weights=False); q = q + s
         q = q + self.ffn(self.lnq3(q))
         return (q, w) if return_w else q
+
+    def capped_cross(self, qn, kn, bias, return_w):
+        """self.cross with the pooler's own logits bounded (--att-cap c): logits = c tanh(q.k / sqrt(d) / c) + bias, the bias being
+        the model's attention prior (att_bias). The pooler can then move a token's weight by at most e^(2c) relative to the prior,
+        so it cannot pile its mass onto a few tokens again. Same weights as self.cross; w averaged over heads as the module's."""
+        B, S, H = qn.shape; h = self.cross.num_heads; d = H // h; W, b = self.cross.in_proj_weight, self.cross.in_proj_bias; c = a.att_cap
+        qp = F.linear(qn, W[:H], b[:H]).view(B, S, h, d).transpose(1, 2)                      # (B, h, S, d)
+        K = F.linear(kn, W[H:2 * H], b[H:2 * H]).view(B, -1, h, d).transpose(1, 2)            # (B, h, L, d)
+        V = F.linear(kn, W[2 * H:], b[2 * H:]).view(B, -1, h, d).transpose(1, 2)
+        sc = torch.matmul(qp, K.transpose(-1, -2)) / math.sqrt(d)                             # (B, h, S, L)
+        w = (c * torch.tanh(sc / c) + bias[:, None, None, :].to(sc.dtype)).softmax(-1)
+        o = torch.matmul(w, V).transpose(1, 2).reshape(B, S, H)
+        return self.cross.out_proj(o), (w.mean(1) if return_w else None)
 
     def project_past(self, past):
         """keys and values of ONE past (1, L, H), projected once (the cross-attention's own weights): (heads, L, d) each"""
@@ -721,7 +738,7 @@ def run_trace(ids, P, train, ref_h=None):
                     ATTLOG[0] = True; sh = kimp[0].clamp(min=0); sh = sh / sh.sum().clamp(min=1e-9); bb = att_bias(kimp)
                     log(f"[sp] att-prior {a.att_prior} (train): first distant buffer {sh.numel()} tokens, importance share of the top 20 "
                         f"{sh.topk(min(20, sh.numel())).values.sum().item():.2f}, zero-importance tokens {(sh == 0).sum().item()}, "
-                        f"bias range {bb.min().item():+.2f}..{bb.max().item():+.2f}")
+                        f"bias range {bb.min().item():+.2f}..{bb.max().item():+.2f}, pooler logits capped at {a.att_cap or 'inf'}")
                 mem = kv_memory(sp, torch.arange(P, P + a.S, device=dev)[None])
                 for li, (k_, v_) in enumerate(pkv): cache.update(torch.cat([k_, mem[li][0]], 2), torch.cat([v_, mem[li][1]], 2), li)
                 off = P + a.S

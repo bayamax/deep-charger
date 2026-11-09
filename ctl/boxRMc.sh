@@ -212,7 +212,10 @@
 # split into two arguments; the score step then opened 'kvp_segment'). The job's loop body is already parsed by bash, so
 # the fix needs a restart: the current checkpoint is copied aside, STOP_KP ends the loop after the running segment, and the
 # fixed script starts again (PRE_EV: the copied checkpoint's 60 problems at seed 1 first, then segment 4 onwards as before).
-SER=76
+# serial 77: segment 4 collapsed again under the prior alone (effective mass 50% on 46 tokens, 31/60; segment 2 was 349 tokens,
+# 39/60; KL on kvm's curve both times) - the pooler's own logits are now bounded (--att-cap 1.0) and the run restarts from the
+# segment-2 weights (kvp_seg2.pt), the 60 problems after every segment. Segments 3-4 without the cap are parked in kvp_nocap/.
+SER=77
 if [ -f /root/.boxrmx_serial ] && [ "$(cat /root/.boxrmx_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxrmx_serial
 [ -d /venv/main/bin ] && export PATH=/venv/main/bin:$PATH
@@ -1009,5 +1012,16 @@ rm -f STOP_KP; echo "[kp] s76: restart from $(cat kvp_seg) segments, first the 6
 PRE_EV=kvp_seg$n.pt:segment$n FROM=base exec bash /root/kvp_job.sh
 JOB
   setsid nohup bash -c 'bash /root/s76.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
+fi
+if [ ! -e /root/.s77cap ]; then touch /root/.s77cap
+  cat > /root/s77.sh <<'JOB'
+cd /root/w; RAW=https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i; touch STOP_KP
+pkill -f "bash /root/kvp_job.sh"; pkill -f "bash /root/s76.sh"; sleep 2; pkill -f "sp_qwen3.py train"; pkill -f "sp_qwen3.py eval"; pkill -f "sp_qwen3.py massprof"; pkill -f "sp_qwen3.py rollout"; sleep 10
+mkdir -p kvp_nocap; mv kvp.pt kvp_nocap/kvp_seg$(cat kvp_seg).pt; cp kvp_hist kvp_nocap/kvp_hist; cp kvp_seg2.pt kvp.pt; echo 2 > kvp_seg; head -n 2 kvp_nocap/kvp_hist > kvp_hist; rm -f kvp_next.pt STOP_KP
+for _t in $(seq 60); do curl -sS -o /root/kvp_job.sh "$RAW/ctl/kvp_job.sh?nocache=$(date +%s)"; grep -q "PRE_MP" /root/kvp_job.sh && break; sleep 120; done
+echo "[kp] s77: pooler logits capped at 1.0 under the prior; restart from the segment-2 weights (segments 3-4 without the cap parked in kvp_nocap/), the 60 problems after every segment $(date -u)"
+CAP=1.0 EVERY=1 PRE_MP="kvp.pt:segment 2 cap1" FROM=base exec bash /root/kvp_job.sh
+JOB
+  setsid nohup bash -c 'bash /root/s77.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
 fi
 # CTL-END

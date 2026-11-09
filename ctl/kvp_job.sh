@@ -12,16 +12,22 @@
 # FROM=base (the user: retrain the pooler from the base model): a new pooler on the original model, no checkpoint - the
 # kvm run's recipe exactly plus the prior, so its held-out KL per segment is read against kvm's curve (segment 1 0.0918,
 # 2 ~0.08, 5 0.0675, 8 0.0648; the raw window alone 0.1073). The baselines are skipped (nothing to measure yet).
+# CAP=c (--att-cap): segments 1-2 with the prior alone matched kvm's KL and scored 39/60 (kvm 35) with the mass spread over
+# hundreds of tokens, but by segment 4 the pooler's own logits had grown past the prior (50% of the mass on 46 tokens again,
+# 31/60, KL unchanged at kvm's 0.0691) - the KL does not see the collapse, the 60 problems do. With the cap the pooler's logits
+# are bounded to +-c before the prior is added, so it can reweight a token by at most e^(2c) and cannot collapse. EVERY=n:
+# the 60 problems every n segments (1: every segment, since they are the measure the KL misses).
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); cd /root/w
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 R=baya1116/hypernet-sp-distill; H=https://huggingface.co/$R/resolve/main; RAW=https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i
 put() { for _i in 1 2 3 4 5; do python3 -c "import sys; from huggingface_hub import HfApi; HfApi().upload_file(path_or_fileobj=sys.argv[1], path_in_repo='archive/sp3/'+sys.argv[2], repo_id='$R')" "$1" "$2" > put.err 2>&1 && { echo "[hub] $2"; return 0; }; sleep 60; done; echo "[hub] $2 FAILED"; }
 get() { for _i in 1 2 3; do curl -sSfL -H "Authorization: Bearer $HF_TOKEN" -o "$2" "$H/$1" && return 0; sleep 10; done; return 1; }
-for _t in $(seq 60); do curl -sS -o sp_new.py "$RAW/tools/sp_qwen3.py?nocache=$(date +%s)"; grep -q "def importance_of" sp_new.py && { mv sp_new.py sp_qwen3.py; break; }; sleep 120; done
+for _t in $(seq 60); do curl -sS -o sp_new.py "$RAW/tools/sp_qwen3.py?nocache=$(date +%s)"; grep -q "att-cap" sp_new.py && { mv sp_new.py sp_qwen3.py; break; }; sleep 120; done
 curl -sS -o sp_mathcheck.py "$RAW/tools/sp_mathcheck.py?nocache=$(date +%s)"
 LG=/root/w/sp_kvp.log; LR=${LR:-1e-4}; FROM=${FROM:-v38}
 M="--S 32 --heads 8 --layers 3 --ffn 2048 --rw 1024 --C 128 --maxd 0 --kv-mem --kv-rank 512"
-AP="--att-prior ${AP:-1.0} --att-layers ${AL:-8-19}"
+AP="--att-prior ${AP:-1.0} --att-layers ${AL:-8-19}"; CAP=${CAP:-0}; [ "$CAP" != 0 ] && AP="$AP --att-cap $CAP"   # CAP: the pooler's own logits bounded to +-CAP (0 = off)
+EVERY=${EVERY:-2}   # massprof + the 60 problems every EVERY segments
 if [ ! -s rm_pool.jsonl ]; then   # the KV-memory distillation data (ctl/kvm_job.sh): the gm_* pool, 1500 at the end held out
   for n in $(python3 -c "
 from huggingface_hub import HfApi
@@ -39,7 +45,7 @@ fi
 [ -s kvg_best.pt ] || get archive/sp3/final/spKVF_best_v38.pt kvg_best.pt
 [ -s kvp.pt ] || [ $FROM = base ] || cp kvg_best.pt kvp.pt
 [ -s kvg_v38_s1.jsonl ] || get archive/sp3/kvg/kvg_v38_s1.jsonl kvg_v38_s1.jsonl
-echo "[kp] ready $(date -u) | importance_of in the script: $(grep -c 'def importance_of' sp_qwen3.py) | $AP | lr $LR | start $FROM | from $(cat kvp_seg 2>/dev/null || echo 0) segments"
+echo "[kp] ready $(date -u) | att-cap in the script: $(grep -c 'def capped_cross' sp_qwen3.py) | $AP | lr $LR | start $FROM | from $(cat kvp_seg 2>/dev/null || echo 0) segments | eval every $EVERY"
 score() { python3 -c "
 import json, sys; sys.path.insert(0, '.')
 from sp_mathcheck import correct
@@ -66,6 +72,7 @@ fi
 seg=$(cat kvp_seg 2>/dev/null || echo 0)
 # PRE_EV=<ckpt>:<label>: one 60-problem run at seed 1 before the loop (the segment-2 run of 07:55 fell to the file-name bug above)
 [ -n "$PRE_EV" ] && ev60 "${PRE_EV%%:*}" 1 "${PRE_EV##*:}"
+[ -n "$PRE_MP" ] && mprof "${PRE_MP%%:*}" "${PRE_MP##*:}"   # PRE_MP=<ckpt>:<label>: one massprof before the loop
 while [ ! -e STOP_KP ]; do seg=$((seg + 1)); t0=$(date +%s); x="--const-lr"; [ $seg = 1 ] && x=""
   CK=kvp.pt; [ -s kvp.pt ] || CK=""   # FROM=base: segment 1 starts a new pooler on the original model
   python3 sp_qwen3.py train --traces rm_pool.jsonl --skip $(( ((seg - 1) * 600) % 9600 )) --n 600 --max-len 8192 $M $AP --chunks-per-trace 16 --accum 8 --lr $LR $x --lora-lr 0 ${CK:+--ckpt $CK} --seed $((100 + seg)) --out kvp_next.pt --log $LG > run_kp.log 2>&1
@@ -76,11 +83,11 @@ while [ ! -e STOP_KP ]; do seg=$((seg + 1)); t0=$(date +%s); x="--const-lr"; [ $
   ev=$(evkl --ckpt kvp.pt $AP)
   echo "[kp] segment $seg ($(( $(date +%s) - t0 )) s, OOM skips $(grep -c 'out of memory' run_kp.log)): train $tk | held-out KL by domain, prior on:$ev"
   echo "$ev" | grep -oP "mean \K[0-9.]+" >> kvp_hist; put kvp.pt spKVP_latest.pt; put $LG kvp/kvp.log > /dev/null
-  if [ $((seg % 2)) = 0 ]; then mprof kvp.pt "segment $seg"; ev60 kvp.pt 1 "segment $seg"; fi
+  if [ $((seg % EVERY)) = 0 ]; then mprof kvp.pt "segment $seg"; ev60 kvp.pt 1 "segment $seg"; fi
   if python3 -c "
 import sys; h = [float(x) for x in open('kvp_hist')]
 sys.exit(0 if len(h) > 3 and min(h[-3:]) > min(h[:-3]) * 0.99 else 1)"; then echo "[kp] plateau ($(tr '\n' ' ' < kvp_hist))"; break; fi
 done
-[ $((seg % 2)) = 0 ] || ev60 kvp.pt 1 "segment $seg"
+[ $((seg % EVERY)) = 0 ] || ev60 kvp.pt 1 "segment $seg"
 ev60 kvp.pt 2 "segment $seg"
 echo "[kp] JOB_DONE $(date -u)"
