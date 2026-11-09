@@ -1,0 +1,69 @@
+#!/bin/bash
+# Generation worker 0 of 3 for the on-policy distillation (the user: generation belongs on cheap boxes). Reads
+# archive/sp3/kvq/VERSION on the hub; with version v's weights (kvq/kvq_v<v>.pt) it writes its share (problem i with
+# i % 3 == 0) of round v+1's problems (kvq/prompts.jsonl rows v*48 .. v*48+47) as kvq/gen_v<v>_p0.jsonl,
+# token ids included (--roll-lp), and every 2nd version its share of the 60 problems at seed 1 as kvq/ev_v<v>_p0.jsonl.
+# The trainer (ctl/kvq_job.sh WORKERS=3) trains on the gen parts and scores the ev parts. Same memory settings as the
+# trainer: the model's attention as the prior, the pooler's logits capped at 1.0. Touch /root/w/PAUSE_G to hold.
+SER=1; SHARD=0; NW=3
+if [ -f /root/.boxkq_serial ] && [ "$(cat /root/.boxkq_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
+echo $SER > /root/.boxkq_serial
+[ -d /venv/main/bin ] && export PATH=/venv/main/bin:$PATH
+[ -s /root/.hf_token ] || { [ -n "$HF_TOKEN" ] && printf '%s' "$HF_TOKEN" > /root/.hf_token && chmod 600 /root/.hf_token; }
+mkdir -p /root/w
+cat > /root/status.sh <<'ST'
+grep -E "^\[g\]|Error|Traceback|out of memory" /root/w/w.log 2>/dev/null | tail -n 3 | cut -c1-300
+tail -n 1 /root/w/sp_g.log 2>/dev/null | cut -c1-300
+nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv,noheader
+ST
+chmod +x /root/status.sh
+cat > /root/gloop.sh <<'JOB'
+SHARD=0; NW=3; NP=48; EVERY=2; RB=16; TB=20000
+RAW=https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i; R=baya1116/hypernet-sp-distill; H=https://huggingface.co/$R/resolve/main
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True; cd /root/w
+echo "[g] worker $SHARD of $NW up, $(nvidia-smi --query-gpu=name,memory.total --format=csv,noheader) $(date -u)"
+python3 -c "import huggingface_hub" 2>/dev/null || python3 -m pip install -q "huggingface_hub[hf_xet]" 2>&1 | tail -1
+hls() { python3 -c "from huggingface_hub import HfApi; print('\n'.join(f[12:] for f in HfApi().list_repo_files('$R') if f.startswith('archive/sp3/kvq/')))" 2>/dev/null; }
+hget() { curl -sSfL -H "Authorization: Bearer $HF_TOKEN" -o "$2" "$H/archive/sp3/$1?x=$(date +%s)"; }
+put() { for _i in 1 2 3 4 5; do python3 -c "import sys; from huggingface_hub import HfApi; HfApi().upload_file(path_or_fileobj=sys.argv[1], path_in_repo='archive/sp3/'+sys.argv[2], repo_id='$R')" "$1" "$2" > put.err 2>&1 && return 0; sleep 60; done; echo "[g] upload of $2 FAILED"; }
+for _t in $(seq 60); do curl -sS -o sp_new.py "$RAW/tools/sp_qwen3.py?nocache=$(date +%s)"; grep -q "def oracle_trace" sp_new.py && { mv sp_new.py sp_qwen3.py; break; }; sleep 120; done
+curl -sS -o sp_mathcheck.py "$RAW/tools/sp_mathcheck.py?nocache=$(date +%s)"
+[ -s rl_eval60.jsonl ] || { curl -sS -o rl_eval120.jsonl "$RAW/ctl/rl_eval120.jsonl?nocache=$(date +%s)"; python3 -c "
+rs = open('rl_eval120.jsonl').readlines(); open('rl_eval60.jsonl', 'w').writelines(rs[i] for i in range(len(rs)) if i % 24 < 12)"; }
+until [ -s prompts.jsonl ]; do hget kvq/prompts.jsonl prompts.jsonl || sleep 60; done
+M="--S 32 --heads 8 --layers 3 --ffn 2048 --rw 1024 --C 128 --maxd 0 --kv-mem --kv-rank 512"; AP="--att-prior 1.0 --att-layers 8-19 --att-cap 1.0"
+score() { python3 -c "
+import json, sys; sys.path.insert(0, '.')
+from sp_mathcheck import correct
+rs = [json.loads(l) for l in open(sys.argv[1])]
+print(f'{sum(correct(r) for r in rs)}/{len(rs)} agree, closed {sum(\"</think>\" in r[\"text\"] for r in rs)}')" "$1"; }
+while true; do
+  if [ -e PAUSE_G ]; then sleep 60; continue; fi
+  v=$(hget kvq/VERSION /dev/stdout 2>/dev/null | tr -d '[:space:]')
+  [ -n "$v" ] || { sleep 60; continue; }
+  if [ "$v" != "$(cat cur_v 2>/dev/null)" ]; then
+    hget kvq/kvq_v$v.pt kvq_w.pt.tmp && mv kvq_w.pt.tmp kvq_w.pt && echo $v > cur_v && echo "[g] version $v weights fetched $(date -u)" || { sleep 60; continue; }
+  fi
+  ls_=$(hls)
+  if ! echo "$ls_" | grep -q "^gen_v${v}_p$SHARD.jsonl"; then
+    python3 -c "
+L = open('prompts.jsonl').readlines()[$v * $NP:($v + 1) * $NP]
+open('gen_in.jsonl', 'w').writelines(l for i, l in enumerate(L) if i % $NW == $SHARD); print(len(L))" > /dev/null
+    [ -s gen_in.jsonl ] || { echo "[g] no problems left for version $v"; sleep 600; continue; }
+    t0=$(date +%s); o=gen_v${v}_p$SHARD.jsonl; rm -f $o
+    python3 sp_qwen3.py rollout --traces gen_in.jsonl $M $AP --ckpt kvq_w.pt --max-len 12288 --roll-batch $RB --grpo-tok-budget $TB --roll-lp --seed $((500 + v)) --roll-out $o --log sp_g.log > run_g.log 2>&1
+    if [ -s $o ]; then put $o kvq/$o; echo "[g] gen version $v part $SHARD: $(wc -l < $o) texts, $(score $o), $(( $(date +%s) - t0 )) s $(date -u)"
+    else echo "[g] gen version $v part $SHARD FAILED: $(grep -E 'Error' run_g.log | tail -1 | cut -c1-200)"; sleep 300; fi
+  elif [ $v -gt 0 ] && [ $((v % EVERY)) = 0 ] && ! echo "$ls_" | grep -q "^ev_v${v}_p$SHARD.jsonl"; then
+    python3 -c "
+L = open('rl_eval60.jsonl').readlines(); open('ev_in.jsonl', 'w').writelines(l for i, l in enumerate(L) if i % $NW == $SHARD)"
+    t0=$(date +%s); o=ev_v${v}_p$SHARD.jsonl; rm -f $o
+    python3 sp_qwen3.py rollout --traces ev_in.jsonl $M $AP --ckpt kvq_w.pt --max-len 12288 --roll-batch $RB --grpo-tok-budget $TB --seed 1 --roll-out $o --log sp_g.log > run_g.log 2>&1
+    if [ -s $o ]; then put $o kvq/$o; echo "[g] eval version $v part $SHARD: $(score $o | sed 's/agree/correct/'), $(( $(date +%s) - t0 )) s $(date -u)"
+    else echo "[g] eval version $v part $SHARD FAILED: $(grep -E 'Error' run_g.log | tail -1 | cut -c1-200)"; sleep 300; fi
+  else sleep 60; fi
+done
+JOB
+pgrep -f "bash /root/gloop.sh" > /dev/null || setsid nohup bash -c 'bash /root/gloop.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
+echo "[g] ctl run $(date -u)"
+# CTL-END

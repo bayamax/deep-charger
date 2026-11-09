@@ -242,7 +242,9 @@
 # its steps), skipping the states already measured; the whole-text check reads 30 of each state's 60 texts.
 # serial 85: the user - the oracle first. The running on-policy round is killed (its generation so far is lost, ~40 min), the
 # oracle runs now, the side checks after it, the on-policy job resumes after those (round 2 from kvq.pt = round 1's weights).
-SER=85
+# serial 86: the user - generation on cheap boxes. The weights after round 1 and the prompt list go to the hub now (no GPU
+# needed), three ctl/boxKQ<i>.sh workers write round 2's texts meanwhile; the on-policy job resumes with WORKERS=3 and only trains.
+SER=86
 if [ -f /root/.boxrmx_serial ] && [ "$(cat /root/.boxrmx_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxrmx_serial
 [ -d /venv/main/bin ] && export PATH=/venv/main/bin:$PATH
@@ -1193,5 +1195,17 @@ rm -f /root/.s84idle; bash /root/s84.sh; rm -f STOP_KQ
 exec bash /root/kvq_job.sh
 JOB
   setsid nohup bash -c 'bash /root/s85.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
+fi
+if [ ! -e /root/.s86workers ]; then touch /root/.s86workers
+  cat > /root/s86.sh <<'JOB'
+cd /root/w; export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); RAW=https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i; R=baya1116/hypernet-sp-distill
+put() { for _i in 1 2 3 4 5; do python3 -c "import sys; from huggingface_hub import HfApi; HfApi().upload_file(path_or_fileobj=sys.argv[1], path_in_repo='archive/sp3/'+sys.argv[2], repo_id='$R')" "$1" "$2" > put.err 2>&1 && return 0; sleep 60; done; echo "[kq] upload of $2 FAILED"; }
+for _t in $(seq 60); do curl -sS -o /root/kvq_new.sh "$RAW/ctl/kvq_job.sh?nocache=$(date +%s)"; grep -q "WORKERS" /root/kvq_new.sh && { mv /root/kvq_new.sh /root/kvq_job.sh; break; }; sleep 120; done
+echo 3 > kvq_workers; rd=$(cat kvq_round 2>/dev/null || echo 0)
+awk '/^if \[ ! -s kvq_prompts.jsonl \]/,/^print.*fi$/' /root/kvq_job.sh > /root/kq_prompts.sh; bash /root/kq_prompts.sh > /dev/null   # the prompt list with the teacher answers
+put kvq_prompts.jsonl kvq/prompts.jsonl; put kvq.pt kvq/kvq_v$rd.pt; echo $rd > VERSION; put VERSION kvq/VERSION
+echo "[kq] s86: version $rd and $(wc -l < kvq_prompts.jsonl) prompts published for 3 workers; the job resumes with WORKERS=3 after the oracle and the side checks $(date -u)"
+JOB
+  setsid nohup bash -c 'bash /root/s86.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
 fi
 # CTL-END
