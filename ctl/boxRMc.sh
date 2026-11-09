@@ -274,7 +274,9 @@
 # optimum (the first from the pooler's output), horizon 8, 6 consecutive positions of the longest math trace - one solution per
 # chain instead of an arbitrary member of the solution set. Does it keep beating the constant on the held-out chunks, and does it
 # move little and consistently (a function a pooler could follow)? Runs in the GPU's idle windows, the trainer waits for it.
-SER=97
+# serial 98: the side checks (my validation of the 128-token measure) were holding the GPU ahead of the chained oracle - stopped;
+# the chained oracle and the content checks go first, the side checks restart after them.
+SER=98
 if [ -f /root/.boxrmx_serial ] && [ "$(cat /root/.boxrmx_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxrmx_serial
 [ -d /venv/main/bin ] && export PATH=/venv/main/bin:$PATH
@@ -1381,5 +1383,13 @@ python3 -c "from huggingface_hub import HfApi; HfApi().upload_file(path_or_fileo
 echo "[kp] s97 done $(date -u)"
 JOB
   setsid nohup bash -c 'bash /root/s97.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
+fi
+if [ ! -e /root/.s98order ]; then touch /root/.s98order
+  pkill -f "bash /root/s84.sh"; sleep 1; pkill -f "sp_gk.py eval"; echo "[kp] s98: side checks stopped - the chained oracle first $(date -u)"
+  cat > /root/s98.sh <<'JOB'
+cd /root/w; until grep -q "\[kp\] s97 done" w.log && grep -q "\[kp\] s96 done" w.log; do sleep 60; done
+echo "[kp] s98: oracle and content checks done - the side checks resume in the idle windows $(date -u)"; bash /root/s84.sh
+JOB
+  setsid nohup bash -c 'bash /root/s98.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
 fi
 # CTL-END
