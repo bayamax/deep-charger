@@ -7,7 +7,9 @@
 # trainer: the model's attention as the prior, the pooler's logits capped at 1.0. Touch /root/w/PAUSE_G to hold.
 # serial 2: the image has no transformers - installed; the loop is restarted once for the new script.
 # serial 3: the hub listing kept the 'kvq/' prefix, so a part already uploaded was never seen and written again and again.
-SER=3; SHARD=__SHARD__; NW=__NW__
+# serial 4: a worker whose own part is on the hub takes the lowest missing part of another shard (worker 0 went silent after
+# fetching the weights), so one dead box cannot stall the trainer; the same for the 60-problem parts.
+SER=4; SHARD=__SHARD__; NW=__NW__
 if [ -f /root/.boxkq_serial ] && [ "$(cat /root/.boxkq_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxkq_serial
 [ -d /venv/main/bin ] && export PATH=/venv/main/bin:$PATH
@@ -48,26 +50,28 @@ while true; do
     hget kvq/kvq_v$v.pt kvq_w.pt.tmp && mv kvq_w.pt.tmp kvq_w.pt && echo $v > cur_v && echo "[g] version $v weights fetched $(date -u)" || { sleep 60; continue; }
   fi
   ls_=$(hls)
-  if ! echo "$ls_" | grep -q "^gen_v${v}_p$SHARD.jsonl"; then
+  miss() { for p_ in $SHARD $(seq 0 $((NW - 1))); do echo "$ls_" | grep -q "^$1_v${v}_p$p_.jsonl" || { echo $p_; return; }; done; }   # own part first, then the lowest missing one
+  gp=$(miss gen); ep=""; [ $v -gt 0 ] && [ $((v % EVERY)) = 0 ] && ep=$(miss ev)
+  if [ -n "$gp" ]; then
     python3 -c "
 L = open('prompts.jsonl').readlines()[$v * $NP:($v + 1) * $NP]
-open('gen_in.jsonl', 'w').writelines(l for i, l in enumerate(L) if i % $NW == $SHARD); print(len(L))" > /dev/null
+open('gen_in.jsonl', 'w').writelines(l for i, l in enumerate(L) if i % $NW == $gp); print(len(L))" > /dev/null
     [ -s gen_in.jsonl ] || { echo "[g] no problems left for version $v"; sleep 600; continue; }
-    t0=$(date +%s); o=gen_v${v}_p$SHARD.jsonl; rm -f $o
+    t0=$(date +%s); o=gen_v${v}_p$gp.jsonl; rm -f $o
     python3 sp_qwen3.py rollout --traces gen_in.jsonl $M $AP --ckpt kvq_w.pt --max-len 12288 --roll-batch $RB --grpo-tok-budget $TB --roll-lp --seed $((500 + v)) --roll-out $o --log sp_g.log > run_g.log 2>&1
-    if [ -s $o ]; then put $o kvq/$o; echo "[g] gen version $v part $SHARD: $(wc -l < $o) texts, $(score $o), $(( $(date +%s) - t0 )) s $(date -u)"
-    else echo "[g] gen version $v part $SHARD FAILED: $(grep -E 'Error' run_g.log | tail -1 | cut -c1-200)"; sleep 300; fi
-  elif [ $v -gt 0 ] && [ $((v % EVERY)) = 0 ] && ! echo "$ls_" | grep -q "^ev_v${v}_p$SHARD.jsonl"; then
+    if [ -s $o ]; then put $o kvq/$o; echo "[g] gen version $v part $gp$([ $gp = $SHARD ] || echo ' (for shard '$gp')'): $(wc -l < $o) texts, $(score $o), $(( $(date +%s) - t0 )) s $(date -u)"
+    else echo "[g] gen version $v part $gp FAILED: $(grep -E 'Error' run_g.log | tail -1 | cut -c1-200)"; sleep 300; fi
+  elif [ -n "$ep" ]; then
     python3 -c "
-L = open('rl_eval60.jsonl').readlines(); open('ev_in.jsonl', 'w').writelines(l for i, l in enumerate(L) if i % $NW == $SHARD)"
-    t0=$(date +%s); o=ev_v${v}_p$SHARD.jsonl; rm -f $o
+L = open('rl_eval60.jsonl').readlines(); open('ev_in.jsonl', 'w').writelines(l for i, l in enumerate(L) if i % $NW == $ep)"
+    t0=$(date +%s); o=ev_v${v}_p$ep.jsonl; rm -f $o
     python3 sp_qwen3.py rollout --traces ev_in.jsonl $M $AP --ckpt kvq_w.pt --max-len 12288 --roll-batch $RB --grpo-tok-budget $TB --seed 1 --roll-out $o --log sp_g.log > run_g.log 2>&1
-    if [ -s $o ]; then put $o kvq/$o; echo "[g] eval version $v part $SHARD: $(score $o | sed 's/agree/correct/'), $(( $(date +%s) - t0 )) s $(date -u)"
-    else echo "[g] eval version $v part $SHARD FAILED: $(grep -E 'Error' run_g.log | tail -1 | cut -c1-200)"; sleep 300; fi
+    if [ -s $o ]; then put $o kvq/$o; echo "[g] eval version $v part $ep: $(score $o | sed 's/agree/correct/'), $(( $(date +%s) - t0 )) s $(date -u)"
+    else echo "[g] eval version $v part $ep FAILED: $(grep -E 'Error' run_g.log | tail -1 | cut -c1-200)"; sleep 300; fi
   else sleep 60; fi
 done
 JOB
-if [ ! -e /root/.gloop3 ]; then touch /root/.gloop3; pkill -f "bash /root/gloop.sh"; pkill -f "sp_qwen3.py"; sleep 3; fi
+if [ ! -e /root/.gloop4 ]; then touch /root/.gloop4; pkill -f "bash /root/gloop.sh"; pkill -f "sp_qwen3.py"; sleep 3; fi
 pgrep -f "bash /root/gloop.sh" > /dev/null || setsid nohup bash -c 'bash /root/gloop.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
 echo "[g] ctl run $(date -u)"
 # CTL-END
