@@ -27,6 +27,9 @@ ap.add_argument("mode", choices=["train", "eval", "profile", "rollout", "grpo", 
 ap.add_argument("--oracle-steps", type=int, default=200, help="oracle: Adam steps on the 32 slots themselves at each position")
 ap.add_argument("--oracle-lr", type=float, default=1e-3, help="oracle: Adam lr on the slots' pre-normalisation parameters (unit rows, so a coordinate is ~0.02)")
 ap.add_argument("--oracle-pos", default="0.5,0.85", help="oracle: positions per trace as fractions of its chunk starts")
+ap.add_argument("--oracle-horizon", type=int, default=0, help="oracle: fit the slots on the next K chunks jointly (the raw window fixed at the "
+                "position, the block growing to K chunks, so nothing is missing) and score them on the 2 chunks after those - a chunk-sized fit "
+                "encodes the chunk's own text and is worse than the pooler one chunk later; a summary must carry further")
 ap.add_argument("--oracle-run", type=int, default=0, help="oracle: instead, this many CONSECUTIVE chunk starts from the trace's middle - how the "
                 "pooler-seeded optima of one chain of thought relate to each other (cosine, the correction's direction, the previous "
                 "optimum's KL on the next chunk): a smooth target a pooler can learn, or unrelated solutions")
@@ -869,6 +872,76 @@ def oracle_trace(ids, P):
         log(f"[sp] oracle pos {c0} (distant {nd_end}): KL window-only {klw:.4f} | pooler {kl0:.4f} | slots optimised from the pooler "
             f"{' > '.join(str(x) for x in hA)} | from random {' > '.join(str(x) for x in hB)} | next chunk, memory kept: {nxt} | "
             f"move from the pooler's output: seeded {rel:.3f} (cos {cs:.3f}), random optimum {relB:.3f} (cos {csB:.3f}), between the two optima {relAB:.3f}")
+
+
+def oracle_h_trace(ids, P):
+    """--oracle-horizon K: at consecutive chunk starts (--oracle-run n, else the trace's middle), the slots are optimised on the KL
+    of the next K chunks together (block = raw window + K chunks, the memory covering the tokens before the window, as deployed
+    at this position) and scored on the 2 chunks after those (block = window + K+2 chunks, the last 2C rows): the pooler's own
+    output, the pooler-seeded optimum and a random-seeded one, and window-only. Neighbour statistics as --oracle-run."""
+    T = min(len(ids), P + a.max_len); a_ids = ids[None, P:T]; La = a_ids.size(1); first = a.rw + a.C; K = a.oracle_horizon
+    span = (K + 2) * a.C; c0s = [c for c in range(first, La, a.C) if c + span <= La]
+    if len(c0s) < 2: return
+    ids = ids.to(dev); a_ids = a_ids.to(dev)
+    with torch.no_grad():
+        ref_h = teacher_hidden(ids, P + first, T)
+        pc = DynamicCache(); llm(input_ids=ids[None, :P], past_key_values=pc, use_cache=True)
+        pkv = [tuple(t for t in kv_of(pc, li)) for li in range(NL)]
+    n_ = max(1, a.oracle_run); st_ = max(0, min(len(c0s) - n_, len(c0s) // 2)); targets = set(c0s[st_:st_ + n_])
+    kept = torch.zeros(1, 0, dtype=torch.long, device=dev); absorbed = 0; use_att = bool(ATT_L)
+    impT = torch.zeros(La, device=dev); kimp = torch.zeros(1, 0, device=dev); prev = None
+    for c0 in range(0, La, a.C):
+        c1 = min(c0 + a.C, La); cur = c1 - c0
+        if cur < 4: break
+        R = min(c0, a.rw); nd_end = c0 - R
+        if use_att:
+            si = impT[None].clone(); si[:, :2] = 0
+            kept, absorbed, kimp = update_buffer(kept, absorbed, a_ids, nd_end, None, imp=kimp, src_imp=si)
+        else: kept, absorbed = update_buffer(kept, absorbed, a_ids, nd_end, None)
+        hit = c0 in targets and kept.size(1) > 0
+        if not hit and not use_att: continue
+        with torch.no_grad():
+            block = torch.cat([embed(a_ids[:, c0 - R:c0]).to(dt), embed(a_ids[:, c0:c1]).to(dt)], 1); nb = block.size(1)
+            sp0 = pooler(embed(kept).float(), kpm=att_bias(kimp) if use_att else None)
+            if use_att:
+                cache = DynamicCache(); mem = kv_memory(sp0, torch.arange(P, P + a.S, device=dev)[None]); off = P + a.S
+                for li, (k_, v_) in enumerate(pkv): cache.update(torch.cat([k_, mem[li][0]], 2), torch.cat([v_, mem[li][1]], 2), li)
+                pos = torch.arange(off, off + nb, device=dev)[None]; ATTREC["rows"] = cur
+                llm(inputs_embeds=block, attention_mask=torch.ones(1, off + nb, device=dev), past_key_values=cache, position_ids=pos,
+                    cache_position=pos[0], use_cache=True, logits_to_keep=1)
+                impT[c0 - R:c1] += att_take()[off:off + R + cur]
+        if not hit: continue
+        fitN = K * a.C; allN = span
+        blkF = torch.cat([embed(a_ids[:, c0 - R:c0]).to(dt), embed(a_ids[:, c0:c0 + fitN]).to(dt)], 1); trF = teacher_rows(ref_h[c0 - first:c0 + fitN - first])
+        blkT = torch.cat([embed(a_ids[:, c0 - R:c0]).to(dt), embed(a_ids[:, c0:c0 + allN]).to(dt)], 1); trT = teacher_rows(ref_h[c0 - first:c0 + allN - first])
+        test = lambda sp_: _mem_kl(sp_, pkv, P, blkT, allN, trT, 0)[fitN:].mean().item()   # the 2 chunks after the fitted K
+        with torch.no_grad():
+            kl0 = test(sp0); klfit0 = _mem_kl(sp0, pkv, P, blkF, fitN, trF, 0).mean().item()
+            cw = DynamicCache()
+            for li, (k_, v_) in enumerate(pkv): cw.update(k_, v_, li)
+            nbT = blkT.size(1); pos = torch.arange(P, P + nbT, device=dev)[None]
+            ow = llm(inputs_embeds=blkT, attention_mask=torch.ones(1, P + nbT, device=dev), past_key_values=cw, position_ids=pos,
+                     cache_position=pos[0], use_cache=True, logits_to_keep=allN + 1)
+            klw = (trT.exp() * (trT - F.log_softmax(ow.logits[0, :allN].float(), -1))).sum(-1)[fitN:].mean().item(); del ow, cw
+        unit = lambda x: x / x.norm(dim=-1, keepdim=True).clamp(min=1e-6); g = torch.Generator(device=dev).manual_seed(1234 + c0)
+        spA, hA = _oracle_fit(sp0, unit(sp0.float()), pkv, P, blkF, fitN, trF)
+        spB, hB = _oracle_fit(sp0, unit(torch.randn(sp0.shape, generator=g, device=dev)), pkv, P, blkF, fitN, trF)
+        with torch.no_grad(): tA, tB = test(spA), test(spB)
+        cosf = lambda x, y: F.cosine_similarity(x, y, dim=-1).mean().item()
+        ent = {"c0": c0, "nd": int(nd_end), "window": klw, "pooler": kl0, "pooler_fit": klfit0, "seeded_fit": hA[-1], "random_fit": hB[-1],
+               "seeded": tA, "random": tB, "cos": cosf(spA, sp0), "cosB": cosf(spB, sp0), "cosAB": cosf(spA, spB)}
+        msg = (f"[sp] oracle-h{K} pos {c0} (distant {nd_end}): fit on {fitN} tokens: pooler {klfit0:.4f} seeded {' > '.join(str(x) for x in hA)} random {hB[-1]:.4f}"
+               f" | the 2 chunks after: window-only {klw:.4f} pooler {kl0:.4f} seeded optimum {tA:.4f} random optimum {tB:.4f}"
+               f" | cos to the pooler's output: seeded {ent['cos']:.3f} random {ent['cosB']:.3f}, between optima {ent['cosAB']:.3f}")
+        if prev is not None:
+            p0, pA, pB = prev
+            with torch.no_grad(): kpA, kpB = test(pA), test(pB)
+            ent["pair"] = {"cos_pooler": cosf(sp0, p0), "cos_seeded": cosf(spA, pA), "cos_random": cosf(spB, pB),
+                           "cos_corr": F.cosine_similarity((spA - sp0).flatten(), (pA - p0).flatten(), dim=0).item(), "kl_prev_seeded": kpA, "kl_prev_random": kpB}
+            pr_ = ent["pair"]
+            msg += (f" | vs the previous position: cos pooler {pr_['cos_pooler']:.3f} seeded optima {pr_['cos_seeded']:.3f} random optima {pr_['cos_random']:.3f}"
+                    f" corrections {pr_['cos_corr']:.3f}; its optima here: seeded {kpA:.4f} random {kpB:.4f}")
+        log(msg); prev = (sp0, spA, spB); ORC.append(ent)
 
 
 def run_trace(ids, P, train, ref_h=None):
@@ -2051,8 +2124,20 @@ elif a.mode == "rollout":
 elif a.mode == "oracle":
     pooler.eval(); t0 = time.time()
     for p_ in pooler.parameters(): p_.requires_grad_(False)
-    for ids, P in data: oracle_trace(ids, P)
-    if ORC:
+    for ids, P in data: (oracle_h_trace if a.oracle_horizon > 0 else oracle_trace)(ids, P)
+    if ORC and a.oracle_horizon > 0:
+        import statistics as st_
+        m_ = lambda k: st_.median(r[k] for r in ORC); pairs = [r["pair"] for r in ORC if "pair" in r]
+        log(f"[sp] oracle-h{a.oracle_horizon} {tag} {os.path.basename(a.ckpt) or 'untrained'}: {len(ORC)} positions in {len(data)} chains, {a.oracle_steps} steps | "
+            f"median KL on the fitted {a.oracle_horizon} chunks: pooler {m_('pooler_fit'):.4f} seeded {m_('seeded_fit'):.4f} random {m_('random_fit'):.4f} | "
+            f"on the 2 chunks after (held out): window-only {m_('window'):.4f} pooler {m_('pooler'):.4f} seeded optimum {m_('seeded'):.4f} random optimum "
+            f"{m_('random'):.4f} | median cos to the pooler's output: seeded {m_('cos'):.3f} random {m_('cosB'):.3f}, between optima {m_('cosAB'):.3f}"
+            + (f" | neighbours ({len(pairs)} pairs): cos pooler {st_.median(p['cos_pooler'] for p in pairs):.3f} seeded optima "
+               f"{st_.median(p['cos_seeded'] for p in pairs):.3f} random optima {st_.median(p['cos_random'] for p in pairs):.3f} corrections "
+               f"{st_.median(p['cos_corr'] for p in pairs):.3f}; the previous position's optima on these held-out chunks: seeded "
+               f"{st_.median(p['kl_prev_seeded'] for p in pairs):.4f} random {st_.median(p['kl_prev_random'] for p in pairs):.4f}" if pairs else "")
+            + f" ({time.time() - t0:.0f}s)")
+    elif ORC:
         import statistics as st_
         m_ = lambda k: st_.median(r[k] for r in ORC); mn = lambda k: sum(r[k] for r in ORC) / len(ORC)
         nx = lambda k: st_.median(r["next"][k] for r in ORC if r["next"])

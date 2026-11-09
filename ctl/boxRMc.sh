@@ -248,7 +248,11 @@
 # between neighbours, the direction of the correction, the previous chunk's optimum on the next chunk)? If they are close, the
 # target is a smooth function a pooler can learn and the rest is distillation. Runs right after the first oracle (6 consecutive
 # chunk starts in each of 2 math + 2 competition traces), then the side checks, then the on-policy job resumes.
-SER=87
+# serial 88: the chunk-sized oracle overfits - its slots reach KL 0.0016 on the fitted chunk and are WORSE than the pooler on the
+# next one (0.069 vs 0.059), as far from the pooler's output as a random optimum (1.17 vs 1.37, cos 0.31). So the question is
+# asked properly: the slots fitted on the next 4 chunks together (--oracle-horizon 4), scored on the 2 chunks after those, 4
+# consecutive positions in each of 4 chains, neighbour statistics included. After serial 87's run, before the side checks.
+SER=88
 if [ -f /root/.boxrmx_serial ] && [ "$(cat /root/.boxrmx_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxrmx_serial
 [ -d /venv/main/bin ] && export PATH=/venv/main/bin:$PATH
@@ -1230,5 +1234,24 @@ bash /root/s84.sh; rm -f STOP_KQ
 exec bash /root/kvq_job.sh
 JOB
   setsid nohup bash -c 'bash /root/s87.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
+fi
+if [ ! -e /root/.s88hz ]; then touch /root/.s88hz
+  cat > /root/s88.sh <<'JOB'
+cd /root/w; export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+RAW=https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i; R=baya1116/hypernet-sp-distill
+while pgrep -f "sp_or2.py oracle" > /dev/null || pgrep -f "sp_or.py oracle" > /dev/null; do sleep 30; done
+pkill -f "bash /root/s87.sh"; pkill -f "bash /root/s85.sh"; pkill -f "bash /root/s84.sh"; pkill -f "bash /root/kvq_job.sh"; sleep 2; pkill -f "sp_gk.py"; pkill -f "sp_qwen3.py"; sleep 5; touch STOP_KQ
+for _t in $(seq 60); do curl -sS -o sp_or3.py "$RAW/tools/sp_qwen3.py?nocache=$(date +%s)"; grep -q "oracle-horizon" sp_or3.py && break; sleep 120; done
+[ -s orun_in.jsonl ] || { head -n 2 held_math.jsonl > orun_in.jsonl; head -n 2 held_comp.jsonl >> orun_in.jsonl; }
+M="--S 32 --heads 8 --layers 3 --ffn 2048 --rw 1024 --C 128 --maxd 0 --kv-mem --kv-rank 512"; AP="--att-prior 1.0 --att-layers 8-19 --att-cap 1.0"
+echo "[kp] s88: oracle with a horizon - slots fitted on the next 4 chunks, scored on the 2 after, 4 positions x 4 chains $(date -u)"
+python3 sp_or3.py oracle --traces orun_in.jsonl --max-len 6144 $M $AP --ckpt kvp_seg2.pt --oracle-steps 200 --oracle-lr 1e-3 --oracle-horizon 4 --oracle-run 4 --log sp_oh.log > run_oh.log 2>&1
+grep -E "^\[sp\] oracle|Error|Traceback" run_oh.log | cut -c1-900 | sed 's/^\[sp\]/[kp]/'
+python3 -c "from huggingface_hub import HfApi; HfApi().upload_file(path_or_fileobj='sp_oh.log', path_in_repo='archive/sp3/kvp/oracle_h4.log', repo_id='$R')" > /dev/null 2>&1
+echo "[kp] s88 done - the side checks, then the on-policy job (workers) $(date -u)"
+bash /root/s84.sh; rm -f STOP_KQ
+exec bash /root/kvq_job.sh
+JOB
+  setsid nohup bash -c 'bash /root/s88.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
 fi
 # CTL-END
