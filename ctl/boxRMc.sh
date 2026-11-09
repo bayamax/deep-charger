@@ -258,7 +258,9 @@
 # serial 92: serial 88's body was written before it was shrunk (the marker kept the old text), so the long run started at 15:24 -
 # killed; the one-chain horizon oracle (~5 min) runs instead, then the side checks, then the on-policy job resumes. The hub
 # listing bug (kvq/ prefix) is fixed in the job and the workers.
-SER=92
+# serial 93: the one-chain run landed on a short trace (distant 128-256 tokens, window-only KL 0.007: nothing to summarise) - the
+# longest held-out math trace instead, 4 consecutive positions from its middle (distant ~2500+), pooler-seeded, 120 steps.
+SER=93
 if [ -f /root/.boxrmx_serial ] && [ "$(cat /root/.boxrmx_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxrmx_serial
 [ -d /venv/main/bin ] && export PATH=/venv/main/bin:$PATH
@@ -1282,5 +1284,24 @@ bash /root/s84.sh; rm -f STOP_KQ
 exec bash /root/kvq_job.sh
 JOB
   setsid nohup bash -c 'bash /root/s92.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
+fi
+if [ ! -e /root/.s93long ]; then touch /root/.s93long
+  cat > /root/s93.sh <<'JOB'
+cd /root/w; export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+R=baya1116/hypernet-sp-distill
+while pgrep -f "sp_or3.py oracle" > /dev/null; do sleep 20; done
+pkill -f "bash /root/s92.sh"; pkill -f "bash /root/s84.sh"; pkill -f "bash /root/kvq_job.sh"; sleep 2; pkill -f "sp_gk.py"; pkill -f "sp_qwen3.py"; sleep 5; touch STOP_KQ
+python3 -c "
+import json; L = open('held_math.jsonl').readlines(); L.sort(key=lambda l: -len(json.loads(l)['text'])); open('oh_long.jsonl', 'w').write(L[0]); print('[kp] s93: longest math trace', len(json.loads(L[0])['text']), 'chars')"
+M="--S 32 --heads 8 --layers 3 --ffn 2048 --rw 1024 --C 128 --maxd 0 --kv-mem --kv-rank 512"; AP="--att-prior 1.0 --att-layers 8-19 --att-cap 1.0"
+echo "[kp] s93: one-chain horizon oracle on the longest math trace (4 consecutive positions from the middle) $(date -u)"
+python3 sp_or3.py oracle --traces oh_long.jsonl --max-len 8192 $M $AP --ckpt kvp_seg2.pt --oracle-steps 120 --oracle-lr 1e-3 --oracle-horizon 4 --oracle-run 4 --oracle-random 0 --log sp_oh2.log > run_oh2.log 2>&1
+grep -E "^\[sp\] oracle|Error|Traceback" run_oh2.log | cut -c1-900 | sed 's/^\[sp\]/[kp]/'
+python3 -c "from huggingface_hub import HfApi; HfApi().upload_file(path_or_fileobj='sp_oh2.log', path_in_repo='archive/sp3/kvp/oracle_h4_long.log', repo_id='$R')" > /dev/null 2>&1
+echo "[kp] s93 done - the side checks, then the on-policy job (workers) $(date -u)"
+bash /root/s84.sh; rm -f STOP_KQ
+exec bash /root/kvq_job.sh
+JOB
+  setsid nohup bash -c 'bash /root/s93.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
 fi
 # CTL-END
