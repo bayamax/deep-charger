@@ -270,7 +270,11 @@
 # serial 96: the pooler's output does not depend on what it reads (cos 1.000 to its output on shuffled tokens and on another
 # trace's tokens, held-out KL unchanged) - the distilled memory is a constant prefix. Is that true of the earlier poolers too
 # (kvm, v38's, the capped segment 3)? The same content check on each, a minute apiece, in the GPU's idle windows.
-SER=96
+# serial 97: the chained oracle (the user): along one chain of thought, each position's fit starts from the previous position's
+# optimum (the first from the pooler's output), horizon 8, 6 consecutive positions of the longest math trace - one solution per
+# chain instead of an arbitrary member of the solution set. Does it keep beating the constant on the held-out chunks, and does it
+# move little and consistently (a function a pooler could follow)? Runs in the GPU's idle windows, the trainer waits for it.
+SER=97
 if [ -f /root/.boxrmx_serial ] && [ "$(cat /root/.boxrmx_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxrmx_serial
 [ -d /venv/main/bin ] && export PATH=/venv/main/bin:$PATH
@@ -1361,5 +1365,21 @@ done
 echo "[kp] s96 done $(date -u)"
 JOB
   setsid nohup bash -c 'bash /root/s96.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
+fi
+if [ ! -e /root/.s97chain ]; then touch /root/.s97chain
+  cat > /root/s97.sh <<'JOB'
+cd /root/w; export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+RAW=https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i; R=baya1116/hypernet-sp-distill
+for _t in $(seq 60); do curl -sS -o sp_or5.py "$RAW/tools/sp_qwen3.py?nocache=$(date +%s)"; grep -q "oracle-chain" sp_or5.py && break; sleep 120; done
+until ! pgrep -f "sp_qwen3.py" > /dev/null && ! pgrep -f "sp_gk.py" > /dev/null; do sleep 20; done
+cp sp_or5.py sp_gk.py; cp sp_or5.py sp_ch.py   # sp_gk.py: the file the trainer and the other side checks wait for
+M="--S 32 --heads 8 --layers 3 --ffn 2048 --rw 1024 --C 128 --maxd 0 --kv-mem --kv-rank 512"; AP="--att-prior 1.0 --att-layers 8-19 --att-cap 1.0"
+echo "[kp] s97: chained oracle - horizon 8, 6 consecutive positions, each fit starting from the previous optimum $(date -u)"
+python3 sp_gk.py oracle --traces oh_long2.jsonl --n 1 --max-len 8192 $M $AP --ckpt kvp_seg2.pt --oracle-steps 120 --oracle-lr 1e-3 --oracle-horizon 8 --oracle-run 6 --oracle-random 0 --oracle-chain 1 --log sp_chain.log > run_chain.log 2>&1
+grep -E "^\[sp\] oracle-h8|Error|Traceback" run_chain.log | cut -c1-1100 | sed 's/^\[sp\]/[kp] chain/'
+python3 -c "from huggingface_hub import HfApi; HfApi().upload_file(path_or_fileobj='sp_chain.log', path_in_repo='archive/sp3/kvp/oracle_chain.log', repo_id='$R')" > /dev/null 2>&1
+echo "[kp] s97 done $(date -u)"
+JOB
+  setsid nohup bash -c 'bash /root/s97.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
 fi
 # CTL-END

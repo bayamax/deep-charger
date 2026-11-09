@@ -32,6 +32,9 @@ ap.add_argument("--oracle-horizon", type=int, default=0, help="oracle: fit the s
                 "encodes the chunk's own text and is worse than the pooler one chunk later; a summary must carry further")
 ap.add_argument("--oracle-content", type=int, default=0, help="oracle (horizon mode): also measure how much the pooler's output depends on its "
                 "input - cosine to its output on the same tokens shuffled, and on another trace's tokens (the first trace of the file, or the second)")
+ap.add_argument("--oracle-chain", type=int, default=0, help="oracle (horizon mode, --oracle-run n): the fit at each position starts from the PREVIOUS "
+                "position's optimum (the first from the pooler's output) - the minimal-movement trajectory, one solution per chain instead of an "
+                "arbitrary member of the solution set; its neighbour statistics ask whether a lawful memory exists")
 ap.add_argument("--oracle-random", type=int, default=1, help="oracle: 0 skips the random-seeded reference fit (half the time; its fields repeat the pooler's)")
 ap.add_argument("--oracle-run", type=int, default=0, help="oracle: instead, this many CONSECUTIVE chunk starts from the trace's middle - how the "
                 "pooler-seeded optima of one chain of thought relate to each other (cosine, the correction's direction, the previous "
@@ -927,12 +930,14 @@ def oracle_h_trace(ids, P):
                      cache_position=pos[0], use_cache=True, logits_to_keep=allN + 1)
             klw = (trT.exp() * (trT - F.log_softmax(ow.logits[0, :allN].float(), -1))).sum(-1)[fitN:].mean().item(); del ow, cw
         unit = lambda x: x / x.norm(dim=-1, keepdim=True).clamp(min=1e-6); g = torch.Generator(device=dev).manual_seed(1234 + c0)
-        spA, hA = _oracle_fit(sp0, unit(sp0.float()), pkv, P, blkF, fitN, trF)
+        init = unit(prev[1].float()) if (a.oracle_chain and prev is not None) else unit(sp0.float())
+        with torch.no_grad(): kl_init = test(init * pooler.out_scale.abs()) if (a.oracle_chain and prev is not None) else kl0   # the start's own held-out KL
+        spA, hA = _oracle_fit(sp0, init, pkv, P, blkF, fitN, trF)
         spB, hB = _oracle_fit(sp0, unit(torch.randn(sp0.shape, generator=g, device=dev)), pkv, P, blkF, fitN, trF) if a.oracle_random else (sp0, [round(klfit0, 4)])
         with torch.no_grad(): tA, tB = test(spA), test(spB)
         cosf = lambda x, y: F.cosine_similarity(x, y, dim=-1).mean().item()
         ent = {"c0": c0, "nd": int(nd_end), "window": klw, "pooler": kl0, "pooler_fit": klfit0, "seeded_fit": hA[-1], "random_fit": hB[-1],
-               "seeded": tA, "random": tB, "cos": cosf(spA, sp0), "cosB": cosf(spB, sp0), "cosAB": cosf(spA, spB)}
+               "seeded": tA, "random": tB, "cos": cosf(spA, sp0), "cosB": cosf(spB, sp0), "cosAB": cosf(spA, spB), "kl_init": kl_init}
         if a.oracle_content:   # does the pooler's output depend on what it reads?
             with torch.no_grad():
                 perm = torch.randperm(kept.size(1), generator=g, device=dev)
@@ -952,11 +957,11 @@ def oracle_h_trace(ids, P):
         if prev is not None:
             p0, pA, pB = prev
             with torch.no_grad(): kpA, kpB = test(pA), test(pB)
-            ent["pair"] = {"cos_pooler": cosf(sp0, p0), "cos_seeded": cosf(spA, pA), "cos_random": cosf(spB, pB),
+            ent["pair"] = {"cos_pooler": cosf(sp0, p0), "cos_seeded": cosf(spA, pA), "cos_random": cosf(spB, pB), "move": ((spA - pA).norm() / pA.norm()).item(),
                            "cos_corr": F.cosine_similarity((spA - sp0).flatten(), (pA - p0).flatten(), dim=0).item(), "kl_prev_seeded": kpA, "kl_prev_random": kpB}
             pr_ = ent["pair"]
-            msg += (f" | vs the previous position: cos pooler {pr_['cos_pooler']:.3f} seeded optima {pr_['cos_seeded']:.3f} random optima {pr_['cos_random']:.3f}"
-                    f" corrections {pr_['cos_corr']:.3f}; its optima here: seeded {kpA:.4f} random {kpB:.4f}")
+            msg += (f" | vs the previous position: cos pooler {pr_['cos_pooler']:.3f} seeded optima {pr_['cos_seeded']:.3f} (move {pr_['move']:.3f}) random optima {pr_['cos_random']:.3f}"
+                    f" corrections {pr_['cos_corr']:.3f}; its optima here: seeded {kpA:.4f} random {kpB:.4f}" + (f"; the chain's start here {kl_init:.4f}" if a.oracle_chain else ""))
         log(msg); prev = (sp0, spA, spB); ORC.append(ent)
 
 
@@ -2151,8 +2156,8 @@ elif a.mode == "oracle":
             f"on the 2 chunks after (held out): window-only {m_('window'):.4f} pooler {m_('pooler'):.4f} seeded optimum {m_('seeded'):.4f} random optimum "
             f"{m_('random'):.4f} | median cos to the pooler's output: seeded {m_('cos'):.3f} random {m_('cosB'):.3f}, between optima {m_('cosAB'):.3f}"
             + (f" | content: pooler output vs shuffled tokens cos {m_('cos_shuffled'):.3f} (KL {m_('kl_shuffled'):.4f}), vs another trace cos {m_('cos_other'):.3f} (KL {m_('kl_other'):.4f})" if "cos_shuffled" in ORC[0] else "")
-            + (f" | neighbours ({len(pairs)} pairs): cos pooler {st_.median(p['cos_pooler'] for p in pairs):.3f} seeded optima "
-               f"{st_.median(p['cos_seeded'] for p in pairs):.3f} random optima {st_.median(p['cos_random'] for p in pairs):.3f} corrections "
+            + (f" | neighbours ({len(pairs)} pairs{', chained' if a.oracle_chain else ''}): cos pooler {st_.median(p['cos_pooler'] for p in pairs):.3f} seeded optima "
+               f"{st_.median(p['cos_seeded'] for p in pairs):.3f} (move {st_.median(p['move'] for p in pairs):.3f}) random optima {st_.median(p['cos_random'] for p in pairs):.3f} corrections "
                f"{st_.median(p['cos_corr'] for p in pairs):.3f}; the previous position's optima on these held-out chunks: seeded "
                f"{st_.median(p['kl_prev_seeded'] for p in pairs):.4f} random {st_.median(p['kl_prev_random'] for p in pairs):.4f}" if pairs else "")
             + f" ({time.time() - t0:.0f}s)")
