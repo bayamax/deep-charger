@@ -193,7 +193,9 @@
 # serial 70: round 37 failed loading a .pt ("unexpected pos": a file cut short) and the loop exited, leaving the GPU idle
 # with three one-off jobs queued. Report disk space and which file is broken, mend it (a bad optimizer state is dropped,
 # bad weights come back from the hub), restart the loop: the queued jobs run first, then the rounds.
-SER=70
+# serial 71: the disk is full (456K of 50G): that is what cut kvg_opt.pt short. Report what fills it, remove what the hub
+# already holds (gradient sketches, downloaded copies, the state upload dirs, caches, cores, logs over 300 MB), report again.
+SER=71
 if [ -f /root/.boxrmx_serial ] && [ "$(cat /root/.boxrmx_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxrmx_serial
 [ -d /venv/main/bin ] && export PATH=/venv/main/bin:$PATH
@@ -926,5 +928,14 @@ echo "[kg] s70: loop restarted, queued one-off jobs first: $(grep -c "^o=" kvg_e
 START=dpo_ref.pt exec bash /root/kvg_job.sh
 JOB
   pgrep -f "^bash /root/kvg_job.sh" > /dev/null || setsid nohup bash -c 'bash /root/s70.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
+fi
+if [ ! -e /root/.s71disk ]; then touch /root/.s71disk
+  cd /root/w
+  echo "[kg] s71: before: $(df -h /root | tail -1 | awk '{print $4" free"}') | $(du -xsh /root/w /root/.cache /tmp /venv 2>/dev/null | awk '{printf "%s %s, ", $2, $1}')"
+  echo "[kg] s71: biggest in /root/w: $(du -xsk /root/w/* 2>/dev/null | sort -rn | head -12 | awk '{printf "%s %.1fG, ", $2, $1/1048576}')"
+  rm -f kvg_gsk_r*.pt evx_*.pt kvg_next.pt core core.* /root/w/mend_dl -r; rm -rf state_up mend_dl evx_dl /root/.cache/pip
+  rm -rf /root/.cache/huggingface/hub/models--baya1116--* /root/.cache/huggingface/hub/.locks/models--baya1116--* 2>/dev/null
+  for f in $(find /root/w /root -maxdepth 2 -name "*.log" -size +300M 2>/dev/null); do tail -c 50000000 $f > $f.tmp && mv $f.tmp $f; done
+  echo "[kg] s71: after: $(df -h /root | tail -1 | awk '{print $4" free"}') $(date -u)"
 fi
 # CTL-END
