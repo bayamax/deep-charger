@@ -168,7 +168,9 @@
 # with LoRA lr 0, hypernet lr 1e-5, closed-but-wrong rewarded -0.1, the 60 problems every 2nd round, the controller
 # steering the hypernet lr.
 # serial 62: the --fifo 2048 eval wrote nothing (0/60) - its log tail goes to the container log to see why.
-SER=62
+# serial 63: the --fifo eval ran out of memory - something else held 22 GB (the restarting trainer). kvg_job now runs a one-off
+# job from kvg_extra between rounds, with the GPU free: the --fifo 2048 eval of v38 goes there. Restart after the running round.
+SER=63
 if [ -f /root/.boxrmx_serial ] && [ "$(cat /root/.boxrmx_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxrmx_serial
 [ -d /venv/main/bin ] && export PATH=/venv/main/bin:$PATH
@@ -769,5 +771,28 @@ JOB
 fi
 if [ ! -e /root/.s62log ]; then touch /root/.s62log
   { echo "[kg] s62: run_fifo.log tail:"; grep -E "Error|Traceback|error" /root/w/run_fifo.log | head -3 | cut -c1-300; tail -n 4 /root/w/run_fifo.log | cut -c1-300; } >> /root/w/w.log 2>&1
+fi
+if [ ! -e /root/.s63fifo ]; then touch /root/.s63fifo
+  cat > /root/w/kvg_extra <<'EX'
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token); cd /root/w; R=baya1116/hypernet-sp-distill
+M="--S 32 --heads 8 --layers 3 --ffn 2048 --rw 1024 --C 128 --maxd 0 --kv-mem --kv-rank 512"
+o=evalx_v38_fifo2048_s1.jsonl; rm -f $o
+python3 sp_qwen3.py rollout --traces rl_eval60.jsonl $M --fifo 2048 --ckpt kvg_best.pt --max-len 12288 --roll-batch 48 --grpo-tok-budget 60000 --seed 1 --roll-out $o --log sp_kvg.log > run_fifo.log 2>&1
+grep -E "Error|Traceback" run_fifo.log | tail -1 | cut -c1-200 | sed 's/^/[kg] fifo eval: /'
+python3 -c "from huggingface_hub import HfApi; HfApi().upload_file(path_or_fileobj='$o', path_in_repo='archive/sp3/kvg/$o', repo_id='$R')"
+echo "[kg] eval v38 fifo2048 seed 1: $(python3 -c "
+import json, sys; sys.path.insert(0, '.')
+from sp_mathcheck import correct
+rs = [json.loads(l) for l in open('$o')]; print(f'{sum(correct(r) for r in rs)}/{len(rs)} correct, closed {sum(\"</think>\" in r[\"text\"] for r in rs)}')") (v38 plain: 44 / 41) $(date -u)"
+EX
+  touch /root/w/STOP_KG
+  cat > /root/s63.sh <<'JOB'
+while pgrep -f "^bash /root/kvg_job.sh" > /dev/null; do sleep 30; done
+cd /root/w; rm -f STOP_KG kvg_pending_auto
+for _t in $(seq 60); do curl -sS -o /root/kvg_job.sh "https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i/ctl/kvg_job.sh?nocache=$(date +%s)"; grep -q -- "kvg_extra" /root/kvg_job.sh && break; sleep 120; done
+echo "[kg] s63: restarting with the one-off job hook (the fifo eval first) $(date -u)"
+START=dpo_ref.pt exec bash /root/kvg_job.sh
+JOB
+  setsid nohup bash -c 'bash /root/s63.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
 fi
 # CTL-END
