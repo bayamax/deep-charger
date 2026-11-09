@@ -205,7 +205,10 @@
 # serial 74: kvp_job started 'from 2 segments' - an older job (the ctl-para segments) left kvp_seg, kvp_hist and maybe kvp.pt
 # behind, so the start may not be v38 and the plateau rule would read old numbers. Check kvp.pt against kvg_best.pt; reset
 # the counters (and the weights and baselines if they differ) and restart from segment 1.
-SER=74
+# serial 75: the baseline massprof says the prior at A=1 does not move v38's pooler - its own logits keep half the effective
+# mass on 17 tokens (the model's importance itself is flat: 616 tokens for half at distant 2048). Rather than fight the collapsed
+# logits, the user's plan as stated: a new pooler from the base model with the prior (FROM=base), read against the kvm curve.
+SER=75
 if [ -f /root/.boxrmx_serial ] && [ "$(cat /root/.boxrmx_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxrmx_serial
 [ -d /venv/main/bin ] && export PATH=/venv/main/bin:$PATH
@@ -979,5 +982,16 @@ rm -f kvp_seg kvp_hist kvp_next.pt STOP_KP
 exec bash /root/kvp_job.sh
 JOB
   setsid nohup bash -c 'bash /root/s74.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
+fi
+if [ ! -e /root/.s75base ]; then touch /root/.s75base
+  cat > /root/s75.sh <<'JOB'
+cd /root/w; RAW=https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i; touch STOP_KP
+pkill -f "bash /root/kvp_job.sh"; pkill -f "bash /root/s74.sh"; sleep 2; pkill -f "sp_qwen3.py train"; pkill -f "sp_qwen3.py eval"; pkill -f "sp_qwen3.py massprof"; pkill -f "sp_qwen3.py rollout"; sleep 10
+mkdir -p kvp_v38start; mv kvp.pt kvp_seg kvp_hist kvp_base_done kvp_next.pt kvp_v38start/ 2>/dev/null; rm -f STOP_KP
+for _t in $(seq 60); do curl -sS -o /root/kvp_job.sh "$RAW/ctl/kvp_job.sh?nocache=$(date +%s)"; grep -q "FROM=" /root/kvp_job.sh && break; sleep 120; done
+echo "[kp] s75: a new pooler from the base model with the prior (kvm's recipe), v38-start files parked in kvp_v38start/ $(date -u)"
+FROM=base exec bash /root/kvp_job.sh
+JOB
+  setsid nohup bash -c 'bash /root/s75.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
 fi
 # CTL-END

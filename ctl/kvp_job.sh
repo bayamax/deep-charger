@@ -9,6 +9,9 @@
 # the held-out KL by domain (with the prior); every 2nd segment the massprof (importance, effective mass) and the 60
 # problems at seed 1. Baselines first: v38's held-out KL without and with the (untrained) prior, and the massprof.
 # Stops at a plateau of the held-out KL (3 segments without a 1% gain) or STOP_KP; then the 60 problems at seed 2 too.
+# FROM=base (the user: retrain the pooler from the base model): a new pooler on the original model, no checkpoint - the
+# kvm run's recipe exactly plus the prior, so its held-out KL per segment is read against kvm's curve (segment 1 0.0918,
+# 2 ~0.08, 5 0.0675, 8 0.0648; the raw window alone 0.1073). The baselines are skipped (nothing to measure yet).
 export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null); cd /root/w
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 R=baya1116/hypernet-sp-distill; H=https://huggingface.co/$R/resolve/main; RAW=https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i
@@ -16,7 +19,7 @@ put() { for _i in 1 2 3 4 5; do python3 -c "import sys; from huggingface_hub imp
 get() { for _i in 1 2 3; do curl -sSfL -H "Authorization: Bearer $HF_TOKEN" -o "$2" "$H/$1" && return 0; sleep 10; done; return 1; }
 for _t in $(seq 60); do curl -sS -o sp_new.py "$RAW/tools/sp_qwen3.py?nocache=$(date +%s)"; grep -q "def importance_of" sp_new.py && { mv sp_new.py sp_qwen3.py; break; }; sleep 120; done
 curl -sS -o sp_mathcheck.py "$RAW/tools/sp_mathcheck.py?nocache=$(date +%s)"
-LG=/root/w/sp_kvp.log; LR=${LR:-1e-4}
+LG=/root/w/sp_kvp.log; LR=${LR:-1e-4}; FROM=${FROM:-v38}
 M="--S 32 --heads 8 --layers 3 --ffn 2048 --rw 1024 --C 128 --maxd 0 --kv-mem --kv-rank 512"
 AP="--att-prior ${AP:-1.0} --att-layers ${AL:-8-19}"
 if [ ! -s rm_pool.jsonl ]; then   # the KV-memory distillation data (ctl/kvm_job.sh): the gm_* pool, 1500 at the end held out
@@ -34,9 +37,9 @@ open('rm_held.jsonl', 'w').writelines(out); open('rm_pool.jsonl', 'w').writeline
 print('[kp] pool', len(rs) - 1500, '| held-out', len(out))"; rm -f gm_*.jsonl
 fi
 [ -s kvg_best.pt ] || get archive/sp3/final/spKVF_best_v38.pt kvg_best.pt
-[ -s kvp.pt ] || cp kvg_best.pt kvp.pt
+[ -s kvp.pt ] || [ $FROM = base ] || cp kvg_best.pt kvp.pt
 [ -s kvg_v38_s1.jsonl ] || get archive/sp3/kvg/kvg_v38_s1.jsonl kvg_v38_s1.jsonl
-echo "[kp] ready $(date -u) | importance_of in the script: $(grep -c 'def importance_of' sp_qwen3.py) | $AP | lr $LR | from $(cat kvp_seg 2>/dev/null || echo 0) segments"
+echo "[kp] ready $(date -u) | importance_of in the script: $(grep -c 'def importance_of' sp_qwen3.py) | $AP | lr $LR | start $FROM | from $(cat kvp_seg 2>/dev/null || echo 0) segments"
 score() { python3 -c "
 import json, sys; sys.path.insert(0, '.')
 from sp_mathcheck import correct
@@ -54,6 +57,7 @@ ev60() {   # ev60 <ckpt> <seed> <label>
   python3 sp_qwen3.py rollout --traces rl_eval60.jsonl $M $AP --ckpt $1 --max-len 12288 --roll-batch 48 --grpo-tok-budget 60000 --seed $2 --roll-out $o --log $LG > run_kpgen.log 2>&1
   grep -E "Error|Traceback" run_kpgen.log | tail -1 | sed "s/^/[kp] $3 gen: /"; put $o kvp/$o > /dev/null
   echo "[kp] $3 seed $2: $(score $o) (v38 plain: 44 / 41, raw window 42 / 44) $(date -u)"; }
+[ $FROM = base ] && touch kvp_base_done
 if [ ! -e kvp_base_done ]; then
   echo "[kp] baseline v38, held-out KL by domain: no prior:$(evkl --ckpt kvp.pt)"
   echo "[kp] baseline v38, held-out KL by domain: prior on, pooler untrained:$(evkl --ckpt kvp.pt $AP)"
@@ -61,7 +65,8 @@ if [ ! -e kvp_base_done ]; then
 fi
 seg=$(cat kvp_seg 2>/dev/null || echo 0)
 while [ ! -e STOP_KP ]; do seg=$((seg + 1)); t0=$(date +%s); x="--const-lr"; [ $seg = 1 ] && x=""
-  python3 sp_qwen3.py train --traces rm_pool.jsonl --skip $(( ((seg - 1) * 600) % 9600 )) --n 600 --max-len 8192 $M $AP --chunks-per-trace 16 --accum 8 --lr $LR $x --lora-lr 0 --ckpt kvp.pt --seed $((100 + seg)) --out kvp_next.pt --log $LG > run_kp.log 2>&1
+  CK=kvp.pt; [ -s kvp.pt ] || CK=""   # FROM=base: segment 1 starts a new pooler on the original model
+  python3 sp_qwen3.py train --traces rm_pool.jsonl --skip $(( ((seg - 1) * 600) % 9600 )) --n 600 --max-len 8192 $M $AP --chunks-per-trace 16 --accum 8 --lr $LR $x --lora-lr 0 ${CK:+--ckpt $CK} --seed $((100 + seg)) --out kvp_next.pt --log $LG > run_kp.log 2>&1
   if [ -s kvp_next.pt ] && grep -q "^\[sp\] trained" run_kp.log; then mv kvp_next.pt kvp.pt; echo $seg > kvp_seg
   else echo "[kp] segment $seg FAILED: $(grep -E 'Error' run_kp.log | tail -1 | cut -c1-200)"; break; fi
   [ $seg = 1 ] && grep "att-prior" run_kp.log | head -1 | cut -c1-300 | sed 's/^\[sp\]/[kp]/'
