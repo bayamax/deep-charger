@@ -172,7 +172,11 @@
 # job from kvg_extra between rounds, with the GPU free: the --fifo 2048 eval of v38 goes there. Restart after the running round.
 # serial 64: eviction by attention mass (the user: what the pooler does not attend to can go), not FIFO: the one-off eval of
 # v38 uses --maxd 2048 (the 2048 distant tokens with the most pooling mass are kept, the rest dropped).
-SER=64
+# serial 65: how many distant tokens to keep is measured, not guessed (the user): sp_qwen3 massprof reports where the
+# pooler's attention mass sits over long rollouts (share on the top-k, tokens for 50/80/90/95%); the one-off job runs it on
+# the v38 / v47 eval texts, takes the median tokens-for-90% at a distant past of 4096 (rounded up to 256, within 512..4096)
+# as --maxd, and evaluates v38 with it.
+SER=65
 if [ -f /root/.boxrmx_serial ] && [ "$(cat /root/.boxrmx_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxrmx_serial
 [ -d /venv/main/bin ] && export PATH=/venv/main/bin:$PATH
@@ -800,5 +804,28 @@ fi
 if [ ! -e /root/.s64mass ]; then touch /root/.s64mass
   [ -e /root/w/kvg_extra.running ] || sed -i 's/--fifo 2048/--maxd 2048/; s/fifo2048/maxd2048/g; s/fifo eval/maxd eval/' /root/w/kvg_extra 2>/dev/null
   echo "[kg] s64: the one-off eval of v38 now with --maxd 2048 (attention-mass eviction) $(grep -c maxd2048 /root/w/kvg_extra 2>/dev/null)" >> /root/w/w.log
+fi
+if [ ! -e /root/.s65mass ]; then touch /root/.s65mass
+  [ -e /root/w/kvg_extra.running ] || cat > /root/w/kvg_extra <<'EX'
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token); cd /root/w; R=baya1116/hypernet-sp-distill
+RAW=https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i
+curl -sS -o sp_new.py "$RAW/tools/sp_qwen3.py?nocache=$(date +%s)"; grep -q '"massprof"' sp_new.py && mv sp_new.py sp_qwen3.py
+M="--S 32 --heads 8 --layers 3 --ffn 2048 --rw 1024 --C 128 --maxd 0 --kv-mem --kv-rank 512"
+cat kvg_v38_s1.jsonl kvg_v47_s1.jsonl > mp_in.jsonl
+python3 sp_qwen3.py massprof --traces mp_in.jsonl $M --ckpt kvg_best.pt --max-len 12288 --log sp_kvg.log > run_mp.log 2>&1
+grep -E "massprof|Error|Traceback" run_mp.log | tail -5 | sed 's/^\[sp\]/[kg]/'
+k=$(grep "massprof distant 4096" run_mp.log | grep -oP '90%: \K[0-9]+' | head -1); [ -n "$k" ] || k=$(grep "massprof distant 2048" run_mp.log | grep -oP '90%: \K[0-9]+' | head -1); [ -n "$k" ] || k=2048
+k=$(( (k + 255) / 256 * 256 )); [ $k -lt 512 ] && k=512; [ $k -gt 4096 ] && k=4096
+echo "[kg] eviction cap from the mass profile: --maxd $k"
+o=evalx_v38_maxd${k}_s1.jsonl; rm -f $o
+python3 sp_qwen3.py rollout --traces rl_eval60.jsonl $M --ckpt kvg_best.pt --max-len 12288 --roll-batch 48 --grpo-tok-budget 60000 --seed 1 --roll-out $o --log sp_kvg.log --maxd $k > run_maxd.log 2>&1
+grep -E "Error|Traceback" run_maxd.log | tail -1 | cut -c1-200 | sed 's/^/[kg] maxd eval: /'
+python3 -c "from huggingface_hub import HfApi; HfApi().upload_file(path_or_fileobj='$o', path_in_repo='archive/sp3/kvg/$o', repo_id='$R')"
+echo "[kg] eval v38 maxd$k seed 1: $(python3 -c "
+import json, sys; sys.path.insert(0, '.')
+from sp_mathcheck import correct
+rs = [json.loads(l) for l in open('$o')]; print(f'{sum(correct(r) for r in rs)}/{len(rs)} correct, closed {sum(\"</think>\" in r[\"text\"] for r in rs)}')") (v38 plain: 44 / 41) $(date -u)"
+EX
+  echo "[kg] s65: the one-off job now measures the mass profile first and picks --maxd from it $(date -u)" >> /root/w/w.log
 fi
 # CTL-END

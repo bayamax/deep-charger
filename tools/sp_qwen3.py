@@ -23,7 +23,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 ap = argparse.ArgumentParser()
-ap.add_argument("mode", choices=["train", "eval", "profile", "rollout", "grpo", "probe"])
+ap.add_argument("mode", choices=["train", "eval", "profile", "rollout", "grpo", "probe", "massprof"])
 ap.add_argument("--model", default="Qwen/Qwen3-1.7B")
 ap.add_argument("--traces", required=True)
 ap.add_argument("--n", type=int, default=0); ap.add_argument("--skip", type=int, default=0)
@@ -1584,6 +1584,28 @@ for r in rows:
     data.append((torch.tensor(pid + ans), len(pid)))   # CPU; moved per trace
 
 tag = f"S{a.S} rw{a.rw} C{a.C} maxd{a.maxd} L{a.layers} ffn{a.ffn}" + (" par" if a.par and a.mode == "train" else "") + (f" spin b{a.spin_beta}" if a.spin and a.mode == "train" else "") + (" grpo-groups" if a.grpo_groups and a.mode == "train" else "") + (" spnext" + (f" win{a.sn_win}/{a.sn_win_every}" if a.sn_win != "1" else "") if a.spnext and a.mode == "train" else "") + (" no-SP" if a.no_sp else "") + (" SP-null" if a.sp_null else "") + (" SP-swap" if a.sp_swap else "") + (f" filler{FILL}" if a.sp_filler else "") + (" pin-think" if a.pin_think else "") + (" kv-evict" if a.kv_evict else "") + (" para-window" if a.para_window else "") + (f" twin-mix{a.twin_mix}" if a.twin_mix >= 0 else "") + (" twin-minent" if a.twin_minent else "") + (" win-teacher" if a.win_teacher else "") + (" sp-replace" if a.sp_replace else "") + (f" rmt{a.rmt_block}" if a.rmt else "") + (f" kvmem{a.kv_rank}" if a.kv_mem else "") + (f" ctxL{a.ctx_hidden}" if a.ctx_hidden else "") + (" pe-rev" if a.pe_rev else "") + (" pe-norm" if a.pe_norm else "") + (f" FT{a.ft_layers}" if a.ft_layers else "") + (f" lora{LORA_RANK}" if LORA_RANK and not a.rmt else "") + (f" from{a.score_from}" if a.score_from else "") + (f" rkl{a.rkl_weight}" if a.rkl_weight and a.mode == "train" else "") + (" ctl-window" if a.ctl_window and a.mode == "train" else "") + (" ctl-para" if a.ctl_para and a.mode == "train" else "")
+if a.mode == "massprof":   # where the pooler's attention mass sits over a long distant past (the user: evict by mass; how many tokens
+    # to keep is a number to measure, not to guess). --traces: rollout texts. For each text and distant length nd (the window
+    # holding the last rw tokens), the mass over the first nd generated tokens: the share of it on the top-k tokens, and the
+    # number of tokens that carry 50 / 80 / 90 / 95% of it. Seconds per text.
+    import collections as _c
+    pooler.eval(); Ks = [256, 512, 1024, 2048, 4096]; cov = _c.defaultdict(list); need = _c.defaultdict(list); n_ = _c.Counter()
+    with torch.no_grad():
+        for r in rows:
+            ids_ = tok.encode(r["text"], add_special_tokens=False)
+            for nd in (1024, 2048, 4096, 8192):
+                if len(ids_) < nd + a.rw: continue
+                _, m_ = pooler.forward_with_mass(embed(torch.tensor([ids_[:nd]], device=dev)).float()); m_ = m_[0].float()
+                s_ = m_.sort(descending=True).values; c_ = s_.cumsum(0) / s_.sum(); n_[nd] += 1
+                for k in Ks:
+                    if k < nd: cov[(nd, k)].append(c_[k - 1].item())
+                for p_ in (0.5, 0.8, 0.9, 0.95): need[(nd, p_)].append(int((c_ < p_).sum().item()) + 1)
+    med = lambda xs: sorted(xs)[len(xs) // 2] if xs else float("nan")
+    for nd in (1024, 2048, 4096, 8192):
+        if not n_[nd]: continue
+        log(f"[sp] massprof distant {nd} ({n_[nd]} texts): mass on the top " + " ".join(f"{k}: {100 * med(cov[(nd, k)]):.0f}%" for k in Ks if k < nd)
+            + " | tokens for " + " ".join(f"{int(100 * p_)}%: {med(need[(nd, p_)])}" for p_ in (0.5, 0.8, 0.9, 0.95)) + " (medians)")
+    sys.exit(0)
 if a.mode == "profile":
     pooler.eval(); acc = {}
     for ids, P in data: profile_trace(ids, P, acc)
