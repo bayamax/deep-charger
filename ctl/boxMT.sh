@@ -32,7 +32,10 @@
 # serial 12: at 1024 kept tokens the chained answers lose to full context because the kept "important" part (user turns plus the
 # verbose final answers of turns 1-2: median 515 tokens) overflows the 512 older entries and the first answer drops out.
 # --kv-policy struct2 keeps the answer lines holding \boxed first. After serial 11: the main eval at 512 + 512 with struct2.
-SER=12
+# serial 13: the user - no training: the system prompt tells the model to write <recall>query</recall> when it needs an earlier
+# detail; the query is searched with BGE over the conversation's earlier lines and the hits come back in <memory> (--recall).
+# After serial 12: the main eval at 512 + 512 (struct2) with recall, then the log in pieces with recall.
+SER=13
 if [ -f /root/.boxmt_serial ] && [ "$(cat /root/.boxmt_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxmt_serial
 [ -d /venv/main/bin ] && export PATH=/venv/main/bin:$PATH
@@ -168,5 +171,16 @@ cd /root/w; sleep 60; while pgrep -f "bash /root/mt11.sh" > /dev/null || pgrep -
 NEED="struct2" RB=32 CONDS="b1024:512:512:--kv-policy=struct2,--kv-pool=7,--kv-lines=32" exec bash /root/mt_job.sh
 JOB
   setsid nohup bash -c 'bash /root/mt12.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
+fi
+if [ ! -e /root/.mt13 ]; then touch /root/.mt13
+  cat > /root/mt13.sh <<'JOB'
+cd /root/w; sleep 90; while pgrep -f "bash /root/mt12.sh" > /dev/null || pgrep -f "bash /root/mt11.sh" > /dev/null || pgrep -f "bash /root/mt9.sh" > /dev/null || pgrep -f "bash /root/mt_job.sh" > /dev/null; do sleep 60; done
+L="--kv-policy=struct2,--kv-pool=7,--kv-lines=32,--recall"
+NEED="recall-model" RB=32 CONDS="r1024:512:512:$L" bash /root/mt_job.sh
+grep -E "recall:" sp_mt.log | tail -1 | sed 's/^/[mt] /'
+NEED="recall-model" TR=mt_docc.jsonl PFX=docc RB=32 CONDS="r1024:512:512:$L" bash /root/mt_job.sh
+grep -E "recall:" sp_mt.log | tail -1 | sed 's/^/[mt] /'
+JOB
+  setsid nohup bash -c 'bash /root/mt13.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
 fi
 # CTL-END
