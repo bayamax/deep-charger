@@ -42,7 +42,10 @@
 # 12: the main eval and the log in pieces at 512 + 512 (struct2 + pool + lines + rag).
 # serial 16: the user meant a 0.5B model cannot follow tags - try the tag-driven recall (--recall) on the 1.7B after all. After
 # serial 15: the main eval and the log in pieces at 512 + 512 (struct2 + pool + lines + recall); the recall count is logged.
-SER=16
+# serial 17: struct2 (boxed lines first) read 103 like struct: the chained-answer losses are the model mixing up the two problems
+# (it calls both "the same problem"), the turn markers having been evicted. --kv-frame always keeps <|im_start|> + role,
+# <|im_end|>, <think>, </think>. After serial 16: the main eval at 512 + 512, struct + pool + lines + frame.
+SER=17
 if [ -f /root/.boxmt_serial ] && [ "$(cat /root/.boxmt_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxmt_serial
 [ -d /venv/main/bin ] && export PATH=/venv/main/bin:$PATH
@@ -212,5 +215,12 @@ NEED="recall-model" TR=mt_docc.jsonl PFX=docc RB=32 CONDS="r1024:512:512:$L" bas
 grep -E "recall:" sp_mt.log | tail -1 | sed 's/^/[mt] /'
 JOB
   setsid nohup bash -c 'bash /root/mt16.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
+fi
+if [ ! -e /root/.mt17 ]; then touch /root/.mt17
+  cat > /root/mt17.sh <<'JOB'
+cd /root/w; sleep 150; while pgrep -f "bash /root/mt16.sh" > /dev/null || pgrep -f "bash /root/mt15.sh" > /dev/null || pgrep -f "bash /root/mt12.sh" > /dev/null || pgrep -f "bash /root/mt_job.sh" > /dev/null; do sleep 60; done
+NEED="kv-frame" RB=32 CONDS="f1024:512:512:--kv-policy=struct,--kv-pool=7,--kv-lines=32,--kv-frame" exec bash /root/mt_job.sh
+JOB
+  setsid nohup bash -c 'bash /root/mt17.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
 fi
 # CTL-END

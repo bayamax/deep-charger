@@ -183,6 +183,8 @@ ap.add_argument("--kv-quant", type=int, default=0, help="--kv-keep: store the ke
                 "(per token, groups of --kv-qgroup along the head dimension, min-max; simulated by quantise-dequantise once when an entry "
                 "leaves the window); the newest rw stay full precision")
 ap.add_argument("--kv-qgroup", type=int, default=32)
+ap.add_argument("--kv-frame", action="store_true", help="--kv-keep with --kv-policy struct/struct2: always keep the turn frame - "
+                "<|im_start|>, the role word after it, <|im_end|>, <think> and </think> - so kept fragments stay attached to their turn")
 ap.add_argument("--recall", action="store_true", help="--kv-keep, multi-turn rows: a recall tool, no training - the system prompt tells "
                 "the model to write <recall>query</recall> when it needs an earlier detail; the query is searched (--recall-model, a "
                 "BGE embedder) over the conversation's earlier lines (user turns and answers, not thinking) and the top --recall-k lines "
@@ -1928,7 +1930,8 @@ def rollout_kvkeep(prompts, nslot):
     cache = None; pad = []; cols = []; lastlog = None; IMP = CNT = None   # per row: left padding, the answer index of each cached answer entry; (B, Ln) attention received / steps observed
     ST = None   # (6, B, Ln) chunk-level statistics per cached column: cumulative, last chunk, EMA 0.9, EMA 0.98, max over chunks, chunks observed; CH: this chunk's sum
     CH = None; sel_model = kvsel_model(a.kv_select[4:]) if a.kv_select.startswith("mlp:") else None
-    IM_END = tok.convert_tokens_to_ids("<|im_end|>")
+    IM_END = tok.convert_tokens_to_ids("<|im_end|>"); IM_START = tok.convert_tokens_to_ids("<|im_start|>")
+    FRAME = [set() for _ in prompts]   # --kv-frame: answer indices of the turn frame
     THINK_END = tok.convert_tokens_to_ids("</think>")
     LINE = [[] for _ in prompts]; LCNT = [0] * len(prompts); NL_IDS = nl_ids() if (a.kv_lines or a.kv_policy == "struct2") else set()
     BOX_IDS = box_ids() if a.kv_policy == "struct2" else set(); BOXL = [set() for _ in prompts]; LCAP = a.kv_lines or 32   # struct2: lines holding \boxed   # --kv-lines: line id per answer index
@@ -1985,11 +1988,13 @@ def rollout_kvkeep(prompts, nslot):
                     cur = MTI.get(j, 0); kd = KIND[j]; tn = TN[j]
                     tier = torch.tensor([2.0 if kd[cols[b][i]] else (1.0 if tn[cols[b][i]] == cur else 0.0) for i in range(n - k)], device=dev)
                     score = score / score.max().clamp(min=1e-12) + 2.0 * tier
+                    if a.kv_frame: score = score + 100.0 * torch.tensor([float(cols[b][i] in FRAME[j]) for i in range(n - k)], device=dev)
                 elif a.kv_policy == "struct2":
                     cur = MTI.get(j, 0); kd = KIND[j]; tn = TN[j]; ln = LINE[j]; bx = BOXL[j]
                     def t2(e): return (4.0 if ln[e] in bx else 2.0) if kd[e] == 2 else (3.0 if kd[e] in (1, 3) else (1.0 if tn[e] == cur else 0.0))
                     tier = torch.tensor([t2(cols[b][i]) for i in range(n - k)], device=dev)
                     score = score / score.max().clamp(min=1e-12) + 2.0 * tier
+                    if a.kv_frame: score = score + 100.0 * torch.tensor([float(cols[b][i] in FRAME[j]) for i in range(n - k)], device=dev)
                 if a.kv_lines:
                     gid = torch.tensor([LINE[j][cols[b][i]] for i in range(n - k)], device=dev); u, inv = gid.unique(return_inverse=True)
                     gs = torch.zeros(len(u), device=dev).index_add_(0, inv, score) / torch.bincount(inv, minlength=len(u)).float()
@@ -2057,6 +2062,7 @@ def rollout_kvkeep(prompts, nslot):
                         else: fin[r] = True; ended[j] = t_ in stop; continue
                 if not forced and t_ in stop: fin[r] = True; ended[j] = True; continue
                 gen[j].append(t_); TN[j].append(MTI.get(j, 0))
+                if a.kv_frame and (t_ in (IM_START, IM_END, THINK_ID, THINK_END) or (len(gen[j]) > 1 and gen[j][-2] == IM_START)): FRAME[j].add(len(gen[j]) - 1)
                 if a.kv_lines or a.kv_policy == "struct2":
                     LINE[j].append(LCNT[j] // 1000000); LCNT[j] += 1
                     if not forced and not INTH[j] and t_ in BOX_IDS: BOXL[j].add(LINE[j][-1])
