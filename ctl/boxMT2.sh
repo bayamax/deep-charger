@@ -92,4 +92,13 @@ NEED="lmk-eol" RB=32 CONDS="le1024:512:512:$L lf1024:512:512:$L,--kv-frame" bash
 JOB
   setsid nohup bash -c 'bash /root/mt24.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
 fi
+if [ ! -e /root/.mt25 ]; then touch /root/.mt25
+  cat > /root/mt25.sh <<'JOB'
+cd /root/w; sleep 30; while pgrep -f "bash /root/mt24.sh" > /dev/null || pgrep -f "bash /root/mt_job.sh" > /dev/null; do sleep 60; done
+L="--kv-policy=struct2,--kv-pool=7,--kv-lines=32,--mem-prompt,--kv-lmk,--lmk-thr=0.004,--lmk-nb=0,--lmk-query=own+q,--lmk-eol,--lmk-turn"
+NEED="lmk-turn" TR=mt_docc.jsonl PFX=docc RB=32 CONDS="lg1024:512:512:$L" bash /root/mt_job.sh
+NEED="lmk-turn" RB=32 CONDS="lg1024:512:512:$L" bash /root/mt_job.sh
+JOB
+  setsid nohup bash -c 'bash /root/mt25.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
+fi
 # CTL-END
