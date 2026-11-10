@@ -190,7 +190,7 @@ ap.add_argument("--recall", action="store_true", help="--kv-keep, multi-turn row
                 "BGE embedder) over the conversation's earlier lines (user turns and answers, not thinking) and the top --recall-k lines "
                 "are fed back inside <memory>...</memory> as forced tokens")
 ap.add_argument("--kv-rag", action="store_true", help="--kv-keep, multi-turn rows: automatic retrieval, no tags and no training - when a "
-                "user turn has been read up to its end, its first and last lines are searched (--recall-model) over the conversation's "
+                "user turn that asks something (a line with '?') has been read up to its end, its question line is searched (--recall-model) over the conversation's "
                 "earlier lines that have dropped out of the cache (user turns and answers, not thinking), and the top --recall-k come "
                 "back, each with up to 4 neighbouring lines of the same turn either side, appended to the user's message as '(Earlier in this conversation: ...)' - "
                 "forced tokens inside the same budget")
@@ -2047,7 +2047,8 @@ def rollout_kvkeep(prompts, nslot):
                         if a.kv_rag and (j, MTI[j]) not in RAGD and MTQ[j] == TAILT:   # the user's message is read: retrieve, append
                             RAGD.add((j, MTI[j])); flush_lines(j); RAGLOG[0] += 1
                             ls_ = [x for x in MT[j][2][MTI[j]].split("\n") if x.strip()]
-                            q_ = (ls_[0] + " " + ls_[-1]) if len(ls_) > 1 else (ls_[0] if ls_ else "")
+                            qs_ = [x for x in ls_ if "?" in x]   # only a message that asks something triggers a search; the query is its question
+                            q_ = qs_[-1] if qs_ else ""
                             inc = set(cols[r]); cand = [i for i, rg in enumerate(SRNG[j]) if any(x not in inc for x in rg)]
                             if q_ and cand:
                                 sim = SEMB[j][cand] @ bge_embed([q_], query=True)[0]
