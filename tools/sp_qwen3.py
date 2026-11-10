@@ -181,6 +181,9 @@ ap.add_argument("--kv-quant", type=int, default=0, help="--kv-keep: store the ke
                 "(per token, groups of --kv-qgroup along the head dimension, min-max; simulated by quantise-dequantise once when an entry "
                 "leaves the window); the newest rw stay full precision")
 ap.add_argument("--kv-qgroup", type=int, default=32)
+ap.add_argument("--kv-lines", type=int, default=0, help="--kv-keep: keep or drop whole lines - the older entries are grouped by line (a "
+                "new group after a token holding a newline, or after this many tokens) and every entry gets its group's mean score, so a "
+                "line (a log entry, a code line, a sentence run) survives whole instead of in pieces")
 ap.add_argument("--kv-layerwise", action="store_true", help="--kv-keep: each hooked layer (--att-layers) keeps its own top-B older entries by its own attention "
                 "statistic (--kv-select mean / cum / ema0.9 / ema0.98 / last); the other layers keep the set chosen by the summed statistic. "
                 "The harness read a per-layer choice ~10% lower in KL")
@@ -1850,6 +1853,13 @@ def qdq(x, key=False):
     return (((y - mn) / s_).round() * s_ + mn).reshape(H_, n_, d_).to(x.dtype)
 
 
+_NL = []
+def nl_ids():
+    """--kv-lines: the token ids whose text holds a newline (computed once)"""
+    if not _NL: _NL.append({i for i in range(len(tok)) if "\n" in tok.decode([i])})
+    return _NL[0]
+
+
 def qcost():
     """memory of one quantised entry in fp16 entries: the codes plus a 16-bit scale and minimum per group"""
     return a.kv_quant / 16 + 2 / a.kv_qgroup
@@ -1869,6 +1879,7 @@ def rollout_kvkeep(prompts, nslot):
     CH = None; sel_model = kvsel_model(a.kv_select[4:]) if a.kv_select.startswith("mlp:") else None
     IM_END = tok.convert_tokens_to_ids("<|im_end|>")
     THINK_END = tok.convert_tokens_to_ids("</think>")
+    LINE = [[] for _ in prompts]; LCNT = [0] * len(prompts); NL_IDS = nl_ids() if a.kv_lines else set()   # --kv-lines: line id per answer index
     KIND = [[] for _ in prompts]; TN = [[] for _ in prompts]; INTH = [False] * len(prompts); QD = [set() for _ in prompts]   # per answer index: 0 think / 1 user turn / 2 answer; its turn; quantised entries
     MTQ = {j: list(MT[j][0][0]) for j in MT}; MTI = {j: 0 for j in MT}; MTS = {j: 0 for j in MT}   # forced turns: queue, turn index, turn start
     if sel_model is not None:
@@ -1907,6 +1918,10 @@ def rollout_kvkeep(prompts, nslot):
                     cur = MTI.get(j, 0); kd = KIND[j]; tn = TN[j]
                     tier = torch.tensor([2.0 if kd[cols[b][i]] else (1.0 if tn[cols[b][i]] == cur else 0.0) for i in range(n - k)], device=dev)
                     score = score / score.max().clamp(min=1e-12) + 2.0 * tier
+                if a.kv_lines:
+                    gid = torch.tensor([LINE[j][cols[b][i]] for i in range(n - k)], device=dev); u, inv = gid.unique(return_inverse=True)
+                    gs = torch.zeros(len(u), device=dev).index_add_(0, inv, score) / torch.bincount(inv, minlength=len(u)).float()
+                    score = gs[inv] + 1e-6 * inv.float() / len(u)   # whole lines; the tie-break keeps a line's entries together
                 older = score.topk(a.kv_keep).indices.sort().values.tolist()
             if older: KEEPLOG[0] += len(older); KEEPLOG[1] += sum(len(gen[j]) - cols[b][i] for i in older) / len(older) / a.C; KEEPLOG[2] += 1
             keep.append((j, b, pad[b], P, older + newest)); NOLD.append(len(older))
@@ -1957,6 +1972,9 @@ def rollout_kvkeep(prompts, nslot):
                         else: fin[r] = True; ended[j] = t_ in stop; continue
                 if not forced and t_ in stop: fin[r] = True; ended[j] = True; continue
                 gen[j].append(t_); TN[j].append(MTI.get(j, 0))
+                if a.kv_lines:
+                    LINE[j].append(LCNT[j] // 1000000); LCNT[j] += 1
+                    if t_ in NL_IDS or LCNT[j] % 1000000 >= a.kv_lines: LCNT[j] = (LCNT[j] // 1000000 + 1) * 1000000
                 if forced: KIND[j].append(1); INTH[j] = False
                 else:
                     if t_ == THINK_ID: INTH[j] = True

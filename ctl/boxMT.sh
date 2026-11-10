@@ -13,7 +13,10 @@
 # serial 5: the 4-bit run ran out of memory too (the simulation holds quantised entries at 16 bits: 32 streams of 2.7k
 # entries). Each condition now carries its own KV allowance (--kv-budget, in entries, sets the stream count). After the running
 # window-1024 condition: 4-bit, 2-bit, the smaller budgets, pooling alone, then full context last (4 streams, slow).
-SER=5
+# serial 6: 4-bit older entries read 116/160 (struct alone 104); the log misses are near-misses (LL-3440 for LP-3440, SV-934 for
+# SV-8934): pieces of a line survive. --kv-lines 32 keeps or drops whole lines. After the running 2-bit condition: 4-bit +
+# whole lines; the smaller budgets then use whole lines if they beat plain 4-bit; pooling alone; full context last.
+SER=6
 if [ -f /root/.boxmt_serial ] && [ "$(cat /root/.boxmt_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxmt_serial
 [ -d /venv/main/bin ] && export PATH=/venv/main/bin:$PATH
@@ -81,5 +84,19 @@ S="--kv-policy=struct,--kv-pool=7"; K5="--kv-budget=50000"
 NEED="kv-policy" RB=32 CONDS="sq4:1024:1536:$S,--kv-quant=4,$K5 sq2:1024:3072:$S,--kv-quant=2,$K5 s1024:512:512:$S sq4w512:512:1536:$S,--kv-quant=4,$K5 sq2w512:512:2560:$S,--kv-quant=2,$K5 s512:256:256:$S sq2w256:256:1280:$S,--kv-quant=2,$K5 p512:1024:512:--kv-pool=7 full:16384:0:--kv-budget=54000" exec bash /root/mt_job.sh
 JOB
   setsid nohup bash -c 'bash /root/mt5.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
+fi
+if [ ! -e /root/.mt6 ]; then touch /root/.mt6
+  pkill -f "bash /root/mt5.sh"; touch /root/w/STOP_MT
+  cat > /root/mt6.sh <<'JOB'
+cd /root/w; while pgrep -f "bash /root/mt_job.sh" > /dev/null; do sleep 60; done; rm -f STOP_MT
+echo "[mt] serial 6: whole lines $(date -u)"
+S="--kv-policy=struct,--kv-pool=7"; K5="--kv-budget=50000"
+NEED="kv-lines" RB=32 CONDS="sq4L:1024:1536:$S,--kv-quant=4,--kv-lines=32,$K5" bash /root/mt_job.sh
+tot() { python3 mt_score.py $1 2>/dev/null | grep -oE "total [0-9]+" | grep -oE "[0-9]+"; }
+L=""; [ -s mt_sq4L_s1.jsonl ] && [ "$(tot mt_sq4L_s1.jsonl)" -gt "$(tot mt_sq4_s1.jsonl)" ] && L=",--kv-lines=32"
+echo "[mt] smaller budgets with '${L:-no whole lines}' $(date -u)"
+NEED="kv-lines" RB=32 CONDS="s1024:512:512:$S$L sq4w512:512:1536:$S,--kv-quant=4,$K5$L sq2w512:512:2560:$S,--kv-quant=2,$K5$L s512:256:256:$S$L sq2w256:256:1280:$S,--kv-quant=2,$K5$L p512:1024:512:--kv-pool=7 full:16384:0:--kv-budget=54000" exec bash /root/mt_job.sh
+JOB
+  setsid nohup bash -c 'bash /root/mt6.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
 fi
 # CTL-END
