@@ -11,7 +11,7 @@ earlier turns can all be evicted. Each task needs something from thousands of to
 """
 import json, random, re, sys
 
-R = random.Random(20261110)
+R = random.Random(int(sys.argv[4]) if len(sys.argv) > 4 else 20261110)   # another seed: a calibration set with other facts, logs, functions
 SYS = "<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n"
 ev120, m96, out = sys.argv[1:4]
 

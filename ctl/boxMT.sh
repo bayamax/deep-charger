@@ -49,7 +49,11 @@
 # neighbouring lines spilled into the next turn's math problem and the model solved that instead. Neighbours now stay in the
 # same turn. After serial 17: rag alone (fixed), then rag + the recall prompt (it lifted the chain to 18) + turn markers, on
 # the main eval and the log in pieces.
-SER=18
+# serial 19: the user - the model should decide when to recall (no rules; training allowed). --kv-probe: every chunk a side
+# branch asks the model yes/no whether it needs an earlier detail it cannot see; on yes it writes the search query. First a
+# calibration pass on a separate set (ctl/mt_cal.jsonl, another seed, 50 rows) with the threshold above 1 (never acts) and every
+# answer logged (hub mt/probe_cal.jsonl), to choose the threshold away from the eval.
+SER=19
 if [ -f /root/.boxmt_serial ] && [ "$(cat /root/.boxmt_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxmt_serial
 [ -d /venv/main/bin ] && export PATH=/venv/main/bin:$PATH
@@ -235,5 +239,17 @@ NEED="same turn either side" RB=32 CONDS="gf1024:512:512:$L gx1024:512:512:$L,--
 NEED="same turn either side" TR=mt_docc.jsonl PFX=docc RB=32 CONDS="gx1024:512:512:$L,--recall,--kv-frame" bash /root/mt_job.sh
 JOB
   setsid nohup bash -c 'bash /root/mt18.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
+fi
+if [ ! -e /root/.mt19 ]; then touch /root/.mt19
+  cat > /root/mt19.sh <<'JOB'
+cd /root/w; sleep 20; while pgrep -f "bash /root/mt_job.sh" > /dev/null; do sleep 60; done
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null)
+L="--kv-policy=struct2,--kv-pool=7,--kv-lines=32,--mem-prompt,--kv-probe,--probe-thr=1.01,--probe-log=probe_cal.jsonl"
+rm -f probe_cal.jsonl
+NEED="mem-prompt" TR=mt_cal.jsonl PFX=cal RB=32 CONDS="p0:512:512:$L" bash /root/mt_job.sh
+grep -E "kv-probe:" sp_mt.log | tail -1 | sed 's/^/[mt] /'
+python3 -c "from huggingface_hub import HfApi; HfApi().upload_file(path_or_fileobj='probe_cal.jsonl', path_in_repo='archive/sp3/mt/probe_cal.jsonl', repo_id='baya1116/hypernet-sp-distill')" && echo "[mt] probe_cal.jsonl uploaded $(wc -l < probe_cal.jsonl) lines"
+JOB
+  setsid nohup bash -c 'bash /root/mt19.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
 fi
 # CTL-END
