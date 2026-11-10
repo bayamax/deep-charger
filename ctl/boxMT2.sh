@@ -68,4 +68,14 @@ NEED="lmk-query" TR=mt_docc.jsonl PFX=docc RB=32 CONDS="la1024:512:512:$L,--lmk-
 JOB
   setsid nohup bash -c 'bash /root/mt21.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
 fi
+if [ ! -e /root/.mt22 ]; then touch /root/.mt22
+  pkill -f "bash /root/mt21.sh"; pkill -f "bash /root/mt_job.sh"; pkill -f sp_qwen3.py; sleep 15
+  cat > /root/mt22.sh <<'JOB'
+cd /root/w; sleep 20; while pgrep -f "bash /root/mt_job.sh" > /dev/null; do sleep 60; done
+L="--kv-policy=struct2,--kv-pool=7,--kv-lines=32,--mem-prompt,--kv-lmk,--lmk-thr=0.004,--lmk-nb=0"
+NEED="lmk-nb" RB=32 CONDS="lc1024:512:512:$L,--lmk-query=own+q ld1024:512:512:$L,--lmk-query=own" bash /root/mt_job.sh
+NEED="lmk-nb" TR=mt_docc.jsonl PFX=docc RB=32 CONDS="lc1024:512:512:$L,--lmk-query=own+q" bash /root/mt_job.sh
+JOB
+  setsid nohup bash -c 'bash /root/mt22.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
+fi
 # CTL-END

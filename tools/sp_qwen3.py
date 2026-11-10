@@ -208,6 +208,7 @@ ap.add_argument("--kv-lmk", action="store_true", help="--kv-keep, multi-turn row
                 "most attended token); every chunk the last query's attention over the cache plus the landmarks is computed, and when "
                 "the mass on landmarks exceeds --lmk-thr the --recall-k lines with the most mass come back as text")
 ap.add_argument("--lmk-thr", type=float, default=0.1)
+ap.add_argument("--lmk-nb", type=int, default=4, help="--kv-lmk: neighbouring lines of the same turn brought back with each hit, either side")
 ap.add_argument("--lmk-query", default="lmk", choices=["lmk", "own", "own+q"], help="--kv-lmk: which lines come back once attention went "
                 "out of the cache - lmk: the landmarks with the most mass; own: a search (--recall-model) with the model's own last 3 "
                 "lines; own+q: those plus the latest question line of the user")
@@ -2164,6 +2165,7 @@ def rollout_kvkeep(prompts, nslot):
             Q_ = ATTREC.pop("q")
             for j in act: COOL[j] = COOL.get(j, 0) - 1
             for r, j in enumerate(act):
+                if INS[j] > 0 or j in RQ: COOL[j] = max(COOL[j], 2); continue   # no check while a recall is being read back in, nor for 2 chunks after
                 if fin[r] or not LMK[j] or NREC[j] >= a.recall_max or COOL[j] > 0 or j in RQ or PENDQ.get(j): continue
                 sl = list(LMK[j]); M_ = torch.stack([LMK[j][x][1] for x in sl], 2).float()   # (layers, kv heads, m, d)
                 mass = torch.zeros(len(sl), device=dev); outm = 0.0
@@ -2190,7 +2192,7 @@ def rollout_kvkeep(prompts, nslot):
                     if q_.strip() and cand:
                         sim = SEMB[j][cand] @ bge_embed([q_], query=True)[0]
                         top = [cand[i] for i in sim.topk(min(a.recall_k, len(cand))).indices.tolist()]
-                pick = sorted({x for h in top for x in range(max(h - 4, 0), min(h + 5, len(STORE[j]))) if SGRP[j][x] == SGRP[j][h]})[:30]
+                pick = sorted({x for h in top for x in range(max(h - a.lmk_nb, 0), min(h + a.lmk_nb + 1, len(STORE[j]))) if SGRP[j][x] == SGRP[j][h]})[:30]
                 body = "\n".join(STORE[j][i] for i in pick); RCLOG[0] += 1
                 if MTQ.get(j): PENDQ[j] = "\n\n(Earlier in this conversation:\n" + body + ")"
                 else: RQ[j] = tok.encode("\n(Recalled from earlier in this conversation:\n" + body + ")\n", add_special_tokens=False)
