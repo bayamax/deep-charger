@@ -187,6 +187,11 @@ ap.add_argument("--recall", action="store_true", help="--kv-keep, multi-turn row
                 "the model to write <recall>query</recall> when it needs an earlier detail; the query is searched (--recall-model, a "
                 "BGE embedder) over the conversation's earlier lines (user turns and answers, not thinking) and the top --recall-k lines "
                 "are fed back inside <memory>...</memory> as forced tokens")
+ap.add_argument("--kv-rag", action="store_true", help="--kv-keep, multi-turn rows: automatic retrieval, no tags and no training - when a "
+                "user turn has been read up to its end, its first and last lines are searched (--recall-model) over the conversation's "
+                "earlier lines that have dropped out of the cache (user turns and answers, not thinking), and the top --recall-k come "
+                "back, each with 4 neighbouring lines either side, appended to the user's message as '(Earlier in this conversation: ...)' - "
+                "forced tokens inside the same budget")
 ap.add_argument("--recall-k", type=int, default=3)
 ap.add_argument("--recall-max", type=int, default=6, help="--recall: at most this many recalls per conversation")
 ap.add_argument("--recall-model", default="BAAI/bge-small-en-v1.5")
@@ -1929,14 +1934,16 @@ def rollout_kvkeep(prompts, nslot):
     BOX_IDS = box_ids() if a.kv_policy == "struct2" else set(); BOXL = [set() for _ in prompts]; LCAP = a.kv_lines or 32   # struct2: lines holding \boxed   # --kv-lines: line id per answer index
     KIND = [[] for _ in prompts]; TN = [[] for _ in prompts]; INTH = [False] * len(prompts); QD = [set() for _ in prompts]   # per answer index: 0 think / 1 user turn / 2 answer; its turn; quantised entries
     RQ = {}; NREC = [0] * len(prompts); LST = [0] * len(prompts); STORE = [[] for _ in prompts]; SEMB = [None] * len(prompts)   # --recall
-    PEND = []; RCLOG = [0, 0]; GT_IDS = gt_ids() if a.recall else set(); NLR = nl_ids() if a.recall else set()
+    PEND = []; RCLOG = [0, 0]; GT_IDS = gt_ids() if a.recall else set(); NLR = nl_ids() if (a.recall or a.kv_rag) else set()
+    SRNG = [[] for _ in prompts]; INS = [0] * len(prompts); RAGD = set(); RAGLOG = [0, 0]   # --kv-rag: line -> answer indices, inserted tokens left, turns done
+    TAILT = tok.encode("<|im_end|>\n<|im_start|>assistant\n", add_special_tokens=False)
     def flush_lines(only=None):
         nonlocal PEND
         todo_ = [x for x in PEND if only is None or x[0] == only]; PEND = [x for x in PEND if not (only is None or x[0] == only)]
         if not todo_: return
-        e_ = bge_embed([t for _, t in todo_])
-        for (jj, t), v in zip(todo_, e_):
-            STORE[jj].append(t); SEMB[jj] = v[None] if SEMB[jj] is None else torch.cat([SEMB[jj], v[None]])
+        e_ = bge_embed([t for _, t, _ in todo_])
+        for (jj, t, rg), v in zip(todo_, e_):
+            STORE[jj].append(t); SRNG[jj].append(rg); SEMB[jj] = v[None] if SEMB[jj] is None else torch.cat([SEMB[jj], v[None]])
     FRESH = {}   # --kv-turn-hold: a user turn just ended - the next rebuild ranks by the last chunk's attention
     MTQ = {j: list(MT[j][0][0]) for j in MT}; MTI = {j: 0 for j in MT}; MTS = {j: 0 for j in MT}   # forced turns: queue, turn index, turn start
     if sel_model is not None:
@@ -2032,6 +2039,17 @@ def rollout_kvkeep(prompts, nslot):
                     if RQ.get(j):
                         t_ = RQ[j].pop(0); forced = True
                     elif MTQ[j]:
+                        if a.kv_rag and (j, MTI[j]) not in RAGD and MTQ[j] == TAILT:   # the user's message is read: retrieve, append
+                            RAGD.add((j, MTI[j])); flush_lines(j); RAGLOG[0] += 1
+                            ls_ = [x for x in MT[j][2][MTI[j]].split("\n") if x.strip()]
+                            q_ = (ls_[0] + " " + ls_[-1]) if len(ls_) > 1 else (ls_[0] if ls_ else "")
+                            inc = set(cols[r]); cand = [i for i, rg in enumerate(SRNG[j]) if any(x not in inc for x in rg)]
+                            if q_ and cand:
+                                sim = SEMB[j][cand] @ bge_embed([q_], query=True)[0]
+                                hit = [cand[i] for i in sim.topk(min(a.recall_k, len(cand))).indices.tolist()]
+                                top = sorted({x for h in hit for x in range(max(h - 4, 0), min(h + 5, len(STORE[j])))})[:30]   # each hit with 4 lines either side
+                                ins = tok.encode("\n\n(Earlier in this conversation:\n" + "\n".join(STORE[j][i] for i in top) + ")", add_special_tokens=False)
+                                MTQ[j] = ins + MTQ[j]; INS[j] = len(ins); RAGLOG[1] += 1
                         t_ = MTQ[j].pop(0); forced = True
                         if not MTQ[j]: MTS[j] = len(gen[j]) + 1; FRESH[j] = True
                     elif t_ in stop or len(gen[j]) - MTS[j] >= MT[j][1][MTI[j]]:   # the turn ended (or hit its cap): next user turn
@@ -2043,19 +2061,21 @@ def rollout_kvkeep(prompts, nslot):
                     LINE[j].append(LCNT[j] // 1000000); LCNT[j] += 1
                     if not forced and not INTH[j] and t_ in BOX_IDS: BOXL[j].add(LINE[j][-1])
                     if t_ in NL_IDS or LCNT[j] % 1000000 >= LCAP: LCNT[j] = (LCNT[j] // 1000000 + 1) * 1000000
-                if forced: KIND[j].append(3 if j in RQ else 1); INTH[j] = False
+                if forced:
+                    KIND[j].append(3 if (j in RQ or INS[j] > 0) else 1); INTH[j] = False
+                    if INS[j] > 0: INS[j] -= 1
                 else:
                     if t_ == THINK_ID: INTH[j] = True
                     KIND[j].append(0 if INTH[j] else 2)
                     if t_ == THINK_END: INTH[j] = False
                 if a.roll_lp: LPG.setdefault(j, []).append(lpn[r])
-                if a.recall and j in MT:
+                if (a.recall or a.kv_rag) and j in MT:
                     if j in RQ and not RQ[j]: del RQ[j]
                     if t_ in NLR:   # a finished line: keep its text for the search (user turns and answers, not thinking or recalls)
                         kk_ = KIND[j][LST[j]:]
                         if kk_ and 3 not in kk_ and any(x in (1, 2) for x in kk_):
-                            tx_ = tok.decode(gen[j][LST[j]:]).strip()
-                            if len(tx_) >= 8 and "<|im_" not in tx_: PEND.append((j, tx_))
+                            tx_ = tok.decode(gen[j][LST[j]:]).rstrip()
+                            if len(tx_.strip()) >= 4 and "<|im_" not in tx_: PEND.append((j, tx_, list(range(LST[j], len(gen[j])))))
                         LST[j] = len(gen[j])
                     if not forced and t_ in GT_IDS and NREC[j] < a.recall_max:
                         tail = tok.decode(gen[j][-64:])
@@ -2083,7 +2103,7 @@ def rollout_kvkeep(prompts, nslot):
                 live = torch.tensor([0.0 if f else 1.0 for f in fin], device=dev)[:, None]
                 IMP += w * live; CNT += amask.float() * live; CH += w * live
             for r, j in enumerate(act): cols[r].append(len(gen[j]) - 1)   # the new entry (a finished row's dummy leaves with it)
-        if a.recall: flush_lines()
+        if a.recall or a.kv_rag: flush_lines()
         ST[0] += CH; ST[1] = CH; ST[2] = 0.9 * ST[2] + CH; ST[3] = 0.98 * ST[3] + CH; ST[4] = torch.maximum(ST[4], CH); ST[5] += amask.float()
         keep_rows = [r for r in range(B) if not fin[r]]
         if len(keep_rows) < B:
@@ -2095,6 +2115,7 @@ def rollout_kvkeep(prompts, nslot):
                 cache = c2; lastlog = lastlog.index_select(0, sel); IMP = IMP.index_select(0, sel); CNT = CNT.index_select(0, sel); ST = ST.index_select(1, sel)
             else: cache = None; lastlog = None; IMP = CNT = ST = None
             act = [act[r] for r in keep_rows]; pad = [pad[r] for r in keep_rows]; cols = [cols[r] for r in keep_rows]
+    if a.kv_rag: log(f"[sp] kv-rag: {RAGLOG[0]} user turns read, {RAGLOG[1]} with earlier lines appended ({a.recall_k} each)")
     if a.recall: log(f"[sp] recall: {RCLOG[0]} recalls ({RCLOG[1]} searched) in {len(prompts)} conversations")
     if KEEPLOG[2]: log(f"[sp] kv-keep {a.kv_keep} {a.kv_select} policy {a.kv_policy} pool {a.kv_pool} quant {a.kv_quant or 16}-bit "
                        f"(budget ~{a.rw + a.kv_keep * (qcost() if a.kv_quant else 1):.0f} fp16 entries + prompt): {KEEPLOG[2]} rebuilds kept {KEEPLOG[0] / KEEPLOG[2]:.0f} older entries each, mean age {KEEPLOG[1] / KEEPLOG[2]:.1f} chunks")
@@ -2660,7 +2681,7 @@ elif a.mode == "rollout":
                 assert a.kv_evict and not a.kv_layerwise and (a.kv_keep > 0 or a.kv_keep_path), "multi-turn rows need --kv-evict --kv-keep(-path)"
                 ts = r["turns"]; segs = [tok.encode(f"<|im_start|>user\n{ts[0]}<|im_end|>\n<|im_start|>assistant\n", add_special_tokens=False)]
                 segs += [tok.encode(f"\n<|im_start|>user\n{t}<|im_end|>\n<|im_start|>assistant\n", add_special_tokens=False) for t in ts[1:]]
-                MT[k_] = (segs, r.get("caps", [a.max_len] * len(ts)))
+                MT[k_] = (segs, r.get("caps", [a.max_len] * len(ts)), ts)
                 if a.recall: pr_[k_] = tok.encode(RECALL_SYS, add_special_tokens=False)
             LPG.clear()
             gens = rollout_kvmem(pr_, a.roll_batch)[0] if a.kv_mem else (rollout_kvlayer if a.kv_layerwise else rollout_kvkeep if (a.kv_keep > 0 or a.kv_keep_path) else rollout_kv)(pr_, a.roll_batch)[0] if a.kv_evict else rollout_cb(pr_, a.roll_batch)[0] if a.roll_cb else rollout(pr_)

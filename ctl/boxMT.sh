@@ -37,7 +37,10 @@
 # After serial 12: the main eval at 512 + 512 (struct2) with recall, then the log in pieces with recall.
 # serial 14: the user - a small model does not follow tags. Serial 13's prompt-driven recall runs are dropped (its waiting script
 # is stopped); an automatic retrieval at the end of each user turn replaces it (queued separately).
-SER=14
+# serial 15: --kv-rag - automatic retrieval at the end of each user turn (its first and last lines searched with BGE over the
+# lines that dropped out of the cache; the top 3, each with 4 lines either side, appended to the user's message). After serial
+# 12: the main eval and the log in pieces at 512 + 512 (struct2 + pool + lines + rag).
+SER=15
 if [ -f /root/.boxmt_serial ] && [ "$(cat /root/.boxmt_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxmt_serial
 [ -d /venv/main/bin ] && export PATH=/venv/main/bin:$PATH
@@ -186,4 +189,15 @@ JOB
   setsid nohup bash -c 'bash /root/mt13.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
 fi
 if [ ! -e /root/.mt14 ]; then touch /root/.mt14; pkill -f "bash /root/mt13.sh"; fi
+if [ ! -e /root/.mt15 ]; then touch /root/.mt15
+  cat > /root/mt15.sh <<'JOB'
+cd /root/w; sleep 90; while pgrep -f "bash /root/mt12.sh" > /dev/null || pgrep -f "bash /root/mt11.sh" > /dev/null || pgrep -f "bash /root/mt9.sh" > /dev/null || pgrep -f "bash /root/mt_job.sh" > /dev/null; do sleep 60; done
+L="--kv-policy=struct2,--kv-pool=7,--kv-lines=32,--kv-rag"
+NEED="kv-rag" RB=32 CONDS="g1024:512:512:$L" bash /root/mt_job.sh
+grep -E "kv-rag:" sp_mt.log | tail -1 | sed 's/^/[mt] /'
+NEED="kv-rag" TR=mt_docc.jsonl PFX=docc RB=32 CONDS="g1024:512:512:$L" bash /root/mt_job.sh
+grep -E "kv-rag:" sp_mt.log | tail -1 | sed 's/^/[mt] /'
+JOB
+  setsid nohup bash -c 'bash /root/mt15.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
+fi
 # CTL-END
