@@ -35,7 +35,9 @@
 # serial 13: the user - no training: the system prompt tells the model to write <recall>query</recall> when it needs an earlier
 # detail; the query is searched with BGE over the conversation's earlier lines and the hits come back in <memory> (--recall).
 # After serial 12: the main eval at 512 + 512 (struct2) with recall, then the log in pieces with recall.
-SER=13
+# serial 14: the user - a small model does not follow tags. Serial 13's prompt-driven recall runs are dropped (its waiting script
+# is stopped); an automatic retrieval at the end of each user turn replaces it (queued separately).
+SER=14
 if [ -f /root/.boxmt_serial ] && [ "$(cat /root/.boxmt_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxmt_serial
 [ -d /venv/main/bin ] && export PATH=/venv/main/bin:$PATH
@@ -183,4 +185,5 @@ grep -E "recall:" sp_mt.log | tail -1 | sed 's/^/[mt] /'
 JOB
   setsid nohup bash -c 'bash /root/mt13.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
 fi
+if [ ! -e /root/.mt14 ]; then touch /root/.mt14; pkill -f "bash /root/mt13.sh"; fi
 # CTL-END
