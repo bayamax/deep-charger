@@ -78,4 +78,10 @@ NEED="lmk-nb" TR=mt_docc.jsonl PFX=docc RB=32 CONDS="lc1024:512:512:$L,--lmk-que
 JOB
   setsid nohup bash -c 'bash /root/mt22.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
 fi
+if [ ! -e /root/.mt23 ]; then touch /root/.mt23
+  pkill -f "bash /root/mt22.sh"; pkill -f "bash /root/mt_job.sh"; pkill -f "sp_mt.py rollout"; sleep 20; pkill -9 -f "sp_mt.py rollout"; sleep 5
+  rm -f /root/w/mt_lc1024_s1.jsonl /root/w/mt_ld1024_s1.jsonl /root/w/docc_lc1024_s1.jsonl
+  sed 's/mt22/mt23/' /root/mt22.sh > /root/mt23.sh
+  setsid nohup bash -c 'bash /root/mt23.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
+fi
 # CTL-END
