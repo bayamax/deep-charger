@@ -172,9 +172,11 @@ ap.add_argument("--kv-keep", type=int, default=0, help="--kv-evict: a fixed budg
                 "as computed and at their true positions - a bounded REAL KV cache chosen by the model's own attention, no training")
 ap.add_argument("--kv-select", default="mean", help="--kv-keep: how the older entries are ranked - mean (attention received per step cached), cum, "
                 "ema0.9, ema0.98, last (the last chunk), or mlp:<path> (the learned selector of tools/kvsel_train.py on the same features)")
-ap.add_argument("--kv-policy", default="attn", choices=["attn", "struct"], help="--kv-keep: attn = the older entries ranked by the "
+ap.add_argument("--kv-policy", default="attn", choices=["attn", "struct", "struct2"], help="--kv-keep: attn = the older entries ranked by the "
                 "--kv-select statistic alone; struct = by tier first - user-turn tokens and final-answer tokens (outside <think>), then the "
-                "current turn's thinking, then the thinking of finished turns (the chat template drops it anyway) - the statistic inside a tier")
+                "current turn's thinking, then the thinking of finished turns (the chat template drops it anyway) - the statistic inside a tier; "
+                "struct2 = lines of the model's answers holding \\boxed first, then user-turn tokens, then the rest of the answers' prose, "
+                "then the thinking as in struct (the verbose answer prose crowded out the earlier answers at 1024 kept tokens)")
 ap.add_argument("--kv-pool", type=int, default=0, help="--kv-keep: max-pool the ranking statistic over this many neighbouring entries "
                 "(odd; SnapKV-style) so kept entries come as spans, not scattered tokens")
 ap.add_argument("--kv-quant", type=int, default=0, help="--kv-keep: store the kept OLDER entries' keys and values at this many bits "
@@ -1864,6 +1866,13 @@ def nl_ids():
     return _NL[0]
 
 
+_BX = []
+def box_ids():
+    """--kv-policy struct2: the token ids whose text holds 'boxed' (computed once)"""
+    if not _BX: _BX.append({i for i in range(len(tok)) if "boxed" in tok.decode([i])})
+    return _BX[0]
+
+
 def qcost():
     """memory of one quantised entry in fp16 entries: the codes plus a 16-bit scale and minimum per group"""
     return a.kv_quant / 16 + 2 / a.kv_qgroup
@@ -1883,7 +1892,8 @@ def rollout_kvkeep(prompts, nslot):
     CH = None; sel_model = kvsel_model(a.kv_select[4:]) if a.kv_select.startswith("mlp:") else None
     IM_END = tok.convert_tokens_to_ids("<|im_end|>")
     THINK_END = tok.convert_tokens_to_ids("</think>")
-    LINE = [[] for _ in prompts]; LCNT = [0] * len(prompts); NL_IDS = nl_ids() if a.kv_lines else set()   # --kv-lines: line id per answer index
+    LINE = [[] for _ in prompts]; LCNT = [0] * len(prompts); NL_IDS = nl_ids() if (a.kv_lines or a.kv_policy == "struct2") else set()
+    BOX_IDS = box_ids() if a.kv_policy == "struct2" else set(); BOXL = [set() for _ in prompts]; LCAP = a.kv_lines or 32   # struct2: lines holding \boxed   # --kv-lines: line id per answer index
     KIND = [[] for _ in prompts]; TN = [[] for _ in prompts]; INTH = [False] * len(prompts); QD = [set() for _ in prompts]   # per answer index: 0 think / 1 user turn / 2 answer; its turn; quantised entries
     FRESH = {}   # --kv-turn-hold: a user turn just ended - the next rebuild ranks by the last chunk's attention
     MTQ = {j: list(MT[j][0][0]) for j in MT}; MTI = {j: 0 for j in MT}; MTS = {j: 0 for j in MT}   # forced turns: queue, turn index, turn start
@@ -1925,6 +1935,11 @@ def rollout_kvkeep(prompts, nslot):
                 if a.kv_policy == "struct":
                     cur = MTI.get(j, 0); kd = KIND[j]; tn = TN[j]
                     tier = torch.tensor([2.0 if kd[cols[b][i]] else (1.0 if tn[cols[b][i]] == cur else 0.0) for i in range(n - k)], device=dev)
+                    score = score / score.max().clamp(min=1e-12) + 2.0 * tier
+                elif a.kv_policy == "struct2":
+                    cur = MTI.get(j, 0); kd = KIND[j]; tn = TN[j]; ln = LINE[j]; bx = BOXL[j]
+                    def t2(e): return (4.0 if ln[e] in bx else 2.0) if kd[e] == 2 else (3.0 if kd[e] == 1 else (1.0 if tn[e] == cur else 0.0))
+                    tier = torch.tensor([t2(cols[b][i]) for i in range(n - k)], device=dev)
                     score = score / score.max().clamp(min=1e-12) + 2.0 * tier
                 if a.kv_lines:
                     gid = torch.tensor([LINE[j][cols[b][i]] for i in range(n - k)], device=dev); u, inv = gid.unique(return_inverse=True)
@@ -1980,9 +1995,10 @@ def rollout_kvkeep(prompts, nslot):
                         else: fin[r] = True; ended[j] = t_ in stop; continue
                 if not forced and t_ in stop: fin[r] = True; ended[j] = True; continue
                 gen[j].append(t_); TN[j].append(MTI.get(j, 0))
-                if a.kv_lines:
+                if a.kv_lines or a.kv_policy == "struct2":
                     LINE[j].append(LCNT[j] // 1000000); LCNT[j] += 1
-                    if t_ in NL_IDS or LCNT[j] % 1000000 >= a.kv_lines: LCNT[j] = (LCNT[j] // 1000000 + 1) * 1000000
+                    if not forced and not INTH[j] and t_ in BOX_IDS: BOXL[j].add(LINE[j][-1])
+                    if t_ in NL_IDS or LCNT[j] % 1000000 >= LCAP: LCNT[j] = (LCNT[j] // 1000000 + 1) * 1000000
                 if forced: KIND[j].append(1); INTH[j] = False
                 else:
                     if t_ == THINK_ID: INTH[j] = True
