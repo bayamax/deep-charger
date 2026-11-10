@@ -8,7 +8,9 @@
 # serial 3: struct + pool (window 1024 + 512) read 104/160 against attention selection 55 and the window alone 38 at the same
 # budget (facts and code 30/30). Queued after serial 2's chain: smaller budgets - struct at ~1024 (window 512 + 512) and ~512
 # (256 + 256), and struct + 2-bit older entries at ~1000 (512 + 2560) and ~500 (256 + 1280).
-SER=3
+# serial 4: full context ran out of memory (8 streams of ~13k tokens) - it runs again with half the KV allowance (4 streams),
+# right after serial 2's chain and before serial 3's smaller budgets (serial 3's waiting script is replaced by this one).
+SER=4
 if [ -f /root/.boxmt_serial ] && [ "$(cat /root/.boxmt_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxmt_serial
 [ -d /venv/main/bin ] && export PATH=/venv/main/bin:$PATH
@@ -53,5 +55,16 @@ S="--kv-policy=struct,--kv-pool=7"
 NEED="kv-policy" RB=32 CONDS="s1024:512:512:$S sq2w512:512:2560:$S,--kv-quant=2 s512:256:256:$S sq2w256:256:1280:$S,--kv-quant=2" exec bash /root/mt_job.sh
 JOB
   setsid nohup bash -c 'bash /root/mt3.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
+fi
+if [ ! -e /root/.mt4 ]; then touch /root/.mt4
+  pkill -f "bash /root/mt3.sh"
+  cat > /root/mt4.sh <<'JOB'
+cd /root/w; sleep 30; while pgrep -f "bash /root/mt2.sh" > /dev/null || pgrep -f "bash /root/mt_job.sh" > /dev/null; do sleep 60; done
+echo "[mt] serial 4: full context at 4 streams, then the smaller budgets $(date -u)"
+S="--kv-policy=struct,--kv-pool=7"
+NEED="kv-policy" RB=32 KB=56000 CONDS="full:16384:0" bash /root/mt_job.sh
+NEED="kv-policy" RB=32 CONDS="s1024:512:512:$S sq2w512:512:2560:$S,--kv-quant=2 s512:256:256:$S sq2w256:256:1280:$S,--kv-quant=2" exec bash /root/mt_job.sh
+JOB
+  setsid nohup bash -c 'bash /root/mt4.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
 fi
 # CTL-END
