@@ -203,6 +203,11 @@ ap.add_argument("--probe-thr", type=float, default=0.5, help="--kv-probe: recall
 ap.add_argument("--probe-log", default="", help="--kv-probe: write every probe that fired (p, query, hits) here as jsonl")
 ap.add_argument("--mem-prompt", action="store_true", help="multi-turn rows: the system prompt says the model's view of the conversation "
                 "is limited and earlier details should not be guessed (the recall prompt without the tag instructions)")
+ap.add_argument("--kv-lmk", action="store_true", help="--kv-keep, multi-turn rows: recall when the model's attention goes out of the "
+                "cache - every evicted line (user turns and answers) leaves one landmark key per hooked layer and head (the key of its "
+                "most attended token); every chunk the last query's attention over the cache plus the landmarks is computed, and when "
+                "the mass on landmarks exceeds --lmk-thr the --recall-k lines with the most mass come back as text")
+ap.add_argument("--lmk-thr", type=float, default=0.1)
 ap.add_argument("--recall-k", type=int, default=3)
 ap.add_argument("--recall-max", type=int, default=6, help="--recall: at most this many recalls per conversation")
 ap.add_argument("--recall-model", default="BAAI/bge-small-en-v1.5")
@@ -631,6 +636,7 @@ def _att_hook(mod, args, kwargs, out):
             if am.dtype == torch.bool: sc.masked_fill_(~am, float("-inf"))
             else: sc = sc + am.to(sc.dtype)
         ATTREC["acc"][mod.layer_idx] = sc.softmax(-1).nan_to_num(0.0).sum(1).sum(1)   # (B, keys)
+        if ATTREC.get("keepq"): ATTREC.setdefault("q", {})[mod.layer_idx] = q[:, :, -1].float()   # --kv-lmk: the last query row per head
 
 
 def att_take():
@@ -1948,7 +1954,9 @@ def rollout_kvkeep(prompts, nslot):
     BOX_IDS = box_ids() if a.kv_policy == "struct2" else set(); BOXL = [set() for _ in prompts]; LCAP = a.kv_lines or 32   # struct2: lines holding \boxed   # --kv-lines: line id per answer index
     KIND = [[] for _ in prompts]; TN = [[] for _ in prompts]; INTH = [False] * len(prompts); QD = [set() for _ in prompts]   # per answer index: 0 think / 1 user turn / 2 answer; its turn; quantised entries
     RQ = {}; NREC = [0] * len(prompts); LST = [0] * len(prompts); STORE = [[] for _ in prompts]; SEMB = [None] * len(prompts)   # --recall
-    PEND = []; RCLOG = [0, 0]; GT_IDS = gt_ids() if a.recall else set(); NLR = nl_ids() if (a.recall or a.kv_rag or a.kv_probe) else set()
+    PEND = []; RCLOG = [0, 0]; GT_IDS = gt_ids() if a.recall else set(); NLR = nl_ids() if (a.recall or a.kv_rag or a.kv_probe or a.kv_lmk) else set()
+    E2S = [dict() for _ in prompts]; LMK = [dict() for _ in prompts]; LMLOG = [0, 0, 0, 0.0]   # --kv-lmk: answer index -> stored line; line -> (importance, keys)
+    ATTREC["keepq"] = a.kv_lmk
     PENDQ = {}; COOL = {}; PBLOG = [0, 0, 0, 0.0]   # --kv-probe: recall text waiting for the end of a user message; cooldown; probes / asked / fired / sum p
     if a.kv_probe:
         P1 = tok.encode("<|im_end|>\n<|im_start|>user\n(Memory check) Is there any detail from earlier in this conversation that you "
@@ -1957,15 +1965,18 @@ def rollout_kvkeep(prompts, nslot):
                         "<|im_start|>assistant\n<think>\n\n</think>\n\n", add_special_tokens=False)
         YES = sorted({tok.encode(w, add_special_tokens=False)[0] for w in ("Yes", "yes", " Yes")}); NO = sorted({tok.encode(w, add_special_tokens=False)[0] for w in ("No", "no", " No")})
         PLOGF = open(a.probe_log, "a") if a.probe_log else None
+    elif a.kv_lmk: PLOGF = open(a.probe_log, "a") if a.probe_log else None
     SGRP = [[] for _ in prompts]; SRNG = [[] for _ in prompts]; INS = [0] * len(prompts); RAGD = set(); RAGLOG = [0, 0]   # --kv-rag: line -> answer indices, inserted tokens left, turns done
     TAILT = tok.encode("<|im_end|>\n<|im_start|>assistant\n", add_special_tokens=False)
     def flush_lines(only=None):
         nonlocal PEND
         todo_ = [x for x in PEND if only is None or x[0] == only]; PEND = [x for x in PEND if not (only is None or x[0] == only)]
         if not todo_: return
-        e_ = bge_embed([t for _, t, _ in todo_])
+        e_ = bge_embed([t for _, t, _ in todo_]) if (a.kv_rag or a.recall or a.kv_probe) else [None] * len(todo_)
         for (jj, t, rg), v in zip(todo_, e_):
-            STORE[jj].append(t); SRNG[jj].append(rg); SGRP[jj].append((TN[jj][rg[0]], KIND[jj][rg[-1]] == 2)); SEMB[jj] = v[None] if SEMB[jj] is None else torch.cat([SEMB[jj], v[None]])
+            STORE[jj].append(t); SRNG[jj].append(rg); SGRP[jj].append((TN[jj][rg[0]], KIND[jj][rg[-1]] == 2))
+            for e__ in rg: E2S[jj][e__] = len(STORE[jj]) - 1
+            if v is not None: SEMB[jj] = v[None] if SEMB[jj] is None else torch.cat([SEMB[jj], v[None]])
     FRESH = {}   # --kv-turn-hold: a user turn just ended - the next rebuild ranks by the last chunk's attention
     MTQ = {j: list(MT[j][0][0]) for j in MT}; MTI = {j: 0 for j in MT}; MTS = {j: 0 for j in MT}   # forced turns: queue, turn index, turn start
     if sel_model is not None:
@@ -2020,6 +2031,19 @@ def rollout_kvkeep(prompts, nslot):
                     score = gs[inv] + 1e-6 * inv.float() / len(u)   # whole lines; the tie-break keeps a line's entries together
                 older = score.topk(a.kv_keep).indices.sort().values.tolist()
             if older: KEEPLOG[0] += len(older); KEEPLOG[1] += sum(len(gen[j]) - cols[b][i] for i in older) / len(older) / a.C; KEEPLOG[2] += 1
+            if a.kv_lmk and E2S[j]:   # evicted stored lines leave their most attended token's key, per hooked layer
+                kept_ = set(older + newest); base_ = pad[b] + P; best = {}
+                imp_ = (IMP[b] / CNT[b].clamp(min=1)).tolist()
+                for i in range(n):
+                    if i in kept_: continue
+                    s_ = E2S[j].get(cols[b][i])
+                    if s_ is None: continue
+                    v_ = imp_[base_ + i]
+                    if (s_ not in best or v_ > best[s_][0]) and (s_ not in LMK[j] or v_ > LMK[j][s_][0]): best[s_] = (v_, base_ + i)
+                if best:
+                    sl = list(best); ci = torch.tensor([best[x][1] for x in sl], device=dev)
+                    kk = torch.stack([kv_of(cache, li)[0][b].index_select(1, ci) for li in ATT_L], 0)   # (layers, kv heads, m, d)
+                    for t_i, x in enumerate(sl): LMK[j][x] = (best[x][0], kk[:, :, t_i].to(torch.float16))
             keep.append((j, b, pad[b], P, older + newest)); NOLD.append(len(older))
         for j in new: keep.append((j, None, 0, len(prompts[j]), [])); NOLD.append(0)
         Ln = max(P + len(idx) for (_, _, _, P, idx) in keep); B = len(keep); pad = [Ln - (P + len(idx)) for (_, _, _, P, idx) in keep]
@@ -2097,7 +2121,7 @@ def rollout_kvkeep(prompts, nslot):
                     KIND[j].append(0 if INTH[j] else 2)
                     if t_ == THINK_END: INTH[j] = False
                 if a.roll_lp: LPG.setdefault(j, []).append(lpn[r])
-                if (a.recall or a.kv_rag or a.kv_probe) and j in MT:
+                if (a.recall or a.kv_rag or a.kv_probe or a.kv_lmk) and j in MT:
                     if j in RQ and not RQ[j]: del RQ[j]
                     if t_ in NLR:   # a finished line: keep its text for the search (user turns and answers, not thinking or recalls)
                         kk_ = KIND[j][LST[j]:]
@@ -2131,8 +2155,32 @@ def rollout_kvkeep(prompts, nslot):
                 live = torch.tensor([0.0 if f else 1.0 for f in fin], device=dev)[:, None]
                 IMP += w * live; CNT += amask.float() * live; CH += w * live
             for r, j in enumerate(act): cols[r].append(len(gen[j]) - 1)   # the new entry (a finished row's dummy leaves with it)
-        if a.recall or a.kv_rag or a.kv_probe: flush_lines()
+        if a.recall or a.kv_rag or a.kv_probe or a.kv_lmk: flush_lines()
         ST[0] += CH; ST[1] = CH; ST[2] = 0.9 * ST[2] + CH; ST[3] = 0.98 * ST[3] + CH; ST[4] = torch.maximum(ST[4], CH); ST[5] += amask.float()
+        if a.kv_lmk and "q" in ATTREC:   # the model's own attention: how much of the last query goes to evicted lines' landmarks
+            Q_ = ATTREC.pop("q")
+            for j in act: COOL[j] = COOL.get(j, 0) - 1
+            for r, j in enumerate(act):
+                if fin[r] or not LMK[j] or NREC[j] >= a.recall_max or COOL[j] > 0 or j in RQ or PENDQ.get(j): continue
+                sl = list(LMK[j]); M_ = torch.stack([LMK[j][x][1] for x in sl], 2).float()   # (layers, kv heads, m, d)
+                mass = torch.zeros(len(sl), device=dev); outm = 0.0
+                for t_i, li in enumerate(ATT_L):
+                    q_ = Q_[li][r]; hq = q_.size(0); K_ = kv_of(cache, li)[0][r, :, pad[r]:].float(); rep_ = hq // K_.size(0)
+                    sc_ = llm.model.layers[li].self_attn.scaling
+                    lk = torch.einsum("hd,hld->hl", q_, K_.repeat_interleave(rep_, 0)) * sc_
+                    lm = torch.einsum("hd,hmd->hm", q_, M_[t_i].repeat_interleave(rep_, 0)) * sc_
+                    pr_ = torch.softmax(torch.cat([lk, lm], 1), 1)[:, lk.size(1):]
+                    mass += pr_.mean(0); outm += float(pr_.sum(1).mean())
+                outm /= len(ATT_L); mass /= len(ATT_L)
+                LMLOG[0] += 1; LMLOG[3] += outm; fire = outm > a.lmk_thr
+                top = [sl[i] for i in mass.topk(min(a.recall_k, len(sl))).indices.tolist()]
+                if PLOGF: PLOGF.write(json.dumps({"j": j, "turn": MTI.get(j, 0), "at": len(gen[j]), "reading": bool(MTQ.get(j)), "out": round(outm, 4), "fired": fire, "top": [STORE[j][x] for x in top]}) + "\n")
+                if not fire: continue
+                LMLOG[1] += 1; NREC[j] += 1; COOL[j] = 2
+                pick = sorted({x for h in top for x in range(max(h - 4, 0), min(h + 5, len(STORE[j]))) if SGRP[j][x] == SGRP[j][h]})[:30]
+                body = "\n".join(STORE[j][i] for i in pick); RCLOG[0] += 1
+                if MTQ.get(j): PENDQ[j] = "\n\n(Earlier in this conversation:\n" + body + ")"
+                else: RQ[j] = tok.encode("\n(Recalled from earlier in this conversation:\n" + body + ")\n", add_special_tokens=False)
         keep_rows = [r for r in range(B) if not fin[r]]
         if len(keep_rows) < B:
             sel = torch.tensor(keep_rows, device=dev, dtype=torch.long)
@@ -2197,6 +2245,9 @@ def rollout_kvkeep(prompts, nslot):
                         if MTQ.get(j): PENDQ[j] = "\n\n(Earlier in this conversation:\n" + body + ")"
                         else: RQ[j] = tok.encode("\n(Recalled from earlier in this conversation:\n" + body + ")\n", add_special_tokens=False)
                         if PLOGF: PLOGF.write(json.dumps({"j": j, "turn": MTI.get(j, 0), "fired": True, "at": len(gen[j]), "reading": bool(MTQ.get(j)), "p": round(float(py[r]), 3), "query": q_, "hits": [STORE[j][h] for h in hit]}) + "\n")
+    if a.kv_lmk:
+        log(f"[sp] kv-lmk: {LMLOG[0]} checks (mean mass on evicted landmarks {LMLOG[3] / max(LMLOG[0], 1):.4f}), {LMLOG[1]} recalls fed")
+        if PLOGF: PLOGF.close()
     if a.kv_probe:
         log(f"[sp] kv-probe: {PBLOG[0]} chunk checks, {PBLOG[1]} streams asked (mean p(yes) {PBLOG[3] / max(PBLOG[1], 1):.3f}), {PBLOG[2]} said yes, {RCLOG[0]} recalls fed")
         if PLOGF: PLOGF.close()
