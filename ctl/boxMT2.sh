@@ -84,4 +84,12 @@ if [ ! -e /root/.mt23 ]; then touch /root/.mt23
   sed 's/mt22/mt23/' /root/mt22.sh > /root/mt23.sh
   setsid nohup bash -c 'bash /root/mt23.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
 fi
+if [ ! -e /root/.mt24 ]; then touch /root/.mt24
+  cat > /root/mt24.sh <<'JOB'
+cd /root/w; sleep 20; while pgrep -f "bash /root/mt23.sh" > /dev/null || pgrep -f "bash /root/mt_job.sh" > /dev/null; do sleep 60; done
+L="--kv-policy=struct2,--kv-pool=7,--kv-lines=32,--mem-prompt,--kv-lmk,--lmk-thr=0.004,--lmk-nb=0,--lmk-query=own+q,--lmk-eol"
+NEED="lmk-eol" RB=32 CONDS="le1024:512:512:$L lf1024:512:512:$L,--kv-frame" bash /root/mt_job.sh
+JOB
+  setsid nohup bash -c 'bash /root/mt24.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
+fi
 # CTL-END

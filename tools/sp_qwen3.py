@@ -208,6 +208,7 @@ ap.add_argument("--kv-lmk", action="store_true", help="--kv-keep, multi-turn row
                 "most attended token); every chunk the last query's attention over the cache plus the landmarks is computed, and when "
                 "the mass on landmarks exceeds --lmk-thr the --recall-k lines with the most mass come back as text")
 ap.add_argument("--lmk-thr", type=float, default=0.1)
+ap.add_argument("--lmk-eol", action="store_true", help="--kv-lmk: a recall decided mid-line waits for the end of the line the model is writing")
 ap.add_argument("--lmk-nb", type=int, default=4, help="--kv-lmk: neighbouring lines of the same turn brought back with each hit, either side")
 ap.add_argument("--lmk-query", default="lmk", choices=["lmk", "own", "own+q"], help="--kv-lmk: which lines come back once attention went "
                 "out of the cache - lmk: the landmarks with the most mass; own: a search (--recall-model) with the model's own last 3 "
@@ -1961,7 +1962,7 @@ def rollout_kvkeep(prompts, nslot):
     PEND = []; RCLOG = [0, 0]; GT_IDS = gt_ids() if a.recall else set(); NLR = nl_ids() if (a.recall or a.kv_rag or a.kv_probe or a.kv_lmk) else set()
     E2S = [dict() for _ in prompts]; LMK = [dict() for _ in prompts]; LMLOG = [0, 0, 0, 0.0]   # --kv-lmk: answer index -> stored line; line -> (importance, keys)
     ATTREC["keepq"] = a.kv_lmk
-    PENDQ = {}; COOL = {}; PBLOG = [0, 0, 0, 0.0]   # --kv-probe: recall text waiting for the end of a user message; cooldown; probes / asked / fired / sum p
+    PENDQ = {}; PENDG = {}; COOL = {}; PBLOG = [0, 0, 0, 0.0]   # --kv-probe: recall text waiting for the end of a user message; cooldown; probes / asked / fired / sum p
     if a.kv_probe:
         P1 = tok.encode("<|im_end|>\n<|im_start|>user\n(Memory check) Is there any detail from earlier in this conversation that you "
                         "need right now but can no longer see clearly? Answer only Yes or No.<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n", add_special_tokens=False)
@@ -2108,7 +2109,7 @@ def rollout_kvkeep(prompts, nslot):
                         t_ = MTQ[j].pop(0); forced = True
                         if not MTQ[j]: MTS[j] = len(gen[j]) + 1; FRESH[j] = True
                     elif t_ in stop or len(gen[j]) - MTS[j] >= MT[j][1][MTI[j]]:   # the turn ended (or hit its cap): next user turn
-                        if MTI[j] + 1 < len(MT[j][0]): MTI[j] += 1; MTQ[j] = list(MT[j][0][MTI[j]]); t_ = IM_END; forced = True
+                        if MTI[j] + 1 < len(MT[j][0]): MTI[j] += 1; MTQ[j] = list(MT[j][0][MTI[j]]); t_ = IM_END; forced = True; PENDG.pop(j, None)
                         else: fin[r] = True; ended[j] = t_ in stop; continue
                 if not forced and t_ in stop: fin[r] = True; ended[j] = True; continue
                 gen[j].append(t_); TN[j].append(MTI.get(j, 0))
@@ -2127,6 +2128,7 @@ def rollout_kvkeep(prompts, nslot):
                 if a.roll_lp: LPG.setdefault(j, []).append(lpn[r])
                 if (a.recall or a.kv_rag or a.kv_probe or a.kv_lmk) and j in MT:
                     if j in RQ and not RQ[j]: del RQ[j]
+                    if j in PENDG and t_ in NLR and not forced and not MTQ.get(j): RQ[j] = PENDG.pop(j)   # --lmk-eol: the line is done
                     if t_ in NLR:   # a finished line: keep its text for the search (user turns and answers, not thinking or recalls)
                         kk_ = KIND[j][LST[j]:]
                         if kk_ and 3 not in kk_ and any(x in (1, 2) for x in kk_):
@@ -2165,7 +2167,7 @@ def rollout_kvkeep(prompts, nslot):
             Q_ = ATTREC.pop("q")
             for j in act: COOL[j] = COOL.get(j, 0) - 1
             for r, j in enumerate(act):
-                if INS[j] > 0 or j in RQ: COOL[j] = max(COOL[j], 2); continue   # no check while a recall is being read back in, nor for 2 chunks after
+                if INS[j] > 0 or j in RQ or j in PENDG: COOL[j] = max(COOL[j], 2); continue   # no check while a recall is being read back in, nor for 2 chunks after
                 if fin[r] or not LMK[j] or NREC[j] >= a.recall_max or COOL[j] > 0 or j in RQ or PENDQ.get(j): continue
                 sl = list(LMK[j]); M_ = torch.stack([LMK[j][x][1] for x in sl], 2).float()   # (layers, kv heads, m, d)
                 mass = torch.zeros(len(sl), device=dev); outm = 0.0
@@ -2195,6 +2197,7 @@ def rollout_kvkeep(prompts, nslot):
                 pick = sorted({x for h in top for x in range(max(h - a.lmk_nb, 0), min(h + a.lmk_nb + 1, len(STORE[j]))) if SGRP[j][x] == SGRP[j][h]})[:30]
                 body = "\n".join(STORE[j][i] for i in pick); RCLOG[0] += 1
                 if MTQ.get(j): PENDQ[j] = "\n\n(Earlier in this conversation:\n" + body + ")"
+                elif a.lmk_eol: PENDG[j] = tok.encode("(Recalled from earlier in this conversation:\n" + body + ")\n", add_special_tokens=False)
                 else: RQ[j] = tok.encode("\n(Recalled from earlier in this conversation:\n" + body + ")\n", add_special_tokens=False)
         keep_rows = [r for r in range(B) if not fin[r]]
         if len(keep_rows) < B:
