@@ -181,6 +181,10 @@ ap.add_argument("--kv-quant", type=int, default=0, help="--kv-keep: store the ke
                 "(per token, groups of --kv-qgroup along the head dimension, min-max; simulated by quantise-dequantise once when an entry "
                 "leaves the window); the newest rw stay full precision")
 ap.add_argument("--kv-qgroup", type=int, default=32)
+ap.add_argument("--kv-turn-hold", action="store_true", help="--kv-keep, multi-turn rows: nothing is evicted while a user turn is being "
+                "read (the cache holds the whole message for a moment); at the first rebuild after it, the older entries are ranked by "
+                "the attention of the last chunk - the end of the message and the assistant's first tokens (SnapKV's observation "
+                "window) - added to the usual statistic. Peak memory: the budget plus the longest user message")
 ap.add_argument("--kv-lines", type=int, default=0, help="--kv-keep: keep or drop whole lines - the older entries are grouped by line (a "
                 "new group after a token holding a newline, or after this many tokens) and every entry gets its group's mean score, so a "
                 "line (a log entry, a code line, a sentence run) survives whole instead of in pieces")
@@ -1881,10 +1885,11 @@ def rollout_kvkeep(prompts, nslot):
     THINK_END = tok.convert_tokens_to_ids("</think>")
     LINE = [[] for _ in prompts]; LCNT = [0] * len(prompts); NL_IDS = nl_ids() if a.kv_lines else set()   # --kv-lines: line id per answer index
     KIND = [[] for _ in prompts]; TN = [[] for _ in prompts]; INTH = [False] * len(prompts); QD = [set() for _ in prompts]   # per answer index: 0 think / 1 user turn / 2 answer; its turn; quantised entries
+    FRESH = {}   # --kv-turn-hold: a user turn just ended - the next rebuild ranks by the last chunk's attention
     MTQ = {j: list(MT[j][0][0]) for j in MT}; MTI = {j: 0 for j in MT}; MTS = {j: 0 for j in MT}   # forced turns: queue, turn index, turn start
     if sel_model is not None:
         sys.path.insert(0, os.path.dirname(os.path.abspath(__file__))); from kvsel_feat import numeric as _numeric
-    per = lambda j: len(prompts[j]) + a.kv_keep + min(a.rw, a.max_len) + a.C
+    per = lambda j: len(prompts[j]) + a.kv_keep + min(a.rw, a.max_len) + a.C + (max(len(x) for x in MT[j][0]) if a.kv_turn_hold and j in MT else 0)
     KEEPLOG = [0, 0, 0]   # kept older entries: how many, their mean age in chunks, rebuilds
     while todo or act:
         new = []
@@ -1897,7 +1902,8 @@ def rollout_kvkeep(prompts, nslot):
         keep = []; NOLD = []   # (j, old row, old pad, P, the old row's answer-entry indices to keep); how many of them are older entries
         for b, j in enumerate(act):
             P = len(prompts[j]); n = len(cols[b]); k = min(a.rw, n); older = list(range(n - k)); newest = list(range(n - k, n))
-            if a.kv_keep <= 0: older = []
+            if a.kv_turn_hold and MTQ.get(j): pass   # reading a user turn: keep everything for now
+            elif a.kv_keep <= 0: older = []
             elif len(older) > a.kv_keep:
                 base = pad[b] + P; sl_ = slice(base, base + n - k)
                 if sel_model is not None:
@@ -1913,6 +1919,8 @@ def rollout_kvkeep(prompts, nslot):
                 elif a.kv_select == "last": score = ST[1, b, sl_]
                 else: score = IMP[b, sl_] / CNT[b, sl_].clamp(min=1)
                 score = score.float()
+                if a.kv_turn_hold and FRESH.pop(j, False):
+                    lastc = ST[1, b, sl_].float(); score = score / score.max().clamp(min=1e-12) + lastc / lastc.max().clamp(min=1e-12)
                 if a.kv_pool > 1: score = F.max_pool1d(score[None, None], a.kv_pool, 1, a.kv_pool // 2)[0, 0, :n - k]
                 if a.kv_policy == "struct":
                     cur = MTI.get(j, 0); kd = KIND[j]; tn = TN[j]
@@ -1966,7 +1974,7 @@ def rollout_kvkeep(prompts, nslot):
                 if j in MT:   # a multi-turn row: user turns enter the stream as forced tokens (evictable like the answer)
                     if MTQ[j]:
                         t_ = MTQ[j].pop(0); forced = True
-                        if not MTQ[j]: MTS[j] = len(gen[j]) + 1
+                        if not MTQ[j]: MTS[j] = len(gen[j]) + 1; FRESH[j] = True
                     elif t_ in stop or len(gen[j]) - MTS[j] >= MT[j][1][MTI[j]]:   # the turn ended (or hit its cap): next user turn
                         if MTI[j] + 1 < len(MT[j][0]): MTI[j] += 1; MTQ[j] = list(MT[j][0][MTI[j]]); t_ = IM_END; forced = True
                         else: fin[r] = True; ended[j] = t_ in stop; continue
