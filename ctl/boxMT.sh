@@ -5,7 +5,10 @@
 # condition (window 1024 + B=512) the chain switches to the new options, 32 streams: the window alone 1536; struct + pool;
 # full context; struct + pool + 4-bit older entries (~1500 fp16 entries); the window alone 1024; 2-bit (~1600); 4-bit with a
 # 512 window (~1000); pooling alone.
-SER=2
+# serial 3: struct + pool (window 1024 + 512) read 104/160 against attention selection 55 and the window alone 38 at the same
+# budget (facts and code 30/30). Queued after serial 2's chain: smaller budgets - struct at ~1024 (window 512 + 512) and ~512
+# (256 + 256), and struct + 2-bit older entries at ~1000 (512 + 2560) and ~500 (256 + 1280).
+SER=3
 if [ -f /root/.boxmt_serial ] && [ "$(cat /root/.boxmt_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxmt_serial
 [ -d /venv/main/bin ] && export PATH=/venv/main/bin:$PATH
@@ -41,5 +44,14 @@ S="--kv-policy=struct,--kv-pool=7"
 NEED="kv-policy" RB=32 CONDS="w1536:1536:0 st512:1024:512:$S full:16384:0 sq4:1024:1536:$S,--kv-quant=4 w1024:1024:0 sq2:1024:3072:$S,--kv-quant=2 sq4w512:512:1536:$S,--kv-quant=4 p512:1024:512:--kv-pool=7" exec bash /root/mt_job.sh
 JOB
   setsid nohup bash -c 'bash /root/mt2.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
+fi
+if [ ! -e /root/.mt3 ]; then touch /root/.mt3
+  cat > /root/mt3.sh <<'JOB'
+cd /root/w; sleep 30; while pgrep -f "bash /root/mt2.sh" > /dev/null || pgrep -f "bash /root/mt_job.sh" > /dev/null; do sleep 60; done
+echo "[mt] serial 3: smaller budgets $(date -u)"
+S="--kv-policy=struct,--kv-pool=7"
+NEED="kv-policy" RB=32 CONDS="s1024:512:512:$S sq2w512:512:2560:$S,--kv-quant=2 s512:256:256:$S sq2w256:256:1280:$S,--kv-quant=2" exec bash /root/mt_job.sh
+JOB
+  setsid nohup bash -c 'bash /root/mt3.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
 fi
 # CTL-END
