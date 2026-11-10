@@ -25,7 +25,11 @@
 # 1024 between the window and the older entries: window 256 + 768, 384 + 640, 768 + 256 (16-bit).
 # serial 10: after serial 9: --kv-turn-hold at 1024 kept tokens (512 + 512) - a user turn is held whole while it is read, then
 # the older entries are ranked with the last chunk's attention (the end of the message and the assistant's first tokens).
-SER=10
+# serial 11: the user - a document can simply be fed in pieces. ctl/mt_docc.jsonl (tools/mt_build_docc.py): the question first,
+# the 100-entry log in 10 turns, after each the model says the code or "Not here.", then the code is asked for. Replaces serial
+# 10's held-turn run (its memory peak breaks the fixed budget). After serial 9: full context, 1024 kept (512 + 512, struct +
+# pool + lines), the window alone at 1024.
+SER=11
 if [ -f /root/.boxmt_serial ] && [ "$(cat /root/.boxmt_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxmt_serial
 [ -d /venv/main/bin ] && export PATH=/venv/main/bin:$PATH
@@ -142,5 +146,17 @@ L="--kv-policy=struct,--kv-pool=7,--kv-lines=32"
 NEED="kv-turn-hold" RB=32 CONDS="h512:512:512:$L,--kv-turn-hold" exec bash /root/mt_job.sh
 JOB
   setsid nohup bash -c 'bash /root/mt10.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
+fi
+if [ ! -e /root/.mt11 ]; then touch /root/.mt11
+  pkill -f "bash /root/mt10.sh"
+  cat > /root/mt11.sh <<'JOB'
+cd /root/w; sleep 40; while pgrep -f "bash /root/mt9.sh" > /dev/null || pgrep -f "bash /root/mt_job.sh" > /dev/null; do sleep 60; done
+RAW=https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i
+for _t in $(seq 60); do curl -sS -o /root/mt_job.sh "$RAW/ctl/mt_job.sh?nocache=$(date +%s)"; grep -q "PFX" /root/mt_job.sh && break; sleep 120; done
+echo "[mt] serial 11: the log in pieces $(date -u)"
+L="--kv-policy=struct,--kv-pool=7,--kv-lines=32"
+NEED="kv-lines" TR=mt_docc.jsonl PFX=docc RB=32 CONDS="s1024:512:512:$L w1024:1024:0 full:16384:0:--kv-budget=54000" exec bash /root/mt_job.sh
+JOB
+  setsid nohup bash -c 'bash /root/mt11.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
 fi
 # CTL-END
