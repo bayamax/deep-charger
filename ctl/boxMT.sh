@@ -1,7 +1,11 @@
 #!/bin/bash
 # A fresh box for the long-range eval (ctl/mt_job.sh), because the stopped 3090 (58853599) could not restart: its host's GPU
 # was taken ("resources_unavailable"). Only this job runs here.
-SER=1
+# serial 2: the user - work out why it failed and find how small a fixed KV can be without an extra model. After the running
+# condition (window 1024 + B=512) the chain switches to the new options, 32 streams: the window alone 1536; struct + pool;
+# full context; struct + pool + 4-bit older entries (~1500 fp16 entries); the window alone 1024; 2-bit (~1600); 4-bit with a
+# 512 window (~1000); pooling alone.
+SER=2
 if [ -f /root/.boxmt_serial ] && [ "$(cat /root/.boxmt_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxmt_serial
 [ -d /venv/main/bin ] && export PATH=/venv/main/bin:$PATH
@@ -26,5 +30,16 @@ for _t in $(seq 60); do curl -sS -o /root/mt_job.sh "$RAW/ctl/mt_job.sh?nocache=
 CONDS="k512:1024:512 w1536:1536:0 full:16384:0 w1024:1024:0 k1024:1024:1024 w2048:2048:0" exec bash /root/mt_job.sh
 JOB
   setsid nohup bash -c 'bash /root/mt1.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
+fi
+if [ ! -e /root/.mt2 ]; then touch /root/.mt2
+  cat > /root/mt2.sh <<'JOB'
+cd /root/w; RAW=https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i
+touch STOP_MT; while pgrep -f "bash /root/mt_job.sh" > /dev/null; do sleep 60; done; rm -f STOP_MT
+for _t in $(seq 60); do curl -sS -o /root/mt_job.sh "$RAW/ctl/mt_job.sh?nocache=$(date +%s)"; grep -q "NEED" /root/mt_job.sh && break; sleep 120; done
+echo "[mt] serial 2: the new options from here $(date -u)"
+S="--kv-policy=struct,--kv-pool=7"
+NEED="kv-policy" RB=32 CONDS="w1536:1536:0 st512:1024:512:$S full:16384:0 sq4:1024:1536:$S,--kv-quant=4 w1024:1024:0 sq2:1024:3072:$S,--kv-quant=2 sq4w512:512:1536:$S,--kv-quant=4 p512:1024:512:--kv-pool=7" exec bash /root/mt_job.sh
+JOB
+  setsid nohup bash -c 'bash /root/mt2.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
 fi
 # CTL-END
