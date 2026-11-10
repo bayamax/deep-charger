@@ -45,7 +45,11 @@
 # serial 17: struct2 (boxed lines first) read 103 like struct: the chained-answer losses are the model mixing up the two problems
 # (it calls both "the same problem"), the turn markers having been evicted. --kv-frame always keeps <|im_start|> + role,
 # <|im_end|>, <think>, </think>. After serial 16: the main eval at 512 + 512, struct + pool + lines + frame.
-SER=17
+# serial 18: --kv-rag read 124/160 at 1024 kept tokens (docq 19, docf 17 - full context 19, 16) but facts fell to 23: the 4
+# neighbouring lines spilled into the next turn's math problem and the model solved that instead. Neighbours now stay in the
+# same turn. After serial 17: rag alone (fixed), then rag + the recall prompt (it lifted the chain to 18) + turn markers, on
+# the main eval and the log in pieces.
+SER=18
 if [ -f /root/.boxmt_serial ] && [ "$(cat /root/.boxmt_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxmt_serial
 [ -d /venv/main/bin ] && export PATH=/venv/main/bin:$PATH
@@ -222,5 +226,14 @@ cd /root/w; sleep 150; while pgrep -f "bash /root/mt16.sh" > /dev/null || pgrep 
 NEED="kv-frame" RB=32 CONDS="f1024:512:512:--kv-policy=struct,--kv-pool=7,--kv-lines=32,--kv-frame" exec bash /root/mt_job.sh
 JOB
   setsid nohup bash -c 'bash /root/mt17.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
+fi
+if [ ! -e /root/.mt18 ]; then touch /root/.mt18
+  cat > /root/mt18.sh <<'JOB'
+cd /root/w; sleep 180; while pgrep -f "bash /root/mt17.sh" > /dev/null || pgrep -f "bash /root/mt16.sh" > /dev/null || pgrep -f "bash /root/mt15.sh" > /dev/null || pgrep -f "bash /root/mt_job.sh" > /dev/null; do sleep 60; done
+L="--kv-policy=struct2,--kv-pool=7,--kv-lines=32,--kv-rag"
+NEED="same turn either side" RB=32 CONDS="gf1024:512:512:$L gx1024:512:512:$L,--recall,--kv-frame" bash /root/mt_job.sh
+NEED="same turn either side" TR=mt_docc.jsonl PFX=docc RB=32 CONDS="gx1024:512:512:$L,--recall,--kv-frame" bash /root/mt_job.sh
+JOB
+  setsid nohup bash -c 'bash /root/mt18.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
 fi
 # CTL-END

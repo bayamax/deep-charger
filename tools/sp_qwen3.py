@@ -192,7 +192,7 @@ ap.add_argument("--recall", action="store_true", help="--kv-keep, multi-turn row
 ap.add_argument("--kv-rag", action="store_true", help="--kv-keep, multi-turn rows: automatic retrieval, no tags and no training - when a "
                 "user turn has been read up to its end, its first and last lines are searched (--recall-model) over the conversation's "
                 "earlier lines that have dropped out of the cache (user turns and answers, not thinking), and the top --recall-k come "
-                "back, each with 4 neighbouring lines either side, appended to the user's message as '(Earlier in this conversation: ...)' - "
+                "back, each with up to 4 neighbouring lines of the same turn either side, appended to the user's message as '(Earlier in this conversation: ...)' - "
                 "forced tokens inside the same budget")
 ap.add_argument("--recall-k", type=int, default=3)
 ap.add_argument("--recall-max", type=int, default=6, help="--recall: at most this many recalls per conversation")
@@ -1938,7 +1938,7 @@ def rollout_kvkeep(prompts, nslot):
     KIND = [[] for _ in prompts]; TN = [[] for _ in prompts]; INTH = [False] * len(prompts); QD = [set() for _ in prompts]   # per answer index: 0 think / 1 user turn / 2 answer; its turn; quantised entries
     RQ = {}; NREC = [0] * len(prompts); LST = [0] * len(prompts); STORE = [[] for _ in prompts]; SEMB = [None] * len(prompts)   # --recall
     PEND = []; RCLOG = [0, 0]; GT_IDS = gt_ids() if a.recall else set(); NLR = nl_ids() if (a.recall or a.kv_rag) else set()
-    SRNG = [[] for _ in prompts]; INS = [0] * len(prompts); RAGD = set(); RAGLOG = [0, 0]   # --kv-rag: line -> answer indices, inserted tokens left, turns done
+    SGRP = [[] for _ in prompts]; SRNG = [[] for _ in prompts]; INS = [0] * len(prompts); RAGD = set(); RAGLOG = [0, 0]   # --kv-rag: line -> answer indices, inserted tokens left, turns done
     TAILT = tok.encode("<|im_end|>\n<|im_start|>assistant\n", add_special_tokens=False)
     def flush_lines(only=None):
         nonlocal PEND
@@ -1946,7 +1946,7 @@ def rollout_kvkeep(prompts, nslot):
         if not todo_: return
         e_ = bge_embed([t for _, t, _ in todo_])
         for (jj, t, rg), v in zip(todo_, e_):
-            STORE[jj].append(t); SRNG[jj].append(rg); SEMB[jj] = v[None] if SEMB[jj] is None else torch.cat([SEMB[jj], v[None]])
+            STORE[jj].append(t); SRNG[jj].append(rg); SGRP[jj].append((TN[jj][rg[0]], KIND[jj][rg[-1]] == 2)); SEMB[jj] = v[None] if SEMB[jj] is None else torch.cat([SEMB[jj], v[None]])
     FRESH = {}   # --kv-turn-hold: a user turn just ended - the next rebuild ranks by the last chunk's attention
     MTQ = {j: list(MT[j][0][0]) for j in MT}; MTI = {j: 0 for j in MT}; MTS = {j: 0 for j in MT}   # forced turns: queue, turn index, turn start
     if sel_model is not None:
@@ -2052,7 +2052,7 @@ def rollout_kvkeep(prompts, nslot):
                             if q_ and cand:
                                 sim = SEMB[j][cand] @ bge_embed([q_], query=True)[0]
                                 hit = [cand[i] for i in sim.topk(min(a.recall_k, len(cand))).indices.tolist()]
-                                top = sorted({x for h in hit for x in range(max(h - 4, 0), min(h + 5, len(STORE[j])))})[:30]   # each hit with 4 lines either side
+                                top = sorted({x for h in hit for x in range(max(h - 4, 0), min(h + 5, len(STORE[j]))) if SGRP[j][x] == SGRP[j][h]})[:30]   # each hit with 4 lines either side
                                 ins = tok.encode("\n\n(Earlier in this conversation:\n" + "\n".join(STORE[j][i] for i in top) + ")", add_special_tokens=False)
                                 MTQ[j] = ins + MTQ[j]; INS[j] = len(ins); RAGLOG[1] += 1
                         t_ = MTQ[j].pop(0); forced = True
@@ -2081,7 +2081,7 @@ def rollout_kvkeep(prompts, nslot):
                         kk_ = KIND[j][LST[j]:]
                         if kk_ and 3 not in kk_ and any(x in (1, 2) for x in kk_):
                             tx_ = tok.decode(gen[j][LST[j]:]).rstrip()
-                            if len(tx_.strip()) >= 4 and "<|im_" not in tx_: PEND.append((j, tx_, list(range(LST[j], len(gen[j])))))
+                            if len(tx_.strip()) >= 4 and "<|im_" not in tx_ and "think>" not in tx_: PEND.append((j, tx_, list(range(LST[j], len(gen[j])))))
                         LST[j] = len(gen[j])
                     if not forced and t_ in GT_IDS and NREC[j] < a.recall_max:
                         tail = tok.decode(gen[j][-64:])
