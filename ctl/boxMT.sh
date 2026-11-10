@@ -20,7 +20,10 @@
 # 4-bit at ~500 (window 256 + 768 at 4 bits) instead of 2-bit, then full context, then pooling alone.
 # serial 8: 4-bit at ~500 read 102/160 (= 16-bit at 1024: 103). Queued after serial 7's chain: 3-bit at ~1000 (window 512 +
 # 2048 at 3 bits), between 4-bit (137) and 2-bit (113).
-SER=8
+# serial 9: the user - the budget is the number of kept tokens, not fp16-equivalents (quantisation stacks on any token budget).
+# At 1024 kept tokens the best so far is 103/160 (window 512 + 512, struct + pool + lines); full context 137. How to split
+# 1024 between the window and the older entries: window 256 + 768, 384 + 640, 768 + 256 (16-bit).
+SER=9
 if [ -f /root/.boxmt_serial ] && [ "$(cat /root/.boxmt_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxmt_serial
 [ -d /venv/main/bin ] && export PATH=/venv/main/bin:$PATH
@@ -120,5 +123,14 @@ S="--kv-policy=struct,--kv-pool=7"; K5="--kv-budget=50000"
 NEED="kv-lines" RB=32 CONDS="sq3w512:512:2048:$S,--kv-quant=3,$K5,--kv-lines=32" exec bash /root/mt_job.sh
 JOB
   setsid nohup bash -c 'bash /root/mt8.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
+fi
+if [ ! -e /root/.mt9 ]; then touch /root/.mt9
+  cat > /root/mt9.sh <<'JOB'
+cd /root/w; sleep 20; while pgrep -f "bash /root/mt_job.sh" > /dev/null; do sleep 60; done; rm -f STOP_MT
+echo "[mt] serial 9: 1024 kept tokens, window / older split $(date -u)"
+L="--kv-policy=struct,--kv-pool=7,--kv-lines=32"
+NEED="kv-lines" RB=32 CONDS="t256:256:768:$L t384:384:640:$L t768:768:256:$L" exec bash /root/mt_job.sh
+JOB
+  setsid nohup bash -c 'bash /root/mt9.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
 fi
 # CTL-END
