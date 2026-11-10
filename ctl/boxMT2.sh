@@ -5,7 +5,11 @@
 # answering a log question). The user's original idea instead: recall when attention goes out of the cache (--kv-lmk: one
 # landmark key per evicted line). Calibration on ctl/mt_cal.jsonl with the threshold above 1 (never acts), every check logged
 # (hub mt/lmk_cal.jsonl).
-SER=2
+# serial 3: out-of-cache attention separates need from no need (AUC 0.85; threshold 0.004: all 20 log questions fire, 0 fires
+# while solving an unrelated problem), but the landmarks point at the right line only 7/20; the model's own last 3 lines find
+# it 13/20, with the user's question line 20/20 (offline, calibration set). The main eval at 512 + 512: attention decides when,
+# own+q / own decide what; then the log in pieces with own+q.
+SER=3
 if [ -f /root/.boxmt2_serial ] && [ "$(cat /root/.boxmt2_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxmt2_serial
 [ -d /venv/main/bin ] && export PATH=/venv/main/bin:$PATH
@@ -54,5 +58,14 @@ grep -E "kv-lmk:" sp_mt.log | tail -1 | sed 's/^/[mt] /'
 python3 -c "from huggingface_hub import HfApi; HfApi().upload_file(path_or_fileobj='lmk_cal.jsonl', path_in_repo='archive/sp3/mt/lmk_cal.jsonl', repo_id='baya1116/hypernet-sp-distill')" && echo "[mt] lmk_cal.jsonl uploaded $(wc -l < lmk_cal.jsonl) lines"
 JOB
   setsid nohup bash -c 'bash /root/mt20.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
+fi
+if [ ! -e /root/.mt21 ]; then touch /root/.mt21
+  cat > /root/mt21.sh <<'JOB'
+cd /root/w; sleep 20; while pgrep -f "bash /root/mt20.sh" > /dev/null || pgrep -f "bash /root/mt_job.sh" > /dev/null; do sleep 60; done
+L="--kv-policy=struct2,--kv-pool=7,--kv-lines=32,--mem-prompt,--kv-lmk,--lmk-thr=0.004"
+NEED="lmk-query" RB=32 CONDS="la1024:512:512:$L,--lmk-query=own+q lb1024:512:512:$L,--lmk-query=own" bash /root/mt_job.sh
+NEED="lmk-query" TR=mt_docc.jsonl PFX=docc RB=32 CONDS="la1024:512:512:$L,--lmk-query=own+q" bash /root/mt_job.sh
+JOB
+  setsid nohup bash -c 'bash /root/mt21.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
 fi
 # CTL-END

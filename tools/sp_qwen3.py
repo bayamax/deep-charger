@@ -208,6 +208,9 @@ ap.add_argument("--kv-lmk", action="store_true", help="--kv-keep, multi-turn row
                 "most attended token); every chunk the last query's attention over the cache plus the landmarks is computed, and when "
                 "the mass on landmarks exceeds --lmk-thr the --recall-k lines with the most mass come back as text")
 ap.add_argument("--lmk-thr", type=float, default=0.1)
+ap.add_argument("--lmk-query", default="lmk", choices=["lmk", "own", "own+q"], help="--kv-lmk: which lines come back once attention went "
+                "out of the cache - lmk: the landmarks with the most mass; own: a search (--recall-model) with the model's own last 3 "
+                "lines; own+q: those plus the latest question line of the user")
 ap.add_argument("--recall-k", type=int, default=3)
 ap.add_argument("--recall-max", type=int, default=6, help="--recall: at most this many recalls per conversation")
 ap.add_argument("--recall-model", default="BAAI/bge-small-en-v1.5")
@@ -1972,7 +1975,7 @@ def rollout_kvkeep(prompts, nslot):
         nonlocal PEND
         todo_ = [x for x in PEND if only is None or x[0] == only]; PEND = [x for x in PEND if not (only is None or x[0] == only)]
         if not todo_: return
-        e_ = bge_embed([t for _, t, _ in todo_]) if (a.kv_rag or a.recall or a.kv_probe) else [None] * len(todo_)
+        e_ = bge_embed([t for _, t, _ in todo_]) if (a.kv_rag or a.recall or a.kv_probe or (a.kv_lmk and a.lmk_query != "lmk")) else [None] * len(todo_)
         for (jj, t, rg), v in zip(todo_, e_):
             STORE[jj].append(t); SRNG[jj].append(rg); SGRP[jj].append((TN[jj][rg[0]], KIND[jj][rg[-1]] == 2))
             for e__ in rg: E2S[jj][e__] = len(STORE[jj]) - 1
@@ -2177,6 +2180,16 @@ def rollout_kvkeep(prompts, nslot):
                 if PLOGF: PLOGF.write(json.dumps({"j": j, "turn": MTI.get(j, 0), "at": len(gen[j]), "reading": bool(MTQ.get(j)), "out": round(outm, 4), "fired": fire, "top": [STORE[j][x] for x in top]}) + "\n")
                 if not fire: continue
                 LMLOG[1] += 1; NREC[j] += 1; COOL[j] = 2
+                if a.lmk_query != "lmk" and SEMB[j] is not None:   # what to bring back: a search with the model's own words
+                    own = [x for x in tok.decode(gen[j][-200:]).split("\n") if x.strip() and "<|im_" not in x][-3:]
+                    q_ = " ".join(own)
+                    if a.lmk_query == "own+q":
+                        ql = [x for t_ in MT[j][2][:MTI.get(j, 0) + 1] for x in t_.split("\n") if "?" in x]
+                        if ql: q_ = q_ + " " + ql[-1]
+                    inc = set(cols[r]); cand = [i for i, rg in enumerate(SRNG[j]) if any(x not in inc for x in rg)]
+                    if q_.strip() and cand:
+                        sim = SEMB[j][cand] @ bge_embed([q_], query=True)[0]
+                        top = [cand[i] for i in sim.topk(min(a.recall_k, len(cand))).indices.tolist()]
                 pick = sorted({x for h in top for x in range(max(h - 4, 0), min(h + 5, len(STORE[j]))) if SGRP[j][x] == SGRP[j][h]})[:30]
                 body = "\n".join(STORE[j][i] for i in pick); RCLOG[0] += 1
                 if MTQ.get(j): PENDQ[j] = "\n\n(Earlier in this conversation:\n" + body + ")"
