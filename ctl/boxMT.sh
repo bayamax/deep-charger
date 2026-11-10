@@ -10,7 +10,10 @@
 # (256 + 256), and struct + 2-bit older entries at ~1000 (512 + 2560) and ~500 (256 + 1280).
 # serial 4: full context ran out of memory (8 streams of ~13k tokens) - it runs again with half the KV allowance (4 streams),
 # right after serial 2's chain and before serial 3's smaller budgets (serial 3's waiting script is replaced by this one).
-SER=4
+# serial 5: the 4-bit run ran out of memory too (the simulation holds quantised entries at 16 bits: 32 streams of 2.7k
+# entries). Each condition now carries its own KV allowance (--kv-budget, in entries, sets the stream count). After the running
+# window-1024 condition: 4-bit, 2-bit, the smaller budgets, pooling alone, then full context last (4 streams, slow).
+SER=5
 if [ -f /root/.boxmt_serial ] && [ "$(cat /root/.boxmt_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxmt_serial
 [ -d /venv/main/bin ] && export PATH=/venv/main/bin:$PATH
@@ -66,5 +69,17 @@ NEED="kv-policy" RB=32 KB=56000 CONDS="full:16384:0" bash /root/mt_job.sh
 NEED="kv-policy" RB=32 CONDS="s1024:512:512:$S sq2w512:512:2560:$S,--kv-quant=2 s512:256:256:$S sq2w256:256:1280:$S,--kv-quant=2" exec bash /root/mt_job.sh
 JOB
   setsid nohup bash -c 'bash /root/mt4.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
+fi
+if [ ! -e /root/.mt5 ]; then touch /root/.mt5
+  pkill -f "bash /root/mt4.sh"; touch /root/w/STOP_MT
+  cat > /root/mt5.sh <<'JOB'
+cd /root/w; while pgrep -f "bash /root/mt_job.sh" > /dev/null; do sleep 60; done; rm -f STOP_MT
+RAW=https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i
+for _t in $(seq 60); do curl -sS -o /root/mt_job.sh "$RAW/ctl/mt_job.sh?nocache=$(date +%s)"; grep -q "they come last" /root/mt_job.sh && break; sleep 120; done
+echo "[mt] serial 5: per-condition KV allowance $(date -u)"
+S="--kv-policy=struct,--kv-pool=7"; K5="--kv-budget=50000"
+NEED="kv-policy" RB=32 CONDS="sq4:1024:1536:$S,--kv-quant=4,$K5 sq2:1024:3072:$S,--kv-quant=2,$K5 s1024:512:512:$S sq4w512:512:1536:$S,--kv-quant=4,$K5 sq2w512:512:2560:$S,--kv-quant=2,$K5 s512:256:256:$S sq2w256:256:1280:$S,--kv-quant=2,$K5 p512:1024:512:--kv-pool=7 full:16384:0:--kv-budget=54000" exec bash /root/mt_job.sh
+JOB
+  setsid nohup bash -c 'bash /root/mt5.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
 fi
 # CTL-END
