@@ -18,7 +18,9 @@
 # whole lines; the smaller budgets then use whole lines if they beat plain 4-bit; pooling alone; full context last.
 # serial 7: 4-bit + whole lines holds at ~1000 (137/160; ~1500: 138), 2-bit falls behind (~1000: 113). After the running s512:
 # 4-bit at ~500 (window 256 + 768 at 4 bits) instead of 2-bit, then full context, then pooling alone.
-SER=7
+# serial 8: 4-bit at ~500 read 102/160 (= 16-bit at 1024: 103). Queued after serial 7's chain: 3-bit at ~1000 (window 512 +
+# 2048 at 3 bits), between 4-bit (137) and 2-bit (113).
+SER=8
 if [ -f /root/.boxmt_serial ] && [ "$(cat /root/.boxmt_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxmt_serial
 [ -d /venv/main/bin ] && export PATH=/venv/main/bin:$PATH
@@ -110,5 +112,13 @@ S="--kv-policy=struct,--kv-pool=7"; K5="--kv-budget=50000"
 NEED="kv-lines" RB=32 CONDS="sq4w256:256:768:$S,--kv-quant=4,$K5,--kv-lines=32 full:16384:0:--kv-budget=54000 p512:1024:512:--kv-pool=7" exec bash /root/mt_job.sh
 JOB
   setsid nohup bash -c 'bash /root/mt7.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
+fi
+if [ ! -e /root/.mt8 ]; then touch /root/.mt8
+  cat > /root/mt8.sh <<'JOB'
+cd /root/w; sleep 30; while pgrep -f "bash /root/mt7.sh" > /dev/null || pgrep -f "bash /root/mt_job.sh" > /dev/null; do sleep 60; done
+S="--kv-policy=struct,--kv-pool=7"; K5="--kv-budget=50000"
+NEED="kv-lines" RB=32 CONDS="sq3w512:512:2048:$S,--kv-quant=3,$K5,--kv-lines=32" exec bash /root/mt_job.sh
+JOB
+  setsid nohup bash -c 'bash /root/mt8.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
 fi
 # CTL-END
