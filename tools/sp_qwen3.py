@@ -172,6 +172,15 @@ ap.add_argument("--kv-keep", type=int, default=0, help="--kv-evict: a fixed budg
                 "as computed and at their true positions - a bounded REAL KV cache chosen by the model's own attention, no training")
 ap.add_argument("--kv-select", default="mean", help="--kv-keep: how the older entries are ranked - mean (attention received per step cached), cum, "
                 "ema0.9, ema0.98, last (the last chunk), or mlp:<path> (the learned selector of tools/kvsel_train.py on the same features)")
+ap.add_argument("--kv-policy", default="attn", choices=["attn", "struct"], help="--kv-keep: attn = the older entries ranked by the "
+                "--kv-select statistic alone; struct = by tier first - user-turn tokens and final-answer tokens (outside <think>), then the "
+                "current turn's thinking, then the thinking of finished turns (the chat template drops it anyway) - the statistic inside a tier")
+ap.add_argument("--kv-pool", type=int, default=0, help="--kv-keep: max-pool the ranking statistic over this many neighbouring entries "
+                "(odd; SnapKV-style) so kept entries come as spans, not scattered tokens")
+ap.add_argument("--kv-quant", type=int, default=0, help="--kv-keep: store the kept OLDER entries' keys and values at this many bits "
+                "(per token, groups of --kv-qgroup along the head dimension, min-max; simulated by quantise-dequantise once when an entry "
+                "leaves the window); the newest rw stay full precision")
+ap.add_argument("--kv-qgroup", type=int, default=32)
 ap.add_argument("--kv-layerwise", action="store_true", help="--kv-keep: each hooked layer (--att-layers) keeps its own top-B older entries by its own attention "
                 "statistic (--kv-select mean / cum / ema0.9 / ema0.98 / last); the other layers keep the set chosen by the summed statistic. "
                 "The harness read a per-layer choice ~10% lower in KL")
@@ -1828,6 +1837,24 @@ def rollout_kv(prompts, nslot):
     return gen, ended
 
 
+def qdq(x, key=False):
+    """--kv-quant: quantise-dequantise (heads, n, head_dim), min-max, a.kv_quant bits. Values: per token in groups of --kv-qgroup
+    along head_dim. Keys (outlier channels): per channel over the n entries quantised together (KIVI) - the block that leaves
+    the window at one rebuild, about C entries."""
+    H_, n_, d_ = x.shape
+    if key and n_ >= 8:
+        y = x.float(); mn = y.amin(1, keepdim=True); s_ = (y.amax(1, keepdim=True) - mn).clamp(min=1e-8) / (2 ** a.kv_quant - 1)
+        return (((y - mn) / s_).round() * s_ + mn).to(x.dtype)
+    g = a.kv_qgroup; y = x.float().reshape(H_, n_, d_ // g, g)
+    mn = y.amin(-1, keepdim=True); s_ = (y.amax(-1, keepdim=True) - mn).clamp(min=1e-8) / (2 ** a.kv_quant - 1)
+    return (((y - mn) / s_).round() * s_ + mn).reshape(H_, n_, d_).to(x.dtype)
+
+
+def qcost():
+    """memory of one quantised entry in fp16 entries: the codes plus a 16-bit scale and minimum per group"""
+    return a.kv_quant / 16 + 2 / a.kv_qgroup
+
+
 @torch.no_grad()
 def rollout_kvkeep(prompts, nslot):
     """--kv-evict --kv-keep B (the user: a fixed KV budget of real entries, no synthesis): rollout_kv, but every C tokens each
@@ -1841,6 +1868,8 @@ def rollout_kvkeep(prompts, nslot):
     ST = None   # (6, B, Ln) chunk-level statistics per cached column: cumulative, last chunk, EMA 0.9, EMA 0.98, max over chunks, chunks observed; CH: this chunk's sum
     CH = None; sel_model = kvsel_model(a.kv_select[4:]) if a.kv_select.startswith("mlp:") else None
     IM_END = tok.convert_tokens_to_ids("<|im_end|>")
+    THINK_END = tok.convert_tokens_to_ids("</think>")
+    KIND = [[] for _ in prompts]; TN = [[] for _ in prompts]; INTH = [False] * len(prompts); QD = [set() for _ in prompts]   # per answer index: 0 think / 1 user turn / 2 answer; its turn; quantised entries
     MTQ = {j: list(MT[j][0][0]) for j in MT}; MTI = {j: 0 for j in MT}; MTS = {j: 0 for j in MT}   # forced turns: queue, turn index, turn start
     if sel_model is not None:
         sys.path.insert(0, os.path.dirname(os.path.abspath(__file__))); from kvsel_feat import numeric as _numeric
@@ -1854,7 +1883,7 @@ def rollout_kvkeep(prompts, nslot):
         for j in new:
             pc = DynamicCache(); o = llm(input_ids=torch.tensor([prompts[j]], device=dev), past_key_values=pc, use_cache=True, logits_to_keep=1)
             newkv[j] = [kv_of(pc, li) for li in range(NL)]; newlog[j] = o.logits[0, -1].float()
-        keep = []   # (j, old row, old pad, P, the old row's answer-entry indices to keep)
+        keep = []; NOLD = []   # (j, old row, old pad, P, the old row's answer-entry indices to keep); how many of them are older entries
         for b, j in enumerate(act):
             P = len(prompts[j]); n = len(cols[b]); k = min(a.rw, n); older = list(range(n - k)); newest = list(range(n - k, n))
             if a.kv_keep <= 0: older = []
@@ -1872,12 +1901,24 @@ def rollout_kvkeep(prompts, nslot):
                 elif a.kv_select == "ema0.98": score = ST[3, b, sl_]
                 elif a.kv_select == "last": score = ST[1, b, sl_]
                 else: score = IMP[b, sl_] / CNT[b, sl_].clamp(min=1)
+                score = score.float()
+                if a.kv_pool > 1: score = F.max_pool1d(score[None, None], a.kv_pool, 1, a.kv_pool // 2)[0, 0, :n - k]
+                if a.kv_policy == "struct":
+                    cur = MTI.get(j, 0); kd = KIND[j]; tn = TN[j]
+                    tier = torch.tensor([2.0 if kd[cols[b][i]] else (1.0 if tn[cols[b][i]] == cur else 0.0) for i in range(n - k)], device=dev)
+                    score = score / score.max().clamp(min=1e-12) + 2.0 * tier
                 older = score.topk(a.kv_keep).indices.sort().values.tolist()
             if older: KEEPLOG[0] += len(older); KEEPLOG[1] += sum(len(gen[j]) - cols[b][i] for i in older) / len(older) / a.C; KEEPLOG[2] += 1
-            keep.append((j, b, pad[b], P, older + newest))
-        for j in new: keep.append((j, None, 0, len(prompts[j]), []))
+            keep.append((j, b, pad[b], P, older + newest)); NOLD.append(len(older))
+        for j in new: keep.append((j, None, 0, len(prompts[j]), [])); NOLD.append(0)
         Ln = max(P + len(idx) for (_, _, _, P, idx) in keep); B = len(keep); pad = [Ln - (P + len(idx)) for (_, _, _, P, idx) in keep]
         nc = DynamicCache(); IMPn = torch.zeros(B, Ln, device=dev); CNTn = torch.zeros(B, Ln, device=dev); STn = torch.zeros(6, B, Ln, device=dev)
+        qpos = [None] * len(keep)   # --kv-quant: the new layout's positions of older entries not yet quantised
+        if a.kv_quant:
+            for r, (j, b, p0, P, idx) in enumerate(keep):
+                if b is None: continue
+                qq = [t for t in range(NOLD[r]) if cols[b][idx[t]] not in QD[j]]
+                if qq: qpos[r] = torch.tensor([pad[r] + P + t for t in qq], device=dev); QD[j].update(cols[b][idx[t]] for t in qq)
         srcs = [torch.tensor(list(range(p0, p0 + P)) + [p0 + P + i for i in idx], device=dev, dtype=torch.long) if b is not None else None for (j, b, p0, P, idx) in keep]
         for li in range(NL):
             ref = kv_of(cache, li)[0] if cache is not None else newkv[new[0]][li][0]
@@ -1887,6 +1928,7 @@ def rollout_kvkeep(prompts, nslot):
                 if b is None: K[r, :, pad[r]:], V[r, :, pad[r]:] = newkv[j][li][0][0], newkv[j][li][1][0]
                 else:
                     K[r, :, pad[r]:] = ok[b].index_select(1, srcs[r]); V[r, :, pad[r]:] = ov[b].index_select(1, srcs[r])
+                    if qpos[r] is not None: K[r, :, qpos[r]] = qdq(K[r, :, qpos[r]], key=True); V[r, :, qpos[r]] = qdq(V[r, :, qpos[r]])
                     if li == 0: IMPn[r, pad[r]:] = IMP[b, srcs[r]]; CNTn[r, pad[r]:] = CNT[b, srcs[r]]; STn[:, r, pad[r]:] = ST[:, b, srcs[r]]
             nc.update(K, V, li)
             if cache is not None:   # the old layer is not needed any more: free it (the rebuild otherwise holds two full caches)
@@ -1914,7 +1956,12 @@ def rollout_kvkeep(prompts, nslot):
                         if MTI[j] + 1 < len(MT[j][0]): MTI[j] += 1; MTQ[j] = list(MT[j][0][MTI[j]]); t_ = IM_END; forced = True
                         else: fin[r] = True; ended[j] = t_ in stop; continue
                 if not forced and t_ in stop: fin[r] = True; ended[j] = True; continue
-                gen[j].append(t_)
+                gen[j].append(t_); TN[j].append(MTI.get(j, 0))
+                if forced: KIND[j].append(1); INTH[j] = False
+                else:
+                    if t_ == THINK_ID: INTH[j] = True
+                    KIND[j].append(0 if INTH[j] else 2)
+                    if t_ == THINK_END: INTH[j] = False
                 if a.roll_lp: LPG.setdefault(j, []).append(lpn[r])
                 if len(gen[j]) >= a.max_len: fin[r] = True
             if all(fin): break
@@ -1943,7 +1990,8 @@ def rollout_kvkeep(prompts, nslot):
                 cache = c2; lastlog = lastlog.index_select(0, sel); IMP = IMP.index_select(0, sel); CNT = CNT.index_select(0, sel); ST = ST.index_select(1, sel)
             else: cache = None; lastlog = None; IMP = CNT = ST = None
             act = [act[r] for r in keep_rows]; pad = [pad[r] for r in keep_rows]; cols = [cols[r] for r in keep_rows]
-    if KEEPLOG[2]: log(f"[sp] kv-keep {a.kv_keep}: {KEEPLOG[2]} rebuilds kept {KEEPLOG[0] / KEEPLOG[2]:.0f} older entries each, mean age {KEEPLOG[1] / KEEPLOG[2]:.1f} chunks")
+    if KEEPLOG[2]: log(f"[sp] kv-keep {a.kv_keep} {a.kv_select} policy {a.kv_policy} pool {a.kv_pool} quant {a.kv_quant or 16}-bit "
+                       f"(budget ~{a.rw + a.kv_keep * (qcost() if a.kv_quant else 1):.0f} fp16 entries + prompt): {KEEPLOG[2]} rebuilds kept {KEEPLOG[0] / KEEPLOG[2]:.0f} older entries each, mean age {KEEPLOG[1] / KEEPLOG[2]:.1f} chunks")
     return gen, ended
 
 
