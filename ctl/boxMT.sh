@@ -16,7 +16,9 @@
 # serial 6: 4-bit older entries read 116/160 (struct alone 104); the log misses are near-misses (LL-3440 for LP-3440, SV-934 for
 # SV-8934): pieces of a line survive. --kv-lines 32 keeps or drops whole lines. After the running 2-bit condition: 4-bit +
 # whole lines; the smaller budgets then use whole lines if they beat plain 4-bit; pooling alone; full context last.
-SER=6
+# serial 7: 4-bit + whole lines holds at ~1000 (137/160; ~1500: 138), 2-bit falls behind (~1000: 113). After the running s512:
+# 4-bit at ~500 (window 256 + 768 at 4 bits) instead of 2-bit, then full context, then pooling alone.
+SER=7
 if [ -f /root/.boxmt_serial ] && [ "$(cat /root/.boxmt_serial)" -gt "$SER" ] 2>/dev/null; then echo "STALE $SER"; exit 0; fi
 echo $SER > /root/.boxmt_serial
 [ -d /venv/main/bin ] && export PATH=/venv/main/bin:$PATH
@@ -98,5 +100,15 @@ echo "[mt] smaller budgets with '${L:-no whole lines}' $(date -u)"
 NEED="kv-lines" RB=32 CONDS="s1024:512:512:$S$L sq4w512:512:1536:$S,--kv-quant=4,$K5$L sq2w512:512:2560:$S,--kv-quant=2,$K5$L s512:256:256:$S$L sq2w256:256:1280:$S,--kv-quant=2,$K5$L p512:1024:512:--kv-pool=7 full:16384:0:--kv-budget=54000" exec bash /root/mt_job.sh
 JOB
   setsid nohup bash -c 'bash /root/mt6.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
+fi
+if [ ! -e /root/.mt7 ]; then touch /root/.mt7
+  touch /root/w/STOP_MT
+  cat > /root/mt7.sh <<'JOB'
+cd /root/w; while pgrep -f "bash /root/mt_job.sh" > /dev/null; do sleep 60; done; rm -f STOP_MT
+echo "[mt] serial 7: 4-bit at ~500, full, pooling alone $(date -u)"
+S="--kv-policy=struct,--kv-pool=7"; K5="--kv-budget=50000"
+NEED="kv-lines" RB=32 CONDS="sq4w256:256:768:$S,--kv-quant=4,$K5,--kv-lines=32 full:16384:0:--kv-budget=54000 p512:1024:512:--kv-pool=7" exec bash /root/mt_job.sh
+JOB
+  setsid nohup bash -c 'bash /root/mt7.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
 fi
 # CTL-END
