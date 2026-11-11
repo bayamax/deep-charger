@@ -77,4 +77,21 @@ echo "[mt] ALL_DONE $(date -u)"
 JOB
   setsid nohup bash -c 'bash /root/mt31.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
 fi
+if [ ! -e /root/.mt32 ]; then touch /root/.mt32
+  cat > /root/mt32.sh <<'JOB'
+cd /root/w; sleep 20; while pgrep -f "bash /root/mt31.sh" > /dev/null || pgrep -f "bash /root/mt_job.sh" > /dev/null; do sleep 60; done
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null)
+python3 -c "from huggingface_hub import hf_hub_download as d; d('baya1116/hypernet-sp-distill', 'archive/sp3/dag2_fullkv_teacher.jsonl', local_dir='.')"
+echo "[mt] wq4 start $(date -u)"
+[ -s wq4_dwq.pt ] || python3 wq.py --calib archive/sp3/mt/tr_lg1024_s1.jsonl,archive/sp3/mt/tr2_lg1024_s1.jsonl,archive/sp3/dag2_fullkv_teacher.jsonl --methods dwq --init wq_gptq.pt --dwq-epochs 2 --out wq4 > wq4.log 2>&1
+grep "^\[wq\]" wq4.log | grep -v "dwq step" | sed 's/^/[mt] /'; grep "dwq step" wq4.log | tail -1 | sed 's/^/[mt] /'; grep -E "Error|error" wq4.log | tail -2 | sed 's/^/[mt] wq4 /'
+python3 -c "import sys; from huggingface_hub import HfApi; HfApi().upload_file(path_or_fileobj=sys.argv[1], path_in_repo='archive/sp3/wq/'+sys.argv[1], repo_id='baya1116/hypernet-sp-distill')" wq4_dwq.pt && echo "[mt] wq4_dwq.pt uploaded"
+python3 wq_kl.py archive/sp3/mt/mt_full_s1.jsonl,archive/sp3/mt/docc_full_s1.jsonl wq4_dwq.pt > wq_kl4.log 2>&1
+grep "^\[wq\]" wq_kl4.log | sed 's/^/[mt] /'; grep -E "Error|error" wq_kl4.log | tail -2 | sed 's/^/[mt] wq_kl /'
+L="--kv-policy=struct2,--kv-pool=7,--kv-lines=32,--mem-prompt,--kv-lmk,--lmk-thr=0.004,--lmk-nb=0,--lmk-query=own+q,--lmk-eol,--lmk-turn"
+NEED="dequantised 4-bit" RB=32 CONDS="q4f1024:512:512:$L,--wq=/root/w/wq4_dwq.pt" bash /root/mt_job.sh
+echo "[mt] ALL4_DONE $(date -u)"
+JOB
+  setsid nohup bash -c 'bash /root/mt32.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
+fi
 # CTL-END
