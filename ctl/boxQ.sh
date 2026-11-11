@@ -48,4 +48,20 @@ JOB
   setsid nohup bash -c 'bash /root/mt29.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
 fi
 if [ ! -e /root/.wqlog ]; then touch /root/.wqlog; grep "^\[wq\]" /root/w/wq.log | grep -v "dwq step\|gptq layer"; grep "dwq step" /root/w/wq.log | tail -2; fi
+if [ ! -e /root/.mt30 ]; then touch /root/.mt30
+  cat > /root/mt30.sh <<'JOB'
+cd /root/w; sleep 20; while pgrep -f "bash /root/mt29.sh" > /dev/null || pgrep -f "bash /root/mt_job.sh" > /dev/null; do sleep 60; done
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null)
+RAW=https://raw.githubusercontent.com/bayamax/deep-charger/claude/vast-ai-key-sharing-h0725i
+curl -sS -o wq.py "$RAW/tools/wq.py?nocache=$(date +%s)"
+echo "[mt] wq3 start $(date -u)"
+[ -s wq3_dwq.pt ] || python3 wq.py --calib archive/sp3/mt/tr_lg1024_s1.jsonl,archive/sp3/mt/tr2_lg1024_s1.jsonl --methods dwq --init wq_gptq.pt --dwq-epochs 3 --out wq3 > wq3.log 2>&1
+grep "^\[wq\]" wq3.log | grep -v "dwq step" | sed 's/^/[mt] /'; grep "dwq step" wq3.log | tail -1 | sed 's/^/[mt] /'; grep -E "Error|error" wq3.log | tail -2 | sed 's/^/[mt] wq3 /'
+for f in wq3_dwq.pt wq3_summary.json wq_summary.json; do python3 -c "import sys; from huggingface_hub import HfApi; HfApi().upload_file(path_or_fileobj=sys.argv[1], path_in_repo='archive/sp3/wq/'+sys.argv[1], repo_id='baya1116/hypernet-sp-distill')" $f && echo "[mt] $f uploaded"; done
+L="--kv-policy=struct2,--kv-pool=7,--kv-lines=32,--mem-prompt,--kv-lmk,--lmk-thr=0.004,--lmk-nb=0,--lmk-query=own+q,--lmk-eol,--lmk-turn"
+NEED="dequantised 4-bit" TR=mt_docc.jsonl PFX=docc RB=32 CONDS="q4e1024:512:512:$L,--wq=/root/w/wq3_dwq.pt" bash /root/mt_job.sh
+NEED="dequantised 4-bit" RB=32 CONDS="q4e1024:512:512:$L,--wq=/root/w/wq3_dwq.pt" bash /root/mt_job.sh
+JOB
+  setsid nohup bash -c 'bash /root/mt30.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
+fi
 # CTL-END

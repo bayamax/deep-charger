@@ -27,6 +27,7 @@ ap.add_argument("--group", type=int, default=64); ap.add_argument("--bits", type
 ap.add_argument("--n-calib", type=int, default=128, help="gptq: calibration sequences"); ap.add_argument("--seq", type=int, default=2048)
 ap.add_argument("--n-val", type=int, default=24, help="held-out sequences (whole conversations, not in calibration or training)")
 ap.add_argument("--damp", type=float, default=0.01)
+ap.add_argument("--init", default="", help="dwq: start from these codes (a wq_<method>.pt) instead of running gptq")
 ap.add_argument("--dwq-seq", type=int, default=1024); ap.add_argument("--dwq-epochs", type=int, default=1)
 ap.add_argument("--dwq-lr", type=float, default=5e-4, help="Adam on the log-scale and the bias (in units of the scale)")
 ap.add_argument("--seed", type=int, default=0); ap.add_argument("--device", default="cuda"); ap.add_argument("--max-dwq", type=int, default=0, help="dwq: at most this many pieces (0: all)")
@@ -187,6 +188,19 @@ def evaluate(m, teacher, name):
         nl = F.cross_entropy(sl[0, :-1], x[0, 1:], reduction="none")
         kl += float(k.sum()); nll += float(nl.sum()); n += k.numel(); kls.append(float(k.mean()))
     log(f"[wq] {name}: held-out KL to 16-bit {kl / n:.4f} (worst conversation {max(kls):.4f}) | ppl {math.exp(nll / n):.3f}")
+    SUM[name] = {"kl": kl / n, "worst": max(kls), "ppl": math.exp(nll / n)}; json.dump(SUM, open(f"{a.out}_summary.json", "w"), indent=1)
+
+
+def load_q(path):
+    d = torch.load(path, map_location="cpu"); QD = {}
+    for k, v in d.items():
+        if not isinstance(v, dict): continue
+        ks = k.split("."); p = v["q"]
+        QD[(int(ks[2]), ".".join(ks[3:]))] = (torch.stack([p & 15, p >> 4], 2).view(p.size(0), -1).to(dev), v["s"].float().to(dev), v["b"].float().to(dev))
+    return QD
+
+
+SUM = {}
 
 
 def save(QD, name):
@@ -201,7 +215,10 @@ M = a.methods.split(",")
 if "rtn" in M:
     m = load(); QD = {(li, nm): rtn(lin(m, li, nm).weight.data) for li in range(len(m.model.layers)) for nm in LIN}
     set_w(m, QD); evaluate(m, teacher, f"rtn {a.bits}-bit g{a.group}"); save(QD, "rtn"); del m, QD; torch.cuda.empty_cache()
-if "gptq" in M or "dwq" in M:
+if a.init and "dwq" in M:
+    m = load(); QD = load_q(a.init); set_w(m, QD); evaluate(m, teacher, f"start ({a.init})")
+    QD = run_dwq(m, QD, teacher); evaluate(m, teacher, f"dwq {a.bits}-bit g{a.group}"); save(QD, "dwq")
+elif "gptq" in M or "dwq" in M:
     m = load(); QD = run_gptq(m); evaluate(m, teacher, f"gptq {a.bits}-bit g{a.group}"); save(QD, "gptq")
     if "dwq" in M:
         QD = run_dwq(m, QD, teacher); evaluate(m, teacher, f"dwq {a.bits}-bit g{a.group}"); save(QD, "dwq")
