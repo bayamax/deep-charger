@@ -217,9 +217,13 @@ ap.add_argument("--lmk-model", default="", help="--kv-lmk: learned recall (tools
 ap.add_argument("--lmk-turn", action="store_true", help="--kv-lmk: --recall-max counts per user turn (each new message may recall again), and a recall decided too late in a message to wait for its end goes in right away")
 ap.add_argument("--lmk-eol", action="store_true", help="--kv-lmk: a recall decided mid-line waits for the end of the line the model is writing")
 ap.add_argument("--lmk-nb", type=int, default=4, help="--kv-lmk: neighbouring lines of the same turn brought back with each hit, either side")
-ap.add_argument("--lmk-query", default="lmk", choices=["lmk", "own", "own+q", "learned"], help="--kv-lmk: which lines come back once attention went "
+ap.add_argument("--lmk-query", default="lmk", choices=["lmk", "own", "own+q", "learned", "rhead+q"], help="--kv-lmk: which lines come back once attention went "
                 "out of the cache - lmk: the landmarks with the most mass; own: a search (--recall-model) with the model's own last 3 "
-                "lines; own+q: those plus the latest question line of the user")
+                "lines; own+q: those plus the latest question line of the user; rhead+q: the landmark mass of the retrieval heads "
+                "(--lmk-heads) fused with a search for the user's latest question line")
+ap.add_argument("--lmk-heads", default="L17h1,L15h6,L17h3", help="--lmk-query rhead+q: the retrieval heads (query heads of the hooked layers). "
+                "Default: the 3 whose landmark mass put the gold line in their top 3 most often on ctl/mt_train2.jsonl (lmk-dump, separate rows)")
+ap.add_argument("--lmk-bw", type=float, default=0.5, help="--lmk-query rhead+q: weight of the question search in the fused score (z-scores)")
 ap.add_argument("--recall-k", type=int, default=3)
 ap.add_argument("--recall-max", type=int, default=6, help="--recall: at most this many recalls per conversation")
 ap.add_argument("--recall-model", default="BAAI/bge-small-en-v1.5")
@@ -2001,6 +2005,10 @@ def rollout_kvkeep(prompts, nslot):
     E2S = [dict() for _ in prompts]; LMK = [dict() for _ in prompts]; LMLOG = [0, 0, 0, 0.0]   # --kv-lmk: answer index -> stored line; line -> (importance, keys)
     ATTREC["keepq"] = a.kv_lmk
     HL = [int(x) for x in a.lmk_hl.split(",")] if (a.lmk_dump or LRN) else []; ATTREC["hl"] = set(HL); DREC = {}   # --lmk-dump: per dialogue, its checks
+    RHD = {}   # --lmk-query rhead+q: hooked layer -> its retrieval heads
+    for _h in (a.lmk_heads.split(",") if a.lmk_query == "rhead+q" else []):
+        _l, _q = _h.strip()[1:].split("h"); assert int(_l) in ATT_L, f"--lmk-heads: layer {_l} is not hooked"; RHD.setdefault(int(_l), []).append(int(_q))
+    NRH = max(sum(len(v) for v in RHD.values()), 1)
     PENDQ = {}; PENDG = {}; COOL = {}; PBLOG = [0, 0, 0, 0.0]   # --kv-probe: recall text waiting for the end of a user message; cooldown; probes / asked / fired / sum p
     if a.kv_probe:
         P1 = tok.encode("<|im_end|>\n<|im_start|>user\n(Memory check) Is there any detail from earlier in this conversation that you "
@@ -2209,7 +2217,7 @@ def rollout_kvkeep(prompts, nslot):
                 if INS[j] > 0 or j in RQ or j in PENDG: COOL[j] = max(COOL[j], 2); continue   # no check while a recall is being read back in, nor for 2 chunks after
                 if fin[r] or not LMK[j] or NREC[j] >= a.recall_max or COOL[j] > 0 or j in RQ or PENDQ.get(j): continue
                 sl = list(LMK[j]); M_ = torch.stack([LMK[j][x][1] for x in sl], 2).float()   # (layers, kv heads, m, d)
-                mass = torch.zeros(len(sl), device=dev); outm = 0.0; LMH_ = []
+                mass = torch.zeros(len(sl), device=dev); outm = 0.0; LMH_ = []; RHS_ = []
                 for t_i, li in enumerate(ATT_L):
                     q_ = Q_[li][r]; hq = q_.size(0); K_ = kv_of(cache, li)[0][r, :, pad[r]:].float(); rep_ = hq // K_.size(0)
                     sc_ = llm.model.layers[li].self_attn.scaling
@@ -2218,6 +2226,7 @@ def rollout_kvkeep(prompts, nslot):
                     pr_ = torch.softmax(torch.cat([lk, lm], 1), 1)[:, lk.size(1):]
                     mass += pr_.mean(0); outm += float(pr_.sum(1).mean())
                     if a.lmk_dump: LMH_.append(pr_.half().cpu())
+                    if RHD.get(li): RHS_.append(pr_[RHD[li]].sum(0))
                 outm /= len(ATT_L); mass /= len(ATT_L)
                 LMLOG[0] += 1; LMLOG[3] += outm; fire = outm > a.lmk_thr
                 hv = torch.cat([H_[li][r] for li in HL]) if HL else None
@@ -2238,6 +2247,15 @@ def rollout_kvkeep(prompts, nslot):
                         with torch.no_grad(): qv = F.normalize(LRN["q"](hv.float()[None])[0], dim=-1)
                         sim = SEMB[j][cand].float() @ qv
                         top = [cand[i] for i in sim.topk(min(a.recall_k, len(cand))).indices.tolist()]
+                elif a.lmk_query == "rhead+q":   # what to bring back: where the retrieval heads point among the landmarks, plus the user's question
+                    inc = set(cols[r]); cand = [i for i, rg in enumerate(SRNG[j]) if any(x not in inc for x in rg)]
+                    if cand:
+                        hm = dict(zip(sl, torch.stack(RHS_).sum(0).tolist())); sc = torch.log(torch.tensor([hm.get(i, 0.0) for i in cand], device=dev) / NRH + 1e-4)
+                        z_ = lambda x: (x - x.mean()) / x.std().clamp(min=1e-6) if x.numel() > 1 else x * 0
+                        ql = [x for t_ in MT[j][2][:MTI.get(j, 0) + 1] for x in t_.split("\n") if "?" in x] if MT.get(j) else []
+                        if ql and SEMB[j] is not None:
+                            sc = (1 - a.lmk_bw) * z_(sc) + a.lmk_bw * z_((SEMB[j][cand] @ bge_embed([ql[-1]], query=True)[0]).float().to(dev))
+                        top = [cand[i] for i in sc.topk(min(a.recall_k, len(cand))).indices.tolist()]
                 elif a.lmk_query != "lmk" and SEMB[j] is not None:   # what to bring back: a search with the model's own words
                     own = [x for x in tok.decode(gen[j][-200:]).split("\n") if x.strip() and "<|im_" not in x][-3:]
                     q_ = " ".join(own)

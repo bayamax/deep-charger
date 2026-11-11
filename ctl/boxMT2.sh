@@ -125,4 +125,13 @@ python3 -c "from huggingface_hub import HfApi; HfApi().upload_file(path_or_fileo
 JOB
   setsid nohup bash -c 'bash /root/mt27.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
 fi
+if [ ! -e /root/.mt28 ]; then touch /root/.mt28
+  cat > /root/mt28.sh <<'JOB'
+cd /root/w; sleep 20; while pgrep -f "bash /root/mt27.sh" > /dev/null || pgrep -f "bash /root/mt_job.sh" > /dev/null; do sleep 60; done
+L="--kv-policy=struct2,--kv-pool=7,--kv-lines=32,--mem-prompt,--kv-lmk,--lmk-thr=0.004,--lmk-nb=0,--lmk-query=rhead+q,--lmk-eol,--lmk-turn"
+NEED="lmk-bw" TR=mt_docc.jsonl PFX=docc RB=32 CONDS="lr1024:512:512:$L" bash /root/mt_job.sh
+NEED="lmk-bw" RB=32 CONDS="lr1024:512:512:$L" bash /root/mt_job.sh
+JOB
+  setsid nohup bash -c 'bash /root/mt28.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
+fi
 # CTL-END
