@@ -47,4 +47,5 @@ NEED="dequantised 4-bit" RB=32 CONDS="q4g1024:512:512:$L,--wq=/root/w/wq_gptq.pt
 JOB
   setsid nohup bash -c 'bash /root/mt29.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
 fi
+if [ ! -e /root/.wqlog ]; then touch /root/.wqlog; grep "^\[wq\]" /root/w/wq.log | grep -v "dwq step\|gptq layer"; grep "dwq step" /root/w/wq.log | tail -2; fi
 # CTL-END
