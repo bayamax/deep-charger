@@ -14,7 +14,7 @@ rows = [json.loads(l) for f in sys.argv[1].split(",") for l in open(f)]
 X = [torch.tensor(tok.encode((r.get("prompt") or "") + r["text"], add_special_tokens=False)[:MAXT]) for r in rows]
 T = AutoModelForCausalLM.from_pretrained("Qwen/Qwen3-1.7B", dtype=torch.bfloat16, attn_implementation="sdpa").to(dev).eval()
 S = AutoModelForCausalLM.from_pretrained("Qwen/Qwen3-1.7B", dtype=torch.bfloat16, attn_implementation="sdpa").to(dev).eval()
-W0 = {k: v.clone() for k, v in S.state_dict().items()}
+W0 = {k: v.detach().cpu().clone() for k, v in S.state_dict().items()}
 
 
 def put(path):
@@ -31,9 +31,11 @@ for path in sys.argv[2:]:
     put(path); kl = ag = n = 0.0; worst = 0.0; per = {}
     with torch.no_grad():
         for r, x in zip(rows, X):
-            x = x[None].to(dev); lt = F.log_softmax(T(input_ids=x).logits.float()[0, :-1], -1); ls = F.log_softmax(S(input_ids=x).logits.float()[0, :-1], -1)
-            k = (lt.exp() * (lt - ls)).sum(-1); kl += float(k.sum()); n += k.numel(); worst = max(worst, float(k.mean()))
-            ag += float((lt.argmax(-1) == ls.argmax(-1)).float().sum()); t = r.get("task", "?"); per.setdefault(t, []).append(float(k.mean()))
-            del lt, ls
+            x = x[None].to(dev); Lt = T(input_ids=x).logits[0, :-1]; Ls = S(input_ids=x).logits[0, :-1]; ks = []
+            for c in range(0, Lt.size(0), 512):   # in pieces: a 4096 x 152k float tensor is 2.5 GB
+                lt = F.log_softmax(Lt[c:c + 512].float(), -1); ls = F.log_softmax(Ls[c:c + 512].float(), -1)
+                ks.append((lt.exp() * (lt - ls)).sum(-1)); ag += float((lt.argmax(-1) == ls.argmax(-1)).float().sum())
+            k = torch.cat(ks); kl += float(k.sum()); n += k.numel(); worst = max(worst, float(k.mean()))
+            t = r.get("task", "?"); per.setdefault(t, []).append(float(k.mean())); del Lt, Ls
     print(f"[wq] {path}: eval KL {kl / n:.4f} (worst conversation {worst:.4f}) | top-1 agreement {ag / n:.4f} | per task "
           + " ".join(f"{t} {sum(v) / len(v):.4f}" for t, v in sorted(per.items())), flush=True)
