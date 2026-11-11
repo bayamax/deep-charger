@@ -101,4 +101,16 @@ NEED="lmk-turn" RB=32 CONDS="lg1024:512:512:$L" bash /root/mt_job.sh
 JOB
   setsid nohup bash -c 'bash /root/mt25.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
 fi
+if [ ! -e /root/.mt26 ]; then touch /root/.mt26
+  cat > /root/mt26.sh <<'JOB'
+cd /root/w; sleep 20; while pgrep -f "bash /root/mt_job.sh" > /dev/null; do sleep 60; done
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null)
+L="--kv-policy=struct2,--kv-pool=7,--kv-lines=32,--mem-prompt,--kv-lmk,--lmk-thr=0.004,--lmk-nb=0,--lmk-query=own+q,--lmk-eol,--lmk-turn"
+rm -f lmk_train.pt
+NEED="lmk-dump" TR=mt_train.jsonl PFX=tr RB=32 CONDS="lg1024:512:512:$L,--lmk-dump=lmk_train.pt" bash /root/mt_job.sh
+grep -E "lmk-dump:" sp_mt.log | tail -1 | sed 's/^/[mt] /'
+python3 -c "from huggingface_hub import HfApi; HfApi().upload_file(path_or_fileobj='lmk_train.pt', path_in_repo='archive/sp3/mt/lmk_train.pt', repo_id='baya1116/hypernet-sp-distill')" && echo "[mt] lmk_train.pt uploaded $(du -m lmk_train.pt | cut -f1) MB"
+JOB
+  setsid nohup bash -c 'bash /root/mt26.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
+fi
 # CTL-END

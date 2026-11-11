@@ -208,10 +208,16 @@ ap.add_argument("--kv-lmk", action="store_true", help="--kv-keep, multi-turn row
                 "most attended token); every chunk the last query's attention over the cache plus the landmarks is computed, and when "
                 "the mass on landmarks exceeds --lmk-thr the --recall-k lines with the most mass come back as text")
 ap.add_argument("--lmk-thr", type=float, default=0.1)
+ap.add_argument("--lmk-dump", default="", help="--kv-lmk: training data for a learned recall - at every check the hidden state (input of "
+                "layers --lmk-hl), the evicted stored lines and their landmark mass; after the rollout each dialogue is read once more with "
+                "full context (teacher-forced, no eviction) and the attention its query at each check pays to every stored line is the label")
+ap.add_argument("--lmk-hl", default="13,19", help="--lmk-dump / learned recall: hooked layers whose attention input is the hidden state")
+ap.add_argument("--lmk-model", default="", help="--kv-lmk: learned recall (tools/lmk_train.py): a file with a TorchScript query head "
+                "(hidden -> bge space, used by --lmk-query learned) and optionally a detector (hidden + landmark mass -> fire) with its threshold")
 ap.add_argument("--lmk-turn", action="store_true", help="--kv-lmk: --recall-max counts per user turn (each new message may recall again), and a recall decided too late in a message to wait for its end goes in right away")
 ap.add_argument("--lmk-eol", action="store_true", help="--kv-lmk: a recall decided mid-line waits for the end of the line the model is writing")
 ap.add_argument("--lmk-nb", type=int, default=4, help="--kv-lmk: neighbouring lines of the same turn brought back with each hit, either side")
-ap.add_argument("--lmk-query", default="lmk", choices=["lmk", "own", "own+q"], help="--kv-lmk: which lines come back once attention went "
+ap.add_argument("--lmk-query", default="lmk", choices=["lmk", "own", "own+q", "learned"], help="--kv-lmk: which lines come back once attention went "
                 "out of the cache - lmk: the landmarks with the most mass; own: a search (--recall-model) with the model's own last 3 "
                 "lines; own+q: those plus the latest question line of the user")
 ap.add_argument("--recall-k", type=int, default=3)
@@ -609,6 +615,19 @@ def update_buffer(kept, absorbed, src, nd_end, feat=None, imp=None, src_imp=None
 ATT_L = []   # --att-prior / --evict-by model: the decoder layers whose attention is the importance
 if a.att_prior > 0 or a.evict_by == "model" or a.kv_keep > 0 or a.mode == "kvsel":
     _lo, _hi = (int(x) for x in a.att_layers.split("-")); ATT_L = list(range(_lo, _hi + 1))
+LRN = None   # --lmk-model: {"q": query head, "det": detector or None, "thr": its threshold, "hl": layers}
+if a.lmk_model:
+    _lm = torch.load(a.lmk_model, map_location="cpu", weights_only=False)
+    LRN = {"q": torch.jit.load(__import__("io").BytesIO(_lm["q"])).to(dev).eval() if _lm.get("q") else None,
+           "det": torch.jit.load(__import__("io").BytesIO(_lm["det"])).to(dev).eval() if _lm.get("det") else None,
+           "thr": float(_lm.get("thr", 0.5))}
+    a.lmk_hl = _lm.get("hl", a.lmk_hl)
+
+
+def lrn_fire(hv, outm):
+    with torch.no_grad(): return float(LRN["det"](hv.float()[None], torch.tensor([[outm]], device=hv.device))[0]) > LRN["thr"]
+
+
 ATTLOG = [False]   # the one-time log of the importance on a first distant buffer
 ATTREC = {"rows": 0, "acc": {}}   # teacher-forced passes: per hooked layer, the attention the block's last `rows` query rows paid to each key
 
@@ -617,9 +636,22 @@ def _att_hook(mod, args, kwargs, out):
     """forward hook on the attention of layers ATT_L: recomputes this layer's attention of the block's last ATTREC['rows'] query
     rows over every key (prompt, memory, window and chunk; causal inside the block), summed over heads and rows - what the
     rollout reads from the eager attentions of its decode steps. Written per layer (gradient checkpointing runs a layer twice)."""
+    from transformers.models.qwen3.modeling_qwen3 import apply_rotary_pos_emb, repeat_kv
+    if ATTREC.get("lab") is not None:   # --lmk-dump labels: a full-context pass; the attention of the query rows ATTREC['lab'] over all keys
+        with torch.no_grad():
+            h = kwargs["hidden_states"] if "hidden_states" in kwargs else args[0]
+            cos, sin = kwargs["position_embeddings"] if "position_embeddings" in kwargs else args[1]
+            lab = ATTREC["lab"]; nb = h.size(1)
+            q = mod.q_norm(mod.q_proj(h[:, lab]).view(1, len(lab), -1, mod.head_dim)).transpose(1, 2)
+            q, _ = apply_rotary_pos_emb(q, q, cos[:, lab], sin[:, lab])
+            kb = mod.k_norm(mod.k_proj(h).view(1, nb, -1, mod.head_dim)).transpose(1, 2); _, kb = apply_rotary_pos_emb(kb, kb, cos, sin)
+            k = repeat_kv(kb, q.size(1) // kb.size(1))
+            sc = (q.float() @ k.float().transpose(-1, -2)) * mod.scaling
+            sc.masked_fill_((torch.arange(nb, device=h.device)[None, :] > lab[:, None])[None, None], float("-inf"))
+            ATTREC["labacc"] = ATTREC.get("labacc", 0) + sc.softmax(-1).mean(1)[0]   # (checks, keys), summed over the hooked layers
+        return
     rows = ATTREC["rows"]
     if not rows: return
-    from transformers.models.qwen3.modeling_qwen3 import apply_rotary_pos_emb, repeat_kv
     h = kwargs["hidden_states"] if "hidden_states" in kwargs else args[0]
     cos, sin = kwargs["position_embeddings"] if "position_embeddings" in kwargs else args[1]
     cache = kwargs.get("past_key_values")
@@ -643,6 +675,7 @@ def _att_hook(mod, args, kwargs, out):
             else: sc = sc + am.to(sc.dtype)
         ATTREC["acc"][mod.layer_idx] = sc.softmax(-1).nan_to_num(0.0).sum(1).sum(1)   # (B, keys)
         if ATTREC.get("keepq"): ATTREC.setdefault("q", {})[mod.layer_idx] = q[:, :, -1].float()   # --kv-lmk: the last query row per head
+        if mod.layer_idx in ATTREC.get("hl", ()): ATTREC.setdefault("h", {})[mod.layer_idx] = h[:, -1].float()   # --lmk-dump / learned recall
 
 
 def att_take():
@@ -1963,6 +1996,7 @@ def rollout_kvkeep(prompts, nslot):
     PEND = []; RCLOG = [0, 0]; GT_IDS = gt_ids() if a.recall else set(); NLR = nl_ids() if (a.recall or a.kv_rag or a.kv_probe or a.kv_lmk) else set()
     E2S = [dict() for _ in prompts]; LMK = [dict() for _ in prompts]; LMLOG = [0, 0, 0, 0.0]   # --kv-lmk: answer index -> stored line; line -> (importance, keys)
     ATTREC["keepq"] = a.kv_lmk
+    HL = [int(x) for x in a.lmk_hl.split(",")] if (a.lmk_dump or LRN) else []; ATTREC["hl"] = set(HL); DREC = {}   # --lmk-dump: per dialogue, its checks
     PENDQ = {}; PENDG = {}; COOL = {}; PBLOG = [0, 0, 0, 0.0]   # --kv-probe: recall text waiting for the end of a user message; cooldown; probes / asked / fired / sum p
     if a.kv_probe:
         P1 = tok.encode("<|im_end|>\n<|im_start|>user\n(Memory check) Is there any detail from earlier in this conversation that you "
@@ -2165,7 +2199,7 @@ def rollout_kvkeep(prompts, nslot):
         if a.recall or a.kv_rag or a.kv_probe or a.kv_lmk: flush_lines()
         ST[0] += CH; ST[1] = CH; ST[2] = 0.9 * ST[2] + CH; ST[3] = 0.98 * ST[3] + CH; ST[4] = torch.maximum(ST[4], CH); ST[5] += amask.float()
         if a.kv_lmk and "q" in ATTREC:   # the model's own attention: how much of the last query goes to evicted lines' landmarks
-            Q_ = ATTREC.pop("q")
+            Q_ = ATTREC.pop("q"); H_ = ATTREC.pop("h", {})
             for j in act: COOL[j] = COOL.get(j, 0) - 1
             for r, j in enumerate(act):
                 if INS[j] > 0 or j in RQ or j in PENDG: COOL[j] = max(COOL[j], 2); continue   # no check while a recall is being read back in, nor for 2 chunks after
@@ -2181,11 +2215,24 @@ def rollout_kvkeep(prompts, nslot):
                     mass += pr_.mean(0); outm += float(pr_.sum(1).mean())
                 outm /= len(ATT_L); mass /= len(ATT_L)
                 LMLOG[0] += 1; LMLOG[3] += outm; fire = outm > a.lmk_thr
+                hv = torch.cat([H_[li][r] for li in HL]) if HL else None
+                if a.lmk_dump:
+                    inc_ = set(cols[r]); cand_ = [i for i, rg in enumerate(SRNG[j]) if any(x not in inc_ for x in rg)]
+                    DREC.setdefault(j, []).append({"at": len(gen[j]), "turn": MTI.get(j, 0), "reading": bool(MTQ.get(j)), "out": outm, "fired": fire,
+                                                   "cand": cand_, "lmk": dict(zip(sl, mass.tolist())), "h": hv.to(torch.float16).cpu()})
+                if LRN and LRN.get("det") is not None:   # a learned detector decides instead of the threshold
+                    fire = lrn_fire(hv, outm)
                 top = [sl[i] for i in mass.topk(min(a.recall_k, len(sl))).indices.tolist()]
                 if PLOGF: PLOGF.write(json.dumps({"j": j, "turn": MTI.get(j, 0), "at": len(gen[j]), "reading": bool(MTQ.get(j)), "out": round(outm, 4), "fired": fire, "top": [STORE[j][x] for x in top]}) + "\n")
                 if not fire: continue
                 LMLOG[1] += 1; NREC[j] += 1; COOL[j] = 2
-                if a.lmk_query != "lmk" and SEMB[j] is not None:   # what to bring back: a search with the model's own words
+                if a.lmk_query == "learned" and SEMB[j] is not None:   # what to bring back: the hidden state mapped into the search space
+                    inc = set(cols[r]); cand = [i for i, rg in enumerate(SRNG[j]) if any(x not in inc for x in rg)]
+                    if cand:
+                        with torch.no_grad(): qv = F.normalize(LRN["q"](hv.float()[None])[0], dim=-1)
+                        sim = SEMB[j][cand].float() @ qv
+                        top = [cand[i] for i in sim.topk(min(a.recall_k, len(cand))).indices.tolist()]
+                elif a.lmk_query != "lmk" and SEMB[j] is not None:   # what to bring back: a search with the model's own words
                     own = [x for x in tok.decode(gen[j][-200:]).split("\n") if x.strip() and "<|im_" not in x][-3:]
                     q_ = " ".join(own)
                     if a.lmk_query == "own+q":
@@ -2266,6 +2313,17 @@ def rollout_kvkeep(prompts, nslot):
                         if MTQ.get(j): PENDQ[j] = "\n\n(Earlier in this conversation:\n" + body + ")"
                         else: RQ[j] = tok.encode("\n(Recalled from earlier in this conversation:\n" + body + ")\n", add_special_tokens=False)
                         if PLOGF: PLOGF.write(json.dumps({"j": j, "turn": MTI.get(j, 0), "fired": True, "at": len(gen[j]), "reading": bool(MTQ.get(j)), "p": round(float(py[r]), 3), "query": q_, "hits": [STORE[j][h] for h in hit]}) + "\n")
+    if a.lmk_dump and DREC:   # labels: each dialogue read once with full context; its attention at every check over each stored line
+        out_ = []
+        for j, recs in DREC.items():
+            P = len(prompts[j]); ATTREC["lab"] = torch.tensor([P + r_["at"] - 1 for r_ in recs], device=dev); ATTREC["labacc"] = 0
+            llm.model(input_ids=torch.tensor([prompts[j] + gen[j]], device=dev), use_cache=False)
+            A_ = ATTREC.pop("labacc") / len(ATT_L); ATTREC["lab"] = None
+            full = torch.stack([A_[:, torch.tensor([P + x for x in rg], device=dev)].sum(1) for rg in SRNG[j]], 1) if SRNG[j] else torch.zeros(len(recs), 0)
+            out_.append({"j": j, "lines": STORE[j], "semb": SEMB[j].half().cpu() if SEMB[j] is not None else None, "grp": SGRP[j],
+                         "checks": recs, "full": full.half().cpu()})
+            del A_
+        torch.save(out_, a.lmk_dump); log(f"[sp] lmk-dump: {len(out_)} dialogues, {sum(len(x['checks']) for x in out_)} checks -> {a.lmk_dump}")
     if a.kv_lmk:
         log(f"[sp] kv-lmk: {LMLOG[0]} checks (mean mass on evicted landmarks {LMLOG[3] / max(LMLOG[0], 1):.4f}), {LMLOG[1]} recalls fed")
         if PLOGF: PLOGF.close()
