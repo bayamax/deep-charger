@@ -26,9 +26,10 @@ for k, v in d.items():
     q8 = q.view(q.size(0), -1, 8); word = torch.zeros(q8.shape[:2], dtype=torch.int64)
     for j in range(8): word |= q8[..., j] << (4 * j)
     W[k + ".weight"] = word.to(torch.uint32); W[k + ".scales"] = v["s"].to(torch.float16); W[k + ".biases"] = v["b"].to(torch.float16); n += 1
+cfg = json.load(open(os.path.join(base, "config.json")))
+if cfg.get("tie_word_embeddings") and "lm_head.weight" in W: del W["lm_head.weight"]   # tied: the embedding is the output head
 os.makedirs(a.out, exist_ok=True)
 save_file(W, os.path.join(a.out, "model.safetensors"), metadata={"format": "mlx"})
-cfg = json.load(open(os.path.join(base, "config.json")))
 cfg["quantization"] = {"group_size": g, "bits": bits}; cfg["quantization_config"] = cfg["quantization"]; cfg["torch_dtype"] = "float16"
 json.dump(cfg, open(os.path.join(a.out, "config.json"), "w"), indent=2)
 for f in os.listdir(base):
