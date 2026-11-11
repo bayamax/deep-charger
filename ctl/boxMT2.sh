@@ -113,4 +113,16 @@ python3 -c "from huggingface_hub import HfApi; HfApi().upload_file(path_or_fileo
 JOB
   setsid nohup bash -c 'bash /root/mt26.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
 fi
+if [ ! -e /root/.mt27 ]; then touch /root/.mt27
+  cat > /root/mt27.sh <<'JOB'
+cd /root/w; sleep 20; while pgrep -f "bash /root/mt26.sh" > /dev/null || pgrep -f "bash /root/mt_job.sh" > /dev/null; do sleep 60; done
+export HF_TOKEN=$(tr -d '[:space:]' < /root/.hf_token 2>/dev/null)
+L="--kv-policy=struct2,--kv-pool=7,--kv-lines=32,--mem-prompt,--kv-lmk,--lmk-thr=0.004,--lmk-nb=0,--lmk-query=own+q,--lmk-eol,--lmk-turn"
+rm -f lmk_train2.pt
+NEED="labseg" TR=mt_train2.jsonl PFX=tr2 RB=32 CONDS="lg1024:512:512:$L,--lmk-dump=lmk_train2.pt" bash /root/mt_job.sh
+grep -E "lmk-dump:" sp_mt.log | tail -1 | sed 's/^/[mt] /'
+python3 -c "from huggingface_hub import HfApi; HfApi().upload_file(path_or_fileobj='lmk_train2.pt', path_in_repo='archive/sp3/mt/lmk_train2.pt', repo_id='baya1116/hypernet-sp-distill')" && echo "[mt] lmk_train2.pt uploaded $(du -m lmk_train2.pt | cut -f1) MB"
+JOB
+  setsid nohup bash -c 'bash /root/mt27.sh >> /root/w/w.log 2>&1' > /dev/null 2>&1 < /dev/null &
+fi
 # CTL-END

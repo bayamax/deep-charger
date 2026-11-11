@@ -648,8 +648,12 @@ def _att_hook(mod, args, kwargs, out):
             k = repeat_kv(kb, q.size(1) // kb.size(1))
             sc = (q.float() @ k.float().transpose(-1, -2)) * mod.scaling
             sc.masked_fill_((torch.arange(nb, device=h.device)[None, :] > lab[:, None])[None, None], float("-inf"))
-            ATTREC["labacc"] = ATTREC.get("labacc", 0) + sc.softmax(-1).mean(1)[0]   # (checks, keys), summed over the hooked layers
+            pr = sc.softmax(-1)[0]   # (heads, checks, keys)
+            if mod.layer_idx in ATT_L: ATTREC["labacc"] = ATTREC.get("labacc", 0) + pr.mean(0)   # (checks, keys), summed over the hooked layers
+            seg, nseg = ATTREC["labseg"]   # key -> stored line (nseg: not in a line)
+            ATTREC.setdefault("labh", {})[mod.layer_idx] = torch.zeros(pr.size(0), pr.size(1), nseg + 1, device=h.device).index_add_(2, seg, pr)[:, :, :nseg].half()
         return
+    if mod.layer_idx not in ATT_L: return
     rows = ATTREC["rows"]
     if not rows: return
     h = kwargs["hidden_states"] if "hidden_states" in kwargs else args[0]
@@ -685,7 +689,7 @@ def att_take():
     x = sum(acc.values()); return x[0] if x.size(0) == 1 else x
 
 
-for _li in ATT_L: llm.model.layers[_li].self_attn.register_forward_hook(_att_hook, with_kwargs=True)
+for _li in (range(len(llm.model.layers)) if a.lmk_dump else ATT_L): llm.model.layers[_li].self_attn.register_forward_hook(_att_hook, with_kwargs=True)   # --lmk-dump labels read every layer's heads
 
 
 @torch.no_grad()
@@ -2205,7 +2209,7 @@ def rollout_kvkeep(prompts, nslot):
                 if INS[j] > 0 or j in RQ or j in PENDG: COOL[j] = max(COOL[j], 2); continue   # no check while a recall is being read back in, nor for 2 chunks after
                 if fin[r] or not LMK[j] or NREC[j] >= a.recall_max or COOL[j] > 0 or j in RQ or PENDQ.get(j): continue
                 sl = list(LMK[j]); M_ = torch.stack([LMK[j][x][1] for x in sl], 2).float()   # (layers, kv heads, m, d)
-                mass = torch.zeros(len(sl), device=dev); outm = 0.0
+                mass = torch.zeros(len(sl), device=dev); outm = 0.0; LMH_ = []
                 for t_i, li in enumerate(ATT_L):
                     q_ = Q_[li][r]; hq = q_.size(0); K_ = kv_of(cache, li)[0][r, :, pad[r]:].float(); rep_ = hq // K_.size(0)
                     sc_ = llm.model.layers[li].self_attn.scaling
@@ -2213,13 +2217,15 @@ def rollout_kvkeep(prompts, nslot):
                     lm = torch.einsum("hd,hmd->hm", q_, M_[t_i].repeat_interleave(rep_, 0)) * sc_
                     pr_ = torch.softmax(torch.cat([lk, lm], 1), 1)[:, lk.size(1):]
                     mass += pr_.mean(0); outm += float(pr_.sum(1).mean())
+                    if a.lmk_dump: LMH_.append(pr_.half().cpu())
                 outm /= len(ATT_L); mass /= len(ATT_L)
                 LMLOG[0] += 1; LMLOG[3] += outm; fire = outm > a.lmk_thr
                 hv = torch.cat([H_[li][r] for li in HL]) if HL else None
                 if a.lmk_dump:
                     inc_ = set(cols[r]); cand_ = [i for i, rg in enumerate(SRNG[j]) if any(x not in inc_ for x in rg)]
                     DREC.setdefault(j, []).append({"at": len(gen[j]), "turn": MTI.get(j, 0), "reading": bool(MTQ.get(j)), "out": outm, "fired": fire,
-                                                   "cand": cand_, "lmk": dict(zip(sl, mass.tolist())), "h": hv.to(torch.float16).cpu()})
+                                                   "cand": cand_, "lmk": dict(zip(sl, mass.tolist())), "h": hv.to(torch.float16).cpu(),
+                                                   "lsl": sl, "lmkh": torch.cat(LMH_, 0)})   # per hooked head: mass on each landmark (order lsl)
                 if LRN and LRN.get("det") is not None:   # a learned detector decides instead of the threshold
                     fire = lrn_fire(hv, outm)
                 top = [sl[i] for i in mass.topk(min(a.recall_k, len(sl))).indices.tolist()]
@@ -2317,11 +2323,15 @@ def rollout_kvkeep(prompts, nslot):
         out_ = []
         for j, recs in DREC.items():
             P = len(prompts[j]); ATTREC["lab"] = torch.tensor([P + r_["at"] - 1 for r_ in recs], device=dev); ATTREC["labacc"] = 0
+            seg = torch.full((P + len(gen[j]),), len(SRNG[j]), dtype=torch.long, device=dev)
+            for li_, rg in enumerate(SRNG[j]): seg[torch.tensor([P + x for x in rg], device=dev)] = li_
+            ATTREC["labseg"] = (seg, len(SRNG[j])); ATTREC["labh"] = {}
             llm.model(input_ids=torch.tensor([prompts[j] + gen[j]], device=dev), use_cache=False)
-            A_ = ATTREC.pop("labacc") / len(ATT_L); ATTREC["lab"] = None
+            A_ = ATTREC.pop("labacc") / len(ATT_L); ATTREC["lab"] = None; LH_ = ATTREC.pop("labh")
+            fullh = torch.cat([LH_[li] for li in sorted(LH_)], 0).cpu()   # (layers x heads, checks, lines): every head's attention per stored line
             full = torch.stack([A_[:, torch.tensor([P + x for x in rg], device=dev)].sum(1) for rg in SRNG[j]], 1) if SRNG[j] else torch.zeros(len(recs), 0)
             out_.append({"j": j, "lines": STORE[j], "semb": SEMB[j].half().cpu() if SEMB[j] is not None else None, "grp": SGRP[j],
-                         "checks": recs, "full": full.half().cpu()})
+                         "checks": recs, "full": full.half().cpu(), "fullh": fullh})
             del A_
         torch.save(out_, a.lmk_dump); log(f"[sp] lmk-dump: {len(out_)} dialogues, {sum(len(x['checks']) for x in out_)} checks -> {a.lmk_dump}")
     if a.kv_lmk:
