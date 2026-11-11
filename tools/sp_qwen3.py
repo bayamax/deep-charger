@@ -323,6 +323,8 @@ ap.add_argument("--grpo-latest", default="", help="grpo: at every check also sav
 ap.add_argument("--grpo-hook", default="", help="grpo: shell command run (in the background) after each eval with the new "
                 "files as arguments - e.g. an upload")
 ap.add_argument("--seed", type=int, default=0)
+ap.add_argument("--wq", default="", help="4-bit weights from tools/wq.py (wq_<method>.pt): every decoder linear is replaced by its "
+                "dequantised 4-bit version (same numbers as a 4-bit kernel)")
 ap.add_argument("--device", default="cuda"); ap.add_argument("--dtype", default="bfloat16")
 a = ap.parse_args()
 
@@ -338,6 +340,14 @@ HES_IDS = sorted({x[0] for w in ("Wait", " Wait", "But", " But", "Alternatively"
 ENDST = {"pt": 0.0, "ps": 0.0, "n": 0, "lt": 0.0, "ls": 0.0, "k": 0, "ht": 0.0, "hs": 0.0, "et": 0.0, "es": 0.0}   # --end-stat: mean p(</think>) all rows; log p at real ends
 llm = AutoModelForCausalLM.from_pretrained(a.model, dtype=dt, attn_implementation="sdpa").to(dev).eval()
 for p_ in llm.parameters(): p_.requires_grad_(False)
+if a.wq:   # tools/wq.py: packed 4-bit codes (two per byte) with an fp16 scale and bias per group
+    _wq = torch.load(a.wq, map_location="cpu"); _g = _wq["group"]; _n = 0
+    for _k, _v in _wq.items():
+        if not isinstance(_v, dict): continue
+        _w = llm.get_submodule(_k).weight; _p = _v["q"].to(dev)
+        _q = torch.stack([_p & 15, _p >> 4], 2).view(_p.size(0), -1).float()
+        _w.data.copy_((_q * _v["s"].to(dev).float().repeat_interleave(_g, 1) + _v["b"].to(dev).float().repeat_interleave(_g, 1)).to(_w.dtype)); _n += 1
+    print(f"[sp] --wq {a.wq}: {_n} linears at {_wq.get('bits', 4)}-bit, group {_g}", flush=True); del _wq
 embed = llm.get_input_embeddings(); H = llm.config.hidden_size; NL = llm.config.num_hidden_layers
 LOGF = open(a.log, "a") if a.log else None
 def log(s):
