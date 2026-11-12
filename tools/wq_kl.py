@@ -1,16 +1,21 @@
 """Loss of 4-bit weights measured on conversations nothing was tuned on: the 16-bit model's own full-context outputs on the eval rows
 (archive/sp3/mt/mt_full_s1.jsonl, docc_full_s1.jsonl), read teacher-forced by the 16-bit model and by each 4-bit version. Prints
 the mean KL(16-bit || 4-bit) per token, the worst conversation, and how often the most likely next token agrees.
-  python tools/wq_kl.py mt_full_s1.jsonl,docc_full_s1.jsonl wq_rtn.pt wq_gptq.pt wq_dwq.pt ...
+  python tools/wq_kl.py mt_full_s1.jsonl,docc_full_s1.jsonl wq_rtn.pt wq_gptq.pt wq_dwq.pt ... [--device cpu --n-conv 40 --maxt 2048]
 """
 import json, sys
 import torch
 import torch.nn.functional as F
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-dev = "cuda"; MAXT = 4096
+import argparse, random
+ap = argparse.ArgumentParser(); ap.add_argument("rows"); ap.add_argument("wq", nargs="+")
+ap.add_argument("--device", default="cuda"); ap.add_argument("--maxt", type=int, default=4096)
+ap.add_argument("--n-conv", type=int, default=0, help="a fixed random subset of this many conversations (0: all)")
+a = ap.parse_args(); dev = a.device; MAXT = a.maxt
 tok = AutoTokenizer.from_pretrained("Qwen/Qwen3-1.7B")
-rows = [json.loads(l) for f in sys.argv[1].split(",") for l in open(f)]
+rows = [json.loads(l) for f in a.rows.split(",") for l in open(f)]
+if a.n_conv: rows = random.Random(0).sample(rows, a.n_conv)
 X = [torch.tensor(tok.encode((r.get("prompt") or "") + r["text"], add_special_tokens=False)[:MAXT]) for r in rows]
 T = AutoModelForCausalLM.from_pretrained("Qwen/Qwen3-1.7B", dtype=torch.bfloat16, attn_implementation="sdpa").to(dev).eval()
 S = AutoModelForCausalLM.from_pretrained("Qwen/Qwen3-1.7B", dtype=torch.bfloat16, attn_implementation="sdpa").to(dev).eval()
@@ -27,7 +32,7 @@ def put(path):
 
 
 print(f"[wq] eval conversations {len(X)}, {sum(len(x) for x in X)} tokens (each cut at {MAXT})", flush=True)
-for path in sys.argv[2:]:
+for path in a.wq:
     put(path); kl = ag = n = 0.0; worst = 0.0; per = {}
     with torch.no_grad():
         for r, x in zip(rows, X):
