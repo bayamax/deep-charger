@@ -56,6 +56,11 @@ def grade(r):
         ja = sum(1 for ch in t if "\u3040" <= ch <= "\u30ff" or "\u4e00" <= ch <= "\u9fff") / max(len(t), 1)
         return ja > 0.4, f"Japanese share {ja:.2f}"
     if ty == "contains": return any(g in t for g in c["any"]), t[:60].replace("\n", " ")
+    if ty == "contains_all": return all(g in t for g in c["all"]) and any(g in t for g in c["any"]), t[:60].replace("\n", " ")
+    if ty == "contains_not": return any(g in t for g in c["any"]) and c["not"] not in t, t[:60].replace("\n", " ")
+    if ty == "contains_ja":
+        ja = sum(1 for ch in t if "\u3040" <= ch <= "\u30ff" or "\u4e00" <= ch <= "\u9fff") / max(len(t), 1)
+        return any(g in t for g in c["any"]) and ja > 0.2, f"ja {ja:.2f}: " + t[:60].replace("\n", " ")
     if ty == "en_and":
         asc = sum(ch.isascii() for ch in t) / max(len(t), 1)
         return asc > 0.9 and any(g in t for g in c["must"]), f"ascii {asc:.2f}: " + t[:60].replace("\n", " ")
