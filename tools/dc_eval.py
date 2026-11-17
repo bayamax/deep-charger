@@ -8,7 +8,8 @@ footing as the other models in the check, which have no search either). CPU, flo
   python tools/dc_eval.py <latest dir> --out dc.jsonl [--gen 2000] [--replycap 600]
 Scored by tools/assist_grade.py (the answer is the text after </think>).
 """
-import argparse, json, math, os, time
+import argparse, json, math, os, re, sys, time
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -19,6 +20,9 @@ ap = argparse.ArgumentParser()
 ap.add_argument("dir"); ap.add_argument("--out", required=True); ap.add_argument("--rows", default="ctl/assist_prompts.jsonl")
 ap.add_argument("--rw", type=int, default=768); ap.add_argument("--maxd", type=int, default=384); ap.add_argument("--chunk", type=int, default=128)
 ap.add_argument("--gen", type=int, default=2000, help="model tokens per reply (the app: 4000)"); ap.add_argument("--replycap", type=int, default=600)
+ap.add_argument("--wiki", default="", help="answer <search> from Wikipedia's API (tools/wiki_env.py), page cache at this path")
+ap.add_argument("--questions", default="", help="search questions (jsonl with q, gold) instead of --rows; scored: gold in the answer's first sentence")
+ap.add_argument("--n", type=int, default=30)
 ap.add_argument("--temp", type=float, default=0.6); ap.add_argument("--seed", type=int, default=0); ap.add_argument("--only", default="")
 a = ap.parse_args()
 torch.set_num_threads(os.cpu_count() or 4); torch.manual_seed(a.seed)
@@ -92,6 +96,7 @@ def prompt_of(msgs):
 @torch.no_grad()
 def run(msgs):
     P = tok.encode(prompt_of(msgs), add_special_tokens=False); cache = DynamicCache()
+    if ENV: ENV.reset()
     model(input_ids=torch.tensor([P]), past_key_values=cache, use_cache=True); MQ = len(P)
     gen, kept, absorbed, nmod, nsearch, done, last_s, inj_end = [], [], 0, 0, 0, False, -99, 0
     while not done:
@@ -118,11 +123,12 @@ def run(msgs):
             if len(gen) >= 8 and len(set(gen[-8:])) == 1: done = True; break
             inj = None
             if "</search" in tok.decode(gen[-6:]) and len(gen) - last_s > 6:
-                last_s = len(gen)
-                nsearch += 1
-                inj = "\n<information>(no results)</information>\n" if nsearch <= 5 else "\n<information>(no searches left - answer from what you have read)</information>\n"
+                last_s = len(gen); nsearch += 1
+                own = tok.decode(gen[inj_end:]); q = own.rsplit("<search>", 1)[-1].split("</search")[0].strip() if "<search>" in own else ""
+                if ENV: inj = ENV.search(q)
+                else: inj = "\n<information>(no results)</information>\n" if nsearch <= 5 else "\n<information>(no searches left - answer from what you have read)</information>\n"
             elif tok.decode(gen[-4:]).rstrip().endswith(("<more>", "<more/>", "</more>")):
-                inj = "\n<information>(no more of this page - search again or answer)</information>\n"
+                inj = ENV.more() if ENV else "\n<information>(no more of this page - search again or answer)</information>\n"
             if inj: gen += ids(inj); inj_end = len(gen); break
             full = tok.decode(gen)
             if "</think>" in full and len(ids(full.split("</think>", 1)[1])) >= a.replycap: done = True; break
@@ -131,12 +137,32 @@ def run(msgs):
     return tok.decode(gen, skip_special_tokens=True), nmod, nsearch
 
 
-rows = [json.loads(l) for l in open(a.rows)]
+ENV = None
+if a.wiki:
+    from wiki_env import WikiEnv
+    ENV = WikiEnv(tok, a.wiki)
+if a.questions:   # search questions: distinct (q, gold) in file order, the first --n
+    rows, seen = [], set()
+    for l in open(a.questions):
+        r = json.loads(l)
+        if r["q"] in seen: continue
+        seen.add(r["q"]); rows.append({"id": f"s{len(rows)}", "cat": "search", "gold": r["gold"], "messages": [{"role": "user", "content": r["q"]}]})
+    rows = rows[:a.n]
+else: rows = [json.loads(l) for l in open(a.rows)]
+
+
+def first_sentence(t):
+    t = t.split("</think>")[-1].strip(); m = re.split(r"(?<=[.!?。])\s", t, maxsplit=1); return m[0]
+
+
 done_ids = {json.loads(l)["id"] for l in open(a.out)} if os.path.exists(a.out) else set()
 todo = [r for r in rows if r["id"] not in done_ids and (not a.only or r["cat"] in a.only.split(","))]
 todo.sort(key=lambda r: r["cat"] == "math")   # everything else first
-out = open(a.out, "a"); t0 = time.time(); ntok = 0
+out = open(a.out, "a"); t0 = time.time(); ntok = 0; nc = 0
 for k, r in enumerate(todo):
-    text, n, ns = run(r["messages"]); ntok += n
-    out.write(json.dumps({"id": r["id"], "cat": r["cat"], "think": True, "n_tok": n, "searches": ns, "text": text}, ensure_ascii=False) + "\n"); out.flush()
-    print(f"[as] {k + 1}/{len(todo)} rows, {ntok} tokens, {ntok / (time.time() - t0):.1f} tok/s", flush=True)
+    text, n, ns = run(r["messages"]); ntok += n; rec = {"id": r["id"], "cat": r["cat"], "think": True, "n_tok": n, "searches": ns, "text": text}
+    if "gold" in r:
+        rec.update(gold=r["gold"], correct=r["gold"].lower() in first_sentence(text).lower(), page_has_gold=ENV.grounded(r["gold"]) if ENV else None, api_failed=ENV.failed if ENV else None)
+        nc += rec["correct"]
+    out.write(json.dumps(rec, ensure_ascii=False) + "\n"); out.flush()
+    print(f"[as] {k + 1}/{len(todo)} rows, {ntok} tokens, {ntok / (time.time() - t0):.1f} tok/s" + (f", correct {nc}/{k + 1}" if "gold" in r else ""), flush=True)
