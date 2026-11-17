@@ -29,7 +29,7 @@ if a.wq:
 SEARCH = ("For questions about facts, do not answer from memory: search first. You can search English Wikipedia. To search, write <search>keywords</search> and stop; the top page comes back as "
           "<information>...</information>. Search again with different "
           "keywords if the page does not have the answer (up to 5 searches). When you know the answer, reply with one sentence "
-          "that states it, for example: The answer is X.")
+          "that states the answer (\"The answer is ...\").")
 SYS = (open(a.system).read().strip() + "\n\n" if a.system else "") + SEARCH
 env = WikiEnv(tok, a.wiki)
 
